@@ -11,16 +11,16 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V10`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V1`] instead.
 
 /// Version tag at the start of every policy commitment. A verifier rejects a
 /// different policy version instead of accepting different security semantics.
 /// Bump it on every layout change or change to a fixed policy requirement.
-/// V10 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
+/// V1 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
 /// Every accepted FundsIn receipt must belong to the canonical chain at or
 /// below that tagged head. The selected tag is attested so verifiers can
 /// reject a weaker policy, including `latest` when they require `safe`.
-pub const POLICY_COMMITMENT_V10: u8 = 10;
+pub const POLICY_COMMITMENT_V1: u8 = 1;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -198,7 +198,7 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V10]
+    /// [POLICY_COMMITMENT_V1]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
@@ -220,7 +220,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V10);
+        out.push(POLICY_COMMITMENT_V1);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -314,7 +314,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V10 {
+        if r.u8()? != POLICY_COMMITMENT_V1 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
@@ -626,26 +626,25 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V10);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V10
+            POLICY_COMMITMENT_V1
         );
     }
 
     #[test]
-    fn rejects_v8_and_v9_policies() {
+    fn rejects_every_version_other_than_v1() {
         for policy in [base(), AttestedPolicy::Development] {
             let current = policy.to_bytes();
-            // V8 is depth-only and V9 lacks one of the V10 fields; both must reject.
-            for old in [8, 9] {
-                let mut legacy = current.clone();
-                legacy[0] = old;
+            for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V1) {
+                let mut other = current.clone();
+                other[0] = version;
                 assert_eq!(
-                    AttestedPolicy::from_bytes(&legacy).unwrap_err(),
+                    AttestedPolicy::from_bytes(&other).unwrap_err(),
                     PolicyDecodeError("unknown policy version")
                 );
-                assert_ne!(policy_commitment(&legacy), policy_commitment(&current));
+                assert_ne!(policy_commitment(&other), policy_commitment(&current));
             }
         }
     }
@@ -825,9 +824,9 @@ mod tests {
             assert!(AttestedPolicy::from_bytes(&good[..n]).is_err(), "{n}");
         }
         let mut bad = vec![[&good[..], &[0]].concat()];
-        let mut v7 = good.clone();
-        v7[0] = 7;
-        bad.push(v7);
+        let mut version = good.clone();
+        version[0] = 2;
+        bad.push(version);
         let mut kind = good.clone();
         kind[1] = 2;
         bad.push(kind);

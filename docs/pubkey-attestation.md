@@ -154,7 +154,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V10 = 10)                  // version tag
+    u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -176,8 +176,8 @@ policy_commitment =
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
-    token_contract(20)                              // released ERC-20 (burnId preimage input), V5
-    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch, V7):
+    token_contract(20)                              // released ERC-20 (burnId preimage input)
+    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch):
       u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
       || u32_be(len(seed_id)) || seed_id
       || u8(address_present) [|| expected_evm_address(20)]
@@ -185,7 +185,7 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-V10 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
+V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
 and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
 in the mint image).
 Every EVM `FundsIn` receipt must be at or below the selected head, with its

@@ -66,7 +66,7 @@ them, and decide whether you accept each one:
 The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
 
-Policy version 10 commits to the selected finality tag and the Bitcoin witness
+Policy version 1 commits to the selected finality tag and the Bitcoin witness
 depth. Production verification
 requires `--expect-evm-finality-tag` with the approved value. Receipt checks
 require coverage by that head and canonical block-hash matching. Use the

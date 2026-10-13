@@ -45,7 +45,7 @@ fn release_bridge_with_full_pins_is_production() {
     assert!(p.assert_valid_for_build(&release_bridge_ctx()).is_ok());
     assert_eq!(
         p.commitment_bytes()[0],
-        attestation_verify::POLICY_COMMITMENT_V10
+        attestation_verify::POLICY_COMMITMENT_V1
     );
 }
 

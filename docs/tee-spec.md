@@ -247,7 +247,7 @@ SecurityPolicy = Production {
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
-  produce identical bytes. Version 10 commits to the selected EVM finality tag
+  produce identical bytes. Version 1 commits to the selected EVM finality tag
   (`evm_finality_tag`) and the Bitcoin witness depth (`spv_min_confirmations`).
   Receipt verification requires coverage by that head and canonical block-hash
   matching. Use the EIF and verifiers from the same release with approved PCRs. See
