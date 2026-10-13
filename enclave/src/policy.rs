@@ -341,6 +341,13 @@ impl ProductionPolicy {
                     .into(),
             );
         }
+        // `latest` is the L2 tip, the zero-confirmation rule that production refused before.
+        if self.evm_finality_tag == EvmFinalityTag::Latest {
+            return Err(
+                "production policy must not accept EVM_FINALITY_TAG=latest; use safe or finalized"
+                    .into(),
+            );
+        }
         if self.spv_min_confirmations == 0 {
             return Err(
                 "production policy must require at least one Bitcoin confirmation \

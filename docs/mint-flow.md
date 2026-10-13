@@ -65,8 +65,9 @@ reports, testnet min-difficulty blocks included, as on the burn path. This is
 accepted on testnets; mainnet has no such blocks. Ancestor mints are bound to the deposits they derive, not
 read on chain (see section 10).
 
-On a mint image `SPV_MIN_CONFIRMATIONS` is this history depth only; the burn
-image pins its own value. The connector must not pick a right lane before its
+On a mint image `SPV_MIN_CONFIRMATIONS` is this history depth only. The mint
+image bakes 3, the depth the bridge waits for (`INIT_OP_MIN_CONFIRMATIONS`); the
+burn image keeps 6. The connector must not pick a right lane before its
 previous mint is that deep: it passes `min_confirmations` of at least this
 value to `mint_begin`, or every mint on a fresh lane is refused until then.
 
@@ -110,8 +111,8 @@ sequenceDiagram
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. Consensus makes it equal the `OS_ASSET` outputs. |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
-| `EVM_FINALITY_TAG` | `safe` (default) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
-| `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each history witness, per the indexer. Image env, attested. Zero stops the boot. The connector's `mint_begin` `min_confirmations` must be at least this. |
+| `EVM_FINALITY_TAG` | `safe` (default) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
+| `SPV_MIN_CONFIRMATIONS` | 3 (mint image) | Minimum depth of each history witness, per the indexer. Image env, attested. Zero stops the boot. The connector's `mint_begin` `min_confirmations` must be at least this. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 12 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
@@ -196,8 +197,9 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `blockHash` must match the canonical block at its height. The tagged head
   is read again afterwards to detect a reorg. A lock above that head is
   refused; retry later. A receiving rgb-lib wallet confirms the anchor only
-  once the lock is `finalized`, and waits for that, so with `safe` or
-  `latest` the user sees the mint later than the enclave signs it.
+  once the lock is `finalized`, and waits for that, so with `safe` the user
+  sees the mint later than the enclave signs it. A production policy refuses
+  `latest`.
 - **M3.11** The bound locks must match the anchors one for one. Consensus
   phase 2 confirms each anchor only against its lock, and only through the
   checked resolver, which compares the chain id with the genesis.

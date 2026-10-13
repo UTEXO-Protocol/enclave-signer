@@ -69,7 +69,10 @@ fn configured_finality_tag_is_attested() {
             a_tls_pin(),
             "e.test",
         );
-        assert!(policy.assert_valid_for_build(&release_bridge_ctx()).is_ok());
+        assert_eq!(
+            policy.assert_valid_for_build(&release_bridge_ctx()).is_ok(),
+            tag != EvmFinalityTag::Latest
+        );
         assert!(matches!(
             policy.attested(),
             AttestedPolicy::Production { evm_finality_tag, .. } if evm_finality_tag == tag
@@ -256,6 +259,47 @@ fn production_boots_without_endpoints_and_launches_only_with_them() {
     assert!(p.assert_valid_at_boot(&ctx).is_ok());
     let err = p.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("Electrum host"), "got: {err}");
+}
+
+#[test]
+fn production_refuses_the_latest_finality_tag_at_boot() {
+    let ctx = release_bridge_ctx();
+    let cfg = BridgeConfig {
+        evm_finality_tag: EvmFinalityTag::Latest,
+        ..pinned_config()
+    };
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
+    assert!(err.contains("EVM_FINALITY_TAG=latest"), "got: {err}");
+}
+
+#[test]
+fn production_boots_with_the_safe_and_finalized_tags() {
+    let ctx = release_bridge_ctx();
+    for tag in [EvmFinalityTag::Safe, EvmFinalityTag::Finalized] {
+        let cfg = BridgeConfig {
+            evm_finality_tag: tag,
+            ..pinned_config()
+        };
+        let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+        assert!(policy.assert_valid_at_boot(&ctx).is_ok(), "{tag}");
+    }
+}
+
+#[test]
+fn development_build_may_use_the_latest_finality_tag() {
+    let ctx = BuildContext {
+        debug_or_test: true,
+        ..release_bridge_ctx()
+    };
+    let cfg = BridgeConfig {
+        evm_finality_tag: EvmFinalityTag::Latest,
+        ..pinned_config()
+    };
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    assert!(matches!(policy, SecurityPolicy::Development { .. }));
+    assert!(policy.assert_valid_at_boot(&ctx).is_ok());
+    assert!(policy.assert_valid_for_build(&ctx).is_ok());
 }
 
 #[test]

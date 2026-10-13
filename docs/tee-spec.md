@@ -67,9 +67,10 @@ their height; the RPC is trusted for that tag.
 On Arbitrum, `latest` accepts the current L2 tip with sequencer and L1 reorg
 risk; `safe` waits for the batch to be posted and covered by L1's safe head,
 with residual L1 reorg risk; `finalized` waits for L1 finalized coverage.
+A production policy refuses `latest` at boot.
 The mint path trusts the pinned Bitcoin indexer (not an SPV chain) to say
-that each history witness is mined `SPV_MIN_CONFIRMATIONS` deep. CCD source
-checks trust the listener.
+that each history witness is mined `SPV_MIN_CONFIRMATIONS` deep (3 in the mint
+image). CCD source checks trust the listener.
 
 **Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
 mint and burn images use `PinnedTlsRpc`. TLS ends inside the enclave and
@@ -233,7 +234,8 @@ SecurityPolicy = Production {
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
   and `TOKEN_CONTRACT` must be non-zero, and `BTC_RELAY_MODE` must be `required`.
   `EVM_FINALITY_TAG` accepts exactly `latest`, `safe`, or `finalized` (default
-  `safe`); an invalid value rejects startup.
+  `safe`); an invalid value rejects startup, and a production policy refuses
+  `latest`.
   `SetEndpoints` runs the gate again with the endpoints and refuses the set on
   an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
@@ -747,12 +749,12 @@ For an RGB-source request, the SPV layer enforces these rules:
    The image measurement covers the value when it is part of the image.
 
 `SPV_MIN_CONFIRMATIONS` is read from the image env at boot, so PCR0 measures
-it, and the attested policy commits it. The host cannot set it: a Nitro
-enclave takes no env from the host, and a value of zero or a non-number stops
-the boot. The other SPV thresholds above are compile-time constants. EVM
-receipts always require coverage by the selected finality head
-(`EVM_FINALITY_TAG`) and a matching canonical block hash. The
-three request-size caps above are env-tunable because they only bound
+it, and the attested policy commits it. The burn image bakes 6, the mint image
+3. The host cannot set it: a Nitro enclave takes no env from the host, and a
+value of zero or a non-number stops the boot. The other SPV thresholds above
+are compile-time constants. EVM receipts always require coverage by the
+selected finality head (`EVM_FINALITY_TAG`) and a matching canonical block
+hash. The three request-size caps above are env-tunable because they only bound
 resource use; they never relax a verification step.
 
 **Checkpoints:** mainnet block 951,552 (retarget-aligned), testnet4 block

@@ -44,6 +44,10 @@ pub fn expected_policy(
                     .parse()
                     .map_err(|e: String| anyhow!("EVM_FINALITY_TAG: {e}"))
             })?;
+    // A production enclave refuses `latest` at boot.
+    if evm_finality_tag == EvmFinalityTag::Latest {
+        bail!("EVM_FINALITY_TAG=latest is not a production policy; use safe or finalized");
+    }
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
@@ -334,16 +338,7 @@ mod tests {
                 ..
             }
         ));
-        for value in [
-            "latest",
-            "safe",
-            "finalized",
-            "",
-            "SAFE",
-            " safe",
-            "safe ",
-            "pending",
-        ] {
+        for value in ["safe", "finalized", "", "SAFE", " safe", "safe ", "pending"] {
             let mut env: Vec<String> = serde_json::from_str(&image_env()).unwrap();
             env.push(format!("EVM_FINALITY_TAG={value}"));
             let result = expected_policy(
@@ -358,6 +353,32 @@ mod tests {
                 Err(_) => assert!(result.unwrap_err().to_string().contains("EVM_FINALITY_TAG")),
             }
         }
+    }
+
+    #[test]
+    fn image_with_the_latest_tag_is_refused() {
+        let mut env: Vec<String> = serde_json::from_str(&image_env()).unwrap();
+        env.push("EVM_FINALITY_TAG=latest".into());
+        let err = expected_policy(
+            SignerRole::Combined,
+            &serde_json::to_string(&env).unwrap(),
+            &endpoints(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("EVM_FINALITY_TAG=latest"), "{err}");
+    }
+
+    #[test]
+    fn mint_image_depth_is_taken_from_the_image() {
+        let env = image_env().replace("SPV_MIN_CONFIRMATIONS=6", "SPV_MIN_CONFIRMATIONS=3");
+        let policy = expected_policy(SignerRole::Mint, &env, &endpoints()).unwrap();
+        assert!(matches!(
+            policy,
+            AttestedPolicy::Production {
+                spv_min_confirmations: 3,
+                ..
+            }
+        ));
     }
 
     /// The policy-only answer of an enclave that attests `policy`.

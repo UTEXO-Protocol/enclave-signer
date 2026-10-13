@@ -540,8 +540,8 @@ Data sources and transport:
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer (mint path: history witness status and transaction fetch). |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
-| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
-| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx: SPV on the burn path, the indexer on the mint path (all but the mint tx being signed). Zero or a non-number stops the boot. Baked into the image. |
+| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
+| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx: SPV on the burn path, the indexer on the mint path (all but the mint tx being signed). Zero or a non-number stops the boot. Baked into the image: 3 in the mint image, 6 in the burn image. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -552,7 +552,7 @@ detect a reorg during verification.
 
 | Tag | Arbitrum acceptance |
 |-----|---------------------|
-| `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. |
+| `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. Development builds only: a production policy refuses it at boot. |
 | `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. Default. |
 | `finalized` | Batch covered by L1's finalized head. |
 

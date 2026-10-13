@@ -56,8 +56,8 @@ them, and decide whether you accept each one:
 | `rgb_asset_id` | `--expect-rgb-asset-id` | the BFA asset of the deployment |
 | `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json` |
 | `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json` |
-| `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json` (`latest`, `safe`, or `finalized`) |
-| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 6) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
+| `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json` (`safe` or `finalized`; `latest` is refused) |
+| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 6 for burn, 3 for mint) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
 | `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json` |
 | `electrum_host` | `--expect-electrum-host` | the Electrum server you accept |
 | `evm_rpc_tls.host` | `--expect-evm-rpc-host` | the EVM RPC host you accept |

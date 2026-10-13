@@ -98,8 +98,9 @@ ENV EVM_CHAIN_ID=42161 \
 # commits to the verification policy. The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
-# Receipts must be covered by EVM_FINALITY_TAG (latest, safe, finalized) and
-# match the canonical block hash; missing tag support fails closed.
+# Receipts must be covered by EVM_FINALITY_TAG (safe or finalized; production
+# refuses latest at boot) and match the canonical block hash; missing tag
+# support fails closed.
 # FUNDS_IN_CONTRACT is set EXPLICITLY to the bridge *entry* contract (the FundsIn
 # event emitter). It MUST be explicit here because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS (the MultisigProxy) - leaving it unset would fall

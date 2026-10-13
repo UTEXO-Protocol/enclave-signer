@@ -120,8 +120,8 @@ struct Cli {
     #[arg(long)]
     expect_funds_in_contract: Option<String>,
 
-    /// Expected EVM RPC head tag: latest, safe or finalized. Required for
-    /// production verification. Ignored with --mock.
+    /// Expected EVM RPC head tag: safe or finalized. Required for production
+    /// verification, which refuses latest. Ignored with --mock.
     #[arg(long, required_unless_present = "mock")]
     expect_evm_finality_tag: Option<EvmFinalityTag>,
 
@@ -132,8 +132,9 @@ struct Cli {
     expect_token_contract: Option<String>,
 
     /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
-    #[arg(long, default_value_t = 6)]
-    expect_spv_min_confirmations: u32,
+    /// Default: the shipped image value, 3 for mint and 6 otherwise.
+    #[arg(long)]
+    expect_spv_min_confirmations: Option<u32>,
 
     /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
     /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
@@ -290,8 +291,27 @@ fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
     parse_hex20(s, "--expect-token-contract")
 }
 
-fn parse_expect_spv_min_confirmations(value: u32) -> Result<u32> {
-    Some(value)
+/// A production enclave refuses `latest` at boot, so no verifier expects it.
+fn parse_expect_evm_finality_tag(value: Option<EvmFinalityTag>) -> Result<EvmFinalityTag> {
+    match value.context("--expect-evm-finality-tag required (or pass --mock)")? {
+        EvmFinalityTag::Latest => {
+            anyhow::bail!("--expect-evm-finality-tag latest is not a production policy")
+        }
+        tag => Ok(tag),
+    }
+}
+
+/// The `SPV_MIN_CONFIRMATIONS` of the shipped image of `role` (a test reads the Dockerfiles).
+fn default_spv_min_confirmations(role: SignerRole) -> u32 {
+    if role == SignerRole::Mint {
+        3
+    } else {
+        6
+    }
+}
+
+fn parse_expect_spv_min_confirmations(value: Option<u32>, role: SignerRole) -> Result<u32> {
+    Some(value.unwrap_or(default_spv_min_confirmations(role)))
         .filter(|n| *n > 0)
         .context("--expect-spv-min-confirmations must be greater than zero")
 }
@@ -378,12 +398,11 @@ async fn run(cli: Cli) -> Result<()> {
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
-            evm_finality_tag: cli
-                .expect_evm_finality_tag
-                .context("--expect-evm-finality-tag required (or pass --mock)")?,
+            evm_finality_tag: parse_expect_evm_finality_tag(cli.expect_evm_finality_tag)?,
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
             spv_min_confirmations: parse_expect_spv_min_confirmations(
                 cli.expect_spv_min_confirmations,
+                signer_role,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
@@ -492,6 +511,52 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn production_refuses_an_expected_latest_tag() {
+        let err = parse_expect_evm_finality_tag(Some(EvmFinalityTag::Latest)).unwrap_err();
+        assert!(format!("{err:#}").contains("latest"), "{err:#}");
+        assert!(parse_expect_evm_finality_tag(None).is_err());
+        for tag in [EvmFinalityTag::Safe, EvmFinalityTag::Finalized] {
+            assert_eq!(parse_expect_evm_finality_tag(Some(tag)).unwrap(), tag);
+        }
+    }
+
+    fn image_spv_depth(dockerfile: &str) -> u32 {
+        dockerfile
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("SPV_MIN_CONFIRMATIONS="))
+            .and_then(|v| v.trim_end_matches('\\').trim().parse().ok())
+            .expect("image sets SPV_MIN_CONFIRMATIONS")
+    }
+
+    #[test]
+    fn spv_depth_defaults_to_the_image_value_of_the_role() {
+        for (role, dockerfile) in [
+            (
+                SignerRole::Mint,
+                include_str!("../../../build/Dockerfile.enclave.mint"),
+            ),
+            (
+                SignerRole::Burn,
+                include_str!("../../../build/Dockerfile.enclave.burn"),
+            ),
+            (
+                SignerRole::Combined,
+                include_str!("../../../build/Dockerfile.enclave"),
+            ),
+        ] {
+            assert_eq!(
+                parse_expect_spv_min_confirmations(None, role).unwrap(),
+                image_spv_depth(dockerfile)
+            );
+        }
+        assert_eq!(
+            parse_expect_spv_min_confirmations(Some(6), SignerRole::Mint).unwrap(),
+            6
+        );
+        assert!(parse_expect_spv_min_confirmations(Some(0), SignerRole::Mint).is_err());
     }
 
     #[test]

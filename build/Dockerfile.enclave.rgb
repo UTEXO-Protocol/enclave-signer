@@ -101,7 +101,8 @@ ENV EVM_CHAIN_ID=42161 \
 # the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
-# The tag accepts latest, safe, or finalized; missing tag support refuses signing.
+# Production accepts safe or finalized and refuses latest at boot; missing tag
+# support refuses signing.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract. In a release

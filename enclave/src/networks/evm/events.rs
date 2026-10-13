@@ -690,6 +690,9 @@ pub fn verify_rgb_funds_in(
             receipt.block_number
         )));
     }
+    // A non-finalized tag is enough: an honest bridge broadcasts only after mint_end sees the
+    // lock finalized. An early mint over a later-reorged lock is refused by rgb-lib receivers
+    // and its deposit id has no record to release, so it loses the mint right, not funds.
     check_finality_inclusion(provider, finality_tag, &head, &receipt)?;
     check_finality_snapshot(provider, finality_tag, &head)?;
 

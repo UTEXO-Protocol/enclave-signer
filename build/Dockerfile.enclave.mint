@@ -104,7 +104,8 @@ ENV EVM_CHAIN_ID=42161 \
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
-# The tag accepts latest, safe, or finalized; missing tag support refuses signing.
+# Production accepts safe or finalized and refuses latest at boot; missing tag
+# support refuses signing.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
@@ -114,9 +115,11 @@ ENV EVM_CHAIN_ID=42161 \
 # image. The operator sets them at launch (SetEndpoints), and the attestation
 # commits them. See docs/tee-spec.md.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
+# In practice that is the lane's previous mint; 3 matches the bridge's
+# INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
 # The connector must pass mint_begin min_confirmations of at least this value.
 ENV EVM_FINALITY_TAG=safe \
-    SPV_MIN_CONFIRMATIONS=6 \
+    SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     BTC_MAX_TOTAL_SATS=1000000

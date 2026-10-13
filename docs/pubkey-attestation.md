@@ -186,13 +186,14 @@ policy_commitment =
 ```
 
 V10 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
-and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`, default 6).
+and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
+in the mint image).
 Every EVM `FundsIn` receipt must be at or below the selected head, with its
 block hash matching the canonical block at that height. The enclave
 revalidates the selected head snapshot to detect a reorg. The enclave trusts
 the pinned RPC for the correctness of these responses. Production verification
-requires `--expect-evm-finality-tag` with the approved `latest`, `safe`, or
-`finalized` value.
+requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
+value; a production enclave refuses `latest` at boot, and so does the verifier.
 
 Use enclave images and verifiers from the same release with approved EIF
 measurements. Clone peers must have matching policy commitments.
@@ -338,7 +339,7 @@ attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
     --expect-evm-finality-tag safe \
-    --expect-spv-min-confirmations 6 \
+    --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
