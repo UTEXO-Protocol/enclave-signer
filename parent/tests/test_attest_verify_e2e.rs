@@ -1,8 +1,8 @@
 //! End-to-end test for the `attest-verify` flow.
 //!
 //! Starts the real enclave server and the real parent gRPC server in-process.
-//! Then runs the `attest-verify` library function against them. It covers all
-//! CLI behavior except argument parsing and output formatting.
+//! Then runs the `attest-verify` library function against them. Subprocess
+//! tests also check CLI exit codes, stdout and stderr.
 //!
 //! The bundle tests run the built binaries and `deploy/verify-identity.sh`.
 
@@ -311,6 +311,78 @@ fn run(program: &str, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+async fn run_attest_verify(args: &[&str]) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_attest-verify"));
+    command.args(args).kill_on_drop(true);
+    // These cases use loopback plaintext or offline input. Operator TLS
+    // settings must not cause a different failure before the tested one.
+    for name in [
+        "PARENT_TLS_CA_FILE",
+        "PARENT_TLS_CERT_FILE",
+        "PARENT_TLS_KEY_FILE",
+        "PARENT_TLS_SERVER_NAME",
+    ] {
+        command.env_remove(name);
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+        .await
+        .expect("attest-verify exceeded the test watchdog")
+        .expect("run attest-verify")
+}
+
+fn assert_cli_failure(out: &std::process::Output, code: i32, reason: &str) {
+    assert_eq!(out.status.code(), Some(code), "{out:?}");
+    assert!(out.stdout.is_empty(), "failure printed stdout: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(reason),
+        "expected {reason:?}, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn attest_verify_cli_connection_error_exits_one() {
+    // Reserve a TCP port without listening, so connection refusal does not
+    // depend on a fixed port or a race after dropping a listener.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = format!("http://{}", socket.local_addr().unwrap());
+    let out = run_attest_verify(&["--endpoint", &endpoint, "--mock"]).await;
+    assert_cli_failure(&out, 1, &format!("FAIL: connecting to {endpoint}:"));
+}
+
+#[tokio::test]
+async fn attest_verify_cli_file_error_exits_one() {
+    let dir = scratch("cli-missing-bundle");
+    let missing = dir.join("missing.json");
+    assert!(!missing.exists());
+    let out = run_attest_verify(&["--from-file", missing.to_str().unwrap(), "--mock"]).await;
+    // Remove only this test's directory, even if an output assertion fails.
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_cli_failure(
+        &out,
+        1,
+        &format!("FAIL: cannot read {}:", missing.display()),
+    );
+}
+
+#[tokio::test]
+async fn attest_verify_cli_missing_pcr_exits_one_not_parse_error() {
+    let out = run_attest_verify(&[]).await;
+    assert_cli_failure(&out, 1, "FAIL: --pcr0 required (or pass --mock)");
+    assert_eq!(out.stderr, b"FAIL: --pcr0 required (or pass --mock)\n");
+}
+
+#[tokio::test]
+async fn attest_verify_cli_unknown_argument_exits_two() {
+    let out = run_attest_verify(&["--mock", "--unknown-af06-flag"]).await;
+    assert_cli_failure(&out, 2, "error: unexpected argument '--unknown-af06-flag'");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Usage:"), "{stderr}");
+    assert!(!stderr.contains("FAIL:"), "{stderr}");
+    assert!(!stderr.contains("warning: --mock"), "{stderr}");
+}
+
 /// The `OK` output without the lines that change with the nonce.
 fn key_lines(out: &std::process::Output) -> Vec<String> {
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -325,7 +397,6 @@ fn key_lines(out: &std::process::Output) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn exported_bundle_round_trips_through_the_binaries() {
     let cli = env!("CARGO_BIN_EXE_utexo-bridge-parent-cli");
-    let verify = env!("CARGO_BIN_EXE_attest-verify");
     let enclave = format!("127.0.0.1:{}", start_real_enclave());
     let dir = scratch("bundle");
     let bundle = dir.join("attestation.json");
@@ -345,13 +416,22 @@ async fn exported_bundle_round_trips_through_the_binaries() {
     assert!(out.status.success(), "{out:?}");
 
     // No parent runs yet, so the check is offline.
-    let offline = run(verify, &["--from-file", bundle, "--mock"]);
-    assert!(offline.status.success(), "{offline:?}");
+    let offline = run_attest_verify(&["--from-file", bundle, "--mock"]).await;
 
     let grpc_port = start_real_parent_grpc(enclave[10..].parse().unwrap()).await;
     let endpoint = format!("http://127.0.0.1:{grpc_port}");
-    let live = run(verify, &["--endpoint", &endpoint, "--mock"]);
-    assert!(live.status.success(), "{live:?}");
+    let live = run_attest_verify(&["--endpoint", &endpoint, "--mock"]).await;
+    for out in [&offline, &live] {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(
+                "warning: --mock skips COSE/cert-chain checks; do NOT use against production enclaves"
+            ),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("FAIL:"), "{stderr}");
+    }
     assert_eq!(key_lines(&offline), key_lines(&live));
 
     let pcrs = dir.join("PCR.json");
@@ -385,11 +465,8 @@ async fn exported_bundle_round_trips_through_the_binaries() {
         assert!(!std::path::Path::new(refused).exists());
     }
 
-    let both = run(
-        verify,
-        &["--from-file", bundle, "--endpoint", &endpoint, "--mock"],
-    );
-    assert_eq!(both.status.code(), Some(2), "{both:?}");
+    let both = run_attest_verify(&["--from-file", bundle, "--endpoint", &endpoint, "--mock"]).await;
+    assert_cli_failure(&both, 2, "cannot be used with");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
