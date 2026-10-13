@@ -9,14 +9,14 @@ package enclave;
 option go_package = "github.com/UTEXO-Protocol/federated-signer-proto/go-gen/enclave;enclavepb";
 
 message EnclaveRequest {
-  reserved 4;
+  reserved 4, 6;
+  reserved "proxy_federation";
 
   oneof request {
     InitializeKeyRequest initialize_key = 1;
     GetPublicKeyRequest get_public_key = 2;
     SignRequest sign = 3;
     SignRawMessageRequest sign_raw_message = 5;
-    ProxyFederationRequest proxy_federation = 6;
     InitiateCloningRequest initiate_cloning = 7;
     GetCloneRequest get_clone = 8;
     SetCloneRequest set_clone = 9;
@@ -32,13 +32,15 @@ message EnclaveRequest {
 }
 
 message EnclaveResponse {
+  reserved 6;
+  reserved "federation_sig";
+
   oneof response {
     InitializeKeyResponse initialize_key = 1;
     PublicKeysResponse public_keys = 2;
     EvmSignatureResponse evm_signature = 3;
     SignedPsbtResponse signed_psbt = 4;
     RawSignatureResponse raw_signature = 5;
-    FederationSignatureResponse federation_sig = 6;
     InitiateCloningResponse initiate_cloning = 7;
     GetCloneResponse get_clone = 8;
     SetCloneResponse set_clone = 9;
@@ -286,14 +288,6 @@ message CcdSignatureResponse {
   // the governance account. Derived in the same operation as the signature, so
   // the two cannot disagree.
   bytes public_key = 2;
-}
-
-message ProxyFederationRequest {
-  bytes message_hash = 1; // 32-byte hash passed to the federation signer.
-}
-
-message FederationSignatureResponse {
-  bytes signature = 1; // 65-byte federation ECDSA signature.
 }
 
 message InitiateCloningRequest {

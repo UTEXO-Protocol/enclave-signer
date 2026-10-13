@@ -132,18 +132,6 @@ pub(super) fn dispatch(
                 Err(unsupported_build("ccd"))
             }
         }
-        Some(Request::ProxyFederation(_req)) => {
-            tracing::info!("request: ProxyFederation");
-            return (
-                EnclaveResponse {
-                    response: Some(Response::Error(ErrorResponse {
-                        code: 1,
-                        message: "unsupported request".into(),
-                    })),
-                },
-                None,
-            );
-        }
         #[cfg(feature = "kms-persistence")]
         Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
             Err(EnclaveError::InvalidRequest(

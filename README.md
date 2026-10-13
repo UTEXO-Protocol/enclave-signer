@@ -231,7 +231,6 @@ request per connection. Frame cap 24 MiB. Schema:
 | `SetClone` | Cloning | burn | Requester installs the sealed seed and goes `Active`. |
 | `SignRawMessage` | - | - | Removed. Always refused. |
 | `Health` | any | all | Readiness: endpoints set and key loaded. Builds with the RGB -> EVM path also require a ready header chain. |
-| `ProxyFederation` | - | - | Not implemented. Always refused (code `1`). |
 
 The "Signer" column is for the mint/burn images. Other builds (combined,
 CCD) keep both directions where their features allow it.
