@@ -23,8 +23,9 @@ use thiserror::Error;
 
 pub mod policy;
 pub use policy::{
-    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource,
-    EvmFinalityTag, EvmRpcTlsPin, KmsPin, PolicyDecodeError, SignerRole, POLICY_COMMITMENT_V1,
+    policy_commitment, AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource,
+    EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, PolicyDecodeError, SignerRole,
+    POLICY_COMMITMENT_V1,
 };
 
 // Public types

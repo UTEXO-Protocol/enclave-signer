@@ -164,7 +164,9 @@ policy_commitment =
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
-    chain_id_be8 || bridge_contract(20)
+    chain_id_be8
+    u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest
+    bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
@@ -208,7 +210,12 @@ IAM role therefore fails verification, and does not start.
 Use enclave images and verifiers from the same release with approved EIF
 measurements. Clone peers must have matching policy commitments.
 
-The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
+`bitcoin_network` is `BITCOIN_NETWORK`, the network of the SPV header chain and
+of the accepted consignments. A verifier declares it (`--expect-bitcoin-network`,
+default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
+`42161`) with another Bitcoin network does not boot.
+
+The tuple omits concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
 release image accepts only `ssl://` or `https://` for the Electrum/Esplora
 URL, so PCR0 covers it. Only a dev build (and thus a development policy)
@@ -343,6 +350,7 @@ attest-verify \
 # compared). Verification fails on any mismatch:
 # --expect-chain-id <u64> --expect-bridge-contract <hex20> \
 # --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
+# --expect-bitcoin-network <bitcoin|testnet3|signet|regtest>   # default bitcoin
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint https://parent.example:50051 \

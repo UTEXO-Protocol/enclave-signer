@@ -27,7 +27,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole};
+use attestation_verify::{
+    BitcoinNetwork, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole,
+};
 use utexo_bridge_parent::attest_verify::{
     verified_report, verify_attested_pubkey, verify_bundle, ExpectedPolicy, VerifyMode,
 };
@@ -102,6 +104,11 @@ struct Cli {
     /// authenticated value. Ignored with --mock.
     #[arg(long)]
     expect_chain_id: Option<u64>,
+
+    /// Require this Bitcoin network: bitcoin (mainnet), testnet3, signet or
+    /// regtest. Ignored with --mock.
+    #[arg(long, default_value = "bitcoin")]
+    expect_bitcoin_network: String,
 
     /// Require this bridge or MultisigProxy address (20-byte 0x-hex). Omit to
     /// accept the authenticated value. Ignored with --mock.
@@ -393,6 +400,13 @@ async fn run(cli: Cli) -> Result<()> {
             electrum_host,
             evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,
+            bitcoin_network: BitcoinNetwork::from_env_str(&cli.expect_bitcoin_network)
+                .with_context(|| {
+                    format!(
+                        "--expect-bitcoin-network {:?} is not bitcoin, testnet3, signet or regtest",
+                        cli.expect_bitcoin_network
+                    )
+                })?,
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,

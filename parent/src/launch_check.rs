@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use attestation_verify::{
-    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource,
-    EvmFinalityTag, EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole,
+    policy_commitment, AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource,
+    EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole,
 };
 use sha2::{Digest, Sha256};
 
@@ -85,6 +85,12 @@ pub fn expected_policy(
         evm_source: EvmDataSource::PinnedTlsRpc,
         btc_source: BtcDataSource::SpvVerified,
         chain_id: number("EVM_CHAIN_ID", Some(required("EVM_CHAIN_ID")?))?,
+        // Unset is mainnet, as in the enclave.
+        bitcoin_network: {
+            let name = optional("BITCOIN_NETWORK").unwrap_or("bitcoin");
+            BitcoinNetwork::from_env_str(name)
+                .with_context(|| format!("BITCOIN_NETWORK {name:?} is not a known network"))?
+        },
         bridge_contract: address20(
             "EVM_PROXY_CONTRACT_ADDRESS",
             required("EVM_PROXY_CONTRACT_ADDRESS")?,
@@ -229,6 +235,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         evm_source,
         btc_source,
         chain_id,
+        bitcoin_network,
         bridge_contract,
         rgb_asset_id,
         funds_in_contract,
@@ -261,6 +268,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("evm_source", format!("{evm_source:?}")),
         ("btc_source", format!("{btc_source:?}")),
         ("chain_id", chain_id.to_string()),
+        ("bitcoin_network", format!("{bitcoin_network:?}")),
         ("bridge_contract", hex(bridge_contract)),
         ("rgb_asset_id", rgb_asset_id.clone()),
         ("funds_in_contract", hex(funds_in_contract)),
@@ -534,6 +542,30 @@ mod tests {
             set!(chain_id, 1),
             "chain_id mismatch: expected 42161, attested 1",
         );
+    }
+
+    #[test]
+    fn bitcoin_network_mismatch_aborts() {
+        assert_mismatch(
+            set!(bitcoin_network, BitcoinNetwork::Signet),
+            "bitcoin_network mismatch: expected Mainnet, attested Signet",
+        );
+    }
+
+    #[test]
+    fn the_image_bitcoin_network_is_expected() {
+        let env = image_env().replace("\"PATH=/usr/bin\"", "\"BITCOIN_NETWORK=signet\"");
+        let policy = expected_policy(SignerRole::Combined, &env, &endpoints()).unwrap();
+        assert!(matches!(
+            policy,
+            AttestedPolicy::Production {
+                bitcoin_network: BitcoinNetwork::Signet,
+                ..
+            }
+        ));
+        let env = image_env().replace("\"PATH=/usr/bin\"", "\"BITCOIN_NETWORK=testnet4\"");
+        let err = expected_policy(SignerRole::Combined, &env, &endpoints()).unwrap_err();
+        assert!(err.to_string().contains("not a known network"), "{err}");
     }
 
     #[test]

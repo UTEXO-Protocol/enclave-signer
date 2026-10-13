@@ -11,8 +11,8 @@
 
 use anyhow::{bail, Context, Result};
 use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin,
-    ExpectedPcrs, KmsPin, SignerRole, VerifiedAttestation,
+    AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource, EvmDataSource, EvmFinalityTag,
+    EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole, VerifiedAttestation,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -61,6 +61,9 @@ pub enum ExpectedPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         /// Expected EVM chain ID. `None` accepts the authenticated value.
         expected_chain_id: Option<u64>,
+        /// Expected Bitcoin network. It is not on the wire, so the operator
+        /// declares it.
+        bitcoin_network: BitcoinNetwork,
         /// Expected 20-byte bridge or MultisigProxy address. `Some` requires
         /// an exact match.
         expected_bridge_contract: Option<[u8; 20]>,
@@ -594,6 +597,7 @@ fn expected_attested_policy(
             electrum_host,
             evm_rpc_tls,
             expected_chain_id,
+            bitcoin_network,
             expected_bridge_contract,
             expected_rgb_asset_id,
             funds_in_contract,
@@ -658,6 +662,7 @@ fn expected_attested_policy(
                 evm_source: *evm_source,
                 btc_source: BtcDataSource::SpvVerified,
                 chain_id: resp.chain_id,
+                bitcoin_network: *bitcoin_network,
                 bridge_contract,
                 rgb_asset_id: resp.rgb_asset_id.clone(),
                 funds_in_contract: *funds_in_contract,
@@ -702,6 +707,7 @@ mod tests {
             token_contract: [0x22; 20],
             spv_min_confirmations: 6,
             expected_chain_id: chain_id,
+            bitcoin_network: BitcoinNetwork::Mainnet,
             expected_bridge_contract: bridge_contract,
             expected_rgb_asset_id: rgb_asset_id,
             gas_tx_allowed_to: [0u8; 20],
@@ -728,6 +734,7 @@ mod tests {
             token_contract: [0x22; 20],
             spv_min_confirmations: 6,
             expected_chain_id: None,
+            bitcoin_network: BitcoinNetwork::Mainnet,
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,
             gas_tx_allowed_to: [0u8; 20],

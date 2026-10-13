@@ -12,7 +12,7 @@
 //! the bundle commits empty values.
 
 use crate::error::{EnclaveError, Result};
-use attestation_verify::EvmFinalityTag;
+use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 
 /// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
 /// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
@@ -108,6 +108,9 @@ pub struct BridgeConfig {
     /// the check, production does not boot ([`crate::policy::ProductionPolicy`]).
     /// Attested.
     pub token_contract: [u8; 20],
+    /// Bitcoin network (`BITCOIN_NETWORK`, default mainnet). The same value
+    /// selects the SPV header chain and the consignment network. Attested.
+    pub bitcoin_network: BitcoinNetwork,
     /// If a `fundsOut` proof must carry BtcRelay commitments that the enclave
     /// checks against its own chain (`BTC_RELAY_MODE`). Default `required`.
     /// `none` is for a local stand only; production does not boot on it
@@ -188,6 +191,7 @@ impl Default for BridgeConfig {
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Safe,
             token_contract: [0u8; 20],
+            bitcoin_network: BitcoinNetwork::Mainnet,
             btc_relay_mode: BtcRelayMode::Required,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
@@ -290,6 +294,12 @@ impl BridgeConfig {
 
         let btc_relay_mode = BtcRelayMode::from_env_value(std::env::var(BTC_RELAY_MODE_ENV).ok());
 
+        // Unknown gives mainnet, as `bootstrap::resolve_bitcoin_network` does.
+        let bitcoin_network = std::env::var("BITCOIN_NETWORK")
+            .ok()
+            .and_then(|s| BitcoinNetwork::from_env_str(&s))
+            .unwrap_or(BitcoinNetwork::Mainnet);
+
         // Without both caps every gas tx fails. Show this at boot.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
         {
@@ -333,6 +343,7 @@ impl BridgeConfig {
             funds_in_contract,
             evm_finality_tag,
             token_contract,
+            bitcoin_network,
             btc_relay_mode,
             max_consignment_bytes,
             max_merkle_proofs,

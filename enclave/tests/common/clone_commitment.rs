@@ -117,6 +117,14 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     btc_source[6] = 0;
     cases.push(("btc_source", btc_source));
     alter!(chain_id, *chain_id ^ 1);
+    alter!(
+        bitcoin_network,
+        match bitcoin_network {
+            attestation_verify::BitcoinNetwork::Signet =>
+                attestation_verify::BitcoinNetwork::Mainnet,
+            _ => attestation_verify::BitcoinNetwork::Signet,
+        }
+    );
     alter!(bridge_contract, {
         let mut x = *bridge_contract;
         x[0] ^= 1;

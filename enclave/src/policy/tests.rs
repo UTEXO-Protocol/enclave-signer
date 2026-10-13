@@ -831,3 +831,69 @@ fn a_development_policy_does_not_read_pcr3() {
         .unwrap();
     assert!(matches!(p, SecurityPolicy::Development { .. }));
 }
+
+/// A boot-time policy for `chain_id` and `network`. Endpoints are not needed.
+fn boot_policy(chain_id: u64, network: BitcoinNetwork) -> SecurityPolicy {
+    SecurityPolicy::resolve(
+        &release_bridge_ctx(),
+        &BridgeConfig {
+            chain_id,
+            bitcoin_network: network,
+            ..pinned_config()
+        },
+        EvmDataSource::Disabled,
+        None,
+        "",
+    )
+}
+
+/// A test-network image must not carry mainnet EVM pins.
+#[test]
+fn a_mainnet_evm_chain_requires_bitcoin_mainnet() {
+    let ctx = release_bridge_ctx();
+    for chain_id in MAINNET_EVM_CHAIN_IDS {
+        assert!(boot_policy(chain_id, BitcoinNetwork::Mainnet)
+            .assert_valid_at_boot(&ctx)
+            .is_ok());
+        for network in [
+            BitcoinNetwork::Testnet3,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::Regtest,
+        ] {
+            let err = boot_policy(chain_id, network)
+                .assert_valid_at_boot(&ctx)
+                .unwrap_err();
+            assert!(
+                err.contains("requires BITCOIN_NETWORK=bitcoin"),
+                "got: {err}"
+            );
+        }
+    }
+}
+
+/// A test EVM chain may pair with any Bitcoin network.
+#[test]
+fn a_test_evm_chain_accepts_a_test_bitcoin_network() {
+    let ctx = release_bridge_ctx();
+    // Arbitrum Sepolia.
+    assert!(boot_policy(421_614, BitcoinNetwork::Signet)
+        .assert_valid_at_boot(&ctx)
+        .is_ok());
+}
+
+/// A verifier sees the Bitcoin network in the commitment.
+#[test]
+fn the_bitcoin_network_is_attested() {
+    let signet = boot_policy(421_614, BitcoinNetwork::Signet);
+    assert!(matches!(
+        signet.attested(),
+        AttestedPolicy::Production {
+            bitcoin_network: BitcoinNetwork::Signet,
+            ..
+        }
+    ));
+    assert_ne!(
+        signet.commitment_bytes(),
+        boot_policy(421_614, BitcoinNetwork::Mainnet).commitment_bytes()
+    );
+}

@@ -17,9 +17,13 @@
 use crate::config::{BridgeConfig, BtcRelayMode};
 
 pub use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin,
-    KmsPin, SignerRole,
+    AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource, EvmDataSource, EvmFinalityTag,
+    EvmRpcTlsPin, KmsPin, SignerRole,
 };
+
+/// EVM mainnets the bridge is deployed on: Ethereum and Arbitrum One. A
+/// production policy pinned to one of them must use Bitcoin mainnet.
+pub const MAINNET_EVM_CHAIN_IDS: [u64; 2] = [1, 42161];
 
 /// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +44,8 @@ pub enum SecurityPolicy {
 pub struct ProductionPolicy {
     /// Pinned EVM chain id (`EVM_CHAIN_ID`).
     pub chain_id: u64,
+    /// Bitcoin network (`BITCOIN_NETWORK`).
+    pub bitcoin_network: BitcoinNetwork,
     /// Pinned MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`).
     pub bridge_contract: [u8; 20],
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
@@ -184,6 +190,7 @@ impl SecurityPolicy {
         let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
         Self::Production(ProductionPolicy {
             chain_id: bridge.chain_id,
+            bitcoin_network: bridge.bitcoin_network,
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
             funds_in_contract: bridge.funds_in_contract,
@@ -262,6 +269,7 @@ impl SecurityPolicy {
                 evm_source: p.evm_source,
                 btc_source: p.btc_source,
                 chain_id: p.chain_id,
+                bitcoin_network: p.bitcoin_network,
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
                 funds_in_contract: p.funds_in_contract,
@@ -372,6 +380,17 @@ impl ProductionPolicy {
             return Err(
                 "production policy is missing one or more of the chain/contract/asset pins".into(),
             );
+        }
+        // A test-network image with mainnet EVM pins would sign real releases
+        // for test-network burns.
+        if MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id)
+            && self.bitcoin_network != BitcoinNetwork::Mainnet
+        {
+            return Err(format!(
+                "production policy pins mainnet EVM chain {} with Bitcoin {:?}; a mainnet EVM \
+                 chain requires BITCOIN_NETWORK=bitcoin",
+                self.chain_id, self.bitcoin_network
+            ));
         }
         if self.funds_in_contract == [0u8; 20] {
             return Err("production policy must pin a non-zero FundsIn contract".into());

@@ -108,6 +108,30 @@ impl std::str::FromStr for EvmFinalityTag {
     }
 }
 
+/// Bitcoin network of the image (`BITCOIN_NETWORK`). The consignment network
+/// and the SPV header chain follow it. The discriminants are wire values.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitcoinNetwork {
+    Mainnet = 0,
+    Testnet3 = 1,
+    Signet = 2,
+    Regtest = 3,
+}
+
+impl BitcoinNetwork {
+    /// Parses a `BITCOIN_NETWORK` value, with the names the enclave accepts.
+    pub fn from_env_str(s: &str) -> Option<Self> {
+        match s {
+            "bitcoin" | "mainnet" => Some(Self::Mainnet),
+            "testnet" | "testnet3" => Some(Self::Testnet3),
+            "signet" => Some(Self::Signet),
+            "regtest" => Some(Self::Regtest),
+            _ => None,
+        }
+    }
+}
+
 /// TLS pin of the EVM RPC endpoint. `host` is the name the certificate must
 /// match. `ca_sha256` is the SHA-256 of the DER of the only trusted CA.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +191,8 @@ pub enum AttestedPolicy {
         evm_source: EvmDataSource,
         btc_source: BtcDataSource,
         chain_id: u64,
+        /// Bitcoin network of the burns and mints this image accepts.
+        bitcoin_network: BitcoinNetwork,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
@@ -215,7 +241,8 @@ impl AttestedPolicy {
     /// [POLICY_COMMITMENT_V1]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
-    ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
+    ///              [btc_source u8][chain_id u64 BE][bitcoin_network u8]
+    ///              [bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_finality_tag u8: 0 latest | 1 safe | 2 finalized]
     ///              [spv_min_confirmations u32 BE]
@@ -244,6 +271,7 @@ impl AttestedPolicy {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
@@ -267,6 +295,7 @@ impl AttestedPolicy {
                 out.push(*evm_source as u8);
                 out.push(*btc_source as u8);
                 out.extend_from_slice(&chain_id.to_be_bytes());
+                out.push(*bitcoin_network as u8);
                 out.extend_from_slice(bridge_contract);
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
@@ -366,6 +395,13 @@ impl AttestedPolicy {
                     _ => return Err(PolicyDecodeError("unknown BTC data source")),
                 };
                 let chain_id = u64::from_be_bytes(r.array()?);
+                let bitcoin_network = match r.u8()? {
+                    0 => BitcoinNetwork::Mainnet,
+                    1 => BitcoinNetwork::Testnet3,
+                    2 => BitcoinNetwork::Signet,
+                    3 => BitcoinNetwork::Regtest,
+                    _ => return Err(PolicyDecodeError("unknown Bitcoin network")),
+                };
                 let bridge_contract = r.array()?;
                 let rgb_asset_id = r.string()?;
                 let funds_in_contract = r.array()?;
@@ -419,6 +455,7 @@ impl AttestedPolicy {
                     evm_source,
                     btc_source,
                     chain_id,
+                    bitcoin_network,
                     bridge_contract,
                     rgb_asset_id,
                     funds_in_contract,
@@ -519,6 +556,7 @@ mod tests {
             evm_source: evm,
             btc_source: BtcDataSource::SpvVerified,
             chain_id,
+            bitcoin_network: BitcoinNetwork::Mainnet,
             bridge_contract: [contract; 20],
             rgb_asset_id: asset.into(),
             funds_in_contract: [0x44; 20],
@@ -614,6 +652,7 @@ mod tests {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
@@ -632,6 +671,7 @@ mod tests {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
@@ -715,6 +755,51 @@ mod tests {
         assert_ne!(encodings[0], encodings[1]);
         assert_ne!(encodings[0], encodings[2]);
         assert_ne!(encodings[1], encodings[2]);
+    }
+
+    /// A signet image with the production EVM pins attests a different policy.
+    #[test]
+    fn bitcoin_network_changes_the_bytes() {
+        let encodings: Vec<Vec<u8>> = [
+            BitcoinNetwork::Mainnet,
+            BitcoinNetwork::Testnet3,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::Regtest,
+        ]
+        .into_iter()
+        .map(|network| {
+            let mut p = base();
+            if let AttestedPolicy::Production {
+                bitcoin_network, ..
+            } = &mut p
+            {
+                *bitcoin_network = network;
+            }
+            assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p.clone()));
+            p.to_bytes()
+        })
+        .collect();
+        for (i, a) in encodings.iter().enumerate() {
+            for b in &encodings[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn bitcoin_network_parses_the_enclave_names() {
+        for (name, want) in [
+            ("bitcoin", BitcoinNetwork::Mainnet),
+            ("mainnet", BitcoinNetwork::Mainnet),
+            ("testnet", BitcoinNetwork::Testnet3),
+            ("testnet3", BitcoinNetwork::Testnet3),
+            ("signet", BitcoinNetwork::Signet),
+            ("regtest", BitcoinNetwork::Regtest),
+        ] {
+            assert_eq!(BitcoinNetwork::from_env_str(name), Some(want), "{name}");
+        }
+        assert_eq!(BitcoinNetwork::from_env_str("testnet4"), None);
+        assert_eq!(BitcoinNetwork::from_env_str(""), None);
     }
 
     #[test]
@@ -891,6 +976,10 @@ mod tests {
         let mut role = good.clone();
         role[3] = 3;
         bad.push(role);
+        // Byte 15 is the Bitcoin network, after the 8-byte chain id.
+        let mut network = good.clone();
+        network[15] = 4;
+        bad.push(network);
         // EVM source 2 (retired) is no longer valid.
         let mut evm = good.clone();
         evm[5] = 2;

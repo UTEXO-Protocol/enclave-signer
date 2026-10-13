@@ -206,6 +206,7 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,
+            bitcoin_network: attestation_verify::BitcoinNetwork::Mainnet,
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,
             funds_in_contract: [0x11; 20],
