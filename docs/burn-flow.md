@@ -225,7 +225,14 @@ signer read a contract of its choice. The rules are those of rgb-lib 98a8af6.
 - **B4.6** `destinationChainId`:
   - pools route: must equal `EVM_CHAIN_ID`;
   - LayerZero route: must not be zero, and must not equal `EVM_CHAIN_ID`.
-- **B4.7** The deadline must be in the future.
+- **B4.7** The deadline must be in the future, and at most 1 day after now
+  (`MAX_TEE_DEADLINE_SECS`, the same value as `MultisigProxy.MAX_TEE_DEADLINE`).
+  So every signature expires 1 day after signing.
+- **B4.8** LayerZero route only: `minAmountLD` must be > 0 and at most `amount`.
+  The backend sets it from the net quoted at signing.
+- **B4.9** LayerZero route only: `extraOptions` must be empty or one executor
+  `lzReceive` gas option (type 3, no value), with gas at most
+  `MAX_LZ_RECEIVE_GAS`. Native drop, compose and every other option are refused.
 
 ### Stage 5 - Does the release belong to this burn?
 

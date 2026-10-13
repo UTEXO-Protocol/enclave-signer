@@ -56,11 +56,18 @@ fn funds_out_calldata_for_chain(amount: u64, destination_chain_id: u64) -> Vec<u
     .abi_encode()
 }
 
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 fn destination() -> EvmDestination {
     EvmDestination {
         call_data: funds_out_calldata(1000, 7),
         nonce: 1,
-        deadline: u64::MAX,
+        deadline: now() + 3600,
         chain_id: 1,
         proxy_contract: vec![0xAA; ADDRESS_LEN],
         calldata_amount: 1000,
@@ -213,6 +220,10 @@ fn rejects_calldata_destination_chain_id_mismatch() {
 
 /// `lzFundsOut` calldata for an entrypoint-routed payout to a remote chain.
 fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
+    lz_funds_out_call(amount, destination_chain_id).abi_encode()
+}
+
+fn lz_funds_out_call(amount: u64, destination_chain_id: u64) -> lzFundsOutCall {
     use alloy_primitives::FixedBytes;
 
     let mut recipient = [0u8; 32];
@@ -232,7 +243,6 @@ fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
         extraOptions: Bytes::new(),
         sourceBurnTxId: FixedBytes([0x5b; 32]),
     }
-    .abi_encode()
 }
 
 /// `lz_release` that matches `lz_funds_out_calldata(1000, _)`.
@@ -319,6 +329,65 @@ fn rejects_entrypoint_route_to_pinned_chain() {
     });
 }
 
+/// An `lzFundsOut` destination with the given floor and options. `lz_release`
+/// follows the floor, so only the new checks can refuse it.
+fn lz_destination_with(min_amount_ld: u64, extra_options: Vec<u8>) -> EvmDestination {
+    let mut call = lz_funds_out_call(1000, 137);
+    call.minAmountLD = U256::from(min_amount_ld);
+    call.extraOptions = Bytes::from(extra_options);
+    let mut release = lz_release();
+    release.min_amount_ld = min_amount_ld;
+    EvmDestination {
+        call_data: call.abi_encode(),
+        lz_release: Some(release),
+        ..destination()
+    }
+}
+
+/// bridge-utexo `BuildLzReceiveOptions(200_000)`.
+fn backend_lz_options() -> Vec<u8> {
+    let mut out = vec![0x00, 0x03, 0x01, 0x00, 0x11, 0x01];
+    out.extend_from_slice(&200_000u128.to_be_bytes());
+    out
+}
+
+#[test]
+fn accepts_entrypoint_route_with_backend_options_and_net_floor() {
+    with_ctx(&config(), |ctx| {
+        validate_dest(&lz_destination_with(990, backend_lz_options()), ctx)
+            .expect("net floor with an lzReceive gas option must validate");
+        validate_dest(&lz_destination_with(1000, Vec::new()), ctx)
+            .expect("floor equal to amount with empty options must validate");
+    });
+}
+
+#[test]
+fn rejects_entrypoint_route_with_zero_min_amount_ld() {
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&lz_destination_with(0, Vec::new()), ctx);
+        assert!(err.contains("minAmountLD must be > 0"), "got: {err}");
+    });
+}
+
+#[test]
+fn rejects_entrypoint_route_with_min_amount_ld_above_amount() {
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&lz_destination_with(1001, Vec::new()), ctx);
+        assert!(err.contains("exceeds amount"), "got: {err}");
+    });
+}
+
+#[test]
+fn rejects_entrypoint_route_with_native_drop() {
+    let mut options = vec![0x00, 0x03, 0x01, 0x00, 0x31, 0x02];
+    options.extend_from_slice(&1u128.to_be_bytes());
+    options.extend_from_slice(&[0xAB; 32]);
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&lz_destination_with(990, options), ctx);
+        assert!(err.contains("extraOptions"), "got: {err}");
+    });
+}
+
 fn destination_or_err(destination: &EvmDestination, ctx: &ValidationContext<'_>) -> String {
     validate_dest(destination, ctx)
         .expect_err("must reject")
@@ -371,6 +440,37 @@ fn rejects_expired_deadline() {
             .unwrap_err()
             .to_string()
             .contains("deadline expired"));
+    });
+}
+
+#[test]
+fn accepts_deadline_at_cap() {
+    let mut destination = destination();
+    // A few seconds of slack for the clock tick between here and the check.
+    destination.deadline = now() + MAX_TEE_DEADLINE_SECS - 5;
+    with_ctx(&config(), |ctx| {
+        validate_dest(&destination, ctx).expect("deadline within the cap must validate");
+    });
+}
+
+#[test]
+fn rejects_deadline_beyond_cap() {
+    let mut destination = destination();
+    destination.deadline = now() + MAX_TEE_DEADLINE_SECS + 60;
+    with_ctx(&config(), |ctx| {
+        assert!(validate_dest(&destination, ctx)
+            .unwrap_err()
+            .to_string()
+            .contains("more than"));
+    });
+}
+
+#[test]
+fn rejects_far_future_deadline() {
+    let mut destination = destination();
+    destination.deadline = u64::MAX;
+    with_ctx(&config(), |ctx| {
+        assert!(validate_dest(&destination, ctx).is_err());
     });
 }
 

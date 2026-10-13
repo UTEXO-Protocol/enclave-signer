@@ -359,7 +359,9 @@ shapes no longer exist.
 
 For an RGB source, `fundsOut` signing runs the checks in Sec 9:
 validated consignment, SPV-confirmed anchors, canonical calldata, pinned
-chain/contract, amount coverage, future deadline.
+chain/contract, amount coverage, a deadline at most 1 day ahead. On the
+LayerZero route also: `minAmountLD` in `(0, amount]`, and `extraOptions`
+empty or one gas-only executor `lzReceive` option.
 
 The calldata MUST lead with one of two selectors: the pools `fundsOut`
 (`0x340276aa`) or `lzFundsOut` (LayerZero release). The enclave decodes it
@@ -896,7 +898,7 @@ Known limits. Read them before deployment.
   disabled, cannot be released. A refund path is planned for record V2.
 - **Release replay.** The burn signer keeps no release state. Replay
   protection is the `MultisigProxy` nonce and the Bridge `burnId` check. The
-  EIP-712 deadline has no upper limit.
+  enclave refuses an EIP-712 deadline more than 1 day after signing.
 - **Settlement ancestry.** `settlementData` must cite every `TS_MINT` in the
   consignment, not only the mints that fed the burned units.
 - **Release route invariant.** The Bridge release route for source chain

@@ -11,6 +11,8 @@ pub mod gas_tx;
 #[cfg(feature = "bfa-validation")]
 pub mod reject_list;
 #[cfg(rgb_to_evm)]
+pub mod lz_options;
+#[cfg(rgb_to_evm)]
 pub mod signing;
 pub mod validation;
 

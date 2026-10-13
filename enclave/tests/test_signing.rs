@@ -97,6 +97,15 @@ fn placeholder_consignment_hash() -> Vec<u8> {
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
+/// One hour from now: inside the enclave's 1-day deadline cap.
+fn test_deadline() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600
+}
+
 /// Build a valid enriched EVM-destination SignRequest for testing. `commission`
 /// stays outside the calldata and does not reach the signed digest.
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
@@ -113,7 +122,7 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
             call_data: mock_funds_out_calldata([0x22; 20], amount),
             nonce: 1,
-            deadline: u64::MAX,
+            deadline: test_deadline(),
             chain_id: 1,
             proxy_contract: vec![0xAA; 20],
             calldata_amount: amount,
@@ -521,7 +530,7 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
             destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
                 call_data: mock_funds_out_calldata([0x22; 20], amount),
                 nonce: 1,
-                deadline: u64::MAX,
+                deadline: test_deadline(),
                 chain_id: 1,
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
@@ -592,7 +601,7 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
             destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
                 call_data,
                 nonce: 1,
-                deadline: u64::MAX,
+                deadline: test_deadline(),
                 chain_id: 1,
                 proxy_contract: vec![0xAA; 20],
                 calldata_amount: amount,
