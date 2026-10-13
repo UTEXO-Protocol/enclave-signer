@@ -29,13 +29,13 @@ document differ, investigate the difference. Either can contain an error.
 | Backend and listener | Operator servers | Nothing | Build the consignment and the PSBT. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
-| EVM RPC | Pinned TLS host | Receipt and chain-head data | Gives the deposit receipts. |
+| EVM RPC | Pinned TLS host | Receipts, canonical blocks and selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
 | Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy; TLS ends in the enclave | Confirmation status and height of history witnesses; Bitcoin data, subject to the checks below | Says whether each history witness is mined. Supplies the transaction of an off-PSBT outpoint, and whether it is mined and unspent. |
 
 The mint signer ignores `event_valid` and `event_finalized` from the listener.
 It checks deposits through the pinned EVM RPC. It trusts that provider for
-receipt, chain-head and finality data. It does not verify EVM consensus. It
-checks that the node reports the pinned chain id.
+receipt, canonical block and selected finality head data. It does not verify EVM
+consensus. It checks that the node reports the pinned chain id.
 
 RGB validation checks every witness on chain. It takes each witness
 transaction from the consignment and asks the pinned indexer for its status.
@@ -110,7 +110,7 @@ sequenceDiagram
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. Consensus makes it equal the `OS_ASSET` outputs. |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
-| `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
+| `EVM_FINALITY_TAG` | `safe` (default) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
 | `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each history witness, per the indexer. Image env, attested. Zero stops the boot. The connector's `mint_begin` `min_confirmations` must be at least this. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 12 MiB (default) | Maximum consignment size. |
@@ -161,8 +161,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 - **M2.6** `netAmount` must not be more than `amount - commission`.
 - **M2.7** Each amount must fit in a u64. The mint signer does not cut a
   larger value. It refuses it.
-- **M2.8** The receipt must be at least `EVM_MIN_CONFIRMATIONS` blocks deep. A
-  receipt above the chain head (a reorg) is refused.
+- **M2.8** The receipt must be covered by
+  `eth_getBlockByNumber(EVM_FINALITY_TAG, false)` and its `blockHash` must match
+  the canonical block at its height. The selected head snapshot is revalidated
+  to detect a reorg. A receipt above that head or unavailable tag data refuses
+  signing. Pending deposits can be retried after the selected head covers them.
 
 ### Stage 3 - Is the RGB history valid, and is each mint backed?
 
@@ -188,10 +191,13 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `FUNDS_IN_CONTRACT`. The `FundsIn` amount, the `operationId` and the net
   amount must be the ones the mint derives. Another deposit for the same OpId
   is refused. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`).
-- **M3.10** The receipt block must be after the mint's `afterBlock`, at least
-  `EVM_MIN_CONFIRMATIONS` deep, and not above the node's `finalized` block. A
-  lock that is not final yet is refused; retry later. These are the rules a
-  receiving rgb-lib wallet applies, so a signed mint is one it accepts.
+- **M3.10** The receipt block must be after the mint's `afterBlock`, at or
+  below the RPC's `EVM_FINALITY_TAG` block (`safe` by default), and its
+  `blockHash` must match the canonical block at its height. The tagged head
+  is read again afterwards to detect a reorg. A lock above that head is
+  refused; retry later. A receiving rgb-lib wallet confirms the anchor only
+  once the lock is `finalized`, and waits for that, so with `safe` or
+  `latest` the user sees the mint later than the enclave signs it.
 - **M3.11** The bound locks must match the anchors one for one. Consensus
   phase 2 confirms each anchor only against its lock, and only through the
   checked resolver, which compares the chain id with the genesis.
@@ -313,7 +319,7 @@ A mint spends the mint right (`OS_MINT`, no units) and makes units
 
 1. RGB consensus: the mint's `OS_ASSET` outputs equal its `issuedSupply`, and
    its anchor confirms only against a `FundsIn` of exactly that amount, for
-   that OpId, finalized and after `afterBlock`.
+   that OpId, covered by the `EVM_FINALITY_TAG` head and after `afterBlock`.
 2. The PSBT bind: the new units equal `amount - commission`.
 3. The recipient bind: the units go to the user's seal.
 

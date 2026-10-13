@@ -81,16 +81,18 @@ the user. The mint signer signs the Bitcoin transaction that does the mint.
 
 Before it signs, the mint signer:
 
-1. Gets the EVM deposit receipt itself. The receipt must be a success and at
-   least `EVM_MIN_CONFIRMATIONS` blocks deep (default 12).
+1. Gets the EVM deposit receipt itself. The receipt must be a success, be at
+   or below the RPC head selected by `EVM_FINALITY_TAG` (default `safe`), and
+   have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
 3. Validates the RGB consignment (full RGB consensus, RGB 0.11.2 BFA). The
    asset must be the pinned `RGB_ASSET_ID` and name the pinned Bridge and
    `EVM_CHAIN_ID`. Each BFA `mint` leaves an anchor that is confirmed only
    against its derived deposit. The mint being signed must also have that
-   deposit on chain: a `FundsIn` for its OpId and amount, in a finalized block
-   after its `afterBlock`, read from a node on the pinned chain.
+   deposit on chain: a `FundsIn` for its OpId and amount, after its
+   `afterBlock` and covered by the `EVM_FINALITY_TAG` head, read from a node on
+   the pinned chain.
 4. Binds the PSBT to the consignment. The txid, the inputs and the sighash
    types must match. The signed bundle holds exactly one mint and hides no
    transition. The minted units must equal `amount - commission` exactly.
@@ -538,10 +540,28 @@ Data sources and transport:
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer (mint path: history witness status and transaction fetch). |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
+| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. |
 | `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx: SPV on the burn path, the indexer on the mint path (all but the mint tx being signed). Zero or a non-number stops the boot. Baked into the image. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
+
+EVM deposit receipts must be at or below the head returned by
+`eth_getBlockByNumber(EVM_FINALITY_TAG, false)` and match the canonical block
+hash at their height. The enclave revalidates the selected head snapshot to
+detect a reorg during verification.
+
+| Tag | Arbitrum acceptance |
+|-----|---------------------|
+| `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. |
+| `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. Default. |
+| `finalized` | Batch covered by L1's finalized head. |
+
+Values must use the exact lowercase spelling. See
+[Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).
+The enclave refuses signing until the deposit meets the selected tag and
+whenever required RPC data is unavailable or invalid. Retry a pending deposit
+after the selected head covers it. Production verification requires
+`--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 (`SetEndpoints`), never in the image. The attested policy commits the Electrum
@@ -702,7 +722,8 @@ Re-syncing changes PCR0. Procedure in
   authenticates the configured RPC hostname against the pinned CA. The host
   relay cannot alter authenticated responses without detection. The enclave
   checks successful receipts, unique expected events from the pinned contract,
-  operation IDs, amounts and depth relative to the provider-reported chain head.
+  operation IDs, amounts, coverage by the selected finality head and canonical
+  block hashes.
   These checks do not prove EVM consensus: an approved provider can return a
   self-consistent false deposit history. Trust in the provider's data is an
   explicit design assumption. Verifiers must compare the attested host and CA
@@ -716,7 +737,7 @@ Re-syncing changes PCR0. Procedure in
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
 - **Limits.** Bitcoin freshness, reorg/retention caps and connection limits
-  are compiled in. `SPV_MIN_CONFIRMATIONS`, `EVM_MIN_CONFIRMATIONS` and
+  are compiled in. `SPV_MIN_CONFIRMATIONS`, `EVM_FINALITY_TAG` and
   request-size caps are read from environment; image-baked values are measured
   with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.

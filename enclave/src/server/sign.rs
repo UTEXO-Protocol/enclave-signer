@@ -446,7 +446,7 @@ fn verify_funds_in_deposit(
         // The bridge entry contract emits FundsIn. It can differ from the
         // MultisigProxy in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
         &ctx.bridge_config.funds_in_contract,
-        ctx.evm_rpc_config.min_confirmations,
+        ctx.bridge_config.evm_finality_tag,
         &tx_hash,
         &source.funds_in_operation_id,
         amount,
@@ -628,7 +628,7 @@ mod bridge_operation_retry;
 mod early_bridge_checks {
     use super::*;
     use crate::config::BridgeConfig;
-    use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
+    use crate::networks::evm::events::{BlockData, EvmReceiptProvider, ReceiptData};
     use crate::state::EnclaveState;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -643,12 +643,18 @@ mod early_bridge_checks {
             Ok(None)
         }
 
-        fn get_block_number(&self) -> Result<u64> {
-            panic!("a missing deposit must be rejected before querying the head")
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
+            Ok(Some(BlockData {
+                number: 100,
+                hash: [0x42; 32],
+            }))
         }
 
-        fn get_finalized_block_number(&self) -> Result<u64> {
-            panic!("a missing deposit must be rejected before querying finality")
+        fn get_block_by_number(&self, _: u64) -> Result<Option<BlockData>> {
+            panic!("a missing deposit must be rejected before querying its block")
         }
 
         fn get_chain_id(&self) -> Result<u64> {
@@ -748,7 +754,7 @@ mod key_not_ready {
     use super::*;
     use crate::cloning::CloneSession;
     use crate::config::BridgeConfig;
-    use crate::networks::evm::events::{EvmReceiptProvider, ReceiptData};
+    use crate::networks::evm::events::{BlockData, EvmReceiptProvider, ReceiptData};
     use crate::networks::rgb::validation::RgbValidator;
     use crate::proto::enclave_request::Request;
     use crate::proto::enclave_response::Response;
@@ -777,27 +783,33 @@ mod key_not_ready {
     struct CountingEvmRpc(Arc<AtomicUsize>);
 
     impl CountingEvmRpc {
-        fn count(&self) -> Result<u64> {
+        fn count(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(0)
         }
     }
 
     impl EvmReceiptProvider for CountingEvmRpc {
         fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
-            self.count().map(|_| None)
+            self.count();
+            Ok(None)
         }
 
-        fn get_block_number(&self) -> Result<u64> {
-            self.count()
+        fn get_block_by_tag(
+            &self,
+            _tag: attestation_verify::EvmFinalityTag,
+        ) -> Result<Option<BlockData>> {
+            self.count();
+            Ok(None)
         }
 
-        fn get_finalized_block_number(&self) -> Result<u64> {
-            self.count()
+        fn get_block_by_number(&self, _: u64) -> Result<Option<BlockData>> {
+            self.count();
+            Ok(None)
         }
 
         fn get_chain_id(&self) -> Result<u64> {
-            self.count()
+            self.count();
+            Ok(0)
         }
     }
 

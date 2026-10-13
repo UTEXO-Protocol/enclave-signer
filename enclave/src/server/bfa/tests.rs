@@ -1,8 +1,11 @@
 use super::*;
 use crate::error::Result;
-use crate::networks::evm::events::{rgb_mint_deposit_id, EvmReceiptProvider, ReceiptData};
+use crate::networks::evm::events::{
+    rgb_mint_deposit_id, BlockData, EvmReceiptProvider, ReceiptData,
+};
 use crate::state::EnclaveState;
 use crate::test_support::regtest_header_chain;
+use attestation_verify::EvmFinalityTag;
 
 const BRIDGE: [u8; 20] = [0x50; 20];
 const CHAIN_ID: u64 = 42161;
@@ -44,11 +47,11 @@ impl EvmReceiptProvider for NoRpc {
         panic!("this binder must not read the chain")
     }
 
-    fn get_block_number(&self) -> Result<u64> {
+    fn get_block_by_tag(&self, _: EvmFinalityTag) -> Result<Option<BlockData>> {
         panic!("this binder must not read the chain")
     }
 
-    fn get_finalized_block_number(&self) -> Result<u64> {
+    fn get_block_by_number(&self, _: u64) -> Result<Option<BlockData>> {
         panic!("this binder must not read the chain")
     }
 
@@ -124,7 +127,7 @@ mod mint {
         Keccak256::digest(sig.as_bytes()).into()
     }
 
-    /// A finalized deposit for mint `opid` of `amount`, with `operation_id`.
+    /// A deposit for mint `opid` of `amount`, with `operation_id`, at block 100.
     fn deposit(opid: [u8; 32], amount: u64, operation_id: [u8; 32]) -> FakeEvm {
         let logs = vec![
             LogEntry {
@@ -142,10 +145,9 @@ mod mint {
             receipt: Some(ReceiptData {
                 status_success: true,
                 block_number: 100,
+                block_hash: [0x42; 32],
                 logs,
             }),
-            head: 200,
-            finalized: Some(150),
             chain_id: CHAIN_ID,
         }
     }
@@ -199,15 +201,71 @@ mod mint {
         assert!(err.to_string().contains("reports chain id 1"), "{err}");
     }
 
+    /// A node whose `covered` head holds the lock and whose other heads are
+    /// below it.
+    struct TaggedHeads {
+        node: FakeEvm,
+        covered: EvmFinalityTag,
+    }
+
+    impl EvmReceiptProvider for TaggedHeads {
+        fn get_transaction_receipt(&self, tx: &[u8; 32]) -> Result<Option<ReceiptData>> {
+            self.node.get_transaction_receipt(tx)
+        }
+
+        fn get_block_by_tag(&self, tag: EvmFinalityTag) -> Result<Option<BlockData>> {
+            if tag == self.covered {
+                return self.node.get_block_by_tag(tag);
+            }
+            self.node.get_block_by_number(99)
+        }
+
+        fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>> {
+            self.node.get_block_by_number(number)
+        }
+
+        fn get_chain_id(&self) -> Result<u64> {
+            self.node.get_chain_id()
+        }
+    }
+
+    /// The mint lock follows the attested `EVM_FINALITY_TAG`, not a fixed tag.
     #[test]
-    fn refuses_a_lock_not_yet_finalized() {
-        let node = FakeEvm {
-            finalized: Some(99),
-            ..paid([2; 32], 100)
-        };
-        let ctx = context(config(), Box::new(node));
-        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("not finalized"), "{err}");
+    fn checks_the_lock_against_the_configured_finality_tag() {
+        let anchors = [anchor(2, 100, true)];
+        for tag in [
+            EvmFinalityTag::Latest,
+            EvmFinalityTag::Safe,
+            EvmFinalityTag::Finalized,
+        ] {
+            let cfg = BridgeConfig {
+                evm_finality_tag: tag,
+                ..config()
+            };
+            let covered = TaggedHeads {
+                node: paid([2; 32], 100),
+                covered: tag,
+            };
+            let ctx = context(cfg.clone(), Box::new(covered));
+            assert!(mint_locks(&ctx, &TX, &PINNED, &anchors).is_ok(), "{tag}");
+
+            let other = if tag == EvmFinalityTag::Safe {
+                EvmFinalityTag::Finalized
+            } else {
+                EvmFinalityTag::Safe
+            };
+            let below = TaggedHeads {
+                node: paid([2; 32], 100),
+                covered: other,
+            };
+            let ctx = context(cfg, Box::new(below));
+            let err = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("above RPC {tag} block 99")),
+                "{err}"
+            );
+        }
     }
 
     /// The pins are checked before any RPC read.

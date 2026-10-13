@@ -42,20 +42,20 @@ sequenceDiagram
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
-    Evt->>Rpc: eth_getTransactionReceipt / eth_blockNumber (15 s timeout)
-    Rpc-->>Evt: receipt / head
+    Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(EVM_FINALITY_TAG, false) / block at receipt height (15 s per call)
+    Rpc-->>Evt: receipt / selected head / canonical block
     Evt->>Evt: receipt exists + status success
     Evt->>Evt: exactly ONE BridgeFundsIn from FUNDS_IN_CONTRACT<br/>(zero or two ⇒ REFUSE, no plain FundsIn fallback)
     Evt->>Evt: topic1 operationId == funds_in_operation_id<br/>gross == amount, tokenCommission == commission<br/>netAmount ≤ gross − commission, u64 only
-    Evt->>Evt: depth ≥ EVM_MIN_CONFIRMATIONS (default 12),<br/>receipt above head ⇒ REFUSE
+    Evt->>Evt: receipt height ≤ selected head, canonical blockHash matches,<br/>revalidate head snapshot; missing head or receipt above head ⇒ REFUSE
     Evt-->>Srv: destinationAddress (may be empty)
 
     Note over Srv,Rgb: 3 - consignment and its mint anchors (validate_destination_anchor)
     Srv->>Rgb: size cap, keccak256(consignment) == consignment_hash,<br/>V1 TFR, BFA genesis, phase 1 validate_deterministic
     Rgb->>Srv: AnchorBinder (server::bfa::mint_locks)
     Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT on EVM_CHAIN_ID,<br/>derived lock per anchor, exactly one anchor in the signed bundle
-    Srv->>Rpc: eth_chainId, receipt of evm_tx_hash, finalized block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == signed mint OpId)<br/>+ one BridgeFundsIn, block > afterBlock, finalized,<br/>depth ≥ EVM_MIN_CONFIRMATIONS; deposit == the mint's derived lock
+    Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == signed mint OpId)<br/>+ one BridgeFundsIn, block > afterBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
     Srv-->>Rgb: BoundAnchors (older mints: derived locks, no RPC)
     Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock
     Rgb->>Idx: each history witness no mined witness spends: pinned indexer<br/>(TLS in the enclave, non-verbose), mined ≥ SPV_MIN_CONFIRMATIONS<br/>below its tip, else REFUSE; last witness (the mint tx) may be unmined

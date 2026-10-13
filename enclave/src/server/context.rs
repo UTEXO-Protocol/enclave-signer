@@ -47,9 +47,6 @@ pub struct ServerContext {
     /// Empty until `SetEndpoints`. Written once, under `launch_lock`.
     pub launch: OnceLock<Launch>,
     pub launch_lock: Mutex<()>,
-    /// Pinned EVM-RPC config (min confirmations).
-    #[cfg(feature = "evm-rpc")]
-    pub evm_rpc_config: crate::config::EvmRpcConfig,
     /// In-enclave Bitcoin header chain for SPV verification.
     /// It starts from the compile-time checkpoint. SubmitHeaders changes it.
     ///
@@ -81,8 +78,6 @@ impl ServerContext {
             build_ctx,
             launch: OnceLock::new(),
             launch_lock: Mutex::new(()),
-            #[cfg(feature = "evm-rpc")]
-            evm_rpc_config: crate::config::EvmRpcConfig::from_env(),
             #[cfg(feature = "rgb-validation")]
             header_chain,
             #[cfg(feature = "rgb-validation")]
@@ -122,7 +117,6 @@ impl ServerContext {
             crate::policy::EvmDataSource::Disabled,
             None,
             "",
-            0,
         );
         let _ = self.launch.set(Launch {
             endpoints: Endpoints::default(),

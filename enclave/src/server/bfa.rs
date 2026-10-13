@@ -1,6 +1,6 @@
 //! BFA anchor binding: every mint anchor of a consignment is bound to the
 //! deposit id it derives. The mint a PSBT signs must also have that deposit
-//! on the pinned EVM chain, finalized.
+//! on the pinned EVM chain, covered by the `EVM_FINALITY_TAG` head.
 //!
 //! `server/mod.rs` gates this module on `bfa-validation`.
 
@@ -76,7 +76,7 @@ pub(super) fn mint_locks(
     let paid = verify_rgb_funds_in(
         &**client,
         &cfg.funds_in_contract,
-        ctx.evm_rpc_config.min_confirmations,
+        cfg.evm_finality_tag,
         tx_hash,
         &signed.opid,
         signed.after_block,

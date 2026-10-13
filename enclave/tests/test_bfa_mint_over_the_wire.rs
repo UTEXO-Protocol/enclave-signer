@@ -71,8 +71,8 @@ const EVM_CHAIN_ID: u64 = 1;
 const DEPOSIT_TX: [u8; 32] = [0x11; 32];
 const TOKEN_CONTRACT: [u8; 20] = [0x7E; 20];
 const MINTED: u64 = 100_000;
-/// The mint's `afterBlock`. The lock is at `LOCK_BLOCK`, the node's head at
-/// 112 (depth 12, the default floor).
+/// The mint's `afterBlock`. The lock is at `LOCK_BLOCK`, which the node's
+/// `EVM_FINALITY_TAG` head covers.
 const AFTER_BLOCK: u64 = 90;
 const LOCK_BLOCK: u64 = 100;
 const BRIDGE_FUNDS: u64 = 10_000;
@@ -271,14 +271,15 @@ fn deposit_receipt(
     ReceiptData {
         status_success: true,
         block_number: block,
+        block_hash: [0x42; 32],
         logs: vec![log(&funds_in), log(&bridge_funds_in)],
     }
 }
 
-/// The EVM node: the deposit's receipt, head 112 and the `finalized` block.
+/// The EVM node: the deposit's receipt and the block its finality tag reports.
 struct DepositChain {
     receipt: ReceiptData,
-    finalized: u64,
+    tagged_head: u64,
 }
 
 impl EvmReceiptProvider for DepositChain {
@@ -288,12 +289,30 @@ impl EvmReceiptProvider for DepositChain {
     ) -> utexo_bridge_enclave::error::Result<Option<ReceiptData>> {
         Ok((*tx_hash == DEPOSIT_TX).then(|| self.receipt.clone()))
     }
-    fn get_block_number(&self) -> utexo_bridge_enclave::error::Result<u64> {
-        Ok(112)
+
+    fn get_block_by_tag(
+        &self,
+        _tag: attestation_verify::EvmFinalityTag,
+    ) -> utexo_bridge_enclave::error::Result<
+        Option<utexo_bridge_enclave::networks::evm::events::BlockData>,
+    > {
+        self.get_block_by_number(self.tagged_head)
     }
-    fn get_finalized_block_number(&self) -> utexo_bridge_enclave::error::Result<u64> {
-        Ok(self.finalized)
+
+    fn get_block_by_number(
+        &self,
+        number: u64,
+    ) -> utexo_bridge_enclave::error::Result<
+        Option<utexo_bridge_enclave::networks::evm::events::BlockData>,
+    > {
+        Ok(Some(
+            utexo_bridge_enclave::networks::evm::events::BlockData {
+                number,
+                hash: self.receipt.block_hash,
+            },
+        ))
     }
+
     fn get_chain_id(&self) -> utexo_bridge_enclave::error::Result<u64> {
         Ok(EVM_CHAIN_ID)
     }
@@ -333,7 +352,6 @@ fn context(contract_id: &ContractId, chain: DepositChain) -> ServerContext {
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     let mut ctx = ServerContext::new(
         state,
@@ -407,8 +425,8 @@ fn build(aux: Option<&Aux>) -> Built {
 }
 
 /// The built deposit through the front door, over the wire, against a lock
-/// at `lock_block` and a node whose finalized block is `finalized`.
-fn drive_with(built: &Built, lock_block: u64, finalized: u64) -> EnclaveResponse {
+/// at `lock_block` and a node whose finality tag reports `tagged_head`.
+fn drive_with(built: &Built, lock_block: u64, tagged_head: u64) -> EnclaveResponse {
     let request = SignRequest {
         amount: MINTED,
         source_network: Some(SourceNetwork::EvmSource(EvmSource {
@@ -436,7 +454,7 @@ fn drive_with(built: &Built, lock_block: u64, finalized: u64) -> EnclaveResponse
             &built.deposit.invoice,
             lock_block,
         ),
-        finalized,
+        tagged_head,
     };
     let ctx = context(&built.deposit.contract_id, chain);
     sign_over_the_wire(&ctx, request)
@@ -698,11 +716,11 @@ fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     );
 }
 
-/// The lock is real but not finalized yet: retry later, do not sign.
+/// The lock is real but above the `EVM_FINALITY_TAG` head: retry later.
 #[test]
-fn refuses_a_lock_that_is_not_finalized() {
+fn refuses_a_lock_above_the_finality_head() {
     let refusal = refusal(&drive_with(&build(None), LOCK_BLOCK, LOCK_BLOCK - 1));
-    assert!(refusal.contains("not finalized"), "{refusal}");
+    assert!(refusal.contains("above RPC safe block"), "{refusal}");
 }
 
 /// An RGB receiver refuses a lock at or before the mint's `afterBlock`.
