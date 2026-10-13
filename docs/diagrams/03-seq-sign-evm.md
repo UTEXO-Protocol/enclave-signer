@@ -25,11 +25,11 @@ sequenceDiagram
     Parent->>Srv: Sign{source_network: RgbSource,<br/>destination_network: EvmDestination}<br/>(TCP/vsock, length-prefixed proto)
     Srv->>Srv: signer role, key ready (else KeyNotInitialized,<br/>before any validation)
 
-    Note over Srv,Bind: 1 - validate_source (RGB), no network call
+    Note over Srv,Bind: 1 - validate_source (RGB), no network call but the reject list
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
-    Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, no reject list
+    Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, reject list EVM-only
     Rgb->>Rgb: phase 1: validate_deterministic(BFA rules, chain_net)<br/>leaves the witnesses and the mint anchors open
     Rgb->>Bind: AnchorBinder(genesis bridgeLocation, mint anchors)
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
@@ -54,6 +54,11 @@ sequenceDiagram
     end
     Spv->>Chain: pin each proof block (ChainPins)
     Spv-->>Srv: Ok / Spv err
+    opt genesis names a reject list (after the asset bind)
+        Srv->>Srv: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID
+        Srv->>Srv: length() at finalized and latest, entries pages at latest
+        Srv->>Srv: burn inputs reach a rejected opout<br/>before an allowed one => REFUSE
+    end
     Srv->>Srv: source amount := TS_BURN burnedAsset<br/>(other settling transition => REFUSE, host rgb_amount NOT used)
 
     Note over Srv,Evm: 2 — validate_destination (EVM)

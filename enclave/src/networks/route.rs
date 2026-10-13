@@ -57,6 +57,10 @@ pub struct ValidationContext<'a> {
     /// then refused.
     #[cfg(feature = "rgb-validation")]
     pub anchor_binder: Option<crate::networks::rgb::validation::AnchorBinder<'a>>,
+    /// Reads the asset's reject list. `None` on builds without
+    /// `bfa-validation`: an asset with a list is then refused.
+    #[cfg(feature = "rgb-validation")]
+    pub reject_list_reader: Option<crate::networks::rgb::validation::RejectListReader<'a>>,
 }
 
 /// Result of source validation: the route proof and, for an RGB source on an

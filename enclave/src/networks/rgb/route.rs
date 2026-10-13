@@ -169,6 +169,13 @@ pub fn validate_destination_anchor(
         ctx.bridge_config,
         validation::AssetBindMode::Destination,
     )?;
+    // After the bind, so only the pinned asset's list is read. The recipient
+    // refuses a mint whose outputs the list reaches: that strands the deposit.
+    validation::assert_not_rejected(
+        &validated,
+        ctx.reject_list_reader,
+        validation::RejectCheck::SettlingInputsAndOutputs,
+    )?;
 
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;

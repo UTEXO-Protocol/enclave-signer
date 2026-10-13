@@ -23,6 +23,7 @@ use crate::state::ReplayReservation;
 pub(super) fn handle_sign(
     ctx: &ServerContext,
     req: SignRequest,
+    deadline: std::time::Instant,
 ) -> Result<(EnclaveResponse, Option<ReplayReservation<'_>>)> {
     let source_ref = req
         .source_network
@@ -120,6 +121,13 @@ pub(super) fn handle_sign(
             bind_anchors(ctx, source_ref, bridge, anchors)
         };
 
+    #[cfg(feature = "bfa-validation")]
+    let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
+        super::reject_list::read_decisions(ctx, list, deadline)
+    };
+    #[cfg(not(feature = "bfa-validation"))]
+    let _ = deadline;
+
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `assert_chain_pins_unchanged` reads these
     // blocks again immediately before the key is used (F05-NEW-AF-08).
@@ -143,6 +151,10 @@ pub(super) fn handle_sign(
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
         anchor_binder: None,
+        #[cfg(feature = "bfa-validation")]
+        reject_list_reader: Some(&reject_list_reader),
+        #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
+        reject_list_reader: None,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
@@ -704,7 +716,7 @@ mod early_bridge_checks {
             .unwrap()
             .commit();
         for expected_calls in 1..=2 {
-            let err = handle_sign(&ctx, request())
+            let err = handle_sign(&ctx, request(), crate::test_support::far_deadline())
                 .map(|(response, _)| response)
                 .unwrap_err();
             assert!(err.to_string().contains("receipt not found"), "{err}");
@@ -728,7 +740,7 @@ mod early_bridge_checks {
             "rgb:test",
         );
         let reservation = ctx.state.op_replay_guard.reserve(key).unwrap();
-        let err = handle_sign(&ctx, request())
+        let err = handle_sign(&ctx, request(), crate::test_support::far_deadline())
             .map(|(response, _)| response)
             .unwrap_err();
         assert!(
@@ -736,7 +748,7 @@ mod early_bridge_checks {
             "{err}"
         );
         reservation.commit();
-        let err = handle_sign(&ctx, request())
+        let err = handle_sign(&ctx, request(), crate::test_support::far_deadline())
             .map(|(response, _)| response)
             .unwrap_err();
         assert!(
@@ -922,6 +934,10 @@ mod key_not_ready {
         );
     }
 }
+
+/// A burn of a listed asset reads the list through the pinned EVM client.
+#[cfg(all(test, feature = "bfa-validation", rgb_to_evm))]
+mod reject_list_wiring;
 
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
 #[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]

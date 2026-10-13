@@ -122,6 +122,11 @@ Before it signs, the burn signer:
 2. Checks that each Bitcoin transaction of the consignment is in its own
    header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
    The chain tip must be less than 2 hours old.
+   If the genesis names a reject list (an `IRgbRejectList` contract on
+   `EVM_CHAIN_ID`), it reads the list over the pinned EVM RPC and refuses a
+   burn whose inputs descend from a rejected output. The mint signer checks
+   the mint's inputs and outputs the same way. Any read failure refuses, so
+   burn hosts need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
 4. Checks `sourceChainId`, `sourceAddress` and `burnId`.

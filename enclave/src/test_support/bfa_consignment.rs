@@ -76,7 +76,7 @@ pub struct Issue {
     pub chain_id: u64,
     pub bridge: [u8; 20],
     pub rights: Vec<OutPoint>,
-    pub reject_list: bool,
+    pub reject_list: Option<RejectListLocation>,
     pub chain_net: ChainNet,
 }
 
@@ -87,7 +87,7 @@ impl Issue {
             chain_id,
             bridge,
             rights,
-            reject_list: false,
+            reject_list: None,
             chain_net: ChainNet::BitcoinRegtest,
         }
     }
@@ -108,6 +108,14 @@ pub fn burn_reason_for(address: [u8; 20]) -> [u8; 32] {
     let mut reason = [0u8; 32];
     reason[12..].copy_from_slice(&address);
     reason
+}
+
+/// A reject list kept by the contract at `address` on chain `chain_id`.
+pub fn evm_reject_list(chain_id: u64, address: [u8; 20]) -> RejectListLocation {
+    RejectListLocation::Evm(EvmContract {
+        chain_id,
+        address: EvmAddress::from(Bytes20::from_byte_array(address)),
+    })
 }
 
 fn bridge_location(chain_id: u64, address: [u8; 20]) -> BridgeLocation {
@@ -143,16 +151,8 @@ impl History {
             bridge_location(issue.chain_id, issue.bridge),
         )
         .unwrap();
-        if issue.reject_list {
-            builder = builder
-                .add_global_state(
-                    "rejectList",
-                    RejectListLocation::Evm(EvmContract {
-                        chain_id: issue.chain_id,
-                        address: EvmAddress::from(Bytes20::from_byte_array([0x4e; 20])),
-                    }),
-                )
-                .unwrap();
+        if let Some(list) = issue.reject_list {
+            builder = builder.add_global_state("rejectList", list).unwrap();
         }
         for (i, right) in issue.rights.iter().enumerate() {
             let seal = GenesisSeal::with_blinding(right.txid, right.vout, 0x1000 + i as u64);

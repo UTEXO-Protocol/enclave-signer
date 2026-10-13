@@ -148,9 +148,12 @@ mod asset_bind {
 
     /// A generated BFA mint of 100_000 units to a blinded seal.
     fn mint() -> History {
-        let right = gen::outpoint(0xA0, 0);
-        let mut history = History::issue(Issue::new(42161, [0xB1; 20], vec![right]));
-        let right = history.genesis_right(0, right);
+        mint_of(Issue::new(42161, [0xB1; 20], vec![gen::outpoint(0xA0, 0)]))
+    }
+
+    fn mint_of(issue: Issue) -> History {
+        let mut history = History::issue(issue);
+        let right = history.genesis_right(0, gen::outpoint(0xA0, 0));
         let to = rgbstd::GraphSeal::with_blinding(gen::outpoint(0xC0, 0).txid, 0u32, 7);
         history.mint(
             right,
@@ -210,6 +213,14 @@ mod asset_bind {
     }
 
     fn run(destination: &RgbDestination, config: &BridgeConfig) -> Result<u64> {
+        run_reading(destination, config, None)
+    }
+
+    fn run_reading(
+        destination: &RgbDestination,
+        config: &BridgeConfig,
+        reader: Option<validation::RejectListReader<'_>>,
+    ) -> Result<u64> {
         let validator = RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap();
         let chain = Mutex::new(HeaderChain::new(
             Network::Regtest,
@@ -228,6 +239,7 @@ mod asset_bind {
             self_owned_psbt_outputs: Some(&self_owned),
             psbt_fee_key_paths: Some(&key_paths),
             anchor_binder: Some(&bind_all),
+            reject_list_reader: reader,
         };
         validate_destination_anchor(destination, 0, 0, &ctx).map(|(amount, _)| amount)
     }
@@ -333,6 +345,63 @@ mod asset_bind {
             msg.contains("does not finalize the consignment's transition"),
             "{msg}"
         );
+    }
+
+    /// A mint of an asset with a reject list, as a pinned destination.
+    fn listed_mint() -> (History, RgbDestination, BridgeConfig) {
+        let history = mint_of(Issue {
+            reject_list: Some(gen::evm_reject_list(42161, [0x4e; 20])),
+            ..Issue::new(42161, [0xB1; 20], vec![gen::outpoint(0xA0, 0)])
+        });
+        let consignment = history.consignment(vec![]);
+        let id = history.contract_id.to_string();
+        let destination = RgbDestination {
+            consignment_hash: Keccak256::digest(&consignment).to_vec(),
+            consignment,
+            ..destination(&id)
+        };
+        (history, destination, pinned_config(&id))
+    }
+
+    /// Runs the listed mint with `rejected` on the list.
+    fn run_rejecting(rejected: rgbstd::Opout) -> String {
+        let (_, destination, config) = listed_mint();
+        let entries = [validation::RejectListEntry {
+            opout: rejected.into(),
+            reject: true,
+        }];
+        let reader = |_: &validation::RejectListContract| Ok(validation::decisions(&entries, 1));
+        run_reading(&destination, &config, Some(&reader))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn mint_from_a_rejected_right_is_refused() {
+        let (history, ..) = listed_mint();
+        let right = history.genesis_right(0, gen::outpoint(0xA0, 0)).opout;
+        let msg = run_rejecting(right);
+        assert!(msg.contains("reject list: opout"), "{msg}");
+    }
+
+    /// The recipient would refuse it, which strands the deposit.
+    #[test]
+    fn mint_whose_output_is_rejected_is_refused() {
+        let (history, ..) = listed_mint();
+        let minted = rgbstd::Opout::new(history.mints[0].opid, schemata::OS_ASSET, 0);
+        let msg = run_rejecting(minted);
+        assert!(msg.contains("reject list: opout"), "{msg}");
+    }
+
+    #[test]
+    fn mint_with_unrelated_entries_reaches_the_psbt_check() {
+        let unrelated = rgbstd::Opout::new(
+            rgbstd::OpId::copy_from_slice([0x99; 32]).unwrap(),
+            schemata::OS_ASSET,
+            0,
+        );
+        let msg = run_rejecting(unrelated);
+        assert!(msg.contains("psbt_bytes is not a valid PSBT"), "{msg}");
     }
 
     // No end-to-end test for an empty validated contract_id.

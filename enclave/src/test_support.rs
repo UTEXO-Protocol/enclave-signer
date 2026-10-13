@@ -94,6 +94,137 @@ impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
     }
 }
 
+/// A request deadline no test reaches.
+#[cfg(feature = "evm-rpc")]
+pub(crate) fn far_deadline() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(3600)
+}
+
+/// The `eth_call`s a [`ListEvm`] saw, as (selector, block).
+#[cfg(feature = "bfa-validation")]
+pub(crate) type CallLog = std::sync::Arc<std::sync::Mutex<Vec<([u8; 4], u64)>>>;
+
+/// In-memory `IRgbRejectList` behind an EVM RPC on chain `chain_id`. The
+/// first `finalized_len` entries are finalized; `None` means no code at the
+/// finalized block. Records each `eth_call` as (selector, block).
+#[cfg(feature = "bfa-validation")]
+pub(crate) struct ListEvm {
+    pub chain_id: u64,
+    pub latest: u64,
+    pub finalized: Option<u64>,
+    pub deployed: bool,
+    pub finalized_len: Option<u64>,
+    pub entries: Vec<crate::networks::rgb::validation::RejectListEntry>,
+    /// Replaces every `entries` reply.
+    pub entries_reply: Option<Vec<u8>>,
+    pub calls: CallLog,
+}
+
+#[cfg(feature = "bfa-validation")]
+impl ListEvm {
+    /// A deployed list of `entries` on chain `chain_id`, all finalized.
+    pub fn new(
+        chain_id: u64,
+        entries: Vec<crate::networks::rgb::validation::RejectListEntry>,
+    ) -> Self {
+        Self {
+            chain_id,
+            latest: 200,
+            finalized: Some(100),
+            deployed: true,
+            finalized_len: Some(entries.len() as u64),
+            entries,
+            entries_reply: None,
+            calls: Default::default(),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<([u8; 4], u64)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn length_reply(&self, block: u64) -> Vec<u8> {
+        let len = if block == self.latest {
+            self.deployed.then_some(self.entries.len() as u64)
+        } else {
+            self.finalized_len
+        };
+        len.map(|l| abi_word(l).to_vec()).unwrap_or_default()
+    }
+
+    fn entries_reply(&self, args: &[u8]) -> Vec<u8> {
+        use crate::networks::evm::reject_list::{entriesCall, Entry};
+        use alloy_sol_types::SolCall;
+        if let Some(reply) = &self.entries_reply {
+            return reply.clone();
+        }
+        let call = entriesCall::abi_decode_raw(args).unwrap();
+        let end = usize::try_from(call.end).unwrap().min(self.entries.len());
+        let start = usize::try_from(call.start).unwrap().min(end);
+        let page: Vec<Entry> = self.entries[start..end]
+            .iter()
+            .map(|e| Entry {
+                opId: e.opout.op.into(),
+                assignmentType: e.opout.ty,
+                no: e.opout.no,
+                reject: e.reject,
+            })
+            .collect();
+        entriesCall::abi_encode_returns(&page)
+    }
+}
+
+#[cfg(feature = "bfa-validation")]
+impl crate::networks::evm::events::EvmReceiptProvider for ListEvm {
+    fn get_transaction_receipt(
+        &self,
+        _tx_hash: &[u8; 32],
+    ) -> crate::error::Result<Option<crate::networks::evm::events::ReceiptData>> {
+        Ok(None)
+    }
+
+    fn get_block_by_tag(
+        &self,
+        tag: attestation_verify::EvmFinalityTag,
+    ) -> crate::error::Result<Option<crate::networks::evm::events::BlockData>> {
+        use attestation_verify::EvmFinalityTag;
+        let number = match tag {
+            EvmFinalityTag::Latest => Some(self.latest),
+            EvmFinalityTag::Finalized => self.finalized,
+            EvmFinalityTag::Safe => None,
+        };
+        Ok(
+            number.map(|number| crate::networks::evm::events::BlockData {
+                number,
+                hash: [0x42; 32],
+            }),
+        )
+    }
+
+    fn get_block_by_number(
+        &self,
+        _number: u64,
+    ) -> crate::error::Result<Option<crate::networks::evm::events::BlockData>> {
+        Ok(None)
+    }
+
+    fn get_chain_id(&self) -> crate::error::Result<u64> {
+        Ok(self.chain_id)
+    }
+
+    fn call(&self, _to: &[u8; 20], data: &[u8], block: u64) -> crate::error::Result<Vec<u8>> {
+        use crate::networks::evm::reject_list::{entriesCall, lengthCall};
+        use alloy_sol_types::SolCall;
+        let selector: [u8; 4] = data[..4].try_into().unwrap();
+        self.calls.lock().unwrap().push((selector, block));
+        match selector {
+            lengthCall::SELECTOR => Ok(self.length_reply(block)),
+            entriesCall::SELECTOR => Ok(self.entries_reply(&data[4..])),
+            _ => panic!("unexpected eth_call selector 0x{}", hex::encode(selector)),
+        }
+    }
+}
+
 /// An enclave clock past every `u32` header time, for tests that do not cover
 /// the header clock bound (`spv::chain` tests do).
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]

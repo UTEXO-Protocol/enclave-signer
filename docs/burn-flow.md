@@ -33,8 +33,9 @@ The burn signer signs nothing on Bitcoin.
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
 The burn signer checks request claims before it signs. It derives the burn
-amount from the consignment. It reads no EVM or Bitcoin indexer: the deposits
-behind the burn are derived, and the witnesses are checked on chain against
+amount from the consignment. It reads no Bitcoin indexer, and reads the EVM
+RPC only for an asset whose genesis names a reject list (Stage 3b): the
+deposits behind the burn are derived, and the witnesses are checked on chain against
 the enclave's own header chain. RGB consensus takes each witness transaction
 from the consignment, but treats it as mined only if a Merkle proof in the
 request places it at least `SPV_MIN_CONFIRMATIONS` deep in that chain. An
@@ -88,6 +89,7 @@ sequenceDiagram
 | `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
 | `TS_MINT` | 8013 | Mint transition. It shows in the burn's history (the ancestry). |
 | `GS_BURNED_ASSET` | 2015 | Burn global: the number of units destroyed (u64). Required. |
+| `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list is. The enclave reads only an `IRgbRejectList` contract on `EVM_CHAIN_ID` (B3.7). |
 | `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
@@ -125,7 +127,10 @@ the first step that reads the keys. It refuses an enclave without keys.
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
 - **B2.1** The bytes must be a V1 transfer file (`TFR`). The genesis schema
-  must be BFA, and the genesis must not declare a reject list.
+  must be BFA. If the genesis names a reject list (`GS_REJECT_LIST`), it must
+  be an EVM contract; a URL list is refused. Consensus builds no opouts DAG
+  (its edges are inputs x outputs per transition); B3.10 walks the history
+  from each operation's inputs, linear in the consignment.
 - **B2.2** RGB consensus phase 1 runs over the whole history under the BFA
   rules from `rgb-schemas`. Each mint leaves an anchor: its OpId and its
   `issuedSupply`.
@@ -179,6 +184,33 @@ skip proof-of-work and `nBits` checks.
   blocks deep (default 6). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights and hashes it used. Just before it
   uses the key, it checks that they did not change.
+
+### Stage 3b - Did the issuer reject the burned units?
+
+Only for an asset whose genesis names a reject list. It runs last in source
+validation, after the asset bind (B2.6), so a foreign genesis cannot make the
+signer read a contract of its choice. The rules are those of rgb-lib 98a8af6.
+
+- **B3.7** The list must be on `EVM_CHAIN_ID`, and the node must report it.
+  Another chain is refused: the enclave has no RPC for it.
+- **B3.8** Over the pinned EVM RPC: the latest block and the `finalized`
+  block (capped at the latest), `length()` at both, then `entries` in pages of
+  1000 at the latest block. Any RPC error, no code at the latest block, a list
+  shorter at the latest block, a bad or short page, or more than 20,000
+  entries refuses. About 5 calls plus one per 1000 entries; the history
+  length does not matter. A call that, at the pace of the slowest call so
+  far, would end within 2 s of the 30 s request deadline is not started:
+  the read refuses with "exceeded the request budget".
+- **B3.9** Decisions: the latest finalized entry for an opout wins. A
+  pending reject counts at once, also over a finalized allow. A pending allow
+  does not count. `finalized` is fixed in code, not `EVM_FINALITY_TAG`, so the
+  signer never releases what an rgb-lib wallet still refuses.
+- **B3.10** Each input of the settling burn is walked back through the
+  history: an opout's parents are the inputs of the operation that made it,
+  the reachability of rgb-lib's opouts DAG. One walk serves all inputs and
+  expands each operation once. An allowed opout stops its branch. A rejected opout on a
+  branch nothing stopped refuses the release. The burn's change is not
+  checked: it is not released.
 
 ### Stage 4 - Is the calldata correct?
 

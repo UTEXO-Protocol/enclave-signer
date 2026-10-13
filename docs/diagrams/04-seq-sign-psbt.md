@@ -64,6 +64,10 @@ sequenceDiagram
 
     Note over Srv,Anchor: 4 - PSBT bind
     Srv->>Anchor: contract_id == asset_id == RGB_ASSET_ID
+    opt genesis names a reject list
+        Srv->>Rpc: length() at finalized and latest, entries pages at latest
+        Srv->>Srv: mint inputs or outputs reach a rejected opout => REFUSE
+    end
     Srv->>Anchor: settling transition == TS_MINT<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
     Srv->>Anchor: exactly one committed transition, TS_MINT, none hidden<br/>sum(OS_ASSET) == amount − commission<br/>one mintRight to an owned seal this tx does not spend<br/>(off-tx: mined and unspent per the indexer),<br/>colored inputs close seals
     Srv->>Anchor: legs: blinded seal ⇒ recipient,<br/>revealed seal ⇒ must be self-owned (≤ 4 off-PSBT outpoints,<br/>their script read from the indexer)<br/>sum(recipient legs) == amount − commission

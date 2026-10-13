@@ -102,6 +102,8 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         psbt_fee_key_paths: None,
         #[cfg(feature = "rgb-validation")]
         anchor_binder: None,
+        #[cfg(feature = "rgb-validation")]
+        reject_list_reader: None,
     };
     f(&ctx)
 }

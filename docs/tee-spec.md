@@ -679,8 +679,8 @@ The consignment pipeline (cheap checks first): non-empty payload within
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
 (integrity only), asset id declared; then full `rgb-ops` 0.11.2 validation of
 a V1 transfer file. A V1 consignment carries no schema, types or scripts: the
-BFA rules come from `rgb-schemas`, and any other schema id, or a genesis with
-a reject list, is refused. Validation runs in two phases. Phase 1
+BFA rules come from `rgb-schemas`, and any other schema id, or a reject list
+that is not an EVM contract, is refused. Validation runs in two phases. Phase 1
 (`validate_deterministic`) checks everything that depends on the consignment
 only. It leaves open each witness and each BFA mint anchor (the mint's OpId,
 `issuedSupply` and `afterBlock`). Phase 2 resolves every witness on chain:
@@ -907,8 +907,18 @@ Known limits. Read them before deployment.
   (not an SPV chain) for witness depth. A host that controls the bridge can
   build a history no receiving wallet accepts, after the user locked. It
   cannot mint unbacked units or pass an unmined history witness.
-- **Reject list.** The enclave refuses an asset whose genesis declares a
-  reject list. Enforcing one needs the burn signer to read it.
+- **Reject list.** A genesis may name an `IRgbRejectList` contract on
+  `EVM_CHAIN_ID`. Both signers read it over the pinned EVM RPC, with rgb-lib
+  98a8af6 rules: a pending reject counts at once, an allow only once
+  `finalized`. A release refuses when the burn's inputs descend from a
+  rejected opout, a mint when its inputs or outputs do. Any read failure
+  refuses, so the burn signer now depends on the EVM RPC for such an asset. A
+  rejected release stays refused until an allow is finalized, and its units
+  are already burned. The list appender can halt every release; the owner
+  rotates it. The list is read in full on each request, at most 20,000
+  entries (about 25 RPC calls). The read also stops before the 30 s request
+  deadline; a list the RPC cannot serve in time refuses every request of the
+  asset with "exceeded the request budget".
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
   after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response.

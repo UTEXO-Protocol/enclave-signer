@@ -10,7 +10,7 @@ flowchart TD
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>no reject list"]
+        p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>reject list EVM-only"]
         p1a --> p1b["phase 1: validate_deterministic(BFA rules)<br/>mint anchors bound to derived locks<br/>(pinned bridge, no RPC); phase 2 confirms each<br/>against its own lock; each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS), else refuse"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
@@ -93,9 +93,11 @@ flowchart TD
   metadata, `settlementData` to the verified mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
-- The burn signer reads no EVM RPC and no Bitcoin indexer. It derives the
-  lock of each mint in the history inside RGB validation (P1), and never
-  confirms an anchor or calls plain `validate()` without a bound lock.
+- The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
+  an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
+  the asset bind. It derives the lock of each mint in the history inside RGB
+  validation (P1), and never confirms an anchor or calls plain `validate()`
+  without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
   release builds. A release bridge build refuses to boot, and `SetEndpoints`
   refuses, without a valid `Production` policy.

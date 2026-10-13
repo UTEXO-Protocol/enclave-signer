@@ -79,7 +79,7 @@ pub(super) fn dispatch(
         // Signing waits for the endpoints the operator sets at launch.
         Some(Request::Sign(req)) => {
             ctx.launch()
-                .and_then(|_| handle_sign(ctx, req))
+                .and_then(|_| handle_sign(ctx, req, deadline))
                 .map(|(response, reserved)| {
                     reservation = reserved;
                     response

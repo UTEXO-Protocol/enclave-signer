@@ -23,7 +23,8 @@ use rgbstd::vm::WitnessOrd;
 use super::bfa::{self, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
 use super::indexer::RgbValidator;
-use super::schema::{assert_bfa_genesis, BFA_RULES};
+use super::reject_list::{RejectListContract, RejectScope};
+use super::schema::{assert_bfa_genesis, reject_list, BFA_RULES};
 use super::types::ValidatedConsignment;
 use super::witness::{OnChainResolver, WitnessCheck};
 use crate::error::{EnclaveError, Result};
@@ -54,6 +55,7 @@ impl RgbValidator {
             EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
         })?;
         assert_bfa_genesis(&transfer.genesis)?;
+        let list = reject_list(&transfer.genesis)?;
         let contract_id = transfer.contract_id().to_string();
 
         let mut pending = self.phase_one(transfer, &contract_id)?;
@@ -66,12 +68,14 @@ impl RgbValidator {
         }
 
         let non_mined = non_mined_witnesses(valid.validation_status());
+        let scope = list.map(|list| reject_scope(list, &valid)).transpose()?;
         let validated = summarize(
             &valid,
             consignment_bytes,
             contract_id,
             mint_locks,
             non_mined,
+            scope,
         )?;
         tracing::info!(
             contract_id = %validated.contract_id,
@@ -84,6 +88,7 @@ impl RgbValidator {
         Ok(validated)
     }
 
+    /// Builds no opouts DAG: its edges are inputs x outputs per transition.
     fn phase_one(&self, transfer: Transfer, contract_id: &str) -> Result<PendingConsignment<true>> {
         let config = ValidationConfig {
             chain_net: self.chain_net,
@@ -173,6 +178,7 @@ fn summarize(
     contract_id: String,
     mint_locks: Vec<bfa::VerifiedLock>,
     non_mined_witness_txids: Vec<[u8; 32]>,
+    reject_scope: Option<RejectScope>,
 ) -> Result<ValidatedConsignment> {
     // Display-order bytes, deduplicated and sorted, as the SPV proofs carry them.
     let witness_txids: Vec<[u8; 32]> = transfer
@@ -215,7 +221,22 @@ fn summarize(
         non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
+        reject_scope,
     })
+}
+
+/// The reject-list scope of the settling transition. Built after consensus,
+/// and linear in the consignment, so an unpinned asset costs no more.
+fn reject_scope(list: RejectListContract, valid: &Transfer) -> Result<RejectScope> {
+    let settling = read_last_bundle(valid)?
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "consignment has no transition for the reject list to check".into(),
+            )
+        })?
+        .settling;
+    let inputs = settling.inputs.into_iter().map(Into::into).collect();
+    Ok(RejectScope::new(list, valid, settling.opid, inputs))
 }
 
 /// Witnesses consensus did not see mined: at most the mint's own tx.

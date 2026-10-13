@@ -175,8 +175,9 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 - **M3.2** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 - **M3.3** The bytes must be a V1 transfer file (`TFR`). A validated copy, a
-  contract and a V0 file are refused. The genesis schema must be BFA, and the
-  genesis must not declare a reject list (the enclave does not enforce one).
+  contract and a V0 file are refused. The genesis schema must be BFA. A
+  reject list (`GS_REJECT_LIST`) must be an EVM contract; a URL list is
+  refused.
 - **M3.4** RGB consensus phase 1 runs under the BFA rules from `rgb-schemas`.
   Nothing in the consignment can change those rules. Each mint leaves an
   anchor: its OpId, its `issuedSupply` and its `afterBlock`.
@@ -213,6 +214,12 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 
 - **M4.1** The contract id must equal the declared `asset_id` and the pinned
   `RGB_ASSET_ID`.
+- **M4.2** If the genesis names a reject list, the mint signer reads it as
+  the burn signer does (burn-flow B3.7 - B3.9). The inputs of the mint (its
+  right lineage back to genesis) and all its outputs are walked back through
+  the history. A hit refuses: the recipient's rgb-lib would refuse the mint,
+  which strands the deposit. It runs after M4.1, so only the pinned asset's
+  list is read.
 
 ### Stage 5 - Does the PSBT do this mint, and only this mint?
 

@@ -17,6 +17,7 @@ use super::asset_bind::*;
 use super::bfa::*;
 use super::consignment::*;
 use super::indexer::*;
+use super::reject_list::*;
 use super::schema::*;
 #[cfg(rgb_to_evm)]
 use super::source::*;
@@ -165,15 +166,334 @@ fn rejects_a_non_bfa_schema() {
     assert!(err.contains("validates only the bridged fungible"), "{err}");
 }
 
-/// The enclave does not read a reject list, so it refuses such an asset.
+// ===== reject list =====
+
+const LIST: [u8; 20] = [0x4e; 20];
+
+/// An asset whose genesis names a reject list on the bridge's chain.
+fn listed() -> History {
+    History::issue(Issue {
+        reject_list: Some(gen::evm_reject_list(EVM_CHAIN_ID, LIST)),
+        ..Issue::new(EVM_CHAIN_ID, BRIDGE, vec![right_utxo()])
+    })
+}
+
+/// A listed asset: a mint, then a burn of 60_000 with change. Returns the
+/// genesis right, the minted units and the burn.
+fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
+    let mut history = listed();
+    let right = history.genesis_right(0, right_utxo());
+    let (_, units) = history.mint_owned(right, MINTED, 90);
+    let burn = history.burn(
+        units,
+        MINTED,
+        Some(60_000),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    (history, right, units, burn)
+}
+
+fn key(opout: rgbstd::Opout) -> OpoutKey {
+    opout.into()
+}
+
+/// The hand decode of an EVM list location equals its strict encoding.
 #[test]
-fn rejects_an_asset_with_a_reject_list() {
+fn evm_reject_list_decodes_as_its_strict_encoding() {
+    use strict_encoding::StrictSerialize;
+    let location = gen::evm_reject_list(0x0102_0304_0506_0708, LIST);
+    let bytes = location.to_strict_serialized::<64>().unwrap();
+    let mut expected = vec![1u8];
+    expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+    expected.extend_from_slice(&LIST);
+    assert_eq!(bytes.as_slice(), expected.as_slice());
+    assert_eq!(
+        reject_list(&listed().genesis).unwrap(),
+        Some(RejectListContract {
+            chain_id: EVM_CHAIN_ID,
+            address: LIST
+        })
+    );
+}
+
+/// The enclave has no egress to a URL, and its host would be untrusted.
+#[test]
+fn url_reject_list_is_refused() {
+    use rgbstd::stl::RejectListLocation;
+    let url = "https://example.com/list".parse().unwrap();
     let history = History::issue(Issue {
-        reject_list: true,
+        reject_list: Some(RejectListLocation::Url(url)),
         ..Issue::new(EVM_CHAIN_ID, BRIDGE, vec![right_utxo()])
     });
     let err = error_of(validate(&history.consignment(vec![])));
-    assert!(err.contains("reject list"), "{err}");
+    assert!(err.contains("not an EVM contract"), "{err}");
+}
+
+#[test]
+fn scope_is_none_without_a_list() {
+    assert!(validate(&burn_bytes()).unwrap().reject_scope.is_none());
+}
+
+#[test]
+fn burn_scope_checks_burned_inputs() {
+    let (history, right, units, burn) = listed_burn();
+    let scope = validate(&history.consignment(vec![]))
+        .unwrap()
+        .reject_scope
+        .unwrap();
+    assert_eq!(
+        scope.list,
+        RejectListContract {
+            chain_id: EVM_CHAIN_ID,
+            address: LIST
+        }
+    );
+    assert_eq!(scope.settling_inputs, vec![key(units.opout)]);
+    let change = rgbstd::Opout::new(burn.opid, schemata::OS_ASSET, 0);
+    assert_eq!(scope.settling_outputs, vec![key(change)]);
+    // The units descend from the mint, which spent the genesis right.
+    assert_eq!(
+        scope.history.inputs_of(&key(units.opout).op),
+        &[key(right.opout)]
+    );
+    assert!(scope.history.inputs_of(&key(right.opout).op).is_empty());
+}
+
+/// One transfer of `n` rights to `n` rights is n x n edges in the consensus
+/// opouts DAG. The scope keeps only the n inputs.
+#[test]
+fn a_wide_transition_keeps_the_scope_linear() {
+    const N: u16 = 200;
+    let outpoints: Vec<OutPoint> = (0..N).map(|i| gen::outpoint(0xA0, i.into())).collect();
+    let mut history = History::issue(Issue {
+        reject_list: Some(gen::evm_reject_list(EVM_CHAIN_ID, LIST)),
+        ..Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone())
+    });
+    let mut wide = history.transition("transfer");
+    for no in 0..N {
+        let right = history.genesis_right(no, outpoints[no as usize]);
+        let seal = GraphSeal::with_blinded_vout(1u32, 0x3000 + u64::from(no));
+        wide = wide
+            .add_input(right.opout, AllocatedState::Void)
+            .unwrap()
+            .add_rights("mintRight", seal)
+            .unwrap();
+    }
+    let wide = wide.complete_transition().unwrap();
+    let wide_op = gen::opid_bytes(rgbstd::Operation::id(&wide));
+    history.commit(vec![wide], outpoints, vec![gen::dust(6)]);
+
+    let scope = validate(&history.consignment(vec![]))
+        .unwrap()
+        .reject_scope
+        .unwrap();
+    assert_eq!(scope.settling_inputs.len(), usize::from(N));
+    assert_eq!(scope.settling_outputs.len(), usize::from(N));
+    assert_eq!(scope.history.inputs_of(&wide_op).len(), usize::from(N));
+    let rejected = key(history.genesis_right(N - 1, right_utxo()).opout);
+    let list = Decisions {
+        reject: [rejected].into(),
+        ..Decisions::default()
+    };
+    let got = first_rejected(&scope.history, &list, &scope.settling_outputs).unwrap();
+    assert_eq!(got, Some(scope.settling_outputs[0]));
+}
+
+#[test]
+fn mint_scope_checks_inputs_and_outputs() {
+    let mut history = listed();
+    let right = history.genesis_right(0, right_utxo());
+    let (next_right, units) = history.mint_owned(right, MINTED, 90);
+    let scope = validate(&history.consignment(vec![]))
+        .unwrap()
+        .reject_scope
+        .unwrap();
+    assert_eq!(scope.settling_inputs, vec![key(right.opout)]);
+    assert_eq!(
+        scope.settling_outputs,
+        vec![key(units.opout), key(next_right.opout)]
+    );
+}
+
+/// The reject-list rules, ported from rgb-lib `api/evm.rs` and `check_dag`.
+mod reject_list_rules {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn op(n: u8) -> OpoutKey {
+        OpoutKey {
+            op: [n; 32],
+            ty: 4000,
+            no: 0,
+        }
+    }
+
+    fn entry(n: u8, reject: bool) -> RejectListEntry {
+        RejectListEntry {
+            opout: op(n),
+            reject,
+        }
+    }
+
+    fn set(ns: &[u8]) -> BTreeSet<OpoutKey> {
+        ns.iter().map(|n| op(*n)).collect()
+    }
+
+    fn log(entries: &[(u8, bool)], finalized: usize) -> Decisions {
+        let entries: Vec<_> = entries.iter().map(|(n, r)| entry(*n, *r)).collect();
+        decisions(&entries, finalized)
+    }
+
+    #[test]
+    fn latest_finalized_entry_wins() {
+        let got = log(&[(1, true), (2, false), (3, false), (3, true)], 4);
+        assert_eq!(got.reject, set(&[1, 3]));
+        assert_eq!(got.allow, set(&[2]));
+        let got = log(
+            &[(1, false), (1, true), (1, false), (2, true), (2, false)],
+            5,
+        );
+        assert!(got.reject.is_empty());
+        assert_eq!(got.allow, set(&[1, 2]));
+    }
+
+    #[test]
+    fn pending_reject_overrides_finalized_allow() {
+        let got = log(&[(2, false), (1, true), (2, true)], 1);
+        assert_eq!(got.reject, set(&[1, 2]));
+        assert!(got.allow.is_empty());
+        // A later pending allow does not undo a pending reject.
+        let got = log(
+            &[(1, false), (1, true), (1, false), (2, true), (2, false)],
+            1,
+        );
+        assert_eq!(got.reject, set(&[1, 2]));
+        assert!(got.allow.is_empty());
+    }
+
+    #[test]
+    fn pending_allow_is_ignored() {
+        let got = log(&[(1, true), (2, false), (1, false)], 1);
+        assert_eq!(got.reject, set(&[1]));
+        assert!(got.allow.is_empty());
+    }
+
+    #[test]
+    fn reject_of_one_output_leaves_its_sibling() {
+        let sibling = OpoutKey { no: 1, ..op(1) };
+        let got = log(&[(1, true)], 1);
+        assert!(got.reject.contains(&op(1)));
+        assert!(!got.reject.contains(&sibling));
+    }
+
+    /// `child -> [parents]`, each node the only opout of its own op.
+    fn graph(edges: &[(u8, &[u8])]) -> OpoutGraph {
+        let mut parents: BTreeMap<u8, Vec<OpoutKey>> = BTreeMap::new();
+        for (child, ups) in edges {
+            for up in *ups {
+                parents.entry(*up).or_default();
+            }
+            parents
+                .entry(*child)
+                .or_default()
+                .extend(ups.iter().map(|u| op(*u)));
+        }
+        let mut graph = OpoutGraph::default();
+        for (n, inputs) in parents {
+            graph.add([n; 32], inputs, [op(n)]);
+        }
+        graph
+    }
+
+    fn rejected(edges: &[(u8, &[u8])], entries: &[(u8, bool)], check: u8) -> bool {
+        first_rejected(&graph(edges), &log(entries, entries.len()), &[op(check)])
+            .unwrap()
+            .is_some()
+    }
+
+    #[test]
+    fn listed_opout_is_rejected() {
+        assert!(rejected(&[(1, &[])], &[(1, true)], 1));
+    }
+
+    #[test]
+    fn rejected_ancestor_taints_the_opout() {
+        assert!(rejected(&[(3, &[2]), (2, &[1])], &[(1, true)], 3));
+        assert!(!rejected(&[(3, &[2]), (2, &[1])], &[(9, true)], 3));
+    }
+
+    #[test]
+    fn allowed_ancestor_shields_its_branch() {
+        assert!(!rejected(
+            &[(3, &[2]), (2, &[1])],
+            &[(1, true), (2, false)],
+            3
+        ));
+    }
+
+    #[test]
+    fn shield_does_not_cover_a_second_path() {
+        let edges: &[(u8, &[u8])] = &[(4, &[2, 3]), (2, &[1]), (3, &[1])];
+        assert!(rejected(edges, &[(1, true), (2, false)], 4));
+        assert!(!rejected(edges, &[(1, true), (2, false), (3, false)], 4));
+    }
+
+    #[test]
+    fn missing_opout_is_an_error() {
+        let err = first_rejected(&graph(&[(1, &[])]), &Decisions::default(), &[op(7)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not in the consignment's history graph"),
+            "{err}"
+        );
+    }
+
+    /// The walk is shared across start opouts: a shield seen first must not
+    /// hide a second, unshielded path to the same reject.
+    #[test]
+    fn shared_walk_still_finds_a_second_path() {
+        let edges: &[(u8, &[u8])] = &[(1, &[]), (2, &[1]), (3, &[2]), (4, &[1])];
+        let got = first_rejected(
+            &graph(edges),
+            &log(&[(1, true), (2, false)], 2),
+            &[op(3), op(4)],
+        )
+        .unwrap();
+        assert_eq!(got, Some(op(4)));
+    }
+
+    /// Every output of one op has the same parents: one reject among the
+    /// inputs taints them all, and outputs outside the history are skipped.
+    #[test]
+    fn outputs_of_one_op_share_its_inputs() {
+        let mut history = OpoutGraph::default();
+        let input = |no| OpoutKey { no, ..op(1) };
+        let output = |no| OpoutKey { no, ..op(2) };
+        history.add([1; 32], vec![], (0..3).map(input));
+        let inputs = (0..3).map(input).chain([op(9)]).collect();
+        history.add([2; 32], inputs, (0..3).map(output));
+        let check: Vec<_> = (0..3).map(output).collect();
+        let none = first_rejected(&history, &log(&[(9, true)], 1), &check).unwrap();
+        assert_eq!(none, None);
+        let list = decisions(
+            &[RejectListEntry {
+                opout: input(2),
+                reject: true,
+            }],
+            1,
+        );
+        let got = first_rejected(&history, &list, &check).unwrap();
+        assert_eq!(got, Some(output(0)));
+    }
+
+    /// The first failing opout is named.
+    #[test]
+    fn names_the_first_rejected_opout() {
+        let parents = graph(&[(2, &[]), (3, &[1]), (1, &[])]);
+        let got = first_rejected(&parents, &log(&[(1, true)], 1), &[op(2), op(3)]).unwrap();
+        assert_eq!(got, Some(op(3)));
+    }
 }
 
 /// An rc bump that changes the schema id forces a reissue and a new PCR0, so
@@ -1694,6 +2014,15 @@ mod source_path {
         config: &BridgeConfig,
         chain: &Mutex<HeaderChain>,
     ) -> Result<ValidatedConsignment> {
+        run_reading(source, config, chain, None)
+    }
+
+    fn run_reading(
+        source: &crate::proto::RgbSource,
+        config: &BridgeConfig,
+        chain: &Mutex<HeaderChain>,
+        reader: Option<RejectListReader<'_>>,
+    ) -> Result<ValidatedConsignment> {
         let validator = validator();
         let ctx = ValidationContext {
             bridge_config: config,
@@ -1705,6 +2034,7 @@ mod source_path {
             #[cfg(evm_to_rgb)]
             psbt_fee_key_paths: None,
             anchor_binder: Some(&bind_all),
+            reject_list_reader: reader,
         };
         validate_source(source, &ctx)
     }
@@ -1804,6 +2134,115 @@ mod source_path {
     fn pin_check_skipped_when_config_unconfigured() {
         let id = asset_id();
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
+    }
+
+    /// The listed burn as a source, every witness proven 6 deep, its chain
+    /// and its asset id.
+    fn listed_source() -> (crate::proto::RgbSource, Mutex<HeaderChain>, String) {
+        let (history, ..) = listed_burn();
+        let bytes = history.consignment(vec![]);
+        let id = history.contract_id.to_string();
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes.clone(),
+            ..burn_source(&id)
+        };
+        let (chain, proofs) =
+            crate::test_support::chain_with_witnesses(&display(&witness_ids(&bytes)), 5);
+        let source = crate::proto::RgbSource {
+            merkle_proofs: proofs,
+            ..source
+        };
+        (source, chain, id)
+    }
+
+    /// Runs the listed burn, 6 deep, with a reader of `entries`, all
+    /// finalized. Returns the result and how often the list was read.
+    fn run_listed(
+        config_asset: Option<&str>,
+        entries: &[(rgbstd::Opout, bool)],
+    ) -> (Result<ValidatedConsignment>, usize) {
+        let (source, chain, id) = listed_source();
+        let entries: Vec<RejectListEntry> = entries
+            .iter()
+            .map(|(opout, reject)| RejectListEntry {
+                opout: key(*opout),
+                reject: *reject,
+            })
+            .collect();
+        let reads = RefCell::new(0);
+        let reader = |list: &RejectListContract| {
+            *reads.borrow_mut() += 1;
+            assert_eq!(list.address, LIST);
+            Ok(decisions(&entries, entries.len()))
+        };
+        let config = pinned_config(config_asset.unwrap_or(&id));
+        let result = run_reading(&source, &config, &chain, Some(&reader));
+        (result, reads.into_inner())
+    }
+
+    fn unrelated() -> rgbstd::Opout {
+        rgbstd::Opout::new(
+            rgbstd::OpId::copy_from_slice([0x99; 32]).unwrap(),
+            schemata::OS_ASSET,
+            0,
+        )
+    }
+
+    #[test]
+    fn burn_with_rejected_ancestry_is_refused() {
+        let (_, right, ..) = listed_burn();
+        let (result, reads) = run_listed(None, &[(right.opout, true)]);
+        let err = error_of(result);
+        assert!(err.contains("reject list: opout"), "{err}");
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn burn_with_unrelated_entries_is_signed() {
+        let (result, reads) = run_listed(None, &[(unrelated(), true)]);
+        assert!(result.unwrap().reject_scope.is_some());
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn an_allowed_burn_input_shields_a_rejected_ancestor() {
+        let (_, right, units, _) = listed_burn();
+        let (result, _) = run_listed(None, &[(right.opout, true), (units.opout, false)]);
+        result.unwrap();
+    }
+
+    /// The change is not released, so a list entry on it does not block.
+    #[test]
+    fn a_rejected_burn_change_does_not_block_the_release() {
+        let (_, _, _, burn) = listed_burn();
+        let change = rgbstd::Opout::new(burn.opid, schemata::OS_ASSET, 0);
+        let (result, _) = run_listed(None, &[(change, true)]);
+        result.unwrap();
+    }
+
+    /// The pin is checked first, so a foreign genesis cannot make the
+    /// enclave read a contract of its choice.
+    #[test]
+    fn foreign_asset_list_is_never_read() {
+        let (result, reads) = run_listed(Some("rgb:some-other"), &[]);
+        assert!(error_of(result).contains("pinned RGB_ASSET_ID"));
+        assert_eq!(reads, 0);
+    }
+
+    #[test]
+    fn burn_is_refused_when_the_list_cannot_be_read() {
+        let (source, chain, id) = listed_source();
+        let failing = |_: &RejectListContract| -> Result<Decisions> {
+            Err(crate::error::EnclaveError::CrossCheck(
+                "evm-rpc: down".into(),
+            ))
+        };
+        let config = pinned_config(&id);
+        let err = error_of(run_reading(&source, &config, &chain, Some(&failing)));
+        assert!(err.contains("evm-rpc: down"), "{err}");
+        let err = error_of(run_reading(&source, &config, &chain, None));
+        assert!(err.contains("cannot read it"), "{err}");
     }
 }
 

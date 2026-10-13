@@ -145,6 +145,14 @@ pub trait EvmReceiptProvider {
     fn get_block_by_number(&self, number: u64) -> Result<Option<BlockData>>;
     /// `eth_chainId`: the chain the node itself is on.
     fn get_chain_id(&self) -> Result<u64>;
+    /// `eth_call` of `data` to `to` at block `block`. Empty when `to` has no
+    /// code. The default refuses, so a provider without it fails closed.
+    fn call(&self, to: &[u8; 20], data: &[u8], block: u64) -> Result<Vec<u8>> {
+        let _ = (to, data, block);
+        Err(EnclaveError::CrossCheck(
+            "evm-rpc: this provider makes no eth_call - refusing to sign".into(),
+        ))
+    }
 }
 
 /// keccak256 of an event signature -> its `topic0`.
@@ -875,6 +883,34 @@ impl EvmReceiptProvider for AlloyEvmClient {
                 ))
             })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_chainId failed: {e}")))
+    }
+
+    fn call(&self, to: &[u8; 20], data: &[u8], block: u64) -> Result<Vec<u8>> {
+        use alloy::primitives::{Address, Bytes};
+        use alloy::providers::Provider;
+        use alloy::rpc::types::{BlockId, TransactionRequest};
+        let request = TransactionRequest::default()
+            .to(Address::from(*to))
+            .input(Bytes::copy_from_slice(data).into());
+        let out = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, async {
+                    self.provider
+                        .call(request)
+                        .block(BlockId::number(block))
+                        .await
+                })
+                .await
+            })
+            .map_err(|_elapsed| {
+                EnclaveError::CrossCheck(format!(
+                    "evm-rpc: eth_call timed out after {}s - refusing to sign",
+                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_call failed: {e}")))?;
+        Ok(out.to_vec())
     }
 }
 

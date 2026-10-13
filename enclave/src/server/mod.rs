@@ -15,6 +15,8 @@ mod health;
 mod keys;
 #[cfg(feature = "rgb-validation")]
 mod rate_limit;
+#[cfg(feature = "bfa-validation")]
+mod reject_list;
 mod sign;
 mod signers;
 #[cfg(feature = "rgb-validation")]

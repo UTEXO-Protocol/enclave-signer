@@ -11,6 +11,7 @@
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
 //! - `bfa.rs`: the BFA mint anchors and their binding to EVM locks.
 //! - `schema.rs`: the schema rules a consignment is validated under.
+//! - `reject_list.rs`: the issuer's reject list and its graph walk.
 //!
 //! The enclave does not trust the listener `consignment_valid` boolean.
 
@@ -19,6 +20,7 @@ mod bfa;
 mod consensus;
 mod consignment;
 mod indexer;
+mod reject_list;
 mod schema;
 mod source;
 mod types;
@@ -31,6 +33,10 @@ pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
 pub use indexer::{IndexerWitnesses, RgbValidator};
+pub use reject_list::{
+    assert_not_rejected, decisions, Decisions, OpoutKey, RejectCheck, RejectListContract,
+    RejectListEntry, RejectListReader, RejectScope,
+};
 pub(crate) use schema::BFA_RULES;
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
