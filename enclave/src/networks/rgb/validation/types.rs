@@ -123,9 +123,10 @@ pub struct TransitionSummary {
     /// (`GS_BURNED_ASSET`) global. Consensus refuses zero. `None` for a
     /// non-burn, or a burn without the global.
     pub burned_asset_amount: Option<u64>,
-    /// The burn's `burnReason` (`GS_BURN_REASON`) global: 32 bytes. The
-    /// bridge puts the EVM payout address in the low 20 bytes. `None` for a
-    /// non-burn, or a burn without the global.
+    /// The burn's `burnReason` (`GS_BURN_REASON`) global: 32 bytes. A V0
+    /// left-padded EVM address or a V1 destination record hash, see
+    /// `networks::evm::burn_destination`. `None` for a non-burn, or a burn
+    /// without the global.
     pub burn_reason: Option<[u8; 32]>,
 }
 

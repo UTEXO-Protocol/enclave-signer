@@ -123,7 +123,8 @@ Before it signs, the burn signer:
 4. Checks `sourceChainId`, `sourceAddress` and `burnId`.
 5. Checks the BtcRelay finality proof against its own header chain.
 6. Binds the release to the burn: amount (`burnedAsset`), `sourceBurnTxId`,
-   recipient (`burnReason`, an EVM address left-padded with 12 zero bytes)
+   destination (`burnReason`: a left-padded EVM address, or the hash of a
+   destination record, see [docs/burn-destination.md](docs/burn-destination.md))
    and `settlementData` (exactly the deposits of the history's mints).
 7. Signs the EIP-712 `TeeFundsOut` (or `TeeLzFundsOut`) digest over the
    decoded fields.

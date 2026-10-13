@@ -12,7 +12,9 @@ document differ, investigate the difference. Either can contain an error.
 
 1. The user burns RGB units on Bitcoin.
 2. The burn records how many units it destroys (`burnedAsset`) and which
-   EVM address gets the tokens (`burnReason`). It may return change.
+   destination gets the tokens (`burnReason`: an EVM address, or the hash of a
+   destination record, see [burn-destination.md](burn-destination.md)). It may
+   return change.
 3. The burn signer checks the burn.
 4. The burn signer signs an EIP-712 release for `MultisigProxy`.
 5. `MultisigProxy` needs M of N such signatures. Then the Bridge contract
@@ -81,7 +83,7 @@ sequenceDiagram
 | `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
 | `TS_MINT` | 8013 | Mint transition. It shows in the burn's history (the ancestry). |
 | `GS_BURNED_ASSET` | 2015 | Burn global: the number of units destroyed (u64). Required. |
-| `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. An EVM address left-padded with 12 zero bytes. Required. |
+| `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `SPV_MIN_CONFIRMATIONS` | 6 | Minimum depth of each Bitcoin transaction. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
@@ -208,19 +210,24 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
   OpId of the burn transition.
-- **B5.8** Recipient: `burnReason` must be present. The high 12 bytes must be
-  zero. It must equal the final payee: the calldata `recipient`, left-padded,
-  on the pools route, or the LayerZero `recipient` on the LayerZero route.
+- **B5.8** Destination: `burnReason` must be present.
+  - High 12 bytes zero (V0): the low 20 bytes are an EVM address. The request
+    must carry no `burn_destination`. Pools route only. The calldata
+    `recipient` must equal the address.
+  - Otherwise (V1): the request must carry `burn_destination`, and its hash
+    must equal the 32 bytes ([burn-destination.md](burn-destination.md)).
+    `destinationChainId` must equal the record. `dstEid == 0` means the pools
+    route, with a 20-byte `recipient` equal to the calldata. `dstEid != 0`
+    means the LayerZero route: the calldata `dstEid` must equal it, and the
+    left-padded record `recipient` must equal the LayerZero `recipient`.
 - **B5.9** Settlement: `settlementData` is
   `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`. It must be
   canonical. The two arrays must have the same length. The ids must be in
   strictly ascending order, so no id repeats. The pairs must equal, as a set,
   the locks consensus confirmed in Stage 2. An empty list is refused.
 
-> **Warning - LayerZero route.** The burn does not name a destination chain,
-> so `dst_eid` is not bound to the burn. The enclave checks `dst_eid` and
-> `min_amount_ld` against the request only. See
-> [spec Sec 13](tee-spec.md#13-implementation-status).
+> **Note - LayerZero route.** Only a V1 burn can leave via LayerZero, because
+> only V1 names a chain. `min_amount_ld` is checked against the request only.
 
 ### Stage 6 - Sign
 

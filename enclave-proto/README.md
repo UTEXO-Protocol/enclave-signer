@@ -47,6 +47,7 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
+| `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
 
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.
@@ -56,8 +57,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `2b81a2eaadb99daa68c4428ea38f80ae3f40805d` (merge of PR #35, "chore(proto): drop mint_ancestors") |
-| Commit date | 2026-10-08T12:17:24Z |
+| Commit | `2b0e44b4a509279f48b5879d618f82317a5a0d49` (branch `feat/burn-destination`, "feat(proto): carry BurnDestination from backend to listener") |
+| Commit date | 2026-10-10T06:29:24Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -71,7 +72,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=2b81a2eaadb99daa68c4428ea38f80ae3f40805d
+REV=2b0e44b4a509279f48b5879d618f82317a5a0d49
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -86,8 +87,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `e8f2ac3d051518c2f0d3605601adfd6eb788a681` |
-| `proto/enclave/enclave.proto` | `03c6966a2998785d0d92af35384b21631f11c5e5` |
+| `rust-gen/src/enclave/enclave.rs` | `580777eef48b7de02ecde201a1f57e6acca70596` |
+| `proto/enclave/enclave.proto` | `296c7354171d00ce78fd96454eacbbc4735b6549` |
 
 ## Why only `prost`
 

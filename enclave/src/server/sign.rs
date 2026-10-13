@@ -210,6 +210,12 @@ pub(super) fn handle_sign(
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
                     &chain_pins,
+                    #[cfg(feature = "rgb-mint-burn")]
+                    destination
+                        .burn_destination
+                        .as_ref()
+                        .map(crate::networks::evm::burn_destination::BurnDestinationRecord::from)
+                        .as_ref(),
                 )?;
             }
             handle_sign_evm(
@@ -266,6 +272,9 @@ fn apply_funds_out_binding(
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
+    #[cfg(feature = "rgb-mint-burn")] burn_destination: Option<
+        &crate::networks::evm::burn_destination::BurnDestinationRecord,
+    >,
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -318,12 +327,12 @@ fn apply_funds_out_binding(
     // `sourceChainId` / `sourceAddress` before this.
     crosscheck::validate_funds_out_source_burn_tx_id(release, validated)?;
 
-    // A burn settles a redemption. Thus it also binds the payout target to
-    // the 32 bytes that the burner committed to (`burnReason`).
-    // `validate_funds_out_amount` already refused all non-burns, so no
-    // runtime type test is necessary.
+    // A burn settles a redemption. Thus it also binds the payout target and
+    // destination chain to the 32 bytes that the burner committed to
+    // (`burnReason`). `validate_funds_out_amount` already refused all
+    // non-burns, so no runtime type test is necessary.
     #[cfg(feature = "rgb-mint-burn")]
-    crosscheck::validate_funds_out_burn_recipient(release, validated)?;
+    crosscheck::validate_funds_out_burn_recipient(release, validated, burn_destination)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
     // exactly the locks consensus confirmed the burn's mint anchors against.

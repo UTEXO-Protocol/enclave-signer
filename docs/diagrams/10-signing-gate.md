@@ -91,8 +91,8 @@ flowchart TD
   `sourceChainId` and `sourceAddress`, `burnId` (`validate_burn_id`),
   `sourceBurnTxId` to the burn OpId, amount and recipient to the burn
   metadata, `settlementData` to the verified mint ancestry.
-- LayerZero route: the recipient is the LayerZero `recipient`. `dstEid` is
-  not bound to the burn.
+- LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
+  burn can use it: its record binds `dstEid` and `destinationChainId`.
 - The burn signer reads no EVM RPC and no Bitcoin indexer. It derives the
   lock of each mint in the history inside RGB validation (P1), and never
   confirms an anchor or calls plain `validate()` without a bound lock.
