@@ -30,18 +30,45 @@ document differ, investigate the difference. Either can contain an error.
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipt and chain-head data | Gives the deposit receipts. |
-| Electrum | Through vsock proxy | Bitcoin data, subject to the checks below | Supplies the transaction of an off-PSBT change outpoint. |
+| Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy; TLS ends in the enclave | Confirmation status and height of history witnesses; Bitcoin data, subject to the checks below | Says whether each history witness is mined. Supplies the transaction of an off-PSBT outpoint, and whether it is mined and unspent. |
 
 The mint signer ignores `event_valid` and `event_finalized` from the listener.
 It checks deposits through the pinned EVM RPC. It trusts that provider for
 receipt, chain-head and finality data. It does not verify EVM consensus. It
 checks that the node reports the pinned chain id.
 
-The mint path does not verify witness inclusion against the enclave SPV chain.
-A V1 consignment carries every witness transaction, and RGB validation reads
-them from it as unconfirmed. The PSBT check binds the new transaction to the
-consignment before that transaction is mined. Ancestor mints are bound to the
-deposits they derive, not read on chain (see section 10).
+RGB validation checks every witness on chain. It takes each witness
+transaction from the consignment and asks the pinned indexer for its status.
+Its block must be at least `SPV_MIN_CONFIRMATIONS` deep below the indexer's
+tip. An unmined, unknown or shallow witness fails consensus, so a history
+built on an off-chain transfer is refused. The only exception is the last
+witness: the mint transaction being signed is not broadcast yet. The PSBT
+check then requires it to be the PSBT's own transaction (M5.3). A first mint
+spends the genesis right, has no history, and makes no indexer call.
+
+A witness that another mined witness spends is mined at least as deep, by
+Bitcoin consensus, so it needs no lookup. In practice a lane costs one lookup
+per mint, for the previous mint, however many mints the lane holds. An
+older witness is looked up only when no mined witness spends it, such as a
+right moved to an existing wallet UTXO.
+
+On Electrum the enclave uses only non-verbose calls, so any server works
+(romanz/electrs included): the history of the witness's first
+non-`OP_RETURN` output gives the height, and a merkle proof against that
+block's header proves the transaction is in it. On Esplora it reads the
+transaction status.
+
+The mint signer has no SPV header chain, so it trusts the indexer for these
+answers. A release image accepts only `ssl://` or `https://` indexers, and
+the host relays only ciphertext. The depth counts every block the indexer
+reports, testnet min-difficulty blocks included, as on the burn path. This is
+accepted on testnets; mainnet has no such blocks. Ancestor mints are bound to the deposits they derive, not
+read on chain (see section 10).
+
+On a mint image `SPV_MIN_CONFIRMATIONS` is this history depth only; the burn
+image pins its own value. The connector must not pick a right lane before its
+previous mint is that deep: it passes `min_confirmations` of at least this
+value to `mint_begin`, or every mint on a fresh lane is refused until then.
 
 ## 3. Sequence
 
@@ -53,6 +80,7 @@ sequenceDiagram
     participant P as Parent (untrusted)
     participant E as Mint signer (enclave)
     participant R as EVM RPC (pinned TLS)
+    participant I as Bitcoin indexer (pinned TLS)
 
     L->>L: build mint consignment + PSBT
     U->>C: lock tokens
@@ -64,6 +92,7 @@ sequenceDiagram
     E->>E: Stage 3: RGB consensus, phase 1
     E->>R: Stage 3: chain id, receipt, finality of the signed mint
     E->>E: Stage 3: bind every mint anchor, phase 2
+    E->>I: Stage 3: phase 2, is each history witness mined and deep enough?
     E->>E: Stage 5: bind PSBT to consignment, mint right, fee
     E->>E: Stage 6: recipient bind, replay reserve
     E->>E: Stage 7: sats budget, sign
@@ -82,6 +111,7 @@ sequenceDiagram
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
+| `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each history witness, per the indexer. Image env, attested. Zero stops the boot. The connector's `mint_begin` `min_confirmations` must be at least this. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 12 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
@@ -165,8 +195,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 - **M3.11** The bound locks must match the anchors one for one. Consensus
   phase 2 confirms each anchor only against its lock, and only through the
   checked resolver, which compares the chain id with the genesis.
-- **M3.12** Every witness resolves from the consignment. Then validation
-  finalizes.
+- **M3.12** Every witness except the last must be mined at least
+  `SPV_MIN_CONFIRMATIONS` deep, per the pinned indexer, or be spent by a
+  witness that is. The last witness, the mint transaction, may be unmined;
+  M5.3 binds it to the PSBT. A proof the consignment carries is never used.
+  Then validation finalizes.
 
 ### Stage 4 - Is it the pinned asset?
 
@@ -194,9 +227,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   - a revealed seal must be owned by the enclave. If not: refuse.
   - The recipient legs must sum to exactly `amount - commission`.
 - **M5.10** The mint must pass exactly one `mintRight` on, to a revealed seal
-  the enclave owns (on the PSBT, or an existing UTXO checked through the
-  indexer). The seal may not be an outpoint the PSBT spends: the tx would
-  close it at once. Otherwise the host could drop the right or take it.
+  the enclave owns: an output of the signed tx (checked from PSBT metadata),
+  or, when the tx has no BTC change, an existing wallet UTXO (fetched through
+  the indexer, which must show it mined and unspent). The seal may not be an
+  outpoint the PSBT spends: the tx would close it at once. Otherwise the
+  host could drop the right or take it.
 - **M5.11** Every colored input the enclave signs must spend a seal the mint
   closes. Spending another colored output would destroy the RGB state on it,
   such as another mint right.
@@ -282,9 +317,9 @@ A mint spends the mint right (`OS_MINT`, no units) and makes units
 2. The PSBT bind: the new units equal `amount - commission`.
 3. The recipient bind: the units go to the user's seal.
 
-Known limit: the mint path does not prove that the ancestor witnesses are
-mined, and it binds ancestor mints to their derived deposits without reading
-them. A host that controls the bridge can then build a history that no
-receiving wallet accepts, after the user locked. It cannot mint units that no
-deposit backs. Never mint outside the TEE flow: a mint the enclave did not
+Known limit: the mint path binds ancestor mints to their derived deposits
+without reading them, and trusts the pinned indexer (not an SPV chain) for
+witness depth. A host that controls the bridge can then build a history that
+no receiving wallet accepts, after the user locked. It cannot mint units that
+no deposit backs, and it cannot pass an unmined history witness. Never mint outside the TEE flow: a mint the enclave did not
 sign makes the later mints of its lineage unacceptable to receivers.

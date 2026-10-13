@@ -11,7 +11,7 @@ flowchart TD
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
         p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>no reject list"]
-        p1a --> p1b["phase 1: validate_deterministic(BFA rules)<br/>mint anchors bound to derived locks<br/>(pinned bridge, no RPC); phase 2 confirms each<br/>against its own lock, witnesses from the<br/>consignment (no network)"]
+        p1a --> p1b["phase 1: validate_deterministic(BFA rules)<br/>mint anchors bound to derived locks<br/>(pinned bridge, no RPC); phase 2 confirms each<br/>against its own lock; each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS), else refuse"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
@@ -20,11 +20,11 @@ flowchart TD
     start --> p1w
 
     subgraph P3 ["P2 — SPV / Bitcoin anchoring (feature spv)"]
-        p3stale{"newest work block fresh?<br/>≤ 2 h old, ≤ 2 h future"}
+        p3stale{"chain tip fresh?<br/>≤ 2 h old, ≤ 2 h future"}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
         p3stale -->|yes| p3net{consignment chain_net == enclave network?}
         p3net -->|no| p3nr[REFUSE — cross-network replay]:::refuse
-        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ 6 work blocks"]
+        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS (default 6)"]
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end

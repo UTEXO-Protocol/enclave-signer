@@ -13,10 +13,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
-use utexo_bridge_enclave::networks::rgb::spv_crosscheck::{
-    SPV_MAX_TIP_AGE_SECS, SPV_MIN_CONFIRMATIONS,
+use utexo_bridge_enclave::config::{
+    BridgeConfig, DEFAULT_SPV_MIN_CONFIRMATIONS as SPV_MIN_CONFIRMATIONS,
 };
+use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
+use utexo_bridge_enclave::networks::rgb::spv_crosscheck::SPV_MAX_TIP_AGE_SECS;
 use utexo_bridge_enclave::proto::enclave_request::Request as EReq;
 use utexo_bridge_enclave::proto::enclave_response::Response as ERes;
 use utexo_bridge_enclave::proto::*;
@@ -24,7 +25,8 @@ use utexo_bridge_enclave::state::EnclaveState;
 
 mod common;
 use common::{
-    send_request, start_test_server, start_test_server_with, submit_headers, synth_chain_from,
+    send_request, start_test_server, start_test_server_with, start_test_server_with_config,
+    submit_headers, synth_chain_from,
 };
 
 fn now_unix() -> u32 {
@@ -149,4 +151,32 @@ fn key_and_stale_chain_is_not_ready() {
         "reported age {} should be at least {age}",
         h.spv_tip_age_secs
     );
+}
+
+/// A server whose pinned config requires `min_confirmations`.
+fn server_requiring(min_confirmations: u32) -> u16 {
+    let cfg = BridgeConfig {
+        spv_min_confirmations: min_confirmations,
+        ..BridgeConfig::from_env()
+    };
+    start_test_server_with_config(with_key, cfg)
+}
+
+/// Readiness uses the configured depth, not the default.
+#[test]
+fn readiness_follows_the_configured_depth() {
+    let shallow = SPV_MIN_CONFIRMATIONS - 3;
+    let port = server_requiring(shallow);
+    submit_chain(port, shallow, now_unix());
+    assert!(
+        health(port).ready,
+        "{shallow} blocks meet a depth of {shallow}"
+    );
+
+    let deep = SPV_MIN_CONFIRMATIONS + 2;
+    let port = server_requiring(deep);
+    submit_chain(port, deep - 1, now_unix());
+    let h = health(port);
+    assert!(!h.spv_synced, "{} blocks fall short of {deep}", deep - 1);
+    assert!(!h.ready);
 }

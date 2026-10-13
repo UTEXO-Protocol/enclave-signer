@@ -915,6 +915,7 @@ mod lz_route {
 
 mod btc_relay {
     use super::*;
+    use crate::config::DEFAULT_SPV_MIN_CONFIRMATIONS;
     use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use crate::test_support::ANY_HEADER_CLOCK;
@@ -1142,6 +1143,7 @@ mod btc_relay {
             chain,
             &ChainPins::new(),
             mode,
+            DEFAULT_SPV_MIN_CONFIRMATIONS,
         )
     }
 
@@ -1524,6 +1526,7 @@ mod btc_relay {
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
+            DEFAULT_SPV_MIN_CONFIRMATIONS,
         )
         .unwrap_err();
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
@@ -1600,6 +1603,7 @@ mod btc_relay {
             chain,
             &pins,
             BtcRelayMode::Required,
+            DEFAULT_SPV_MIN_CONFIRMATIONS,
         )
         .expect("terminal check passes on the fixture chain");
         pins
@@ -1808,6 +1812,7 @@ mod btc_relay {
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
+            DEFAULT_SPV_MIN_CONFIRMATIONS,
         )
         .unwrap_err();
         assert!(

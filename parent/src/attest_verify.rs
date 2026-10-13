@@ -73,6 +73,8 @@ pub enum ExpectedPolicy {
         /// operator declares it.
         token_contract: [u8; 20],
         evm_min_confirmations: u64,
+        /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`).
+        spv_min_confirmations: u32,
         /// Expected gas-tx (`SignRawDigest`) rule. An all-zero destination,
         /// zero caps and no selectors mean "not pinned". The enclave then
         /// rejects every gas-tx request.
@@ -491,6 +493,7 @@ fn expected_attested_policy(
             funds_in_contract,
             token_contract,
             evm_min_confirmations,
+            spv_min_confirmations,
             gas_tx_allowed_to,
             gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
@@ -551,6 +554,7 @@ fn expected_attested_policy(
                 rgb_asset_id: resp.rgb_asset_id.clone(),
                 funds_in_contract: *funds_in_contract,
                 evm_min_confirmations: *evm_min_confirmations,
+                spv_min_confirmations: *spv_min_confirmations,
                 electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
                 // The operator declares the gas-tx rule. `to_bytes` sorts the
@@ -587,6 +591,7 @@ mod tests {
             funds_in_contract: [0x11; 20],
             token_contract: [0x22; 20],
             evm_min_confirmations: 12,
+            spv_min_confirmations: 6,
             expected_chain_id: chain_id,
             expected_bridge_contract: bridge_contract,
             expected_rgb_asset_id: rgb_asset_id,
@@ -612,6 +617,7 @@ mod tests {
             funds_in_contract: [0x11; 20],
             token_contract: [0x22; 20],
             evm_min_confirmations: 12,
+            spv_min_confirmations: 6,
             expected_chain_id: None,
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,

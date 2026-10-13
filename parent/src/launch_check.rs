@@ -82,6 +82,10 @@ pub fn expected_policy(
             "EVM_MIN_CONFIRMATIONS",
             Some(required("EVM_MIN_CONFIRMATIONS")?),
         )?,
+        spv_min_confirmations: number(
+            "SPV_MIN_CONFIRMATIONS",
+            Some(required("SPV_MIN_CONFIRMATIONS")?),
+        )?,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
@@ -199,6 +203,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         rgb_asset_id,
         funds_in_contract,
         evm_min_confirmations,
+        spv_min_confirmations,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to,
@@ -229,6 +234,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("rgb_asset_id", rgb_asset_id.clone()),
         ("funds_in_contract", hex(funds_in_contract)),
         ("evm_min_confirmations", evm_min_confirmations.to_string()),
+        ("spv_min_confirmations", spv_min_confirmations.to_string()),
         ("electrum_host", electrum_host.clone()),
         ("evm_rpc_tls", presence(evm_rpc_tls.is_some())),
     ];
@@ -287,6 +293,7 @@ mod tests {
             "FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951",
             "TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
             "EVM_MIN_CONFIRMATIONS=12",
+            "SPV_MIN_CONFIRMATIONS=6",
             "GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951",
             "GAS_TX_MAX_GAS_LIMIT=300000",
             "GAS_TX_MAX_FEE_PER_GAS=1000",
@@ -462,6 +469,14 @@ mod tests {
         assert_mismatch(
             set!(evm_min_confirmations, 1),
             "evm_min_confirmations mismatch: expected 12, attested 1",
+        );
+    }
+
+    #[test]
+    fn spv_min_confirmations_mismatch_aborts() {
+        assert_mismatch(
+            set!(spv_min_confirmations, 3),
+            "spv_min_confirmations mismatch: expected 6, attested 3",
         );
     }
 

@@ -116,7 +116,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      the RGB change on an existing wallet UTXO. That needs an indexer call,
 ///      capped at [`MAX_OFF_TX_CHANGE_OUTPOINTS`] per PSBT.
 ///   8. Mint right (mint flow): the mint passes exactly one `mintRight` on, to
-///      a revealed seal that `self_owned` proves is ours.
+///      a revealed seal that `self_owned` proves is ours and this tx does not
+///      spend.
 ///
 /// `self_owned` resolves whether an outpoint pays back to this enclave. It is a
 /// callback, not a `&KeyManager`, so the key lock is not held across the
@@ -275,7 +276,8 @@ pub fn validate_psbt_anchors_transition(
 ///   * on an earlier tx: the tx is fetched and verified by
 ///     [`crate::networks::rgb::validation::RgbValidator::fetch_transaction`],
 ///     then its `script_pubkey` must be in
-///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`].
+///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`], and the
+///     indexer must show the outpoint mined and unspent.
 #[cfg(feature = "rgb-validation")]
 pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
 
@@ -407,7 +409,7 @@ fn split_asset_legs(
 }
 
 /// The mint passes the right to mint on to exactly one seal this enclave
-/// owns. Otherwise the host could drop the right or take it.
+/// owns. Off the tx (no BTC change), `self_owned` also needs it mined, unspent.
 #[cfg(feature = "rgb-mint-burn")]
 fn assert_mint_right_kept(
     psbt: &Psbt,
@@ -441,6 +443,13 @@ fn assert_mint_right_kept(
         return Err(EnclaveError::CrossCheck(format!(
             "mint passes the mintRight to {outpoint}, which this transaction spends - the right \
              would be lost"
+        )));
+    }
+    let outputs = psbt.unsigned_tx.output.len();
+    if txid == psbt_txid && *vout as usize >= outputs {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint passes the mintRight to output {vout}, but the transaction being signed has \
+             only {outputs} outputs - the right would be lost"
         )));
     }
     if !self_owned(psbt, outpoint)? {

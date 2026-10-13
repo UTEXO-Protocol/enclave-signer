@@ -51,10 +51,11 @@ Reference material:
    only when the configured URL uses `ssl://`.
 5. The parent sends Bitcoin block headers to the enclave. On mainnet, the
    enclave checks proof of work and maintains its own header chain.
-   On testnet4 it also applies the 20-minute rule and BIP94; min-difficulty
-   blocks there do not count as confirmations. On every network it refuses a
-   header more than 2 hours ahead of its clock. Signet and regtest use weaker
-   checks. See the specification.
+   On testnet4 it also applies the 20-minute rule and BIP94. On the testnets
+   min-difficulty blocks count as confirmations and freshness, for testing
+   convenience: testnets carry no production value. On every network it
+   refuses a header more than 2 hours ahead of its clock. Signet
+   and regtest use weaker checks. See the specification.
 
 See the [component diagram](docs/diagrams/01-components.md) and the
 [deployment diagram](docs/diagrams/02-deployment.md).
@@ -93,8 +94,9 @@ Before it signs, the mint signer:
 4. Binds the PSBT to the consignment. The txid, the inputs and the sighash
    types must match. The signed bundle holds exactly one mint and hides no
    transition. The minted units must equal `amount - commission` exactly.
-   The mint passes its `mintRight` back to an output the enclave owns, and
-   every colored input spends a seal the mint closes.
+   The mint passes its `mintRight` to an output the enclave owns (on the
+   signed tx, or a mined, unspent wallet UTXO), and every colored input
+   spends a seal the mint closes.
 5. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
    the one blinded seal in the consignment must equal that invoice.
@@ -116,8 +118,8 @@ Before it signs, the burn signer:
    Each mint in the history is confirmed only against the deposit it
    derives. The last transition must be a BFA `burn`.
 2. Checks that each Bitcoin transaction of the consignment is in its own
-   header chain, at least 6 blocks deep. The chain tip must be less than
-   2 hours old.
+   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
+   The chain tip must be less than 2 hours old.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
 4. Checks `sourceChainId`, `sourceAddress` and `burnId`.
@@ -534,9 +536,10 @@ Data sources and transport:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer (transaction fetch on the mint path). |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer (mint path: history witness status and transaction fetch). |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
+| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx: SPV on the burn path, the indexer on the mint path (all but the mint tx being signed). Zero or a non-number stops the boot. Baked into the image. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -686,9 +689,15 @@ Re-syncing changes PCR0. Procedure in
 ## Security model
 
 - **Untrusted host.** Requests from the parent, listener and backend are checked
-  inside the enclave. For RGB-source requests, Bitcoin witness inclusion is
-  checked against its header chain. Concordium source validation still trusts
-  the listener; see the spec for network-specific limits.
+  inside the enclave. Concordium source validation still trusts the listener;
+  see the spec for network-specific limits.
+- **On-chain RGB witnesses.** RGB consensus counts a witness tx as valid only
+  if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
+  transfer in the history fails validation. The burn signer proves this with
+  the request's Merkle proofs against its own header chain. The mint signer
+  asks the pinned indexer; only its own unbroadcast mint tx, the last
+  witness and the PSBT's tx, may be unmined. The indexer depth counts every
+  block, testnet min-difficulty ones included.
 - **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
   authenticates the configured RPC hostname against the pinned CA. The host
   relay cannot alter authenticated responses without detection. The enclave
@@ -706,9 +715,10 @@ Re-syncing changes PCR0. Procedure in
   committed. See the [policy scope](docs/tee-spec.md#4-security-policy).
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
-- **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
-  connection limits are compiled in. `EVM_MIN_CONFIRMATIONS` and request-size
-  caps are read from environment; image-baked values are measured with the EIF.
+- **Limits.** Bitcoin freshness, reorg/retention caps and connection limits
+  are compiled in. `SPV_MIN_CONFIRMATIONS`, `EVM_MIN_CONFIRMATIONS` and
+  request-size caps are read from environment; image-baked values are measured
+  with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
   `#![deny(unsafe_code)]`. With `kms-persistence`, seeds persist as KMS ciphertext
   in S3. The parent receives no plaintext seed. KMS handles the seed during

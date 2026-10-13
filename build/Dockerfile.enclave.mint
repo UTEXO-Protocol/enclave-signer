@@ -111,7 +111,10 @@ ENV EVM_CHAIN_ID=42161 \
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
 # image. The operator sets them at launch (SetEndpoints), and the attestation
 # commits them. See docs/tee-spec.md.
+# SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
+# The connector must pass mint_begin min_confirmations of at least this value.
 ENV EVM_MIN_CONFIRMATIONS=12 \
+    SPV_MIN_CONFIRMATIONS=6 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     BTC_MAX_TOTAL_SATS=1000000

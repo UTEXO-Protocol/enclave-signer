@@ -7,10 +7,9 @@
 //! is appended. Mainnet and the testnets also check PoW and nBits.
 //!
 //! On the testnets a block more than 20 minutes after its parent may use the
-//! minimum difficulty, which costs almost no work. Such blocks do not count
-//! toward confirmations or freshness ([`HeaderChain::confirmations`],
-//! [`HeaderChain::fresh_time`]): a host could mint them for free. The clock
-//! bound keeps a host from dating them ahead to retarget its fork down.
+//! minimum difficulty. Such blocks count toward confirmations and freshness
+//! like any other: testnets carry no production value. The clock bound keeps
+//! a host from dating them ahead to retarget its fork down.
 //!
 //! ## Three submission cases
 //!
@@ -161,36 +160,14 @@ impl HeaderChain {
         }
     }
 
-    /// Timestamp of the newest header that proves work, or the checkpoint
-    /// `time`. The SPV staleness check uses it to find a source that sends
-    /// real but old headers, or keeps the tip fresh with free blocks.
-    pub fn fresh_time(&self) -> u32 {
-        self.headers
-            .iter()
-            .rev()
-            .find(|h| !self.is_min_difficulty(h))
-            .map_or(self.checkpoint.time, |h| h.time)
-    }
-
-    /// Headers from `height` to the tip that prove work, counted up to `cap`.
-    /// Min-difficulty blocks do not count. `0` when no header is at `height`.
+    /// Headers from `height` to the tip, counted up to `cap`. `0` when no
+    /// header is at `height`.
     pub fn confirmations(&self, height: BlockHeight, cap: u32) -> u32 {
         if self.header_at(height).is_none() {
             return 0;
         }
-        let from = (height - self.base_height - 1) as usize;
-        let counted = self.headers[from..]
-            .iter()
-            .filter(|h| !self.is_min_difficulty(h))
-            .take(cap as usize)
-            .count();
-        counted as u32
-    }
-
-    /// A block mined under the 20-minute rule. It proves almost no work.
-    fn is_min_difficulty(&self, header: &Header) -> bool {
-        self.network.allows_min_difficulty()
-            && header.bits.to_consensus() == self.network.pow_limit_bits()
+        let depth = self.tip_height() - height + 1;
+        depth.min(cap)
     }
 
     /// Number of stored headers, without the checkpoint.

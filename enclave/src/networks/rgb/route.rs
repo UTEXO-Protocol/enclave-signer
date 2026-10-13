@@ -148,8 +148,17 @@ pub fn validate_destination_anchor(
             "send-RGB PSBT carries a consignment but the RGB validator is not configured".into(),
         )
     })?;
+    // History witnesses must be mined, per the indexer. Only the mint tx (last)
+    // may be unbroadcast; the PSBT bind below requires it to be the PSBT's tx.
+    let indexer = validator.indexer_witnesses(ctx.bridge_config.spv_min_confirmations);
+    let witnesses = validation::WitnessCheck {
+        chain: &indexer,
+        allow_unbroadcast_last: true,
+        infer_spent_ancestors: true,
+    };
     // The binder verifies the mint's own EVM lock and derives the ancestors'.
-    let validated = validator.validate_consignment(&destination.consignment, ctx.anchor_binder)?;
+    let validated =
+        validator.validate_consignment(&destination.consignment, ctx.anchor_binder, &witnesses)?;
 
     // Fail closed on a missing pin, unlike the source direction. An enclave
     // with rgb-validation but no config must not trust the listener.

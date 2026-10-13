@@ -11,9 +11,13 @@
 //! 3. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
 //!    header at `block_height`.
 //! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
-//!    `SPV_MIN_CONFIRMATIONS` deep. Bridge spec section 11 forbids trust in
-//!    only the most recent anchoring transaction. On the testnets,
-//!    min-difficulty blocks do not count: a host can mint them for free.
+//!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
+//!    Bridge spec section 11 forbids trust in only the most recent anchoring
+//!    transaction. On the testnets, min-difficulty blocks count too: testnets
+//!    carry no production value.
+//!
+//! Consensus runs first, over [`proven_witnesses`]: the same inclusion and depth
+//! checks, so RGB validation sees a witness mined only if its proof holds.
 //!
 //! Byte order: `MerkleProofEntry.txid` and `.merkle_path` are in display
 //! (big-endian) order. `spv::merkle` uses internal (little-endian) order.
@@ -21,7 +25,9 @@
 //! order on both sides.
 
 #[cfg(rgb_to_evm)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(rgb_to_evm)]
+use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(rgb_to_evm)]
@@ -33,13 +39,11 @@ use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError, Network};
 #[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
+#[cfg(rgb_to_evm)]
+use rgbstd::vm::WitnessPos;
 
 #[cfg(rgb_to_evm)]
 use super::validation::ValidatedConsignment;
-
-/// Confirmation depth required before the enclave signs. Compile-time, not an
-/// env var: a host value of 0 would bypass SPV and attestation would still pass.
-pub const SPV_MIN_CONFIRMATIONS: u32 = 6;
 
 /// Maximum age of the chain tip `time`, in seconds. With an older tip the
 /// enclave does not sign. This stops a host that sends real but old headers
@@ -73,6 +77,7 @@ pub fn validate_source_chain(
     merkle_proofs: &[MerkleProofEntry],
     now: SystemTime,
     pins: &ChainPins,
+    min_confirmations: u32,
 ) -> Result<()> {
     let validated = validated_consignment.ok_or_else(|| {
         EnclaveError::Spv(
@@ -89,7 +94,7 @@ pub fn validate_source_chain(
         chain,
         &validated.witness_txids,
         merkle_proofs,
-        SPV_MIN_CONFIRMATIONS,
+        min_confirmations,
     )?;
 
     // Pin every block this check used, under the caller's lock guard. The guard
@@ -125,21 +130,7 @@ pub fn validate_spv_proofs(
     let mut proof_set: BTreeSet<[u8; 32]> = BTreeSet::new();
 
     for (i, proof) in proofs.iter().enumerate() {
-        let txid: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
-            EnclaveError::Spv(format!(
-                "merkle_proofs[{i}].txid must be 32 bytes, got {}",
-                proof.txid.len()
-            ))
-        })?;
-        // Bound per-proof hashing before it starts. A path deeper than any
-        // real block is a bug or a work-amplification attack.
-        if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
-            return Err(EnclaveError::Spv(format!(
-                "merkle_proofs[{i}].merkle_path too deep: {} siblings (max {})",
-                proof.merkle_path.len(),
-                MAX_MERKLE_PATH_DEPTH
-            )));
-        }
+        let txid = proof_txid(i, proof)?;
         if !proof_set.insert(txid) {
             return Err(EnclaveError::Spv(format!(
                 "duplicate merkle proof for txid {}",
@@ -177,6 +168,64 @@ pub fn validate_spv_proofs(
     Ok(())
 }
 
+/// Each proof's tx position, after the inclusion and depth checks. Consensus
+/// reads it; [`validate_source_chain`] then checks freshness and coverage.
+#[cfg(rgb_to_evm)]
+pub fn proven_witnesses(
+    chain: &HeaderChain,
+    proofs: &[MerkleProofEntry],
+    min_confirmations: u32,
+) -> Result<BTreeMap<bitcoin::Txid, WitnessPos>> {
+    let tip = chain.tip_height();
+    let mut proven = BTreeMap::new();
+    for (i, proof) in proofs.iter().enumerate() {
+        let mut txid = proof_txid(i, proof)?;
+        verify_one_proof(chain, tip, min_confirmations, i, proof)?;
+        let pos = chain
+            .header_at(proof.block_height)
+            .zip(NonZeroU32::new(proof.block_height))
+            .and_then(|(header, height)| WitnessPos::bitcoin(height, i64::from(header.time)))
+            .ok_or_else(|| {
+                EnclaveError::Spv(format!(
+                    "merkle_proofs[{i}]: block {} has no valid witness position",
+                    proof.block_height
+                ))
+            })?;
+        txid.reverse();
+        if proven
+            .insert(bitcoin::Txid::from_byte_array(txid), pos)
+            .is_some()
+        {
+            return Err(EnclaveError::Spv(format!(
+                "duplicate merkle proof for txid {}",
+                hex::encode(proof.txid.as_slice())
+            )));
+        }
+    }
+    Ok(proven)
+}
+
+/// The proof's txid in display order, once its shape is in bounds.
+#[cfg(rgb_to_evm)]
+fn proof_txid(index: usize, proof: &MerkleProofEntry) -> Result<[u8; 32]> {
+    let txid: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
+        EnclaveError::Spv(format!(
+            "merkle_proofs[{index}].txid must be 32 bytes, got {}",
+            proof.txid.len()
+        ))
+    })?;
+    // Bound per-proof hashing before it starts. A path deeper than any real
+    // block is a bug or a work-amplification attack.
+    if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
+        return Err(EnclaveError::Spv(format!(
+            "merkle_proofs[{index}].merkle_path too deep: {} siblings (max {})",
+            proof.merkle_path.len(),
+            MAX_MERKLE_PATH_DEPTH
+        )));
+    }
+    Ok(txid)
+}
+
 /// Chain-freshness part of the signing precondition, with this module's
 /// bounds. Signing calls it before the proof checks. The readiness probe calls
 /// it too, so the two cannot drift apart.
@@ -190,19 +239,23 @@ pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
 }
 
 /// Full signing precondition on the chain only: fresh, and at least
-/// [`SPV_MIN_CONFIRMATIONS`] blocks past the checkpoint.
+/// `min_confirmations` blocks past the checkpoint.
 ///
 /// `validate_spv_proofs` rejects shallower proofs. A chain one block past the
 /// checkpoint is fresh but cannot confirm anything. A freshness-only probe
 /// would then report ready while every signing request fails.
-pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
+pub fn assert_chain_ready(
+    chain: &HeaderChain,
+    now: SystemTime,
+    min_confirmations: u32,
+) -> Result<()> {
     assert_chain_fresh(chain, now)?;
 
-    let depth = chain.confirmations(chain.checkpoint().height + 1, SPV_MIN_CONFIRMATIONS);
-    if depth < SPV_MIN_CONFIRMATIONS {
+    let depth = chain.confirmations(chain.checkpoint().height + 1, min_confirmations);
+    if depth < min_confirmations {
         return Err(EnclaveError::Spv(format!(
-            "spv: chain is only {depth} work block(s) past the checkpoint, need \
-             {SPV_MIN_CONFIRMATIONS} before a proof can reach the required \
+            "spv: chain is only {depth} block(s) past the checkpoint, need \
+             {min_confirmations} before a proof can reach the required \
              confirmation depth"
         )));
     }
@@ -215,9 +268,7 @@ pub fn assert_chain_ready(chain: &HeaderChain, now: SystemTime) -> Result<()> {
 /// `SystemTime::now()`.
 ///
 /// Threat model: a host that sends real but old headers makes a valid chain
-/// with an old tip. An old block then looks well confirmed. On the testnets it
-/// can also keep the tip fresh with free min-difficulty blocks, so the time is
-/// that of the newest block that proves work ([`HeaderChain::fresh_time`]).
+/// with an old tip. An old block then looks well confirmed.
 pub fn assert_chain_not_stale(
     chain: &HeaderChain,
     now: SystemTime,
@@ -228,7 +279,7 @@ pub fn assert_chain_not_stale(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| EnclaveError::Internal(format!("system clock is before UNIX_EPOCH: {e}")))?
         .as_secs();
-    let tip_time = u64::from(chain.fresh_time());
+    let tip_time = u64::from(chain.tip_time());
 
     // Future bound: Bitcoin consensus allows approx 2h of future skew per
     // block. Reject more than `max_future`.

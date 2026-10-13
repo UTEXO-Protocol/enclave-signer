@@ -21,7 +21,8 @@ sequenceDiagram
     participant Srv as enclave/server/sign.rs<br/>handle_sign
     participant Evt as networks::evm::events
     participant Rpc as EVM RPC<br/>(TLS to pinned host, ends in enclave)
-    participant Rgb as networks::rgb::validation<br/>(rgb-ops, no network)
+    participant Rgb as networks::rgb::validation<br/>(rgb-ops)
+    participant Idx as Bitcoin indexer<br/>(pinned URL, TLS ends in enclave)
     participant Anchor as networks::rgb::psbt_validation
     participant Inv as networks::rgb::invoice
     participant State as EnclaveState<br/>op_replay_guard
@@ -56,13 +57,15 @@ sequenceDiagram
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash, finalized block
     Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == signed mint OpId)<br/>+ one BridgeFundsIn, block > afterBlock, finalized,<br/>depth ≥ EVM_MIN_CONFIRMATIONS; deposit == the mint's derived lock
     Srv-->>Rgb: BoundAnchors (older mints: derived locks, no RPC)
-    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock,<br/>witnesses from the consignment (no network), finalize
+    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock
+    Rgb->>Idx: each history witness no mined witness spends: pinned indexer<br/>(TLS in the enclave, non-verbose), mined ≥ SPV_MIN_CONFIRMATIONS<br/>below its tip, else REFUSE; last witness (the mint tx) may be unmined
+    Rgb->>Rgb: finalize
     Rgb-->>Srv: ValidatedConsignment / REFUSE
 
     Note over Srv,Anchor: 4 - PSBT bind
     Srv->>Anchor: contract_id == asset_id == RGB_ASSET_ID
     Srv->>Anchor: settling transition == TS_MINT<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
-    Srv->>Anchor: exactly one committed transition, TS_MINT, none hidden<br/>sum(OS_ASSET) == amount − commission<br/>one mintRight to an owned seal this tx does not spend,<br/>colored inputs close seals
+    Srv->>Anchor: exactly one committed transition, TS_MINT, none hidden<br/>sum(OS_ASSET) == amount − commission<br/>one mintRight to an owned seal this tx does not spend<br/>(off-tx: mined and unspent per the indexer),<br/>colored inputs close seals
     Srv->>Anchor: legs: blinded seal ⇒ recipient,<br/>revealed seal ⇒ must be self-owned (≤ 4 off-PSBT outpoints,<br/>their script read from the indexer)<br/>sum(recipient legs) == amount − commission
     Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)
     Anchor-->>Srv: Ok / REFUSE
@@ -93,8 +96,11 @@ sequenceDiagram
     Listener-->>Orc: finalize + broadcast
 ```
 
-The witness transaction is being signed now. It does not need to be mined.
-The mint path does no SPV check. The replay cache is in memory and per
+The witness transaction is being signed now. It does not need to be mined:
+it is the only unmined witness consensus allows, and the PSBT bind requires
+it to be the PSBT's own tx. Every history witness must be mined, per the
+pinned indexer or a mined witness that spends it. The mint path has no SPV
+chain. The replay cache is in memory and per
 enclave. It is not a durable deposit ledger.
 
 See [the spec](../tee-spec.md#72-evm-lock---rgb-bridge-psbt) for the deposit

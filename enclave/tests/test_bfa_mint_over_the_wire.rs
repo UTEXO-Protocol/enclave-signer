@@ -345,7 +345,7 @@ fn context(contract_id: &ContractId, chain: DepositChain) -> ServerContext {
     );
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    // Validation reads no indexer: the witnesses are in the consignment.
+    // A first mint has no history, so validation reads no indexer.
     launch.rgb_validator =
         Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
     launch.evm_rpc_client = Some(Box::new(chain));

@@ -34,13 +34,18 @@ The burn signer signs nothing on Bitcoin.
 
 The burn signer checks request claims before it signs. It derives the burn
 amount from the consignment. It reads no EVM or Bitcoin indexer: the deposits
-behind the burn are derived, and the witnesses come from the consignment and
-the enclave's own header chain.
+behind the burn are derived, and the witnesses are checked on chain against
+the enclave's own header chain. RGB consensus takes each witness transaction
+from the consignment, but treats it as mined only if a Merkle proof in the
+request places it at least `SPV_MIN_CONFIRMATIONS` deep in that chain. An
+unmined witness anywhere in the history fails consensus. So two conflicting
+off-chain transfers of the same units cannot both back a burn: only one of
+them can be mined.
 
 On mainnet and testnet4, SPV checks witness inclusion against the enclave
-header chain with proof of work. On testnet4, min-difficulty blocks do not
-count as confirmations or freshness: a host can make them for free. Signet
-and regtest do not enforce proof of work. See
+header chain with proof of work. On testnet4, min-difficulty blocks count as
+confirmations and freshness, for testing convenience: testnets carry no
+production value. Signet and regtest do not enforce proof of work. See
 [Bitcoin network limits](tee-spec.md#8-rgb--bitcoin--spv-verification).
 
 ## 3. Sequence
@@ -61,8 +66,8 @@ sequenceDiagram
     L->>P: Sign(RgbSource -> EvmDestination)
     P->>E: forward over vsock
     E->>E: Stage 1: payload caps
-    E->>E: Stage 2: RGB consensus, mint anchors bound to derived deposits
-    E->>E: Stage 3: SPV proofs against own header chain
+    E->>E: Stage 2: RGB consensus, mint anchors bound to derived deposits,<br/>each witness mined per its SPV proof
+    E->>E: Stage 3: SPV freshness, proof coverage, block pins
     E->>E: Stage 4: decode and check calldata
     E->>E: Stage 5: bind release to burn
     E->>E: Stage 6: EIP-712 digest, sign
@@ -85,7 +90,7 @@ sequenceDiagram
 | `GS_BURNED_ASSET` | 2015 | Burn global: the number of units destroyed (u64). Required. |
 | `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `SPV_MIN_CONFIRMATIONS` | 6 | Minimum depth of each Bitcoin transaction. |
+| `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
 | `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
 | `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | Maximum distance from the BtcRelay tip to the enclave tip. |
@@ -145,6 +150,12 @@ the first step that reads the keys. It refuses an enclave without keys.
   witness, so one tx can also carry a plain transfer. Two burns there are
   refused. The amount comes from `burnedAsset`, never from the outputs or the
   host.
+- **B2.8** Consensus phase 2 resolves every witness, the burn included, on
+  chain: the transaction comes from the consignment, its block from the
+  request's Merkle proof for it. That proof must pass B3.4 and B3.5 first. A
+  witness with no such proof is unmined and fails consensus. A proof the
+  consignment itself carries is never used. Stage 3 runs these proof checks
+  again with coverage and pins.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 
@@ -157,17 +168,16 @@ ahead to lower its fork's difficulty. It accepts a replacement chain only
 when it has more work and meets the reorganization limits. Signet and regtest
 skip proof-of-work and `nBits` checks.
 
-- **B3.1** The newest block that proves work must not be older than 2
-  hours, nor more than 2 hours in the future. On the testnets a
-  min-difficulty block does not count.
+- **B3.1** The chain tip must not be older than 2 hours, nor more than 2
+  hours in the future. On the testnets a min-difficulty tip counts.
 - **B3.2** The consignment's network (`chain_net`) must equal the enclave's
   Bitcoin network.
 - **B3.3** The Merkle proofs must be exactly the set of witness transactions
   in the consignment. None missing. None extra. No duplicates.
 - **B3.4** Each Merkle path must be at most 32 levels. Each proof must verify
   against the header that the enclave stores at that height.
-- **B3.5** Each witness transaction must be at least 6 blocks deep. On the
-  testnets only blocks that prove work count.
+- **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
+  blocks deep (default 6). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights and hashes it used. Just before it
   uses the key, it checks that they did not change.
 
@@ -297,7 +307,8 @@ globals. So the burn signer needs three proofs that agree:
 
 1. RGB consensus: the burn and its whole history are valid, and every mint in
    it is confirmed against the deposit it derives.
-2. SPV: every witness transaction of the history is buried.
+2. SPV: every witness transaction of the history is buried, and consensus
+   saw each one as mined (B2.8).
 3. Globals: the amount and the payee in the burn equal those in the calldata.
 
 The contract proves that the cited deposits exist. The burn signer proves that

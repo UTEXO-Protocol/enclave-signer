@@ -248,6 +248,28 @@ fn production_rejects_a_zero_confirmation_rule() {
 }
 
 #[test]
+fn production_rejects_a_zero_spv_confirmation_rule() {
+    let ctx = release_bridge_ctx();
+    let mut cfg = pinned_config();
+    cfg.spv_min_confirmations = 0;
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test", 12);
+    let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
+    assert!(err.contains("SPV_MIN_CONFIRMATIONS"), "got: {err}");
+}
+
+#[test]
+fn spv_min_confirmations_is_attested() {
+    let ctx = release_bridge_ctx();
+    let commit = |depth: u32| {
+        let mut cfg = pinned_config();
+        cfg.spv_min_confirmations = depth;
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test", 12)
+            .commitment_bytes()
+    };
+    assert_ne!(commit(6), commit(7));
+}
+
+#[test]
 fn production_rejects_an_unpinned_token_contract() {
     // Without the token, the burnId check is skipped.
     let ctx = release_bridge_ctx();

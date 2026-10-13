@@ -11,12 +11,12 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V8`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V9`] instead.
 
 /// Version tag at the start of every policy commitment. A verifier rejects a
 /// different encoding version instead of computing a wrong hash. Bump it on
 /// every layout change.
-pub const POLICY_COMMITMENT_V8: u8 = 8;
+pub const POLICY_COMMITMENT_V9: u8 = 9;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -118,6 +118,8 @@ pub enum AttestedPolicy {
         funds_in_contract: [u8; 20],
         /// Minimum EVM receipt depth before a deposit can authorize signing.
         evm_min_confirmations: u64,
+        /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
+        spv_min_confirmations: u32,
         /// Host of the Electrum server the operator set at launch.
         electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
@@ -150,12 +152,13 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V8]
+    /// [POLICY_COMMITMENT_V9]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_min_confirmations u64 BE]
+    ///              [spv_min_confirmations u32 BE]
     ///              [len(electrum_host) u32 BE][electrum_host bytes]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
@@ -171,7 +174,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V8);
+        out.push(POLICY_COMMITMENT_V9);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -184,6 +187,7 @@ impl AttestedPolicy {
                 rgb_asset_id,
                 funds_in_contract,
                 evm_min_confirmations,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
@@ -206,6 +210,7 @@ impl AttestedPolicy {
                 out.extend_from_slice(rgb_asset_id.as_bytes());
                 out.extend_from_slice(funds_in_contract);
                 out.extend_from_slice(&evm_min_confirmations.to_be_bytes());
+                out.extend_from_slice(&spv_min_confirmations.to_be_bytes());
                 out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
                 out.extend_from_slice(electrum_host.as_bytes());
                 match evm_rpc_tls {
@@ -263,7 +268,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V8 {
+        if r.u8()? != POLICY_COMMITMENT_V9 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
@@ -296,6 +301,7 @@ impl AttestedPolicy {
                 let rgb_asset_id = r.string()?;
                 let funds_in_contract = r.array()?;
                 let evm_min_confirmations = u64::from_be_bytes(r.array()?);
+                let spv_min_confirmations = u32::from_be_bytes(r.array()?);
                 let electrum_host = r.string()?;
                 let evm_rpc_tls = r
                     .flag()?
@@ -342,6 +348,7 @@ impl AttestedPolicy {
                     rgb_asset_id,
                     funds_in_contract,
                     evm_min_confirmations,
+                    spv_min_confirmations,
                     electrum_host,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
@@ -440,6 +447,7 @@ mod tests {
             rgb_asset_id: asset.into(),
             funds_in_contract: [0x44; 20],
             evm_min_confirmations: 12,
+            spv_min_confirmations: 6,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             gas_tx_allowed_to: [0xAA; 20],
@@ -476,6 +484,7 @@ mod tests {
                 rgb_asset_id,
                 funds_in_contract,
                 evm_min_confirmations,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 token_contract,
@@ -492,6 +501,7 @@ mod tests {
                 rgb_asset_id,
                 funds_in_contract,
                 evm_min_confirmations,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to: to,
@@ -508,10 +518,10 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V8);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V9);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V8
+            POLICY_COMMITMENT_V9
         );
     }
 
@@ -574,6 +584,20 @@ mod tests {
         }
         assert_ne!(base().to_bytes(), emitter.to_bytes());
         assert_ne!(base().to_bytes(), confirmations.to_bytes());
+    }
+
+    #[test]
+    fn spv_min_confirmations_changes_the_bytes() {
+        let mut deeper = base();
+        if let AttestedPolicy::Production {
+            spv_min_confirmations,
+            ..
+        } = &mut deeper
+        {
+            *spv_min_confirmations = 7;
+        }
+        assert_ne!(base().to_bytes(), deeper.to_bytes());
+        assert_eq!(AttestedPolicy::from_bytes(&deeper.to_bytes()), Ok(deeper));
     }
 
     #[test]

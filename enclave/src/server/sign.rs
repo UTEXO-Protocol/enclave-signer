@@ -58,7 +58,8 @@ pub(super) fn handle_sign(
     //
     // An outpoint on this PSBT is resolved from its taproot metadata.
     // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib
-    // puts change on an existing UTXO when the transfer has no BTC change.
+    // puts RGB change, or a mint's right, on an existing UTXO when the tx has
+    // no BTC change.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt, outpoint: bitcoin::OutPoint| {
         use crate::networks::rgb::btc_ownership;
@@ -87,8 +88,14 @@ pub(super) fn handle_sign(
             )));
         };
         let script = txout.script_pubkey.as_bytes().to_vec();
-        ctx.state
-            .with_keys(|keys| Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script)))
+        let owned = ctx.state.with_keys(|keys| {
+            Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script))
+        })?;
+        // State sealed to a spent or unmined outpoint would be lost.
+        if owned {
+            validator.assert_unspent_and_mined(outpoint, &txout.script_pubkey)?;
+        }
+        Ok(owned)
     };
 
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -313,6 +320,7 @@ fn apply_funds_out_binding(
             &chain,
             pins,
             ctx.bridge_config.btc_relay_mode,
+            ctx.bridge_config.spv_min_confirmations,
         )?;
     }
 
@@ -883,19 +891,99 @@ mod key_not_ready {
         );
     }
 
-    /// Control: with a ready key a valid burn passes RGB validation and the
-    /// asset bind, and stops at the SPV check after them.
+    /// Control: with a ready key a valid burn passes the mint-anchor bind and
+    /// stops at the witnesses: with no SPV proof, none is mined to consensus.
     #[test]
-    fn a_ready_key_lets_a_valid_burn_reach_the_spv_check() {
+    fn a_ready_key_lets_a_valid_burn_reach_the_witness_check() {
         let (consignment, asset_id) = valid_burn();
         let (response, rpc_calls) = sign_burn(ready_state(), consignment, asset_id);
         let Response::Error(err) = &response else {
-            panic!("expected the SPV refusal, got {response:?}");
+            panic!("expected the witness refusal, got {response:?}");
         };
-        assert!(err.message.contains("spv:"), "{response:?}");
+        assert!(
+            err.message.contains("not confirmed on chain"),
+            "{response:?}"
+        );
         assert_eq!(
             rpc_calls, 0,
             "a burn must not read the EVM chain: {response:?}"
         );
+    }
+}
+
+/// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
+mod funds_out_depth {
+    use super::*;
+    use crate::config::{BridgeConfig, BtcRelayMode};
+    use crate::networks::evm::validation::ReleaseIdentity;
+    use crate::networks::rgb::spv_crosscheck::ChainPins;
+    use crate::networks::rgb::validation::ValidatedConsignment;
+    use crate::state::EnclaveState;
+    use alloy_primitives::U256;
+    use bitcoin::hashes::Hash;
+
+    const WITNESS: [u8; 32] = [0x5a; 32];
+
+    /// A release whose proof cites the witness block (1) and the tip (2),
+    /// with zero commitments for `BTC_RELAY_MODE=none`.
+    fn release() -> ReleaseIdentity {
+        let mut proof = vec![0u8; 128];
+        proof[31] = 1;
+        proof[95] = 2;
+        ReleaseIdentity {
+            burn_id: U256::ZERO,
+            amount: U256::ZERO,
+            source_chain_id: U256::ZERO,
+            source_address: String::new(),
+            settlement_data: vec![],
+            source_burn_tx_id: [0; 32],
+            recipient: [0; 32],
+            destination_chain_id: U256::ZERO,
+            dst_eid: None,
+            proof,
+        }
+    }
+
+    /// Runs the binding with the witness 2 deep. The relay checks pass in
+    /// `none` mode, so a pass on depth stops at the missing transition.
+    fn bind_at(min_confirmations: u32) -> String {
+        let (chain, proofs) = crate::test_support::chain_with_witnesses(&[WITNESS], 1);
+        let cfg = BridgeConfig {
+            btc_relay_mode: BtcRelayMode::None,
+            spv_min_confirmations: min_confirmations,
+            ..BridgeConfig::default()
+        };
+        let ctx = ServerContext::new(EnclaveState::default(), cfg, chain);
+        let mut internal = WITNESS;
+        internal.reverse();
+        let validated = ValidatedConsignment {
+            witness_txids: vec![WITNESS],
+            last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+            ..Default::default()
+        };
+        apply_funds_out_binding(
+            &ctx,
+            &release(),
+            Some(&validated),
+            &proofs,
+            &ChainPins::new(),
+            #[cfg(feature = "rgb-mint-burn")]
+            None,
+        )
+        .unwrap_err()
+        .to_string()
+    }
+
+    #[test]
+    fn a_config_depth_the_anchor_meets_passes_the_depth_check() {
+        let err = bind_at(2);
+        assert!(err.contains("at least one transition"), "{err}");
+    }
+
+    #[test]
+    fn a_config_depth_above_the_anchor_refuses() {
+        let err = bind_at(3);
+        assert!(err.contains("insufficient confirmations"), "{err}");
     }
 }

@@ -21,7 +21,7 @@ fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let synced = assert_chain_ready(&chain, now).is_ok();
+    let synced = assert_chain_ready(&chain, now, ctx.bridge_config.spv_min_confirmations).is_ok();
     let (tip_height, tip_time) = (chain.tip_height(), chain.tip_time());
     drop(chain);
 

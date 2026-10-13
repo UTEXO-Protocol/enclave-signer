@@ -656,13 +656,13 @@ fn testnet4_refuses_a_work_block_with_the_minimum_difficulty() {
     );
 }
 
-/// 29 blocks sit above 155_233, but only four of them prove work.
+/// Min-difficulty blocks count like any other block on the testnets.
 #[test]
-fn min_difficulty_blocks_do_not_confirm() {
+fn min_difficulty_blocks_confirm_on_testnets() {
     let chain = testnet4_chain();
-    assert_eq!(chain.confirmations(155_233, 6), 4);
-    assert_eq!(chain.confirmations(155_249, 6), 1);
-    assert_eq!(chain.confirmations(155_257, 6), 0);
+    assert_eq!(chain.confirmations(155_233, 64), 30);
+    assert_eq!(chain.confirmations(155_257, 6), 6);
+    assert_eq!(chain.confirmations(155_262, 6), 1);
     assert_eq!(chain.confirmations(155_263, 6), 0);
 }
 
@@ -677,14 +677,6 @@ fn every_block_confirms_where_min_difficulty_is_not_allowed() {
     let (mut chain, raws) = synthetic_regtest_setup();
     chain.submit_headers(101, &raws, NOW).unwrap();
     assert_eq!(chain.confirmations(101, 6), 5);
-}
-
-/// The tip is a min-difficulty block. Freshness reads the last work block.
-#[test]
-fn freshness_reads_the_newest_work_block() {
-    let chain = testnet4_chain();
-    assert_eq!(chain.tip_time(), 1_791_217_894);
-    assert_eq!(chain.fresh_time(), 1_791_210_688);
 }
 
 /// A free block dated weeks ahead would let a host fork retarget down without

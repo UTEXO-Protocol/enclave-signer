@@ -136,6 +136,7 @@ pub fn log_policy(policy: &SecurityPolicy) {
             funds_in_contract = %hex::encode(p.funds_in_contract),
             token_contract = %hex::encode(p.token_contract),
             evm_min_confirmations = p.evm_min_confirmations,
+            spv_min_confirmations = p.spv_min_confirmations,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"
         ),

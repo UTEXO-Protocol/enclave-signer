@@ -16,7 +16,7 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map. Thus confirmation does not rest on the SPV header chain alone.
+/// ordinal map, which the burn path fills from verified SPV proofs only.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -188,11 +188,12 @@ pub fn validate_funds_out_source_burn_tx_id(
 ///
 /// `RgbSettlementModule.beforeFundsOut` decodes `settlementData` as
 /// `abi.encode(bytes32[] operationIds, uint256[] amounts)`. It checks each
-/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`. It
-/// does not know the deposits behind a burn. The enclave knows, because it
-/// verified each ancestry lock receipt
-/// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
-/// equal that ancestry, pair for pair.
+/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`, but
+/// does not know which deposits are behind a burn. The enclave derives one
+/// deposit id per ancestry mint ([`crate::networks::evm::events::derived_lock`])
+/// without reading the chain. That deposit's existence is enforced by
+/// `beforeFundsOut`, so the release route must use `RgbSettlementModule`.
+/// The cited set must equal the derived ancestry, pair for pair.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
 /// `operationId` order, which also refuses duplicates. `burnId` does not hash
@@ -319,6 +320,7 @@ pub fn verify_btc_relay_agreement(
     chain: &HeaderChain,
     pins: &ChainPins,
     mode: BtcRelayMode,
+    min_confirmations: u32,
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(release)?;
 
@@ -350,7 +352,7 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
+    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain, min_confirmations)?;
     pins.pin(chain, anchor.height)?;
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
@@ -495,13 +497,14 @@ struct ConsignmentAnchor {
 ///
 /// The proof is verified again here. The earlier `validate_source_chain` pass
 /// held a different header-chain lock. A concurrent `SubmitHeaders` reorg (up
-/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS = 6`) can
+/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS`) can
 /// replace the header between the two. Inclusion and header hash must come
 /// from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
+    min_confirmations: u32,
 ) -> Result<ConsignmentAnchor> {
     use bitcoin::hashes::Hash as _;
 
@@ -547,7 +550,7 @@ fn resolve_consignment_anchor(
         chain,
         &[txid],
         std::slice::from_ref(proof),
-        spv_crosscheck::SPV_MIN_CONFIRMATIONS,
+        min_confirmations,
     )?;
 
     Ok(ConsignmentAnchor {

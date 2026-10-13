@@ -28,27 +28,28 @@ sequenceDiagram
     Note over Srv,Bind: 1 - validate_source (RGB), no network call
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
+    Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
     Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, no reject list
     Rgb->>Rgb: phase 1: validate_deterministic(BFA rules, chain_net)<br/>leaves the witnesses and the mint anchors open
     Rgb->>Bind: AnchorBinder(genesis bridgeLocation, mint anchors)
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(mint OpId, minted units; no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock;<br/>witnesses from the consignment's own txs (Tentative,<br/>ConsignmentTxResolver); finalize
+    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock;<br/>each witness: tx from the consignment, Mined(height) only<br/>from a proven SPV proof (OnChainResolver), else REFUSE; finalize
     Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId; flat parser must agree
     Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source, feature spv)
     Srv->>Chain: lock chain
-    Srv->>Spv: assert_chain_not_stale: newest work block<br/>≤ 2 h old, ≤ 2 h future
+    Srv->>Spv: assert_chain_not_stale: tip<br/>≤ 2 h old, ≤ 2 h future
     Srv->>Spv: assert_chain_net(consignment, enclave network)
     Srv->>Spv: validate_spv_proofs(witness_txids, proofs)
     Spv->>Spv: exact set-equality(expected txids, proofs)
     loop each MerkleProofEntry
         Spv->>Spv: merkle path depth ≤ 32
         Spv->>Chain: header_at(block_height)
-        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (6)<br/>(testnets: min-difficulty blocks do not count)
+        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (default 6, attested)
         Spv->>Spv: verify_merkle_proof(txid, position, path, root)
     end
     Spv->>Chain: pin each proof block (ChainPins)

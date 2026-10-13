@@ -63,11 +63,8 @@ pub struct ValidatedConsignment {
     /// Witness txids that are **not mined**, in **display (big-endian) byte
     /// order**, as [`Self::witness_txids`].
     ///
-    /// Always empty at present. rgb-ops sets each consignment tx to
-    /// `WitnessOrd::Tentative` at any depth, so `validate_consignment` does
-    /// not fill it. RGB->EVM confirmation comes from the SPV depth check.
-    /// The empty set keeps `evm::crosscheck::assert_witnesses_confirmed` as a
-    /// structural guard.
+    /// Empty on the burn path. On the mint path, at most the mint tx being
+    /// signed: consensus refuses every other unmined witness.
     pub non_mined_witness_txids: Vec<[u8; 32]>,
     /// Every transition in the consignment, grouped by the witness tx that
     /// commits it.

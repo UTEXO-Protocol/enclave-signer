@@ -3,7 +3,8 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the indexer client and the consignment witness resolver.
+//! - `indexer.rs`: the indexer client, and the mint path's witness source.
+//! - `witness.rs`: the on-chain witness resolver consensus runs with.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
 //! - `types.rs`: those shapes.
@@ -21,6 +22,7 @@ mod indexer;
 mod schema;
 mod source;
 mod types;
+mod witness;
 
 #[cfg(test)]
 mod tests;
@@ -28,9 +30,10 @@ mod tests;
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
-pub use indexer::RgbValidator;
+pub use indexer::{IndexerWitnesses, RgbValidator};
 pub(crate) use schema::BFA_RULES;
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
 pub use source::validate_source;
 pub use types::{OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment};
+pub use witness::{ConfirmedWitnesses, WitnessCheck};

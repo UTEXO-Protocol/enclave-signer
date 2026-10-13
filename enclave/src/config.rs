@@ -31,6 +31,11 @@ pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// fits: 16_384 x 448 bytes = 7.3 MB.
 pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
+/// Env var of [`BridgeConfig::spv_min_confirmations`].
+pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
+/// Default depth of each Bitcoin witness tx before the enclave signs.
+pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 6;
+
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -111,6 +116,9 @@ pub struct BridgeConfig {
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
+    /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
+    /// 6, at least 1). Image env, so PCR0 measures it, and attested.
+    pub spv_min_confirmations: u32,
 }
 
 /// Env var selecting [`BtcRelayMode`].
@@ -170,6 +178,7 @@ impl Default for BridgeConfig {
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
+            spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
         }
     }
 }
@@ -288,6 +297,10 @@ impl BridgeConfig {
         let max_total_proof_bytes =
             parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
 
+        let spv_min_confirmations =
+            parse_spv_min_confirmations(std::env::var(SPV_MIN_CONFIRMATIONS_ENV).ok().as_deref())
+                .unwrap_or_else(|e| panic!("{e}"));
+
         Self {
             chain_id,
             bridge_contract,
@@ -306,6 +319,7 @@ impl BridgeConfig {
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,
+            spv_min_confirmations,
         }
     }
 
@@ -337,6 +351,21 @@ impl BridgeConfig {
     /// `btc_crosscheck::validate_btc_request` enforces it. The two must agree.
     pub fn allows_vanilla_btc(&self) -> bool {
         self.btc_max_total_sats != 0
+    }
+}
+
+/// Parse `SPV_MIN_CONFIRMATIONS`. Unset or empty gives the default. Zero or a
+/// non-number is an error, so a typo cannot lower the depth.
+pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u32, String> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_SPV_MIN_CONFIRMATIONS);
+    };
+    match raw.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "{SPV_MIN_CONFIRMATIONS_ENV} {raw:?} is not valid: set a whole number of at least 1, \
+             or leave it unset for {DEFAULT_SPV_MIN_CONFIRMATIONS}"
+        )),
     }
 }
 
@@ -558,8 +587,8 @@ fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
 /// development policy.
 ///
 /// Over `tcp://` or `http://` the host reads and changes every indexer answer.
-/// The mint path has no SPV check, so the indexer is its only source of the
-/// witness history. The attested policy commits the indexer host, not its
+/// The mint path has no SPV check, so the indexer alone says whether its
+/// history witnesses are mined. The attested policy commits the indexer host, not its
 /// scheme. Thus a release image refuses plaintext: the rule is in the code,
 /// and PCR0 measures it.
 #[cfg(feature = "rgb-validation")]
@@ -689,6 +718,26 @@ mod tests {
                 BtcRelayMode::Required,
                 "{v}"
             );
+        }
+    }
+
+    #[test]
+    fn spv_min_confirmations_defaults_to_six_when_unset() {
+        assert_eq!(parse_spv_min_confirmations(None), Ok(6));
+        assert_eq!(parse_spv_min_confirmations(Some(" ")), Ok(6));
+    }
+
+    #[test]
+    fn spv_min_confirmations_accepts_a_positive_number() {
+        assert_eq!(parse_spv_min_confirmations(Some("1")), Ok(1));
+        assert_eq!(parse_spv_min_confirmations(Some(" 12 ")), Ok(12));
+    }
+
+    #[test]
+    fn spv_min_confirmations_rejects_zero_and_garbage() {
+        for v in ["0", "-1", "six", "6.5", "99999999999"] {
+            let err = parse_spv_min_confirmations(Some(v)).unwrap_err();
+            assert!(err.contains("at least 1"), "{v}: {err}");
         }
     }
 

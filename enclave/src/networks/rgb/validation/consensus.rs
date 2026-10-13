@@ -6,8 +6,9 @@
 //! 1. `validate_deterministic`: everything that depends on the consignment
 //!    only. It leaves open the witnesses and the BFA mint anchors.
 //! 2. The anchors resolve only against the locks an [`AnchorBinder`] bound to
-//!    them, the witnesses only from the consignment's own txs. Then
-//!    `finalize`.
+//!    them. Each witness takes its tx from the consignment and its on-chain
+//!    status from a [`WitnessCheck`]: it must be mined, at
+//!    `SPV_MIN_CONFIRMATIONS` depth. Then `finalize`.
 //!
 //! The enclave never calls `Consignment::validate`, and never confirms an
 //! anchor without a bound lock (`PendingValidation::resolve_anchor`).
@@ -16,13 +17,15 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use rgbstd::containers::{ConsignmentExt, FileContent, PendingConsignment, Transfer};
-use rgbstd::validation::{ValidationConfig, ValidationError};
+use rgbstd::validation::{Status, ValidationConfig, ValidationError};
+use rgbstd::vm::WitnessOrd;
 
 use super::bfa::{self, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
-use super::indexer::{ConsignmentTxResolver, RgbValidator};
+use super::indexer::RgbValidator;
 use super::schema::{assert_bfa_genesis, BFA_RULES};
 use super::types::ValidatedConsignment;
+use super::witness::{OnChainResolver, WitnessCheck};
 use crate::error::{EnclaveError, Result};
 
 impl RgbValidator {
@@ -30,11 +33,12 @@ impl RgbValidator {
     ///
     /// `bind` binds every mint anchor to a lock. Builds without
     /// `bfa-validation` pass `None`, and then a consignment with any mint in
-    /// its history is refused.
+    /// its history is refused. `witnesses` says which witness txs are mined.
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
         bind: Option<AnchorBinder<'_>>,
+        witnesses: &WitnessCheck<'_>,
     ) -> Result<ValidatedConsignment> {
         #[cfg(test)]
         if let Some(validated) = &self.canned {
@@ -55,13 +59,20 @@ impl RgbValidator {
         let mut pending = self.phase_one(transfer, &contract_id)?;
         let anchors = open_anchors(&mut pending);
         let mint_locks = resolve_mint_anchors(&mut pending, &anchors, bind)?;
-        self.resolve_witnesses(&mut pending, &contract_id)?;
+        self.resolve_witnesses(&mut pending, &contract_id, witnesses)?;
         let valid = pending.finalize();
         for warning in &valid.validation_status().warnings {
             tracing::warn!(%contract_id, "RGB validation warning: {warning}");
         }
 
-        let validated = summarize(&valid, consignment_bytes, contract_id, mint_locks)?;
+        let non_mined = non_mined_witnesses(valid.validation_status());
+        let validated = summarize(
+            &valid,
+            consignment_bytes,
+            contract_id,
+            mint_locks,
+            non_mined,
+        )?;
         tracing::info!(
             contract_id = %validated.contract_id,
             chain_net = %validated.chain_net,
@@ -86,14 +97,15 @@ impl RgbValidator {
 }
 
 impl RgbValidator {
-    /// Phase 2 for the witnesses, from the consignment's own txs. Leaves
+    /// Phase 2 for the witnesses: each must be confirmed on chain. Leaves
     /// nothing open: `finalize` panics on that, and the enclave aborts.
     fn resolve_witnesses(
         &self,
         pending: &mut PendingConsignment<true>,
         contract_id: &str,
+        witnesses: &WitnessCheck<'_>,
     ) -> Result<()> {
-        let resolver = ConsignmentTxResolver::new(pending.consignment(), self.chain_net);
+        let resolver = OnChainResolver::new(pending.consignment(), self.chain_net, witnesses);
         pending
             .pending()
             .resolve_all(&resolver)
@@ -160,6 +172,7 @@ fn summarize(
     consignment_bytes: &[u8],
     contract_id: String,
     mint_locks: Vec<bfa::VerifiedLock>,
+    non_mined_witness_txids: Vec<[u8; 32]>,
 ) -> Result<ValidatedConsignment> {
     // Display-order bytes, deduplicated and sorted, as the SPV proofs carry them.
     let witness_txids: Vec<[u8; 32]> = transfer
@@ -199,11 +212,26 @@ fn summarize(
             .map(|l| l.settling.mint_rights.clone())
             .unwrap_or_default(),
         last_transfer_op_id: last.as_ref().map(|l| l.settling.opid),
-        // Every witness resolves as tentative. Depth comes from the SPV check.
-        non_mined_witness_txids: Vec::new(),
+        non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
     })
+}
+
+/// Witnesses consensus did not see mined: at most the mint's own tx.
+fn non_mined_witnesses(status: &Status) -> Vec<[u8; 32]> {
+    status
+        .tx_ord_map
+        .iter()
+        .filter(|(_, ord)| !matches!(ord, WitnessOrd::Mined(_)))
+        .map(|(txid, _)| {
+            let mut bytes = bitcoin::hashes::Hash::to_byte_array(*txid);
+            bytes.reverse();
+            bytes
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The flat summary of the settling transition, with the burn facts of the
@@ -248,6 +276,7 @@ fn settling_summary(
 fn validation_error(contract_id: &str, e: ValidationError) -> EnclaveError {
     let detail = match &e {
         ValidationError::InvalidConsignment(failure) => failure.to_string(),
+        ValidationError::ResolverError(resolver) => resolver.to_string(),
         other => other.to_string(),
     };
     tracing::warn!(%contract_id, %detail, "RGB validation failed: {e}");

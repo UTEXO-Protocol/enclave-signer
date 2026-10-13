@@ -50,6 +50,8 @@ pub struct ProductionPolicy {
     pub token_contract: [u8; 20],
     /// Min receipt depth of an accepted FundsIn deposit.
     pub evm_min_confirmations: u64,
+    /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
+    pub spv_min_confirmations: u32,
     /// `fundsOut` proofs must carry BtcRelay commitments (`BTC_RELAY_MODE=required`).
     /// [`check_invariants`](Self::check_invariants) refuses `false`, so
     /// [`AttestedPolicy`] has no field for it.
@@ -181,6 +183,7 @@ impl SecurityPolicy {
             funds_in_contract: bridge.funds_in_contract,
             token_contract: bridge.token_contract,
             evm_min_confirmations,
+            spv_min_confirmations: bridge.spv_min_confirmations,
             btc_relay_required: bridge.btc_relay_mode == BtcRelayMode::Required,
             allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
             signer_role: ctx.signer_role,
@@ -241,6 +244,7 @@ impl SecurityPolicy {
                 funds_in_contract: p.funds_in_contract,
                 token_contract: p.token_contract,
                 evm_min_confirmations: p.evm_min_confirmations,
+                spv_min_confirmations: p.spv_min_confirmations,
                 electrum_host: p.electrum_host.clone(),
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // Unset commits as all-zero, which the gas path never accepts.
@@ -339,6 +343,13 @@ impl ProductionPolicy {
         }
         if self.evm_min_confirmations == 0 {
             return Err("production policy must require at least one EVM confirmation".into());
+        }
+        if self.spv_min_confirmations == 0 {
+            return Err(
+                "production policy must require at least one Bitcoin confirmation \
+                 (SPV_MIN_CONFIRMATIONS)"
+                    .into(),
+            );
         }
         if !self.btc_relay_required {
             return Err(format!(

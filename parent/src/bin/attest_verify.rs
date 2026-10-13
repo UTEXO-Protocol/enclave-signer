@@ -129,6 +129,10 @@ struct Cli {
     #[arg(long)]
     expect_evm_min_confirmations: Option<u64>,
 
+    /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
+    #[arg(long, default_value_t = 6)]
+    expect_spv_min_confirmations: u32,
+
     /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
     /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
     /// all-zero destination and rejects the path. Ignored with --mock.
@@ -290,6 +294,12 @@ fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
         .context("--expect-evm-min-confirmations must be specified and greater than zero")
 }
 
+fn parse_expect_spv_min_confirmations(value: u32) -> Result<u32> {
+    Some(value)
+        .filter(|n| *n > 0)
+        .context("--expect-spv-min-confirmations must be greater than zero")
+}
+
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
 /// An empty string yields an empty allowlist.
 fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
@@ -375,6 +385,9 @@ async fn run(cli: Cli) -> Result<()> {
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
             evm_min_confirmations: parse_expect_evm_min_confirmations(
                 cli.expect_evm_min_confirmations,
+            )?,
+            spv_min_confirmations: parse_expect_spv_min_confirmations(
+                cli.expect_spv_min_confirmations,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
