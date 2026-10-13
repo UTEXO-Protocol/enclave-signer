@@ -309,46 +309,49 @@ mod asset_bind {
         );
     }
 
-    /// A pinned destination whose PSBT is `tx`, with no input data.
+    /// The PSBT-bind tests use a mint consignment, which only the mint-burn
+    /// flow accepts.
     #[cfg(feature = "rgb-mint-burn")]
-    fn with_psbt(tx: bitcoin::Transaction) -> (RgbDestination, BridgeConfig) {
-        let id = asset_id();
-        let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx)
-            .unwrap()
-            .serialize();
-        let destination = RgbDestination {
-            psbt_bytes: psbt,
-            ..destination(&id)
-        };
-        (destination, pinned_config(&id))
-    }
+    mod unbroadcast_mint {
+        use super::*;
 
-    #[cfg(feature = "rgb-mint-burn")]
-    fn mint_tx() -> bitcoin::Transaction {
-        mint().bundles.last().unwrap().tx.clone()
-    }
+        /// A pinned destination whose PSBT is `tx`, with no input data.
+        fn with_psbt(tx: bitcoin::Transaction) -> (RgbDestination, BridgeConfig) {
+            let id = asset_id();
+            let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx)
+                .unwrap()
+                .serialize();
+            let destination = RgbDestination {
+                psbt_bytes: psbt,
+                ..destination(&id)
+            };
+            (destination, pinned_config(&id))
+        }
 
-    /// The mint tx is unbroadcast, so no indexer knows it. It passes
-    /// consensus and the PSBT bind, and stops at the next PSBT check.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn the_unbroadcast_mint_tx_passes_when_it_is_the_psbt() {
-        let (destination, config) = with_psbt(mint_tx());
-        let msg = run(&destination, &config).unwrap_err().to_string();
-        assert!(msg.contains("carries no witness_utxo"), "{msg}");
-    }
+        fn mint_tx() -> bitcoin::Transaction {
+            mint().bundles.last().unwrap().tx.clone()
+        }
 
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn an_unbroadcast_mint_tx_that_is_not_the_psbt_is_refused() {
-        let mut other = mint_tx();
-        other.lock_time = bitcoin::absolute::LockTime::from_consensus(1);
-        let (destination, config) = with_psbt(other);
-        let msg = run(&destination, &config).unwrap_err().to_string();
-        assert!(
-            msg.contains("does not finalize the consignment's transition"),
-            "{msg}"
-        );
+        /// The mint tx is unbroadcast, so no indexer knows it. It passes
+        /// consensus and the PSBT bind, and stops at the next PSBT check.
+        #[test]
+        fn the_unbroadcast_mint_tx_passes_when_it_is_the_psbt() {
+            let (destination, config) = with_psbt(mint_tx());
+            let msg = run(&destination, &config).unwrap_err().to_string();
+            assert!(msg.contains("carries no witness_utxo"), "{msg}");
+        }
+
+        #[test]
+        fn an_unbroadcast_mint_tx_that_is_not_the_psbt_is_refused() {
+            let mut other = mint_tx();
+            other.lock_time = bitcoin::absolute::LockTime::from_consensus(1);
+            let (destination, config) = with_psbt(other);
+            let msg = run(&destination, &config).unwrap_err().to_string();
+            assert!(
+                msg.contains("does not finalize the consignment's transition"),
+                "{msg}"
+            );
+        }
     }
 
     /// A mint of an asset with a reject list, as a pinned destination.
