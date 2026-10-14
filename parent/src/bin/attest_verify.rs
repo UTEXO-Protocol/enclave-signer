@@ -17,9 +17,10 @@
 //!
 //! Exit codes:
 //!     0 - verification succeeded
-//!     1 - verification, IO, connection or missing-flag failure (output gives
-//!         the reason)
-//!     2 - argument parse error
+//!     1 - error after argument parsing: verification, connection, IO or
+//!         missing/invalid settings (e.g. PCR hex); see stderr
+//!     2 - argument parse error (e.g. unknown/conflicting flags or a
+//!         non-numeric --expect-chain-id)
 
 use std::process::ExitCode;
 

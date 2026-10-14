@@ -341,8 +341,8 @@ Exit codes:
 | Code | Meaning                                                         |
 |------|-----------------------------------------------------------------|
 | 0    | All eight checks passed                                         |
-| 1    | Verification failed, or the endpoint could not be reached (stderr explains why) |
-| 2    | Command-line usage error                                        |
+| 1    | Error after argument parsing: verification, connection, file I/O or missing/invalid settings (e.g. PCR hex); see stderr |
+| 2    | Command-line argument parsing failed (e.g. unknown/conflicting flags or non-numeric `--expect-chain-id`) |
 
 ## Launch check at deploy
 
