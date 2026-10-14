@@ -6,10 +6,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use attestation_verify::{
     policy_commitment, AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource,
     EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole,
+    VerifiedAttestation,
 };
 use sha2::{Digest, Sha256};
 
-use crate::attest_verify::VerifyMode;
+use crate::attest_verify::{refuse_mock_production, VerifyMode};
 use crate::enclave_proto::{GetAttestedPublicKeyResponse, SetEndpointsRequest};
 
 /// The policy that a production enclave of `role` must attest after
@@ -187,20 +188,28 @@ pub fn check_launch(
     expected: &AttestedPolicy,
     mode: VerifyMode,
 ) -> Result<AttestedPolicy> {
+    check_launch_with(response, mode, expected, |doc| {
+        Ok(match mode {
+            VerifyMode::Real => attestation_verify::verify_policy_attestation(doc, pcrs, &nonce),
+            VerifyMode::Mock => {
+                attestation_verify::verify_mock_policy_attestation(doc, pcrs, &nonce)
+            }
+        }?)
+    })
+}
+
+fn check_launch_with(
+    response: GetAttestedPublicKeyResponse,
+    mode: VerifyMode,
+    expected: &AttestedPolicy,
+    verify_doc: impl FnOnce(&[u8]) -> Result<VerifiedAttestation>,
+) -> Result<AttestedPolicy> {
+    refuse_mock_production(mode, matches!(expected, AttestedPolicy::Production { .. }))?;
     if response.public_keys.is_some() {
         bail!("the enclave already has keys; the launch check needs a fresh enclave");
     }
-    let verified = match mode {
-        VerifyMode::Real => {
-            attestation_verify::verify_policy_attestation(&response.attestation_doc, pcrs, &nonce)
-        }
-        VerifyMode::Mock => attestation_verify::verify_mock_policy_attestation(
-            &response.attestation_doc,
-            pcrs,
-            &nonce,
-        ),
-    }
-    .context("attestation verification failed")?;
+    let verified =
+        verify_doc(&response.attestation_doc).context("attestation verification failed")?;
     if verified.user_data.as_deref()
         != Some(policy_commitment(&response.attested_policy).as_slice())
     {
@@ -318,6 +327,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use attestation_verify::test_util::{signed_document, verify_policy_with_root};
 
     const PCRS: ExpectedPcrs = ExpectedPcrs {
         pcr0: [1; 48],
@@ -415,8 +425,22 @@ mod tests {
         ));
     }
 
-    /// The policy-only answer of an enclave that attests `policy`.
-    fn response(policy: &[u8]) -> GetAttestedPublicKeyResponse {
+    /// The policy-only answer of an enclave that attests `policy`, signed
+    /// under a test root, and the root DER.
+    fn response(policy: &[u8]) -> (GetAttestedPublicKeyResponse, Vec<u8>) {
+        let commitment = policy_commitment(policy);
+        let (doc, root) =
+            signed_document(&PCRS, &NONCE, None, &commitment, 1_577_880_000_000, None);
+        let answer = GetAttestedPublicKeyResponse {
+            public_keys: None,
+            attestation_doc: doc,
+            attested_policy: policy.to_vec(),
+        };
+        (answer, root)
+    }
+
+    /// The policy-only answer of a mock enclave that attests `policy`.
+    fn mock_response(policy: &[u8]) -> GetAttestedPublicKeyResponse {
         let commitment = policy_commitment(policy);
         GetAttestedPublicKeyResponse {
             public_keys: None,
@@ -431,8 +455,19 @@ mod tests {
         }
     }
 
-    fn check(response: GetAttestedPublicKeyResponse) -> Result<AttestedPolicy> {
-        check_launch(response, NONCE, &PCRS, &expected(), VerifyMode::Mock)
+    /// The launch check in Real mode, with `root` as the trust anchor.
+    fn check_with(
+        (response, root): (GetAttestedPublicKeyResponse, Vec<u8>),
+        nonce: [u8; 32],
+        pcrs: &ExpectedPcrs,
+    ) -> Result<AttestedPolicy> {
+        check_launch_with(response, VerifyMode::Real, &expected(), |doc| {
+            Ok(verify_policy_with_root(doc, pcrs, &nonce, &root)?)
+        })
+    }
+
+    fn check(answer: (GetAttestedPublicKeyResponse, Vec<u8>)) -> Result<AttestedPolicy> {
+        check_with(answer, NONCE, &PCRS)
     }
 
     /// The enclave attests `expected()` with one edit. The check must fail
@@ -769,28 +804,11 @@ mod tests {
     /// whatever it attests.
     #[test]
     fn a_cloning_role_without_an_iam_role_aborts() {
-        let mut policy = expected();
-        set!(clone_peer_pcr3, Some([0; 48]))(&mut policy);
-        let commitment = policy_commitment(&policy.to_bytes());
-        let r = GetAttestedPublicKeyResponse {
-            public_keys: None,
-            attestation_doc: attestation_verify::build_mock_document_with_pcr3(
-                &NONCE,
-                None,
-                Some(&commitment),
-                Some(&[0; 48]),
-            )
-            .unwrap(),
-            attested_policy: policy.to_bytes(),
-        };
-        let err = check_launch(
-            r,
-            NONCE,
-            &ExpectedPcrs::zero(),
-            &expected(),
-            VerifyMode::Mock,
-        )
-        .unwrap_err();
+        // A signed test document always carries MOCK_PCR3, and Mock mode
+        // refuses Production, so check the PCR3 rule directly.
+        let mut pcrs: HashMap<u32, Vec<u8>> = (0..3).map(|i| (i, vec![0u8; 48])).collect();
+        pcrs.insert(3, vec![0; 48]);
+        let err = with_document_pcr3(&expected(), &pcrs).unwrap_err();
         assert!(err.to_string().contains("no IAM role"), "{err}");
     }
 
@@ -798,13 +816,10 @@ mod tests {
     #[test]
     fn the_mint_signer_attests_no_pcr3() {
         let mint = expected_policy(SignerRole::Mint, &image_env(), &endpoints()).unwrap();
-        let policy = check_launch(
-            response(&mint.to_bytes()),
-            NONCE,
-            &PCRS,
-            &mint,
-            VerifyMode::Mock,
-        )
+        let (r, root) = response(&mint.to_bytes());
+        let policy = check_launch_with(r, VerifyMode::Real, &mint, |doc| {
+            Ok(verify_policy_with_root(doc, &PCRS, &NONCE, &root)?)
+        })
         .unwrap();
         assert!(matches!(
             policy,
@@ -827,81 +842,71 @@ mod tests {
     #[test]
     fn a_wrong_pcr_aborts() {
         let other = ExpectedPcrs::new([1; 48], [2; 48], [9; 48]);
-        let err = check_launch(
-            response(&attested().to_bytes()),
-            NONCE,
-            &other,
-            &expected(),
-            VerifyMode::Mock,
-        )
-        .unwrap_err();
+        let err = check_with(response(&attested().to_bytes()), NONCE, &other).unwrap_err();
         assert!(format!("{err:#}").contains("PCR mismatch: PCR2"), "{err:#}");
     }
 
     #[test]
     fn a_wrong_nonce_aborts() {
-        let err = check_launch(
-            response(&attested().to_bytes()),
-            [8; 32],
-            &PCRS,
-            &expected(),
-            VerifyMode::Mock,
-        )
-        .unwrap_err();
+        let err = check_with(response(&attested().to_bytes()), [8; 32], &PCRS).unwrap_err();
         assert!(format!("{err:#}").contains("nonce mismatch"), "{err:#}");
     }
 
     #[test]
     fn a_missing_nonce_aborts() {
         // The mock builder always sets a nonce. Drop it from the CBOR map.
-        let mut r = response(&attested().to_bytes());
+        // A signed document cannot drop it, so this test runs in Mock mode.
+        let dev = AttestedPolicy::Development;
+        let mut r = mock_response(&dev.to_bytes());
         let mut doc: ciborium::Value = ciborium::from_reader(r.attestation_doc.as_slice()).unwrap();
         doc.as_map_mut()
             .unwrap()
             .retain(|(k, _)| k.as_text() != Some("nonce"));
         r.attestation_doc.clear();
         ciborium::into_writer(&doc, &mut r.attestation_doc).unwrap();
-        let err = check(r).unwrap_err();
+        let err = check_launch(r, NONCE, &PCRS, &dev, VerifyMode::Mock).unwrap_err();
         assert!(format!("{err:#}").contains("missing nonce"), "{err:#}");
     }
 
     #[test]
     fn changed_policy_bytes_fail_the_commitment() {
-        let mut r = response(&attested().to_bytes());
-        let mut other = attested();
+        let (mut r, root) = response(&attested().to_bytes());
+        let mut other = expected();
         set!(chain_id, 1)(&mut other);
         r.attested_policy = other.to_bytes();
-        let err = check(r).unwrap_err();
+        let err = check((r, root)).unwrap_err();
         assert!(err.to_string().contains("does not commit"), "{err}");
     }
 
     #[test]
     fn a_keyed_answer_aborts() {
-        let mut r = response(&attested().to_bytes());
+        let (mut r, root) = response(&attested().to_bytes());
         r.public_keys = Some(Default::default());
-        let err = check(r).unwrap_err();
+        let err = check((r, root)).unwrap_err();
         assert!(err.to_string().contains("already has keys"), "{err}");
     }
 
     #[test]
     fn a_keyed_document_aborts() {
-        let mut r = response(&attested().to_bytes());
+        let (mut r, _) = response(&attested().to_bytes());
         let commitment = policy_commitment(&r.attested_policy);
-        r.attestation_doc = attestation_verify::build_mock_document_with_pcrs(
+        let (doc, root) = signed_document(
+            &PCRS,
             &NONCE,
             Some(&[4; 65]),
-            Some(&commitment),
-            &PCRS,
-        )
-        .unwrap();
-        let err = check(r).unwrap_err();
+            &commitment,
+            1_577_880_000_000,
+            None,
+        );
+        r.attestation_doc = doc;
+        let err = check((r, root)).unwrap_err();
         assert!(format!("{err:#}").contains("has a public key"), "{err:#}");
     }
 
     #[test]
     fn a_malformed_document_aborts_in_real_mode() {
         let err = check_launch(
-            response(&attested().to_bytes()),
+            mock_response(&attested().to_bytes()),
             NONCE,
             &PCRS,
             &expected(),
@@ -912,6 +917,31 @@ mod tests {
             format!("{err:#}").starts_with("attestation verification failed"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn mock_mode_refuses_a_production_expectation() {
+        let refused = "mock mode refuses a Production expectation";
+        let err = check_launch(
+            Default::default(),
+            NONCE,
+            &PCRS,
+            &expected(),
+            VerifyMode::Mock,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(refused), "{err}");
+
+        let dev = AttestedPolicy::Development;
+        let ok = check_launch(
+            mock_response(&dev.to_bytes()),
+            NONCE,
+            &PCRS,
+            &dev,
+            VerifyMode::Mock,
+        )
+        .unwrap();
+        assert_eq!(ok, dev);
     }
 
     #[test]

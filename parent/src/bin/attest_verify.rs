@@ -435,7 +435,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         None => verify_attested_pubkey(&cli.endpoint, expected_pcrs, mode, expected_policy).await?,
     };
-    print!("{}", verified_report(&result, mode));
+    print!("{}", verified_report(&result));
     Ok(())
 }
 

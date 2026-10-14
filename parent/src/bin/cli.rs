@@ -821,6 +821,7 @@ fn export_attestation(
     std::fs::rename(&tmp, out).with_context(|| format!("cannot write {}", out.display()))?;
     println!("OK: wrote {}", out.display());
     println!("  EVM address: {}", bundle.public_keys.evm_address);
+    println!("  Verification mode: {}", bundle.verification_mode.as_str());
     Ok(())
 }
 

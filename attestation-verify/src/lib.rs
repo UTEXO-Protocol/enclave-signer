@@ -1234,6 +1234,23 @@ pub mod test_util {
         )?;
         into_verified(attestation, nonce, true)
     }
+
+    /// [`verify_policy_attestation`] with `root_der` as the trust anchor.
+    pub fn verify_policy_with_root(
+        doc: &[u8],
+        expected_pcrs: &ExpectedPcrs,
+        expected_nonce: &[u8; 32],
+        root_der: &[u8],
+    ) -> Result<VerifiedAttestation> {
+        let (attestation, nonce) = real::verify_real_document(
+            doc,
+            expected_pcrs,
+            Some(expected_nonce),
+            root_der,
+            CheckTime::Now,
+        )?;
+        into_verified(attestation, nonce, false)
+    }
 }
 
 // Mock path (raw CBOR, no COSE / cert chain)
