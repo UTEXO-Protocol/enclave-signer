@@ -1,6 +1,7 @@
 //! The parent's header sync against a real enclave or a scripted one, with a
 //! fake Electrum server that serves synthetic regtest headers.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -339,7 +340,10 @@ fn enclave_tip(port: u16) -> (u32, Vec<u8>) {
 // Sync
 
 fn service(port: u16) -> ParentAdapterService {
-    ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{port}")))
+    ParentAdapterService::new(
+        EnclaveTarget::Tcp(format!("127.0.0.1:{port}")),
+        HashSet::new(),
+    )
 }
 
 fn start_sync(
@@ -481,6 +485,42 @@ async fn fork_near_checkpoint_repairs_above_it() {
         !starts.is_empty() && starts.iter().all(|s| *s == 201),
         "{starts:?}"
     );
+    task.abort();
+}
+
+/// A branch of 10 replaces the last 8 headers: the enclave follows it. A fork
+/// deeper than the enclave allows is sent once, not again every interval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_8_replaced_by_10_follows_and_too_deep_is_sent_once() {
+    let a = extend(&genesis(), 150, 1);
+    let electrum = Electrum::start(a.clone());
+    let enclave = start_real_enclave();
+    let (relay, log) = start_relay(enclave);
+    let (task, mut rx) = start_sync(relay, Some(&electrum.url));
+    wait(&mut rx, 30, synced_at(150)).await;
+
+    // Headers 143..=150 are replaced by 143..=152.
+    let b = extend(&a[..=142], 10, 2);
+    electrum.set_chain(b.clone());
+    wait(&mut rx, 20, synced_at(152)).await;
+    assert_eq!(enclave_tip(enclave), (152, block_hash(&b[152])));
+
+    // Forked 101 below the tip 152: headers 52..=152 differ.
+    let sent = submits(&log).len();
+    electrum.set_chain(extend(&b[..=51], 110, 3));
+    let status = wait(&mut rx, 20, stalled).await;
+    let error = status.last_error.unwrap();
+    assert!(
+        error.contains("chain linkage broken at height 53"),
+        "{error}"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(enclave_tip(enclave), (152, block_hash(&b[152])));
+    let starts: Vec<u32> = submits(&log)[sent..]
+        .iter()
+        .map(|(_, s)| s.start_height)
+        .collect();
+    assert_eq!(starts, [53], "the refused fork is sent once");
     task.abort();
 }
 
@@ -806,7 +846,7 @@ fn self_signed_tls_source_is_refused() {
 
     let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert: CertificateDer<'static> = signed.cert.der().clone();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.signing_key.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.key_pair.serialize_der()));
     let config = Arc::new(
         rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

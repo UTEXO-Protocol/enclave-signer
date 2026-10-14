@@ -14,7 +14,7 @@ fn main() {
     bootstrap::init_tracing();
     tracing::info!("starting utexo-bridge-enclave");
 
-    // Start first. Without clock sync the enclave clock drifts (about 1 s/day) and then
+    // Start first. Without NTP the enclave clock drifts (about 1 s/day) and then
     // rejects new certs as "not yet valid". No-op if PTP is not available.
     #[cfg(target_os = "linux")]
     utexo_bridge_enclave::clocksync::spawn();
@@ -23,7 +23,7 @@ fn main() {
     let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
 
     // Pinned bridge config. Committed in attestation `user_data` and checked on
-    // every signing request.
+    // every SignEvm.
     let bridge_config = BridgeConfig::from_env();
     bootstrap::log_bridge_config(&bridge_config);
 
@@ -41,6 +41,7 @@ fn main() {
         &bridge_config,
         utexo_bridge_enclave::policy::EvmDataSource::Disabled,
         None,
+        None,
         "",
         evm_min_confirmations,
     );
@@ -51,6 +52,7 @@ fn main() {
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
+    bootstrap::start_vsock_forwarders();
 
     // The policy and chain clients come with `SetEndpoints`. Until then the
     // enclave signs nothing.

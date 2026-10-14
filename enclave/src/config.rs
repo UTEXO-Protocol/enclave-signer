@@ -5,11 +5,11 @@
 //! `server/keys.rs`). So:
 //!
 //!   1. a `GetAttestedPublicKey` verifier sees the (chain_id, contract, asset);
-//!   2. a `fundsOut` `Sign` rejects request fields that do not match this config.
+//!   2. `SignEvm` rejects request fields that do not match this config.
 //!
-//! Production sets all three env vars. A release bridge build without them does
-//! not boot ([`crate::policy`]). Dev and mock builds can leave them unset. Then
-//! the bundle commits empty values.
+//! Production sets all three env vars. Dev and mock builds can leave them unset.
+//! Then the cross-check is skipped and the bundle commits empty values, so a
+//! production deploy without them is visible externally.
 
 use crate::error::{EnclaveError, Result};
 
@@ -397,12 +397,103 @@ impl Default for EvmRpcConfig {
     }
 }
 
+/// True if the host of `url` is exactly `127.0.0.1`, `[::1]` or `localhost`.
+/// Exact match, so `127.0.0.1.evil.com` is not loopback.
+#[cfg(feature = "helios")]
+fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    // Drop path/query/fragment, then any `userinfo@` prefix.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // Strip the port. IPv6 literals have brackets (`[::1]:8545`).
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        match rest.split_once(']') {
+            // Valid IPv6 authority: `]` is followed by nothing or `:port`.
+            Some((inner, after)) => {
+                return inner == "::1" && (after.is_empty() || after.starts_with(':'))
+            }
+            None => hostport,
+        }
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    host == "127.0.0.1" || host == "localhost"
+}
+
+/// Helios light-client config (`helios` feature, not in production).
+///
+/// [`HeliosConfig::from_env`] gives `Some` only when `HELIOS_EXECUTION_RPC`
+/// is set. The URLs must be loopback. Helios verifies the untrusted upstreams
+/// against the pinned checkpoint.
+#[cfg(feature = "helios")]
+#[derive(Debug, Clone)]
+pub struct HeliosConfig {
+    /// Untrusted execution RPC (`HELIOS_EXECUTION_RPC`, required), for example
+    /// `http://127.0.0.1:18545`.
+    pub execution_rpc: String,
+    /// Beacon RPC (`HELIOS_CONSENSUS_RPC`, default `http://127.0.0.1:18550`).
+    pub consensus_rpc: String,
+    /// Helios network name: `mainnet` | `sepolia` | `holesky`
+    /// (`HELIOS_NETWORK`, default `mainnet`).
+    pub network: String,
+    /// Weak-subjectivity checkpoint: 0x-prefixed 32-byte beacon block root
+    /// (`HELIOS_CHECKPOINT`). `None` fails client init closed.
+    pub checkpoint: Option<String>,
+    /// Reject a checkpoint older than the safe weak-subjectivity window
+    /// (`HELIOS_STRICT_CHECKPOINT_AGE`, default `true`).
+    pub strict_checkpoint_age: bool,
+}
+
+#[cfg(feature = "helios")]
+impl HeliosConfig {
+    const DEFAULT_CONSENSUS_RPC: &'static str = "http://127.0.0.1:18550";
+
+    /// Load from `HELIOS_*` env. `None` when `HELIOS_EXECUTION_RPC` is unset.
+    /// A non-loopback URL is logged as an error. It cannot connect, because the
+    /// enclave has no direct egress.
+    pub fn from_env() -> Option<Self> {
+        let execution_rpc = std::env::var("HELIOS_EXECUTION_RPC").ok()?;
+        warn_if_not_loopback("HELIOS_EXECUTION_RPC", &execution_rpc);
+
+        let consensus_rpc = std::env::var("HELIOS_CONSENSUS_RPC")
+            .unwrap_or_else(|_| Self::DEFAULT_CONSENSUS_RPC.to_string());
+        warn_if_not_loopback("HELIOS_CONSENSUS_RPC", &consensus_rpc);
+
+        let network = std::env::var("HELIOS_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+        let checkpoint = std::env::var("HELIOS_CHECKPOINT").ok();
+        let strict_checkpoint_age = std::env::var("HELIOS_STRICT_CHECKPOINT_AGE")
+            .ok()
+            .map(|s| s != "false" && s != "0")
+            .unwrap_or(true);
+
+        Some(Self {
+            execution_rpc,
+            consensus_rpc,
+            network,
+            checkpoint,
+            strict_checkpoint_age,
+        })
+    }
+}
+
+#[cfg(feature = "helios")]
+fn warn_if_not_loopback(var: &str, url: &str) {
+    if !is_loopback_url(url) {
+        tracing::error!(
+            %var, %url,
+            "Helios RPC URL is not loopback - the enclave reaches upstreams only via the vsock \
+             forwarder; a non-loopback URL will not connect"
+        );
+    }
+}
+
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
-    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora).
-    /// Test and dev builds also accept `tcp://` and `http://`. Empty without
-    /// `rgb-validation`.
+    /// `ssl://host:port` or `tcp://host:port`. Empty without `rgb-validation`.
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
@@ -414,12 +505,6 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    /// True for an `ssl://` or `https://` indexer. Its forwarder then sends on
-    /// only TLS ([`crate::egress`]).
-    pub fn indexer_uses_tls(&self) -> bool {
-        self.electrum_url.starts_with("ssl://") || self.electrum_url.starts_with("https://")
-    }
-
     /// Check the values this build uses. A value the build does not use
     /// must be empty.
     pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {
@@ -541,75 +626,19 @@ fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
         .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
 }
 
-/// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, port 443 by
-/// default). Nothing after the port.
-///
-/// The plaintext forms `tcp://host:port` and `http://host[:port]` (port 80 by
-/// default) are accepted only by a build that can never attest a production
-/// policy. See [`plaintext_indexer_allowed`].
+/// `ssl://host:port` or `tcp://host:port`, nothing after the port.
 #[cfg(feature = "rgb-validation")]
 fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
-    parse_indexer_url(url, plaintext_indexer_allowed())
-}
-
-/// True for a test, debug, mock-attestation or seed-import build. These are
-/// the inputs that make [`crate::policy::SecurityPolicy::resolve`] return a
-/// development policy.
-///
-/// Over `tcp://` or `http://` the host reads and changes every indexer answer.
-/// The mint path has no SPV check, so the indexer is its only source of the
-/// witness history. The attested policy commits the indexer host, not its
-/// scheme. Thus a release image refuses plaintext: the rule is in the code,
-/// and PCR0 measures it.
-#[cfg(feature = "rgb-validation")]
-fn plaintext_indexer_allowed() -> bool {
-    let ctx = crate::policy::BuildContext::current();
-    ctx.debug_or_test || ctx.mock_attestation || ctx.allow_seed_import
-}
-
-/// [`parse_electrum_url`] with the plaintext rule as an input, so tests can
-/// check the release rule.
-#[cfg(feature = "rgb-validation")]
-fn parse_indexer_url(
-    url: &str,
-    allow_plaintext: bool,
-) -> std::result::Result<(String, u16), String> {
-    let plaintext = |scheme: &str| {
-        url.strip_prefix(scheme)
-            .map(|rest| {
-                if allow_plaintext {
-                    Ok(rest)
-                } else {
-                    Err(format!(
-                        "electrum_url {url:?} is plaintext ({scheme}); a release image \
-                         accepts only ssl:// or https://"
-                    ))
-                }
-            })
-            .transpose()
-    };
-    let (rest, default_port) = if let Some(rest) = url.strip_prefix("ssl://") {
-        (rest, None)
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        (rest, Some(443))
-    } else if let Some(rest) = plaintext("tcp://")? {
-        (rest, None)
-    } else if let Some(rest) = plaintext("http://")? {
-        (rest, Some(80))
-    } else {
-        return Err(format!(
-            "electrum_url {url:?} is not ssl://, tcp://, https:// or http://"
-        ));
-    };
-    let (host, port) = match (rest.rsplit_once(':'), default_port) {
-        (Some((host, port)), _) => (
-            host,
-            port.parse::<u32>()
-                .map_err(|_| format!("electrum_url {url:?} has a bad port"))?,
-        ),
-        (None, Some(port)) => (rest, port),
-        (None, None) => return Err(format!("electrum_url {url:?} has no port")),
-    };
+    let rest = url
+        .strip_prefix("ssl://")
+        .or_else(|| url.strip_prefix("tcp://"))
+        .ok_or_else(|| format!("electrum_url {url:?} is not ssl:// or tcp://"))?;
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("electrum_url {url:?} has no port"))?;
+    let port = port
+        .parse::<u32>()
+        .map_err(|_| format!("electrum_url {url:?} has a bad port"))?;
     Ok((
         parse_host("electrum_url host", host)?,
         parse_port("electrum_url port", port)?,
@@ -758,6 +787,29 @@ mod tests {
         assert!(c.is_partially_configured());
     }
 
+    #[cfg(feature = "helios")]
+    #[test]
+    fn loopback_url_accepts_real_loopback() {
+        assert!(is_loopback_url("http://127.0.0.1:3444"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://localhost:8545"));
+        assert!(is_loopback_url("http://[::1]:18545/path"));
+        assert!(is_loopback_url("http://[::1]"));
+        assert!(is_loopback_url("http://user:pass@127.0.0.1:3444"));
+    }
+
+    #[cfg(feature = "helios")]
+    #[test]
+    fn loopback_url_rejects_lookalike_authorities() {
+        // A `starts_with` check accepts all of these.
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_url("http://localhost.evil.com/rpc"));
+        assert!(!is_loopback_url("http://127.0.0.1@evil.com"));
+        assert!(!is_loopback_url("http://[::1].evil.com"));
+        assert!(!is_loopback_url("http://10.0.0.1:8545"));
+        assert!(!is_loopback_url("http://evil.com/127.0.0.1"));
+    }
+
     const CA_HEX: &str = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
 
     /// A valid set for this build: only the values it uses.
@@ -812,7 +864,7 @@ mod tests {
         assert_eq!(e.electrum_url, "ssl://electrum.test:50002");
         for url in [
             "",
-            "ftp://electrum.test:50001",
+            "http://electrum.test:50001",
             "electrum.test:50001",
             "ssl://electrum.test",
             "ssl://electrum.test:50002/x",
@@ -821,75 +873,6 @@ mod tests {
             "ssl://127.0.0.1:50002",
             "ssl://electrum_test:50002",
             "ssl://electrum test:50002",
-        ] {
-            assert!(
-                parse_with(|r| r.electrum_url = url.into()).is_err(),
-                "{url:?}"
-            );
-        }
-    }
-
-    /// A release image refuses a plaintext indexer. The host relays the
-    /// bytes, so over `tcp://` or `http://` it can forge every answer.
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn a_release_build_refuses_a_plaintext_indexer() {
-        for url in [
-            "tcp://electrum.test:50001",
-            "http://esplora.test:3000",
-            "http://esplora.test",
-        ] {
-            let err = parse_indexer_url(url, false).unwrap_err();
-            assert!(err.contains("plaintext"), "{url:?}: {err}");
-            assert!(
-                parse_indexer_url(url, true).is_ok(),
-                "{url:?} in a dev build"
-            );
-        }
-        assert_eq!(
-            parse_indexer_url("ssl://electrum.test:50002", false).unwrap(),
-            ("electrum.test".to_string(), 50002)
-        );
-        assert_eq!(
-            parse_indexer_url("https://esplora.test", false).unwrap(),
-            ("esplora.test".to_string(), 443)
-        );
-        assert!(parse_indexer_url("ftp://electrum.test:1", false)
-            .unwrap_err()
-            .contains("is not ssl://"));
-    }
-
-    /// The test build is a dev build, so the launch path takes plaintext.
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn a_test_build_allows_a_plaintext_indexer() {
-        assert!(plaintext_indexer_allowed());
-    }
-
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn esplora_url_takes_a_default_port() {
-        // The EVM RPC forwarder takes another loopback port than Esplora's 443.
-        let e = parse_with(|r| {
-            r.electrum_url = "https://esplora.test".into();
-            if cfg!(feature = "evm-rpc") {
-                r.evm_rpc_tls_port = 8443;
-            }
-        })
-        .unwrap();
-        assert_eq!(
-            (e.electrum_host.as_str(), e.electrum_port),
-            ("esplora.test", 443)
-        );
-        let e = parse_with(|r| r.electrum_url = "http://esplora.test:3000/".into()).unwrap();
-        assert_eq!(
-            (e.electrum_host.as_str(), e.electrum_port),
-            ("esplora.test", 3000)
-        );
-        for url in [
-            "https://esplora.test/api",
-            "https://esplora.test:0",
-            "https://",
         ] {
             assert!(
                 parse_with(|r| r.electrum_url = url.into()).is_err(),

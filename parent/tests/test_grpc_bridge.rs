@@ -4,6 +4,7 @@
 //! tonic Parent Adapter that targets it. A gRPC client then runs the full path.
 
 use attestation_verify::AttestedPolicy;
+use std::collections::HashSet;
 use std::net::TcpListener;
 
 use tonic::transport::Server;
@@ -16,8 +17,8 @@ use utexo_bridge_parent::framing;
 use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
 use utexo_bridge_parent::grpc_proto::parent_service_server::ParentServiceServer;
 use utexo_bridge_parent::grpc_proto::{
-    sign_request, source_proof, AttestedPublicKeyRequest, CloneRequest, EvmSource, RgbSource,
-    SignRequest, SourceProof,
+    sign_request, source_proof, AttestedPublicKeyRequest, EvmSource, RgbSource, SignRequest,
+    SourceProof,
 };
 use utexo_bridge_parent::grpc_server::{EnclaveTarget, ParentAdapterService};
 use utexo_bridge_parent::signer::{DataType, PublicKeyRequest, SignRequest as CommonSignRequest};
@@ -223,15 +224,6 @@ fn start_mock_enclave() -> u16 {
                         }
                     }
                 }
-                // Answer with the error code in the first cluster_public_key byte.
-                Some(enclave_request::Request::GetClone(req)) => EnclaveResponse {
-                    response: Some(enclave_response::Response::Error(
-                        enclave_proto::ErrorResponse {
-                            code: req.cluster_public_key[0].into(),
-                            message: "mock: GetClone refused".into(),
-                        },
-                    )),
-                },
                 _ => EnclaveResponse {
                     response: Some(enclave_response::Response::Error(
                         enclave_proto::ErrorResponse {
@@ -255,8 +247,10 @@ async fn start_grpc_server(enclave_port: u16) -> u16 {
     let grpc_port = grpc_addr.port();
     drop(grpc_listener);
 
-    let service =
-        ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
+    let service = ParentAdapterService::new(
+        EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
+        HashSet::from([84]),
+    );
 
     tokio::spawn(async move {
         Server::builder()
@@ -298,6 +292,7 @@ fn rgb_source(
             rgb_amount: amount,
             rgb_asset_id: rgb_asset_id.into(),
             merkle_proofs: vec![],
+            mint_ancestors: vec![],
         })),
     }
 }
@@ -550,6 +545,8 @@ async fn grpc_sign_psbt_roundtrip() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
+        // Plain PSBT roundtrip. There is no bridged mint, so no ancestors.
+        mint_ancestors: vec![],
     };
 
     let req = sign_rgb_request(evm_source(0, 0), payload);
@@ -559,86 +556,6 @@ async fn grpc_sign_psbt_roundtrip() {
         !resp.signature.is_empty(),
         "signed PSBT should not be empty"
     );
-}
-
-/// Start a mock enclave that answers every Sign request with `resp`.
-fn start_sign_reply_mock(resp: EnclaveResponse) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
-            if let Some(enclave_request::Request::Sign(_)) = req.request {
-                let _ = framing::write_message(&mut stream, &resp);
-            }
-        }
-    });
-
-    port
-}
-
-#[tokio::test]
-async fn grpc_sign_refuses_crossed_reply_type() {
-    let evm_payload = enriched::EnrichedEvmPayload {
-        call_data: vec![0xAB; 132],
-        nonce: 1,
-        deadline: u64::MAX,
-        chain_id: 1,
-        proxy_contract: vec![],
-        calldata_amount: 0,
-        calldata_commission: 0,
-        unsigned_tx: Vec::new(),
-        lz_release: None,
-    };
-    let rgb_payload = enriched::EnrichedRgbPayload {
-        operation_idx: 5,
-        psbt_bytes: vec![0xFF; 32],
-        psbt_output_amount: 0,
-        rgb_asset_id: String::new(),
-        consignment: vec![],
-        consignment_hash: vec![],
-    };
-
-    let cases = [
-        (
-            EnclaveResponse {
-                response: Some(enclave_response::Response::SignedPsbt(
-                    enclave_proto::SignedPsbtResponse {
-                        signed_psbt: vec![0xDD; 100],
-                        inputs_signed: 2,
-                    },
-                )),
-            },
-            sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), evm_payload),
-            "enclave reply type mismatch for Sign: expected EvmSignature, got SignedPsbt",
-        ),
-        (
-            EnclaveResponse {
-                response: Some(enclave_response::Response::EvmSignature(
-                    enclave_proto::EvmSignatureResponse {
-                        signature: vec![0xCC; 65],
-                        call_data: Vec::new(),
-                    },
-                )),
-            },
-            sign_rgb_request(evm_source(0, 0), rgb_payload),
-            "enclave reply type mismatch for Sign: expected SignedPsbt, got EvmSignature",
-        ),
-    ];
-
-    for (mock_reply, req, expected_message) in cases {
-        let enclave_port = start_sign_reply_mock(mock_reply);
-        let grpc_port = start_grpc_server(enclave_port).await;
-        let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-            .await
-            .unwrap();
-
-        let err = client.sign(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Internal);
-        assert_eq!(err.message(), expected_message);
-    }
 }
 
 #[tokio::test]
@@ -780,8 +697,8 @@ async fn grpc_evm_passes_enriched_fields_through() {
 
 #[tokio::test]
 async fn grpc_evm_forwards_raw_consignment_bytes() {
-    // Regression: the parent must forward both the raw RGB consignment and
-    // its keccak256 hash.
+    // Regression: the parent must forward both the raw consignment (field 11)
+    // and its keccak256 hash (field 12).
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
 
@@ -926,37 +843,6 @@ async fn grpc_missing_transaction_payload_returns_error() {
 
     let err = client.sign(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-// Codes 1-3 are the map that Sign and the other RPCs share.
-#[tokio::test]
-async fn grpc_clone_maps_enclave_codes() {
-    use tonic::Code;
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let cases = [
-        (1, Code::Internal),
-        (2, Code::Unavailable),
-        (3, Code::FailedPrecondition),
-        (4, Code::InvalidArgument),
-        (5, Code::PermissionDenied),
-        (6, Code::AlreadyExists),
-        (7, Code::ResourceExhausted),
-    ];
-    for (code, expected) in cases {
-        let req = CloneRequest {
-            cluster_public_key: vec![code],
-            ..Default::default()
-        };
-        let status = ParentServiceClient::clone(&mut client, req)
-            .await
-            .unwrap_err();
-        assert_eq!(status.code(), expected, "code {code}");
-    }
 }
 
 #[tokio::test]

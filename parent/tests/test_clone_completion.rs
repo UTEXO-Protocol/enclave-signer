@@ -216,15 +216,11 @@ async fn run_cli_completion(secure: bool) {
 
     let donor = start(true, Fault::None);
     let evm = hex::encode(donor.client.get_public_keys().unwrap().evm_address);
-    // Keep the port bound until the server owns it. A freed port can be taken
-    // by the readiness probe below (Linux TCP self-connect).
     let socket = TcpListener::bind("127.0.0.1:0").unwrap();
     let grpc_addr = socket.local_addr().unwrap();
-    socket.set_nonblocking(true).unwrap();
-    let incoming = tonic::transport::server::TcpIncoming::from(
-        tokio::net::TcpListener::from_std(socket).unwrap(),
-    );
-    let service = ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()));
+    drop(socket);
+    let service =
+        ParentAdapterService::new(EnclaveTarget::Tcp(donor.addr.clone()), Default::default());
     let pki = pki::Pki::new();
     let mut builder = tonic::transport::Server::builder();
     // Test production mTLS and auth with the real CLI and enclave clone handlers.
@@ -251,7 +247,7 @@ async fn run_cli_completion(secure: bool) {
         builder
             .layer(tower::util::option_layer(access))
             .add_service(ParentServiceServer::new(service))
-            .serve_with_incoming(incoming)
+            .serve(grpc_addr)
             .await
             .unwrap();
     });

@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
-    GetAttestedPublicKeyRequest, GetAttestedPublicKeyResponse, GetLastSavedBlockRequest,
-    GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest, HealthResponse,
-    InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse,
-    MerkleProofEntry, PublicKeysResponse, SetCloneRequest, SetEndpointsRequest, SignedPsbtResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest,
+    HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
+    InitiateCloningResponse, MerkleProofEntry, PublicKeysResponse, SetCloneRequest,
+    SetEndpointsRequest, SignedPsbtResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -13,10 +13,9 @@ use crate::framing;
 /// TCP connect timeout. It matters only across a network or a bad vsock proxy.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Read and write timeout for one socket operation to the enclave. It stops a
-/// silent peer from hanging the CLI.
+/// Response read timeout. It stops a silent peer from hanging the CLI.
 /// Slow valid operations (key generation, consignment validation) must fit in it.
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct SignEvmRequest {
@@ -43,8 +42,7 @@ pub struct SignEvmRequest {
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
     /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required.
-    /// Different from `operation_idx`, the RGB hub index. The replay key uses
-    /// this full operation ID, not the hub index.
+    /// Not the same as `operation_idx` (RGB hub index and replay-guard key).
     pub evm_funds_in_operation_id: Vec<u8>,
     pub operation_idx: u64,
     pub evm_event_valid: bool,
@@ -143,7 +141,7 @@ impl EnclaveClient {
             let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
             stream
-                .set_read_timeout(Some(IO_TIMEOUT))
+                .set_read_timeout(Some(READ_TIMEOUT))
                 .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
@@ -156,12 +154,6 @@ impl EnclaveClient {
         let mut stream = VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
             ParentError::Connection(format!("vsock connect cid={cid} port={port}: {e}"))
         })?;
-        stream
-            .set_read_timeout(Some(IO_TIMEOUT))
-            .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
-        stream
-            .set_write_timeout(Some(IO_TIMEOUT))
-            .map_err(|e| ParentError::Connection(format!("set_write_timeout: {e}")))?;
         framing::write_message(&mut stream, req)?;
         framing::read_message(&mut stream)
     }
@@ -245,11 +237,10 @@ impl EnclaveClient {
         }
     }
 
-    /// Requester side, final cloning step (SetClone). Sends the donor sealed
-    /// seed, ephemeral public key and attestation to the local enclave. The
-    /// enclave verifies the attestation and unseals the seed. It commits the
-    /// keys only if the EVM address matches the cluster identity. On success:
-    /// Cloning -> Active.
+    /// Requester side, cloning step 3. Sends the donor sealed seed, ephemeral
+    /// public key and attestation to the local enclave. The enclave verifies
+    /// the attestation and unseals the seed. It commits the keys only if the
+    /// EVM address matches the cluster identity. On success: Cloning -> Active.
     pub fn set_clone(
         &self,
         encrypted_seed: Vec<u8>,
@@ -314,6 +305,7 @@ impl EnclaveClient {
                                 // The CLI cannot resolve the deposit behind
                                 // a mint, so the enclave rejects a BFA burn
                                 // signed through it.
+                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),
@@ -377,6 +369,7 @@ impl EnclaveClient {
                                 consignment_hash: req.consignment_hash,
                                 // The CLI cannot resolve the deposits behind
                                 // a chained mint, so the enclave rejects one.
+                                mint_ancestors: Vec::new(),
                             },
                         ),
                     ),
@@ -426,30 +419,6 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::Health(r)) => Ok(r),
-            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
-                code: e.code,
-                message: e.message,
-            }),
-            other => Err(ParentError::Connection(format!(
-                "unexpected response variant: {:?}",
-                other
-            ))),
-        }
-    }
-
-    /// Attestation for `nonce`, straight from the enclave. Before keys exist,
-    /// it attests the policy only.
-    pub fn get_attested_public_key(&self, nonce: [u8; 32]) -> Result<GetAttestedPublicKeyResponse> {
-        let req = EnclaveRequest {
-            request: Some(enclave_request::Request::GetAttestedPublicKey(
-                GetAttestedPublicKeyRequest {
-                    nonce: nonce.to_vec(),
-                },
-            )),
-        };
-        let resp = self.send_request(&req)?;
-        match resp.response {
-            Some(enclave_response::Response::GetAttestedPublicKey(r)) => Ok(r),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

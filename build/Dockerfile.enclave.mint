@@ -2,22 +2,24 @@
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
 # Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" \
-#   --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
-# Use the same Debian release for the builder and runtime.
-FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
+# Production builder glibc must remain compatible with the AL2023 runtime.
+FROM rust:1.96-slim-bullseye@sha256:c593596210f729542a92aced6a8b0812bcc8d04c5f1b238e663b800d0e2e17bd AS builder
 
-# Pin packages to a signed snapshot over HTTPS.
-# Disable expiry checks so the fixed snapshot remains usable after Valid-Until.
+# Use the signed Debian snapshot to avoid missing Bullseye packages.
+# HTTP is required until ca-certificates is installed.
+# Replace this temporary pin when the shared base-image update is ready.
 RUN set -eux; \
     printf '%s\n' \
-      'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
-      'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
+      'deb http://snapshot.debian.org/archive/debian/20260801T000000Z bullseye main' \
+      'deb http://snapshot.debian.org/archive/debian-security/20260801T000000Z bullseye-security main' \
       > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
-    apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
+    apt-get update && apt-get install -y \
+    pkg-config libssl-dev git ca-certificates openssh-client \
+    make python3 python3-pip \
+    && pip3 install --no-cache-dir "cmake==3.31.6" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -33,10 +35,12 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
 # (so this binary is RGB-only) and also drops the default `rgb-swap`, which is
-# what lets the mint/burn flow be selected instead. The signer role implies
-# `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
-# alloy + tokio); it needs a second host vsock-proxy
+# what lets the mint/burn flow be selected instead. `evm-rpc` adds in-enclave FundsIn verification,
+# pulling the alloy + tokio subtree; requires a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).
+#
+# `helios` is deliberately NOT enabled: the light-client path is unused in
+# production, so the attested evm_source is RawRpc.
 #
 # `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
 # builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
@@ -44,6 +48,7 @@ ENV CARGO_INCREMENTAL=0 \
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
 RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consignment_key \
     --mount=type=secret,id=consensus_key \
     --mount=type=secret,id=ops_key \
     --mount=type=secret,id=schemas_key \
@@ -51,35 +56,27 @@ RUN --mount=type=secret,id=github_token \
 
 
 # --- Runtime ---
-# Pin the measured rootfs by digest. Update both stages together.
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
+# Pinned by DIGEST: this rootfs is what ends up in the EIF, so its digest drives
+# PCR0 directly. Bump tag + digest together, in step with Dockerfile.enclave.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8073d921f4ac1bf17fca94e16b0bc575e3fc17e4ccbe53b563160f02f0c7ccfc AS runtime
 
-# Bootstrap HTTPS before the runtime installs its CA package.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-
-# Disable expiry checks for the fixed snapshot; keep signature checks enabled.
-# Remove package-manager logs and caches in the installation layer.
-RUN set -eux; \
-    printf '%s\n' \
-      'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
-      'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
-      > /etc/apt/sources.list; \
-    rm -f /etc/apt/sources.list.d/*; \
-    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
-    printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/98ca; \
-    apt-get update && apt-get install -y --no-install-recommends \
-    bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
-        /var/cache/debconf /var/cache/ldconfig /var/log/* /tmp/*
+# Deterministic runtime rootfs (PCR0/PCR2 reproducibility). dnf/rpm write state
+# with embedded timestamps and randomness (rpmdb, history, caches, logs);
+# rewrite-timestamp normalises mtimes but not file contents. Scrub it in the SAME
+# layer so the measured rootfs is stable. (rpmdb is not needed at runtime.)
+RUN dnf install -y socat iproute \
+    && dnf clean all \
+    && rm -rf \
+        /var/cache/dnf /var/cache/libdnf5 /var/cache/ldconfig \
+        /var/lib/dnf /var/lib/rpm /var/lib/rpm-state \
+        /var/log/* /tmp/* \
+    && :
 
 WORKDIR /app
 COPY --from=builder /build/target/release/utexo-bridge-enclave /app/utexo-bridge-enclave
 COPY build/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/utexo-bridge-enclave /app/entrypoint.sh
-# Reject missing libraries or incompatible symbol versions before EIF conversion.
-RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 
 # The mint signer restores its KMS-protected seed instead of peer cloning.
 
@@ -94,8 +91,11 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
-# The BFA asset id is a build arg with no default: each BFA contract id is per
-# deployment. An empty value fails the build (`test -n` below).
+# The BFA asset id is a BUILD ARG with no default, unlike every other image
+# here: each BFA contract id is per-deployment, and baking
+# the swap asset would make this enclave refuse every mint at
+# `networks/rgb/mod.rs` after the EVM RPC has already been paid. Empty leaves
+# the config partially pinned, which `policy.rs` refuses at boot.
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
 # Note the pin is single-valued, so this EIF signs for the BFA asset only.
 ARG RGB_ASSET_ID=""

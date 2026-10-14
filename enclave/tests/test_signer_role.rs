@@ -149,7 +149,7 @@ mod burn_signer {
     }
 
     /// The refusal is about direction: a release is not refused as the
-    /// wrong role (it fails later, at the key).
+    /// wrong role (it fails later, in validation).
     #[test]
     fn does_not_refuse_a_release_as_the_wrong_role() {
         let msg = refusal(release_request());

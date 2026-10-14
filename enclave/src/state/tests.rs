@@ -35,10 +35,7 @@ fn export_hard_cap_blocks_after_quota() {
     assert_eq!(state.reserve_export_quota().unwrap().commit(&pk), 2);
     // The export after the cap is refused before sealing.
     let err = state.reserve_export_quota().err().unwrap();
-    assert!(matches!(
-        err,
-        EnclaveError::ExportCapReached { used: 2, cap: 2 }
-    ));
+    assert!(matches!(err, EnclaveError::Clone(_)));
 }
 
 // The default cap 0 never blocks exports.

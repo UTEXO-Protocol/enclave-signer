@@ -32,11 +32,6 @@ def _webhook():
     return _webhook_cache
 
 
-def _esc(value) -> str:
-    """Escape Slack control characters in notification text."""
-    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def _format(sns) -> str:
     subject = sns.get("Subject") or "CloudWatch notification"
     message = sns.get("Message", "")
@@ -51,15 +46,15 @@ def _format(sns) -> str:
         dims = ""
         try:
             dd = alarm.get("Trigger", {}).get("Dimensions", [])
-            dims = "  ".join(f"`{_esc(d['name'])}={_esc(d['value'])}`" for d in dd)
+            dims = "  ".join(f"`{d['name']}={d['value']}`" for d in dd)
         except (KeyError, TypeError):
             pass
         return (
-            f"{emoji} *{_esc(alarm.get('AlarmName'))}* → *{_esc(state)}*\n"
-            f"{_esc(alarm.get('NewStateReason', ''))}\n"
-            f"{dims}  ·  {_esc(alarm.get('Region', ''))}"
+            f"{emoji} *{alarm.get('AlarmName')}* → *{state}*\n"
+            f"{alarm.get('NewStateReason', '')}\n"
+            f"{dims}  ·  {alarm.get('Region', '')}"
         )
-    return f"*{_esc(subject)}*\n{_esc(message)}"
+    return f"*{subject}*\n{message}"
 
 
 def handler(event, _context):

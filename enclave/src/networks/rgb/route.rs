@@ -102,8 +102,7 @@ pub fn validate_destination(
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
 }
 
-/// Returns the **recipient leg** of the bound consignment in asset units and
-/// its `utxob:` seals (see
+/// Returns the **recipient leg** of the bound consignment in asset units (see
 /// [`psbt_validation::validate_psbt_anchors_transition`]). The route-level
 /// cross-check uses this amount, not the host-supplied `psbt_output_amount`.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]

@@ -1,11 +1,11 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-05. Deployment was not checked.
+**Checked against code:** 2026-10-02.
 
 This document tells how the mint signer checks and signs a mint. The
-[spec](tee-spec.md) describes the rules and known limits. If the code and this
-document differ, investigate the difference. Either can contain an error.
+[spec](tee-spec.md) has the full rules. If this document and the code do not
+agree, the code is correct.
 
 ## 1. What the mint flow does
 
@@ -15,8 +15,7 @@ document differ, investigate the difference. Either can contain an error.
    PSBT that anchors it.
 4. The mint signer checks the deposit, the mint and the PSBT.
 5. The mint signer signs the PSBT with its colored taproot key.
-6. The backend finalizes and broadcasts the Bitcoin transaction.
-7. The recipient validates the RGB transfer and waits for the required confirmations.
+6. The backend sends the Bitcoin transaction. The user now holds RGB units.
 
 ## 2. Who does what
 
@@ -27,16 +26,11 @@ document differ, investigate the difference. Either can contain an error.
 | Backend and listener | Operator servers | Nothing | Build the consignment and the PSBT. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
-| EVM RPC | Pinned TLS host | Receipt and chain-head data | Gives the deposit receipts. |
-| Electrum | Through vsock proxy | Bitcoin data, subject to the checks below | Supplies transactions and witness status for RGB validation. |
+| EVM RPC | Pinned TLS host | Receipt data | Gives the deposit receipts. |
+| Electrum | Through vsock proxy | Availability only | Gives Bitcoin data for RGB validation. |
 
-The mint signer ignores `event_valid` and `event_finalized` from the listener.
-It checks deposits through the pinned EVM RPC. It trusts that provider for
-receipt and chain-head data. It does not verify EVM consensus.
-
-The mint path does not verify witness inclusion against the enclave SPV chain.
-RGB validation uses the Electrum resolver. The PSBT check binds the new
-transaction to the consignment before that transaction is mined.
+The listener can send flags such as `event_valid` and `event_finalized`. The
+mint signer ignores them. It proves each fact itself.
 
 ## 3. Sequence
 
@@ -75,13 +69,12 @@ sequenceDiagram
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_BRIDGE` | 4014 | The mint right. It holds no units. It does not count in the amount. |
 | `EVM_MIN_CONFIRMATIONS` | 12 (default) | Minimum depth of each deposit receipt. Attested. Production refuses 0. |
-| `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | `MAX_CONSIGNMENT_BYTES` | 8 MiB (default) | Maximum consignment size. |
 | `MAX_OFF_TX_CHANGE_OUTPOINTS` | 4 | Maximum change outpoints outside the PSBT. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| `RGB_MAX_UNOWNED_SATS` | not set in the mint image | Maximum sats that go to scripts the enclave does not own. Not set: refuse every mint PSBT. |
+| `RGB_MAX_UNOWNED_SATS` | set in the image | Maximum sats that go to scripts the enclave does not own. Not set: refuse. |
 | Replay window | 24 h, 100 000 entries | In memory, per enclave. |
 | Colored account | `m/86'/827166'/0'` (mainnet) | The only account that signs a mint. |
 | Amount rule | `sum(OS_ASSET) == amount - commission` | Exact. Not a minimum. |
@@ -94,19 +87,16 @@ error.
 ### Stage 0 - Can this enclave do this request?
 
 - **M0.1** The endpoints must be set (`SetEndpoints`).
-- **M0.2** The source must be EVM and the destination must be RGB. The mint
+- **M0.2** The enclave must be `Active`.
+- **M0.3** The source must be EVM and the destination must be RGB. The mint
   signer refuses a burn request.
-
-The enclave must be `Active`, but no check runs here. The first check that
-reads the keys (Stage 5) refuses an enclave without keys.
 
 ### Stage 1 - Is this a repeat?
 
 - **M1.1** The mint signer makes a replay key from `chain_id`, the proxy
   contract, `evm_tx_hash`, `funds_in_operation_id` and the asset id.
-- **M1.2** If the replay cache still holds this key, the signer refuses it.
-  Entries expire after 24 hours. Capacity pressure can remove them earlier.
-  This check records nothing. It runs before any network call.
+- **M1.2** If it signed this key in the last 24 hours, it refuses. This check
+  records nothing. It runs before any network call.
 
 ### Stage 2 - Is this deposit real?
 
@@ -133,16 +123,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   `FUNDS_IN_CONTRACT`.
 - **M3.2** The last mint must be the mint of this request. It pairs with
   `evm_tx_hash`.
-- **M3.3** Each mint's deposit id is derived from the mint (see burn-flow
-  B1.3).
-- **M3.4** The receipt of `evm_tx_hash` must have exactly one `FundsIn` event
-  with the last mint's RGB OpId, and exactly one `BridgeFundsIn` event, both
-  from `FUNDS_IN_CONTRACT`, at least `EVM_MIN_CONFIRMATIONS` deep. Its
-  `operationId`, amount and net amount must be the ones the last mint derives.
-  Another deposit for the same OpId is refused.
-- **M3.5** The `BridgeFundsIn` `destinationChainId` must equal 827166
-  (`RGB_CHAIN_ID`). `FundsIn` has no chain field, so this binds the deposit
-  to the RGB network.
+- **M3.3** Each older mint in the history must have a `mint_ancestors` entry.
+  A request that lists the last mint in `mint_ancestors` is refused.
+- **M3.4** For each mint, the receipt must have exactly one `FundsIn` event
+  with that mint's RGB OpId, and exactly one `BridgeFundsIn` event. Both must
+  come from `FUNDS_IN_CONTRACT`. Depth: at least `EVM_MIN_CONFIRMATIONS`.
 
 ### Stage 4 - Is the RGB history valid?
 
@@ -159,8 +144,7 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 ### Stage 5 - Does the PSBT do this mint, and only this mint?
 
 - **M5.1** The PSBT must parse and have at least one input.
-- **M5.2** The settling transition must be `TS_BRIDGE`, so the last witness
-  commits no `TS_BURN`.
+- **M5.2** The last transition must be `TS_BRIDGE`.
 - **M5.3** The PSBT txid must equal the last witness txid. So the signature
   can complete this one transaction only.
 - **M5.4** Each input must be a SegWit output with a `witness_utxo`. So the
@@ -201,23 +185,21 @@ market fee before the user locks tokens.
 - **M7.1** The sats that go to scripts the enclave does not own must not be
   more than `RGB_MAX_UNOWNED_SATS`.
 - **M7.2** The mint signer signs only inputs of the colored account. It uses
-  Taproot key-path signatures with BIP-86 account keys. A Tapret or script-tree
-  root can be part of the tweak. It never produces script-path signatures.
+  the BIP-86 key path only. It never signs a script path.
 - **M7.3** For each input, the derived key must equal the internal key, and
   the tweak must give the output key. A false origin claim fails here.
 - **M7.4** Zero signed inputs is an error.
 - **M7.5** The response is `SignedPsbtResponse { signed_psbt, inputs_signed }`.
   The PSBT is not finalized.
-- **M7.6** The replay reservation is committed after the response write
-  succeeds. A failed write releases it. A successful write does not prove
-  that the caller received the response. A retry can therefore be refused.
+- **M7.6** The replay key is recorded only after the enclave writes the
+  response. If the write fails, the key is released.
 
 ## 6. Replay
 
 The replay guard is in memory and per enclave. It does not survive a restart.
 Other replicas do not share it. Bitcoin stops a double spend of the same
 inputs. But the guard alone does not stop a new PSBT for the same deposit
-after a restart, cache expiry, capacity eviction, or on a different replica.
+after a restart, after 24 hours, or on a different replica.
 
 ## 7. Plain BTC (`SignBtc`)
 

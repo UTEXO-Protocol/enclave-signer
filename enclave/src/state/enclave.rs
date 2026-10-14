@@ -32,17 +32,15 @@ const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
 /// Enclave lifecycle phase.
 ///
 /// Valid transitions (see `EnclaveState`):
-///   Initial  -> Active   (local InitializeKey: entropy or import)
+///   Initial  -> Active   (local InitializeKey / InitializeFromEntropy)
 ///   Initial  -> Initializing -> Active (KMS seed recovery)
 ///   Initializing -> Initial (failed or expired seed recovery)
 ///   Initial  -> Cloning  (InitiateCloning)
-///   Cloning  -> Cloning  (replace an expired session)
 ///   Cloning  -> Active   (SetClone)
 ///   Active   -> Active   (donor serves GetClone, no state change)
 /// The state refuses all other transitions.
 ///
-/// Boxing `KeyManager` keeps its key material out of the enum storage.
-/// The enum size also depends on `CloningSession` and the target platform.
+/// `KeyManager` is boxed to keep the enum at approx 24 bytes, not 584.
 pub enum Phase {
     /// No keys, waiting for an initialize request.
     Initial,
@@ -86,11 +84,11 @@ pub struct EnclaveState {
     /// (see `networks::rgb::psbt_validation::psbt_operation_key`).
     /// It refuses a repeated operation inside the TTL window before signing.
     ///
-    /// This cache does not provide durable deposit uniqueness. A restart
-    /// clears it, and replicas do not share it. Entries expire or are evicted
-    /// when the cache reaches its capacity. Each key field is also checked
-    /// by the request validators. A different cache key alone does not
-    /// authorize a request. Durable uniqueness needs a separate control.
+    /// Defense in depth only, not a full double-spend control. Nitro has no
+    /// persistent storage. Thus the set is lost on restart, is per instance
+    /// (the host can send a duplicate to a sibling enclave), and is TTL-bounded.
+    /// A host that changes a key field also bypasses it.
+    /// The durable guard is an on-chain ticket.
     pub op_replay_guard: NonceReplayGuard,
 
     /// Successful exports from this enclave process. (F03-AF-10)
@@ -190,7 +188,9 @@ impl EnclaveState {
                     "GetClone: seed-export HARD cap reached - export refused \
                      (F03-AF-10, fail-closed). Rotate/re-provision to lift."
                 );
-                return Err(EnclaveError::ExportCapReached { used, cap });
+                return Err(EnclaveError::Clone(format!(
+                    "seed-export hard cap reached ({used}/{cap}); export refused"
+                )));
             }
         }
         Ok(ExportQuotaReservation {
@@ -482,8 +482,7 @@ impl EnclaveState {
         self.with_active(|km| km.sign_evm_gas_tx(message_hash))
     }
 
-    /// Sign the BIP-86 key-path inputs of either account. Returns
-    /// (signed_psbt_bytes, inputs_signed).
+    /// Sign PSBT inputs matching our BTC key. Returns (signed_psbt_bytes, inputs_signed).
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
     }

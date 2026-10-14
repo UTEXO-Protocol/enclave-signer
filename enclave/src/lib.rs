@@ -8,8 +8,7 @@
 //     enclave passes verification.
 //
 // A release build (`debug_assertions` off) with either one fails to compile.
-// `not(test)` exempts the unit-test compilation only. Integration tests also
-// compile the library without `cfg(test)`. Dev images build in debug mode.
+// `not(test)` exempts `cargo test --release`. Dev images build in debug.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -28,20 +27,19 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// Without `spv`, the host-controlled indexer tells if witness txs are mined.
+// Without `spv`, the host-controlled Esplora tells if witness txs are mined.
 // A malicious host can then get a `fundsOut` signed against a fake anchor.
 // `spv` checks every witness tx against the enclave's own header chain.
 // Unsafe in every profile, so this guard is not release-gated (M-01).
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled indexer - build with `--features spv` (which \
+     the host-controlled Esplora resolver - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
 
-// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The guard requires
-// `spv` when `rgb-validation` is selected directly. The stack uses the
-// `rgb-validation` gate; the `rgb` alias itself need not be enabled.
+// With these guards, `rgb`, `spv` and `rgb-validation` act as one switch.
+// Code gates the RGB stack on `rgb-validation` only.
 
 // Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
 // The modules in `networks/rgb/flow/` export the same item names. These guards
@@ -111,9 +109,6 @@ pub mod cloning;
 pub mod clocksync;
 pub mod config;
 pub mod conn;
-// The TLS rule of the loopback forwarders. Plain std, so tests run on all
-// targets.
-pub mod egress;
 pub mod error;
 pub mod framing;
 pub mod keys;

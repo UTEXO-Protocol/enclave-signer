@@ -9,10 +9,7 @@
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
 
-#[path = "../src/test_support/electrum_stub.rs"]
-mod electrum_stub;
-
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
 use std::sync::Mutex;
 
 use alloy_sol_types::{sol, SolEvent};
@@ -72,7 +69,7 @@ const SEED: [u8; 64] = [0x42; 64];
 /// The bridge entry contract: pinned in the enclave and written into genesis.
 const FUNDS_IN_CONTRACT: [u8; 20] = [0xB1; 20];
 const DEPOSIT_TX: [u8; 32] = [0x11; 32];
-const TOKEN_CONTRACT: [u8; 20] = [0x7E; 20];
+const OPERATION_ID: [u8; 32] = [0xF7; 32];
 const MINTED: u64 = 100_000;
 const BRIDGE_FUNDS: u64 = 10_000;
 const BRIDGE_CHANGE: u64 = 9_700;
@@ -82,7 +79,7 @@ const USER_FUNDS: u64 = 1_000;
 // The two logs `handle_sign` reads from the deposit receipt, in the shape
 // `IBridge.sol` emits them.
 sol! {
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
@@ -372,7 +369,7 @@ fn log<E: SolEvent>(event: &E) -> LogEntry {
 /// The EVM deposit receipt: `FundsIn` with the mint OpId and `BridgeFundsIn`
 /// with the invoice, both from the pinned contract. The enclave reads this
 /// receipt and does not trust the listener.
-fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> ReceiptData {
+fn deposit_receipt(mint_opid: &OpId, invoice: &str) -> ReceiptData {
     let opid = alloy_primitives::B256::from_slice(&hex::decode(mint_opid.to_string()).unwrap());
     let funds_in = FundsIn {
         sender: [0xde; 20].into(),
@@ -380,7 +377,7 @@ fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> R
         amount: MINTED,
     };
     let bridge_funds_in = BridgeFundsIn {
-        operationId: operation_id.into(),
+        operationId: OPERATION_ID.into(),
         sourceTx: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
         senderNonce: alloy_primitives::U256::ZERO,
@@ -389,9 +386,7 @@ fn deposit_receipt(mint_opid: &OpId, operation_id: [u8; 32], invoice: &str) -> R
         tokenCommission: alloy_primitives::U256::ZERO,
         nativeCommission: alloy_primitives::U256::ZERO,
         sourceChainId: alloy_primitives::U256::ZERO,
-        destinationChainId: alloy_primitives::U256::from(
-            utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID,
-        ),
+        destinationChainId: alloy_primitives::U256::ZERO,
         destinationAddress: invoice.into(),
         settlementData: Default::default(),
     };
@@ -416,49 +411,56 @@ impl EvmReceiptProvider for DepositChain {
     }
 }
 
-/// Stub Electrum for a regtest validator. It answers only the chain check.
-/// The fee policy is pinned at compile time, so the enclave fetches no fee
-/// estimate.
+/// Stub Esplora for a regtest validator. It serves only the genesis hash for
+/// the chain identity check. The fee policy is pinned at compile time, so the
+/// enclave fetches no fee estimate.
 fn spawn_regtest_stub() -> String {
-    electrum_stub::spawn(Network::Regtest)
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let body = if req.starts_with("GET /block-height/0") {
+                bitcoin::constants::genesis_block(Network::Regtest)
+                    .block_hash()
+                    .to_string()
+            } else {
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
+                continue;
+            };
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://{addr}")
 }
 
 /// A production-shaped context: pinned bridge config, real validator, the
 /// deposit's receipt behind the EVM client, keys from `SEED`.
-fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
-    BridgeConfig {
-        chain_id: 1,
-        bridge_contract: [0x11; 20],
-        funds_in_contract: FUNDS_IN_CONTRACT,
-        token_contract: TOKEN_CONTRACT,
-        rgb_asset_id: contract_id.to_string(),
-        rgb_max_unowned_sats: 1_000,
-        ..Default::default()
-    }
-}
-
-/// The operationId the Bridge derives for the deposit that backs this mint.
-fn operation_id(deposit: &Deposit) -> [u8; 32] {
-    let opid: [u8; 32] = hex::decode(deposit.mint_opid.to_string())
-        .unwrap()
-        .try_into()
-        .unwrap();
-    utexo_bridge_enclave::networks::evm::events::rgb_mint_deposit_id(
-        &bridge_config(&deposit.contract_id),
-        &opid,
-        MINTED,
-    )
-    .unwrap()
-}
-
 fn context(contract_id: &ContractId, receipt: ReceiptData) -> ServerContext {
     let state = EnclaveState::new(Network::Regtest);
     state.initialize_from_seed(SEED).unwrap();
-    let bridge_config = bridge_config(contract_id);
+    let bridge_config = BridgeConfig {
+        chain_id: 1,
+        bridge_contract: [0x11; 20],
+        funds_in_contract: FUNDS_IN_CONTRACT,
+        rgb_asset_id: contract_id.to_string(),
+        rgb_max_unowned_sats: 1_000,
+        ..Default::default()
+    };
     let policy = SecurityPolicy::resolve(
         &BuildContext::current(),
         &bridge_config,
         EvmDataSource::Disabled,
+        None,
         None,
         "",
         0,
@@ -539,7 +541,7 @@ fn drive(built: &Built) -> EnclaveResponse {
             token: Vec::new(),
             recipient: Vec::new(),
             commission: 0,
-            funds_in_operation_id: operation_id(&built.deposit).to_vec(),
+            funds_in_operation_id: OPERATION_ID.to_vec(),
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
             operation_idx: 0,
@@ -548,15 +550,12 @@ fn drive(built: &Built) -> EnclaveResponse {
             asset_id: built.deposit.contract_id.to_string(),
             consignment: built.deposit.consignment.clone(),
             consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
+            mint_ancestors: Vec::new(),
         })),
     };
     let ctx = context(
         &built.deposit.contract_id,
-        deposit_receipt(
-            &built.deposit.mint_opid,
-            operation_id(&built.deposit),
-            &built.deposit.invoice,
-        ),
+        deposit_receipt(&built.deposit.mint_opid, &built.deposit.invoice),
     );
     sign_over_the_wire(&ctx, request)
 }

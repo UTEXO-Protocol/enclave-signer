@@ -27,8 +27,10 @@ use std::time::SystemTime;
 ///    in-enclave RGB validation;
 /// 2. the validated asset matches the listener-declared `asset_id` and, if
 ///    configured, the operator-pinned `RGB_ASSET_ID`;
-/// 3. each witness tx has a Merkle proof against the in-enclave header chain
-///    with enough confirmations (`rgb-validation` requires `spv`).
+/// 3. with `spv`, each witness tx has a Merkle proof against the in-enclave
+///    header chain with sufficient confirmations;
+/// 4. without `spv`, any supplied Merkle proof is rejected, so a build
+///    mismatch fails closed.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,

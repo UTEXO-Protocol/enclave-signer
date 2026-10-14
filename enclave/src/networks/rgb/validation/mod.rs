@@ -3,7 +3,7 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the Electrum client that `RgbValidator` uses.
+//! - `indexer.rs`: the Esplora/Electrum client that `RgbValidator` uses.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
 //! - `types.rs`: those shapes.
@@ -27,7 +27,7 @@ mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 #[cfg(feature = "bfa-validation")]
-pub use bfa::{bfa_binding, BfaBinding, BfaMint};
+pub use bfa::{bfa_binding, BfaBinding};
 pub use consignment::is_mint_transition;
 pub use indexer::RgbValidator;
 pub use source::assert_consignment_size;

@@ -27,10 +27,6 @@ pub(super) fn handle_initialize(
         // Test path: import a BIP-39 mnemonic.
         #[cfg(feature = "allow-seed-import")]
         {
-            // Check the secret before key install. A refused init keeps the phase Initial.
-            if !req.cloning_secret.is_empty() {
-                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
-            }
             state.initialize_from_mnemonic(&req.mnemonic)?;
             tracing::info!("key initialized from imported mnemonic");
         }
@@ -55,9 +51,6 @@ pub(super) fn handle_initialize(
         }
         #[cfg(not(feature = "kms-persistence"))]
         {
-            if !req.cloning_secret.is_empty() {
-                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
-            }
             let mut entropy = [0u8; 32];
             getrandom::fill(&mut entropy)
                 .map_err(|e| EnclaveError::Internal(format!("entropy generation failed: {}", e)))?;
@@ -74,9 +67,6 @@ pub(super) fn handle_initialize(
                     v.len()
                 ))
             })?;
-            if !req.cloning_secret.is_empty() {
-                crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
-            }
             state.initialize_from_seed(seed)?;
             tracing::info!("key initialized from imported seed");
         }
@@ -90,7 +80,7 @@ pub(super) fn handle_initialize(
 
     // Donor cloning secret. It comes at runtime in the init message, not in the
     // EIF, so it stays out of the PCRs. Only a `GetClone` donor needs it.
-    // An empty field leaves any donor secret loaded at boot unchanged.
+    // Empty means disabled.
     if !req.cloning_secret.is_empty() {
         state.set_donor_cloning_secret(req.cloning_secret)?;
         tracing::info!("donor cloning secret configured from init request");
@@ -249,33 +239,14 @@ pub(super) fn handle_get_attested_public_key(
     // This endpoint attests any caller nonce. This is safe for replay
     // accounting: the cloning handlers record a nonce only after a fully
     // authenticated handshake. Thus these nonces cannot fill the guard.
-    let attested_policy = ctx.launch()?.policy.commitment_bytes();
-    let keys = match ctx.state.get_keys() {
-        Ok(keys) => keys,
-        // No keys yet: attest the policy only.
-        // Checked by `parent/src/launch_check.rs::check_launch`.
-        Err(EnclaveError::KeyNotInitialized) => {
-            let commitment = attestation_verify::policy_commitment(&attested_policy);
-            let attestation_doc =
-                crate::attestation::get_attestation(&nonce, None, Some(&commitment))?;
-            return Ok(EnclaveResponse {
-                response: Some(Response::GetAttestedPublicKey(
-                    GetAttestedPublicKeyResponse {
-                        public_keys: None,
-                        attestation_doc,
-                        attested_policy,
-                    },
-                )),
-            });
-        }
-        Err(e) => return Err(e),
-    };
+    let keys = ctx.state.get_keys()?;
     let public_keys = build_public_keys_response(keys, &ctx.bridge_config);
 
     // `user_data` = sha256(pubkey_bundle || policy_commitment). A verifier
     // checks keys and policy as one value.
     // Verifier mirror: `parent/src/attest_verify.rs::verify_attested_pubkey`.
     let mut preimage = canonical_pubkey_bundle(&public_keys);
+    let attested_policy = ctx.launch()?.policy.commitment_bytes();
     preimage.extend_from_slice(&attested_policy);
     let commitment: [u8; 32] = Sha256::digest(&preimage).into();
 

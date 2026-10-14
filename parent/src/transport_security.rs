@@ -1,7 +1,6 @@
 //! Host gRPC perimeter. mTLS authenticates the peer. The SHA-256 pin of the
 //! leaf certificate gives an RPC role before any handler or enclave I/O runs.
-//! Plaintext modes: `GRPC_ALLOW_INSECURE_LOOPBACK` on a loopback bind, and
-//! any bind in a debug build with the `insecure-dev` feature.
+//! The only plaintext mode is `GRPC_ALLOW_INSECURE_LOOPBACK` on a loopback bind.
 use anyhow::{bail, Context as _, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -47,47 +46,18 @@ fn read(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading TLS file {path}"))
 }
 
-fn max_connections() -> Result<usize> {
-    let max_connections = value("GRPC_MAX_CONNECTIONS")?
-        .unwrap_or_else(|| "64".into())
-        .parse::<usize>()
-        .context("invalid GRPC_MAX_CONNECTIONS")?;
-    if !(1..=4096).contains(&max_connections) {
-        bail!("GRPC_MAX_CONNECTIONS must be 1..4096");
-    }
-    Ok(max_connections)
-}
-
 impl ServerSecurity {
-    /// `insecure-dev` build: plaintext, no ACL, any bind address.
-    #[cfg(feature = "insecure-dev")]
-    pub fn from_env(bind: std::net::IpAddr) -> Result<Self> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let tls_vars = [
-            "GRPC_TLS_CERT_FILE",
-            "GRPC_TLS_KEY_FILE",
-            "GRPC_TLS_CLIENT_CA_FILE",
-            "GRPC_TLS_ACL_FILE",
-        ];
-        for key in tls_vars {
-            if value(key)?.is_some() {
-                bail!("insecure-dev build takes no TLS settings ({key} is set)");
-            }
-        }
-        tracing::warn!(%bind, "insecure-dev build: plaintext gRPC, no client auth. Dev only");
-        Ok(Self {
-            tls: None,
-            access: AccessLayer::unauthenticated(),
-            max_connections: max_connections()?,
-        })
-    }
-
-    #[cfg(not(feature = "insecure-dev"))]
     pub fn from_env(bind: std::net::IpAddr) -> Result<Self> {
         // Other dependencies can enable aws-lc. Select ring, so feature
         // unification cannot make rustls panic at startup.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let max_connections = max_connections()?;
+        let max_connections = value("GRPC_MAX_CONNECTIONS")?
+            .unwrap_or_else(|| "64".into())
+            .parse::<usize>()
+            .context("invalid GRPC_MAX_CONNECTIONS")?;
+        if !(1..=4096).contains(&max_connections) {
+            bail!("GRPC_MAX_CONNECTIONS must be 1..4096");
+        }
         let cert = value("GRPC_TLS_CERT_FILE")?;
         let key = value("GRPC_TLS_KEY_FILE")?;
         let ca = value("GRPC_TLS_CLIENT_CA_FILE")?;
@@ -107,7 +77,7 @@ impl ServerSecurity {
             }
             return Ok(Self {
                 tls: None,
-                access: AccessLayer::unauthenticated(),
+                access: AccessLayer::insecure_loopback(),
                 max_connections,
             });
         }
@@ -139,20 +109,8 @@ impl ServerSecurity {
     }
 }
 
-/// Plaintext client target: an explicit loopback IP.
-#[cfg(not(feature = "insecure-dev"))]
-fn plaintext_allowed(host: &str) -> bool {
-    host.parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
-}
-/// Plaintext client target: any host in an `insecure-dev` build.
-#[cfg(feature = "insecure-dev")]
-fn plaintext_allowed(_host: &str) -> bool {
-    true
-}
-
 /// Client endpoint for clone and attest-verify. Plaintext is allowed only to
-/// `plaintext_allowed` hosts. Partial TLS settings never downgrade to plaintext.
+/// an explicit loopback IP. Partial TLS settings never downgrade to plaintext.
 pub fn client_endpoint(url: &str) -> Result<Endpoint> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let endpoint = Endpoint::from_shared(url.to_owned())?
@@ -164,12 +122,10 @@ pub fn client_endpoint(url: &str) -> Result<Endpoint> {
     let name = value("PARENT_TLS_SERVER_NAME")?;
     if endpoint.uri().scheme_str() == Some("http") {
         let host = endpoint.uri().host().unwrap_or("").trim_matches(['[', ']']);
-        if !plaintext_allowed(host)
-            || ca.is_some()
-            || cert.is_some()
-            || key.is_some()
-            || name.is_some()
-        {
+        let local = host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+        if !local || ca.is_some() || cert.is_some() || key.is_some() || name.is_some() {
             bail!("plaintext is allowed only for explicit loopback IP without TLS settings");
         }
         return Ok(endpoint);
@@ -204,7 +160,7 @@ pub struct AccessLayer {
     policy: Option<Arc<Policy>>,
 }
 impl AccessLayer {
-    fn unauthenticated() -> Self {
+    fn insecure_loopback() -> Self {
         Self { policy: None }
     }
     pub fn from_acl(acl: &str, limit: u32, period: Duration) -> Result<Self> {

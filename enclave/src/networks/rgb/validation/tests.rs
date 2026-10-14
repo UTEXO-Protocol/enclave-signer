@@ -1,5 +1,5 @@
 //! Tests for all of `validation/`. They are in one file because they share
-//! the consignment fixtures and the Electrum stub.
+//! the consignment fixtures and the Esplora stub.
 
 use std::io::Cursor;
 
@@ -45,11 +45,6 @@ const CONTRACT_FIXTURE: &[u8] =
 const BFA_BURN_FIXTURE: &[u8] =
     include_bytes!("../../../../tests/fixtures/bfa_burn_consignment.rgbc");
 
-// From QA (rgb-lib-go 0.3.0-beta.44-bfa.1): the last witness commits a burn of
-// 10_000 and, after it, a plain transfer of 22_200 units.
-const BURN_WITH_COMPANION_FIXTURE: &[u8] =
-    include_bytes!("../../../../tests/fixtures/bfa_burn_with_companion_transfer.rgbc");
-
 use crate::config::BridgeConfig;
 #[cfg(rgb_to_evm)]
 use crate::config::{
@@ -58,51 +53,9 @@ use crate::config::{
 #[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
 
-/// Both walks pick the burn, not the transfer after it, and agree on its OpId.
-#[test]
-fn both_walks_pick_the_burn_beside_a_companion_transfer() {
-    const BURN_OPID: &str = "5753e10e9241d8f02065d52ba759580c22d3b7d6a46bcac4db6a699e7d3e9a97";
-    let (_, _, last, by_witness) = extract_transition_summary(BURN_WITH_COMPANION_FIXTURE).unwrap();
-    assert_eq!(by_witness.last().unwrap().1.len(), 2, "burn and transfer");
-    let last = last.expect("settling transition");
-    assert_eq!(last.transition_type, bfa::TS_BURN);
-    assert_eq!(last.op_id, BURN_OPID);
-
-    let transfer = Transfer::load(Cursor::new(BURN_WITH_COMPANION_FIXTURE)).unwrap();
-    assert_eq!(
-        read_last_transition_burned_asset(&transfer).unwrap(),
-        Some(10_000)
-    );
-    assert_eq!(
-        read_last_transition_burn_recipient(&transfer)
-            .unwrap()
-            .map(hex::encode)
-            .as_deref(),
-        Some("0000000000000000000000000258c3129102efbc672fa5e4377f02487695a375")
-    );
-    let (_, opid) = read_last_transfer_witness(&transfer, bfa::TS_BURN).unwrap();
-    assert_eq!(opid.map(hex::encode).as_deref(), Some(BURN_OPID));
-}
-
-/// One tx can burn and send a plain transfer. The burn settles, whatever the
-/// bundle order. Two burns keep the later one, as before.
-#[test]
-fn settling_index_takes_the_burn_beside_a_transfer() {
-    let burn = |t: &u16| *t == bfa::TS_BURN;
-    let transfer = 10_000u16;
-    assert_eq!(settling_index(&[bfa::TS_BURN, transfer], burn), Some(0));
-    assert_eq!(settling_index(&[transfer, bfa::TS_BURN], burn), Some(1));
-    assert_eq!(
-        settling_index(&[bfa::TS_BURN, transfer, bfa::TS_BURN], burn),
-        Some(2)
-    );
-    assert_eq!(settling_index(&[transfer, bfa::TS_BRIDGE], burn), Some(1));
-    assert_eq!(settling_index::<u16>(&[], burn), None);
-}
-
 #[test]
 fn rejects_invalid_bytes() {
-    let validator = RgbValidator::new("tcp://localhost:1".to_string(), "regtest").unwrap();
+    let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
     let err = validator
         .validate_consignment(b"not-a-consignment", &[])
         .unwrap_err();
@@ -113,9 +66,9 @@ fn rejects_invalid_bytes() {
 }
 
 #[test]
-fn stalled_electrum_times_out_instead_of_hanging() {
+fn stalled_esplora_times_out_instead_of_hanging() {
     // A host that accepts the connection and never responds must cost at most
-    // the socket timeout.
+    // the HTTP timeout.
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
@@ -130,61 +83,9 @@ fn stalled_electrum_times_out_instead_of_hanging() {
         }
     });
 
-    let validator = RgbValidator::new(format!("tcp://{addr}"), "bitcoin")
-        .unwrap()
-        .with_timeout(2);
-    let start = std::time::Instant::now();
-    let err = validator
-        .validate_consignment(TRANSFER_FIXTURE, &[])
-        .unwrap_err();
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_secs(60),
-        "stalled Electrum must be bounded by the socket timeout, took {elapsed:?}: {err}"
-    );
-}
-
-#[test]
-fn rejects_unknown_network() {
-    let err = RgbValidator::new("tcp://localhost:1".to_string(), "foonet").unwrap_err();
-    assert!(err.to_string().contains("unknown bitcoin network"));
-}
-
-#[test]
-fn rejects_an_unknown_indexer_scheme() {
-    for url in ["ftp://localhost:1", "ws://localhost:1", "localhost:1"] {
-        let err = RgbValidator::new(url.to_string(), "regtest").unwrap_err();
-        assert!(
-            err.to_string().contains("not ssl:// or tcp://"),
-            "{url}: {err}"
-        );
-    }
-}
-
-#[test]
-fn accepts_an_esplora_url() {
-    for url in ["https://esplora.test", "http://127.0.0.1:3000"] {
-        RgbValidator::new(url.to_string(), "signet").expect(url);
-    }
-}
-
-#[test]
-fn stalled_esplora_times_out_instead_of_hanging() {
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { break };
-            held.push(stream);
-        }
-    });
-
     let validator = RgbValidator::new(format!("http://{addr}"), "bitcoin")
         .unwrap()
-        .with_timeout(2);
+        .with_http_timeout(2);
     let start = std::time::Instant::now();
     let err = validator
         .validate_consignment(TRANSFER_FIXTURE, &[])
@@ -194,6 +95,12 @@ fn stalled_esplora_times_out_instead_of_hanging() {
         elapsed < std::time::Duration::from_secs(60),
         "stalled Esplora must be bounded by the HTTP timeout, took {elapsed:?}: {err}"
     );
+}
+
+#[test]
+fn rejects_unknown_network() {
+    let err = RgbValidator::new("http://localhost:1".to_string(), "foonet").unwrap_err();
+    assert!(err.to_string().contains("unknown bitcoin network"));
 }
 
 /// `asset_output_amount` must count only `OS_ASSET` allocations, not the
@@ -280,9 +187,7 @@ fn signed_precision_is_refused_without_a_panic() {
     const SIGNED_PRECISION_FIXTURE: &[u8] =
         include_bytes!("../../../../tests/fixtures/transfer_consignment_signed_precision.rgbc");
 
-    // Electrum connects when the resolver is built, so the stub must be live.
-    let url = crate::test_support::electrum_stub::spawn(bitcoin::Network::Regtest);
-    let validator = RgbValidator::new(url, "regtest").unwrap();
+    let validator = RgbValidator::new("http://localhost:1".to_string(), "regtest").unwrap();
     let err = validator
         .validate_consignment(SIGNED_PRECISION_FIXTURE, &[])
         .unwrap_err();
@@ -375,10 +280,7 @@ fn binding_defers_undecodable_bytes() {
 #[cfg(feature = "bfa-validation")]
 fn binding_with(mint_opids: Vec<[u8; 32]>, last: Option<(u16, [u8; 32])>) -> BfaBinding {
     BfaBinding {
-        mints: mint_opids
-            .into_iter()
-            .map(|opid| super::BfaMint { opid, minted: 1 })
-            .collect(),
+        mint_opids,
         bridge_location: "0x0".into(),
         last_transition: last.map(|(transition_type, opid)| TransitionSummary {
             op_id: hex::encode(opid),
@@ -642,14 +544,14 @@ fn extracts_last_transfer_witness_from_transfer_fixture() {
 
 #[test]
 fn rejects_last_transfer_witness_on_type_mismatch() {
-    // If the rgbstd walk and the parser walk disagree on the settling transition
+    // If the rgbstd walk and the parser walk disagree on the last transition
     // type, fail closed. The fixture ends in TS_TRANSFER, so a TS_BURN claim
     // triggers the check.
     let transfer = Transfer::load(Cursor::new(TRANSFER_FIXTURE)).expect("load transfer fixture");
     let err = read_last_transfer_witness(&transfer, bfa::TS_BURN).unwrap_err();
     assert!(
         err.to_string()
-            .contains("disagrees with parsed settling transition type"),
+            .contains("disagrees with parsed last transition type"),
         "expected type-mismatch rejection, got: {err}"
     );
 }
@@ -696,6 +598,7 @@ fn fixture_source(asset_id: &str) -> RgbSource {
         consignment_hash: keccak(TRANSFER_FIXTURE),
         merkle_proofs: vec![],
         commission: 0,
+        mint_ancestors: vec![],
     }
 }
 
@@ -842,7 +745,7 @@ fn rejects_consignment_hash_mismatch_even_with_valid_flag() {
 
 // Asset-identity binding, SOURCE path. `validate_source` calls the binding
 // after `validate_consignment`. The tests run `validate_source` end to end
-// with the mainnet fixture and a stub Electrum.
+// with the mainnet fixture and a stub Esplora.
 //
 // Intentional asymmetry: here the RGB_ASSET_ID pin applies only if
 // `BridgeConfig::is_configured()`. The destination path
@@ -903,11 +806,42 @@ mod asset_bind {
         )]
     }
 
-    /// Stub Electrum that answers only the signet chain check. The
+    /// Stub Esplora that serves only `GET /block-height/0` with the signet
+    /// genesis hash. Offline rgbstd validation of the fixture needs only this.
+    /// The resolver calls out only for the genesis-hash chain check. The
     /// fixture embeds its witness txs (added as tentative by
     /// `add_consignment_txes`).
-    fn spawn_stub_electrum() -> String {
-        crate::test_support::electrum_stub::spawn(bitcoin::Network::Signet)
+    fn spawn_stub_esplora() -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub esplora");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first = req.lines().next().unwrap_or("").to_string();
+                if !first.starts_with("GET /block-height/0") {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
+                    .block_hash()
+                    .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
     }
 
     /// Fully pinned operator config (`is_configured() == true`) with the
@@ -956,7 +890,7 @@ mod asset_bind {
         ))
     }
 
-    /// Runs `validate_source` with a stub-Electrum validator and a fresh
+    /// Runs `validate_source` with a stub-Esplora validator and a fresh
     /// signet header chain.
     fn run_validate_source(
         source: &RgbSource,
@@ -971,7 +905,7 @@ mod asset_bind {
         config: &BridgeConfig,
         events: &[rgbstd::vm::ether_extension::Event],
     ) -> Result<ValidatedConsignment> {
-        let url = spawn_stub_electrum();
+        let url = spawn_stub_esplora();
         let validator = RgbValidator::new(url, "signet").expect("validator");
         let chain = fresh_signet_chain();
         let ctx = ValidationContext {
@@ -1088,53 +1022,6 @@ mod asset_bind {
         );
     }
 
-    /// Stub Esplora that serves only `GET /block-height/0`, the chain check.
-    #[cfg(feature = "bfa-validation")]
-    fn spawn_stub_esplora() -> String {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub esplora");
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                if !request.starts_with("GET /block-height/0 ") {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                    );
-                    continue;
-                }
-                let body = bitcoin::constants::genesis_block(bitcoin::Network::Signet)
-                    .block_hash()
-                    .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\
-                     connection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    /// Esplora passes the signet chain check on the genesis hash alone, so it
-    /// validates where rgb-ops' Electrum check needs a public-signet tx.
-    #[test]
-    #[cfg(feature = "bfa-validation")]
-    fn validates_a_real_burn_through_esplora() {
-        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
-        let validated = validator
-            .validate_consignment(BFA_BURN_FIXTURE, &fixture_mint_events())
-            .expect("the BFA burn fixture passes RGB consensus through Esplora");
-        assert_eq!(validated.contract_id, FIXTURE_ASSET_ID);
-    }
-
     /// The full validator on a real burn. RGB consensus accepts the fixture:
     /// the mint script with its EVM lock, and the two burn scripts. The
     /// summary has the last burn: its OpId, the 10_000 burned units and its
@@ -1142,7 +1029,7 @@ mod asset_bind {
     #[test]
     #[cfg(feature = "bfa-validation")]
     fn validates_a_real_burn_and_reads_its_terminal_burn() {
-        let validator = RgbValidator::new(spawn_stub_electrum(), "signet").expect("validator");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
         let validated = validator
             .validate_consignment(BFA_BURN_FIXTURE, &fixture_mint_events())
             .expect("the BFA burn fixture passes RGB consensus");
@@ -1220,7 +1107,7 @@ mod asset_bind {
         let original = Transfer::load(Cursor::new(BFA_BURN_FIXTURE)).expect("load BFA fixture");
         let bundles: Vec<_> = original.bundles.iter().cloned().collect();
         assert_eq!(bundles.len(), 3, "one mint and two burns");
-        let validator = RgbValidator::new(spawn_stub_electrum(), "signet").expect("validator");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
         let events = fixture_mint_events();
 
         for order in [
@@ -1425,7 +1312,7 @@ mod asset_bind {
         assert_eq!(witness_tx.input.len(), 2);
         assert_eq!(witness_tx.input[0].previous_output.to_string(), RIGHT_UTXO);
 
-        let validator = RgbValidator::new(spawn_stub_electrum(), "signet").expect("validator");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
         let events = fixture_mint_events();
 
         let err = validator
@@ -1655,7 +1542,7 @@ mod asset_bind {
     #[cfg(feature = "bfa-validation")]
     fn validates_a_history_of_200_transfers() {
         let consignment = fixture_with_long_history(200);
-        let validator = RgbValidator::new(spawn_stub_electrum(), "signet").expect("validator");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
         let validated = validator
             .validate_consignment(&consignment, &fixture_mint_events())
             .expect("the long history passes RGB consensus");
@@ -1689,7 +1576,7 @@ mod asset_bind {
         use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
         use crate::proto::enclave_request::Request;
         use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-        use crate::proto::{EnclaveRequest, EvmDestination, SignRequest};
+        use crate::proto::{EnclaveRequest, EvmDestination, MintAncestor, SignRequest};
 
         const TRANSFERS: usize = 10_000;
         // 1 mint and 2 burns in the fixture, then the transfers and 1 burn.
@@ -1701,7 +1588,7 @@ mod asset_bind {
         }
 
         // 1. RGB consensus.
-        let validator = RgbValidator::new(spawn_stub_electrum(), "signet").expect("validator");
+        let validator = RgbValidator::new(spawn_stub_esplora(), "signet").expect("validator");
         let start = std::time::Instant::now();
         let validated = validator
             .validate_consignment(&consignment, &fixture_mint_events())
@@ -1713,7 +1600,15 @@ mod asset_bind {
         // 2. Request caps.
         let cfg = BridgeConfig::default();
         assert!(consignment.len() <= cfg.max_consignment_bytes);
-        let source = sized_source(&consignment, &validated.witness_txids, 13);
+        let mut source = sized_source(&consignment, &validated.witness_txids, 13);
+        source.mint_ancestors = validated
+            .mint_op_ids
+            .iter()
+            .map(|opid| MintAncestor {
+                op_id: hex::decode(opid).expect("opid hex"),
+                tx_hash: vec![0x77; 32],
+            })
+            .collect();
         validate_source_payload(&source, &cfg).expect("the source passes the default caps");
         let proof_bytes: usize = source
             .merkle_proofs

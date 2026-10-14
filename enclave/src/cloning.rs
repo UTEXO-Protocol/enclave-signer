@@ -22,6 +22,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use rand_core::OsRng;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
@@ -49,7 +50,7 @@ pub struct CloneSession {
 impl CloneSession {
     /// Generate a fresh ephemeral X25519 keypair from the OS RNG.
     pub fn new() -> Self {
-        let secret = StaticSecret::random();
+        let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret);
         Self { secret, public }
     }
@@ -95,7 +96,7 @@ pub fn make_cloning_digest(
     encryption_pubkey: &[u8; 32],
     target_cluster_pk: &[u8; 20],
 ) -> [u8; 32] {
-    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret.as_bytes())
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(encryption_pubkey);
     mac.update(target_cluster_pk);
@@ -159,7 +160,7 @@ pub fn encrypt_seed_for_peer(
     peer_pubkey: &[u8; 32],
     seed: &[u8; 64],
 ) -> Result<(Vec<u8>, [u8; 32])> {
-    let our_secret = EphemeralSecret::random();
+    let our_secret = EphemeralSecret::random_from_rng(OsRng);
     let our_pub = PublicKey::from(&our_secret).to_bytes();
     let peer = PublicKey::from(*peer_pubkey);
     let shared = our_secret.diffie_hellman(&peer);
@@ -173,7 +174,7 @@ pub fn encrypt_seed_for_peer(
 /// Reject non-contributory DH outputs (RFC 7748, section 6.1).
 fn reject_non_contributory(shared: &SharedSecret) -> Result<()> {
     if !shared.was_contributory() {
-        return Err(EnclaveError::InvalidRequest(
+        return Err(EnclaveError::Clone(
             "peer X25519 public key was small-order (non-contributory DH)".into(),
         ));
     }
@@ -350,7 +351,7 @@ mod tests {
             encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
 
         // Random, not zero: zero is small-order and fails a different check.
-        let wrong_donor = PublicKey::from(&StaticSecret::random()).to_bytes();
+        let wrong_donor = PublicKey::from(&StaticSecret::random_from_rng(OsRng)).to_bytes();
         let result = requester.decrypt_seed_from_peer(&wrong_donor, &ciphertext);
         assert!(matches!(result, Err(EnclaveError::Clone(_))));
     }
@@ -359,7 +360,7 @@ mod tests {
     fn encrypt_rejects_small_order_peer_pubkey() {
         // The all-zero point is a small-order point on Curve25519.
         let result = encrypt_seed_for_peer(&[0u8; 32], &[42u8; 64]);
-        assert!(matches!(result, Err(EnclaveError::InvalidRequest(_))));
+        assert!(matches!(result, Err(EnclaveError::Clone(_))));
     }
 
     #[test]
@@ -369,7 +370,7 @@ mod tests {
         let (ciphertext, _legit_donor) =
             encrypt_seed_for_peer(&requester.public_key(), &[42u8; 64]).unwrap();
         let result = requester.decrypt_seed_from_peer(&[0u8; 32], &ciphertext);
-        assert!(matches!(result, Err(EnclaveError::InvalidRequest(_))));
+        assert!(matches!(result, Err(EnclaveError::Clone(_))));
     }
 
     #[test]

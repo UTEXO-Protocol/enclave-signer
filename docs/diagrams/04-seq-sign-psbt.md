@@ -4,7 +4,7 @@ The mint signer path, in code order. Step-by-step text:
 [mint flow](../mint-flow.md).
 
 The request must have the EVM deposit hash **and** the RGB consignment. The
-mint signer uses Taproot key-path signatures from the colored BIP-86 account. Bitcoin
+mint signer signs only the colored account, with the BIP-86 key path. Bitcoin
 outputs that the enclave cannot prove it owns are limited by
 `RGB_MAX_UNOWNED_SATS`.
 
@@ -37,7 +37,7 @@ sequenceDiagram
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))
-    State-->>Srv: unexpired entry still in cache ⇒ REFUSE
+    State-->>Srv: seen in 24 h ⇒ REFUSE
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
@@ -50,7 +50,7 @@ sequenceDiagram
     Evt-->>Srv: destinationAddress (may be empty)
 
     Note over Srv,Rpc: 3 — each mint has a deposit (bfa_mint_events)
-    Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT<br/>last mint ↔ evm_tx_hash (its derived id), older mints ↔ derived ids
+    Srv->>Srv: bridgeLocation == FUNDS_IN_CONTRACT<br/>last mint ↔ evm_tx_hash, older mints ↔ mint_ancestors
     Srv->>Rpc: receipt per mint
     Srv->>Srv: one FundsIn (rgbOpId == mint OpId) + one BridgeFundsIn,<br/>depth ≥ EVM_MIN_CONFIRMATIONS ⇒ verified locks
 
@@ -58,7 +58,7 @@ sequenceDiagram
     Srv->>Rgb: size cap, keccak256(consignment) == consignment_hash,<br/>rgb-ops validation (BFA only, mints vs verified locks)
     Rgb-->>Srv: ValidatedConsignment / REFUSE
     Srv->>Anchor: contract_id == asset_id == RGB_ASSET_ID
-    Srv->>Anchor: settling transition == TS_BRIDGE<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
+    Srv->>Anchor: last transition == TS_BRIDGE<br/>PSBT txid == last witness txid<br/>every input SegWit with witness_utxo<br/>input prevouts == witness prevouts<br/>sighash ALL / taproot DEFAULT only
     Srv->>Anchor: every committed transition is TS_BRIDGE<br/>sum(OS_ASSET) == amount − commission (OS_BRIDGE excluded)
     Srv->>Anchor: legs: blinded seal ⇒ recipient,<br/>revealed seal ⇒ must be self-owned (≤ 4 off-PSBT outpoints)<br/>sum(recipient legs) == amount − commission
     Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)
@@ -85,7 +85,6 @@ sequenceDiagram
     Srv-->>Wire: SignedPsbtResponse + reservation
     Wire->>Parent: write response
     Wire->>State: commit replay key only after the write succeeds
-    Note over Wire,Parent: A successful write does not prove receipt by the caller.
     Parent-->>Listener: signed PSBT (not finalized)
     Listener-->>Orc: finalize + broadcast
 ```

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tonic::{Request, Response, Status};
@@ -35,11 +36,15 @@ pub enum EnclaveTarget {
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
+    evm_network_ids: HashSet<u32>,
 }
 
 impl ParentAdapterService {
-    pub fn new(target: EnclaveTarget) -> Self {
-        Self { target }
+    pub fn new(target: EnclaveTarget, evm_network_ids: HashSet<u32>) -> Self {
+        Self {
+            target,
+            evm_network_ids,
+        }
     }
 
     /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
@@ -120,11 +125,6 @@ impl ParentAdapterService {
             // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
             2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
-            // Codes 4-7 come from GetClone only.
-            4 => Status::invalid_argument(err.message.clone()),
-            5 => Status::permission_denied(err.message.clone()),
-            6 => Status::already_exists(err.message.clone()),
-            7 => Status::resource_exhausted(err.message.clone()),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message
@@ -176,6 +176,13 @@ impl ParentAdapterService {
         }
     }
 
+    fn enclave_mint_ancestor(ancestor: grpc_proto::MintAncestor) -> enclave_proto::MintAncestor {
+        enclave_proto::MintAncestor {
+            op_id: ancestor.op_id,
+            tx_hash: ancestor.tx_hash,
+        }
+    }
+
     fn enclave_source_network(
         source: SourceProof,
     ) -> Result<enclave_proto::sign_request::SourceNetwork, Status> {
@@ -213,6 +220,13 @@ impl ParentAdapterService {
                         .merkle_proofs
                         .into_iter()
                         .map(Self::enclave_merkle_proof)
+                        .collect(),
+                    // Forward as given. The enclave verifies every pair
+                    // against the chain, so the parent adds no trust.
+                    mint_ancestors: rgb
+                        .mint_ancestors
+                        .into_iter()
+                        .map(Self::enclave_mint_ancestor)
                         .collect(),
                 }),
             ),
@@ -262,6 +276,12 @@ impl ParentAdapterService {
                         asset_id: payload.rgb_asset_id,
                         consignment: payload.consignment,
                         consignment_hash: payload.consignment_hash,
+                        // Forward as given. The enclave verifies every pair.
+                        mint_ancestors: payload
+                            .mint_ancestors
+                            .into_iter()
+                            .map(Self::enclave_mint_ancestor)
+                            .collect(),
                     },
                 )
             }
@@ -374,6 +394,12 @@ impl ParentService for ParentAdapterService {
 
                 let destination_network = match inner.data {
                     Some(sign_request::Data::EvmData(payload)) => {
+                        if !self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "EVM payload destination network {} is not configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
                         tracing::info!(
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
@@ -386,6 +412,12 @@ impl ParentService for ParentAdapterService {
                         Self::enclave_destination_network(sign_request::Data::EvmData(payload))
                     }
                     Some(sign_request::Data::RgbData(payload)) => {
+                        if self.evm_network_ids.contains(&common.dst_network_id) {
+                            return Err(Status::invalid_argument(format!(
+                                "RGB payload destination network {} is configured as EVM",
+                                common.dst_network_id
+                            )));
+                        }
                         tracing::info!(
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
@@ -412,10 +444,6 @@ impl ParentService for ParentAdapterService {
 
                 let source_network = Self::enclave_source_network(source)?;
                 Self::validate_cross_network_route(&source_network, &destination_network)?;
-                let expects_evm = match &destination_network {
-                    enclave_proto::sign_request::DestinationNetwork::EvmDestination(_) => true,
-                    enclave_proto::sign_request::DestinationNetwork::RgbDestination(_) => false,
-                };
 
                 let enclave_req = EnclaveRequest {
                     request: Some(enclave_request::Request::Sign(enclave_proto::SignRequest {
@@ -434,11 +462,6 @@ impl ParentService for ParentAdapterService {
 
                 match resp.response {
                     Some(enclave_response::Response::SignedPsbt(r)) => {
-                        if expects_evm {
-                            return Err(Status::internal(
-                                "enclave reply type mismatch for Sign: expected EvmSignature, got SignedPsbt",
-                            ));
-                        }
                         Ok(Response::new(SignatureResponse {
                             signer_network_id,
                             signature: r.signed_psbt,
@@ -449,11 +472,6 @@ impl ParentService for ParentAdapterService {
                         }))
                     }
                     Some(enclave_response::Response::EvmSignature(r)) => {
-                        if !expects_evm {
-                            return Err(Status::internal(
-                                "enclave reply type mismatch for Sign: expected SignedPsbt, got EvmSignature",
-                            ));
-                        }
                         Ok(Response::new(SignatureResponse {
                             signer_network_id,
                             signature: r.signature,
@@ -590,10 +608,9 @@ impl ParentService for ParentAdapterService {
     ///   (m/44'/919'/0'/0'/0').
     ///
     /// `CCD_GOVERNANCE` reads the governance key without attestation.
-    /// For Nitro evidence binding these public keys to approved measured code,
-    /// use `AttestedPublicKey` with a trusted Real verifier. Genuine Nitro
-    /// evidence requires a Nitro Security Module. See docs/pubkey-attestation.md
-    /// for what verification does and does not prove.
+    /// `AttestedPublicKey` needs a Nitro Security Module. For proof that the
+    /// key comes from a real enclave, use `AttestedPublicKey`
+    /// (see docs/pubkey-attestation.md).
     async fn public_key(
         &self,
         request: Request<PublicKeyRequest>,
@@ -764,12 +781,11 @@ impl ParentService for ParentAdapterService {
         ))
     }
 
-    /// Relay a 32-byte caller nonce to the enclave and return its public-key
-    /// bundle, policy and attestation document. The document commits to the EVM
-    /// public key and sha256(bundle || policy). This handler does not verify it:
-    /// the caller must use a trusted verifier with approved PCRs and expected
-    /// policy before relying on the identity. See docs/pubkey-attestation.md
-    /// for the checks and their limits.
+    /// Prove that the bridge signing key comes from this TEE. Sends a 32-byte
+    /// caller nonce to the enclave. Returns the public-key bundle and an NSM
+    /// attestation document. The document binds the EVM public key and a
+    /// sha256 of the full bundle to the enclave PCRs.
+    /// See docs/pubkey-attestation.md for verification.
     async fn attested_public_key(
         &self,
         request: Request<AttestedPublicKeyRequest>,
@@ -793,9 +809,26 @@ impl ParentService for ParentAdapterService {
 
         match resp.response {
             Some(enclave_response::Response::GetAttestedPublicKey(r)) => {
-                crate::attest_verify::attested_response(r)
-                    .map(Response::new)
-                    .map_err(|e| Status::internal(e.to_string()))
+                let pk = r.public_keys.ok_or_else(|| {
+                    Status::internal("enclave returned attestation without public_keys")
+                })?;
+                Ok(Response::new(AttestedPublicKeyResponse {
+                    evm_address: pk.evm_address,
+                    evm_uncompressed_pub: pk.evm_uncompressed_pub,
+                    btc_compressed_pub: pk.btc_compressed_pub,
+                    btc_xpub: pk.btc_xpub,
+                    master_fingerprint: pk.master_fingerprint,
+                    account_xpub_vanilla: pk.account_xpub_vanilla,
+                    account_xpub_colored: pk.account_xpub_colored,
+                    attestation_doc: r.attestation_doc,
+                    chain_id: pk.chain_id,
+                    bridge_contract: pk.bridge_contract,
+                    rgb_asset_id: pk.rgb_asset_id,
+                    evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
+                    evm_gas_tx_address: pk.evm_gas_tx_address,
+                    ccd_ed25519_pub: pk.ccd_ed25519_pub,
+                    attested_policy: r.attested_policy,
+                }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
             other => Err(Status::internal(format!(

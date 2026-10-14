@@ -74,19 +74,10 @@ fn mock_funds_out_calldata_identity(
 }
 
 /// A `ValidatedConsignment` with only `transition` as its last transition.
-/// `last_transfer_op_id` gets the same OpId when it decodes as 32 bytes, as
-/// validation does. A malformed OpId leaves it `None`.
+/// The `fundsOut` cross-checks read only `last_transition`.
 fn validated_with_last(
     transition: crate::networks::rgb::validation::TransitionSummary,
 ) -> crate::networks::rgb::validation::ValidatedConsignment {
-    let last_transfer_op_id = hex::decode(
-        transition
-            .op_id
-            .strip_prefix("0x")
-            .unwrap_or(&transition.op_id),
-    )
-    .ok()
-    .and_then(|b| <[u8; 32]>::try_from(b).ok());
     crate::networks::rgb::validation::ValidatedConsignment {
         contract_id: "rgb:test".into(),
         chain_net: "bc".into(),
@@ -96,7 +87,7 @@ fn validated_with_last(
         last_transition: Some(transition),
         last_witness_txid: None,
         last_transfer_witness_prevouts: None,
-        last_transfer_op_id,
+        last_transfer_op_id: None,
         non_mined_witness_txids: vec![],
         transitions_by_witness: vec![],
     }
@@ -241,37 +232,7 @@ mod source_burn {
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
     }
 
-    /// The bind reads the OpId that consensus validated, not the flat parser's
-    /// copy. A summary whose validated OpId differs from the parser's is
-    /// refused when the calldata cites the parser's value.
-    #[test]
-    fn binds_to_the_validated_op_id_not_the_parser_copy() {
-        let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
-        let mut other = op_id_bytes();
-        other[0] ^= 0x80;
-        validated.last_transfer_op_id = Some(other);
-
-        // The calldata cites the flat parser's OpId.
-        let cd = calldata_with("", op_id_bytes());
-        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
-        assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");
-
-        // The calldata cites the validated OpId.
-        let cd = calldata_with("", other);
-        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
-    }
-
-    /// A burn summary with no validated OpId cannot bind a release.
-    #[test]
-    fn rejects_a_summary_without_a_validated_op_id() {
-        let cd = calldata_with("", op_id_bytes());
-        let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
-        validated.last_transfer_op_id = None;
-        let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
-        assert!(err.to_string().contains("validated OpId"), "{err}");
-    }
-
-    /// A malformed op_id gives no validated OpId, so the bind refuses.
+    /// A malformed op_id is an internal error. Do not use a partial compare.
     #[test]
     fn rejects_a_non_hex_or_short_op_id() {
         let cd = calldata_with("", op_id_bytes());
@@ -536,7 +497,8 @@ mod settlement {
         assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
     }
 
-    /// F05-NEW-AF-04: only the ascending order is signable.
+    /// F05-NEW-AF-04: the same pairs in another order hash to another
+    /// `burnId`. Only the ascending order is signable.
     #[test]
     fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
@@ -584,7 +546,8 @@ mod settlement {
         assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
-    /// A valid burn citing a deposit it does not descend from.
+    /// The P6 attack: a valid burn sent again with other deposits cited, to
+    /// get a new `burnId` on chain.
     #[test]
     fn rejects_a_deposit_the_burn_does_not_descend_from() {
         let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();

@@ -43,6 +43,7 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
@@ -52,6 +53,11 @@ jobs:
             HostName github.com
             User git
             IdentityFile ~/.ssh/key_federated
+            IdentitiesOnly yes
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
             IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
@@ -89,12 +95,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Defaults are rgb + rgb-swap + ccd: the combined swap EIF (retired flow)
-      # minus vsock and bfa-validation.
+      # Defaults are rgb + rgb-swap + ccd, so the steps below exercise the
+      # signing path shipped in the combined EIF (minus vsock / evm-rpc).
       - name: Build (default features)
         run: cargo build --workspace
 
-      # `--all-targets` so clippy also lints test code under `tests/`.
+      # `--all-targets` so clippy lints test code too — otherwise lints on
+      # files under `tests/` slip through, as happened on the attestation PR.
       - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -114,18 +121,12 @@ jobs:
       - name: Test (parent)
         run: cargo test --manifest-path parent/Cargo.toml
 
-      - name: Clippy (parent, insecure-dev)
-        run: cargo clippy --manifest-path parent/Cargo.toml --features insecure-dev --lib --bins --test test_insecure_dev -- -D warnings
-
-      - name: Test (parent, insecure-dev)
-        run: cargo test --manifest-path parent/Cargo.toml --features insecure-dev --test test_insecure_dev
-
-      # Combined build profile: the feature set of build/Dockerfile.enclave
-      # (retired swap flow, not production).
-      - name: Build (swap combo)
+      # Production build profile: the exact feature set shipped in the EIF
+      # (build/Dockerfile.enclave). `helios` is not shipped.
+      - name: Build (production combo)
         run: cargo build -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation
 
-      - name: Clippy (swap combo)
+      - name: Clippy (production combo)
         run: cargo clippy -p utexo-bridge-enclave --features vsock,rgb,rgb-swap,ccd,bfa-validation --all-targets -- -D warnings
 
       # SPV path coverage. Cannot use vsock here (Linux runner without
@@ -134,8 +135,7 @@ jobs:
       - name: Test (--features spv,rgb-swap)
         run: cargo test -p utexo-bridge-enclave --features spv,rgb-swap
 
-      # RGB-only swap EIF profile (retired flow), `ccd` dropped. Mirrors
-      # Dockerfile.enclave.rgb.
+      # RGB-only EIF profile, `ccd` dropped. Mirrors Dockerfile.enclave.rgb.
       # CCD requests (SignCcd / CcdSource) must be refused here.
       - name: Build (rgb-only)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
@@ -179,7 +179,7 @@ jobs:
 
       # Minimal build: no features at all (`--no-default-features` drops the
       # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the
-      # guard that a no-spv build refuses to sign `fundsOut`
+      # Guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
       # Skips the rgb-consignment dep entirely. Like every enclave build here it
       # still resolves the workspace's private RGB git sources using the keys above.
@@ -211,7 +211,7 @@ jobs:
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
-  # checked individually with `--release`; the check MUST fail, and fail via
+  # built individually with `--release`; the build MUST fail, and fail via
   # our guard rather than some unrelated error. Runs separately from `ci`
   # because these builds are expected to fail.
   release-guards:
@@ -219,13 +219,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - feature: allow-seed-import
-            target: -p utexo-bridge-enclave
-          - feature: mock-attestation
-            target: -p utexo-bridge-enclave
-          - feature: insecure-dev
-            target: --manifest-path parent/Cargo.toml
+        feature: [allow-seed-import, mock-attestation]
 
     steps:
       - uses: actions/checkout@v4
@@ -238,20 +232,20 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Set up SSH for private deps
+      - name: Set up SSH for private BFA deps
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
-          Host github-federated-signer
+          Host github-rgb-consignment
             HostName github.com
             User git
-            IdentityFile ~/.ssh/key_federated
+            IdentityFile ~/.ssh/key_consignment
             IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
@@ -279,12 +273,12 @@ jobs:
             ~/.cargo/git
             target
             parent/target
-          key: ${{ runner.os }}-cargo-release-guards-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
       - name: Assert release build is rejected with ${{ matrix.feature }}
         run: |
-          if cargo check ${{ matrix.target }} --release --features ${{ matrix.feature }} 2>build.log; then
+          if cargo build -p utexo-bridge-enclave --release --features ${{ matrix.feature }} 2>build.log; then
             echo "::error::release build unexpectedly SUCCEEDED with '${{ matrix.feature }}' — the compile_error release guard is missing or not firing"
             exit 1
           fi
@@ -297,7 +291,7 @@ jobs:
 
   # Assert that enabling `rgb-validation` without `spv` fails to compile via the
   # `compile_error!` in lib.rs. Without SPV, a consignment's
-  # witness txs are anchored only through the host-controlled indexer,
+  # witness txs are anchored only through the host-controlled Esplora resolver,
   # so the enclave must never be built that way. Runs separately from `ci`
   # because the build is expected to fail. Unlike `release-guards` this is not
   # release-specific — the combination is unsafe in every profile.
@@ -319,11 +313,17 @@ jobs:
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}"  > ~/.ssh/key_consignment
           printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
           printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
           printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
+          Host github-rgb-consignment
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_consignment
+            IdentitiesOnly yes
           Host github-rgb-consensus
             HostName github.com
             User git
