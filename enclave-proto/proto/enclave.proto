@@ -173,6 +173,25 @@ message EvmDestination {
   // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
   // crosscheck. Absent for direct fundsOutCall releases.
   optional LzReleaseParams lz_release = 8;
+  // burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
+  // Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
+  // holds the EVM address itself. Transport only: the enclave hashes the
+  // typed fields, never these protobuf bytes.
+  optional BurnDestination burn_destination = 9;
+}
+
+// BurnDestination carries the fields of a versioned burn destination record.
+// The hash rules per version are in enclave-signer docs/burn-destination.md.
+// A new version adds new fields; existing field numbers never change.
+message BurnDestination {
+  // version selects the record type. 1 = UtexoBurnDestinationV1.
+  uint32 version = 1;
+  // destination_chain_id is the Bridge route chain id (fundsOut destinationChainId).
+  uint64 destination_chain_id = 2;
+  // dst_eid is the LayerZero endpoint id. 0 means a direct fundsOut.
+  uint32 dst_eid = 3;
+  // recipient is the chain-native payee address, 1 to 32 bytes.
+  bytes recipient = 4;
 }
 
 // LzReleaseParams carries the LayerZero-specific crosscheck fields for an

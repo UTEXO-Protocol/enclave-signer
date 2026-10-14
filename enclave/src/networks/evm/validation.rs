@@ -135,6 +135,10 @@ pub struct ReleaseIdentity {
     /// Final payee as 32 bytes. `fundsOut`: `recipient`, left-padded.
     /// `lzFundsOut`: the LayerZero `recipient`.
     pub recipient: [u8; 32],
+    /// Calldata `destinationChainId`.
+    pub destination_chain_id: alloy_primitives::U256,
+    /// Calldata `dstEid`. `None` on the direct `fundsOut` route.
+    pub dst_eid: Option<u32>,
     /// Calldata `proof`.
     pub proof: Vec<u8>,
 }
@@ -152,6 +156,8 @@ impl ReleaseIdentity {
             settlement_data: params.settlementData.to_vec(),
             source_burn_tx_id: params.sourceBurnTxId.0,
             recipient,
+            destination_chain_id: params.destinationChainId,
+            dst_eid: None,
             proof: params.proof.to_vec(),
         }
     }
@@ -166,6 +172,8 @@ impl ReleaseIdentity {
             settlement_data: call.settlementData.to_vec(),
             source_burn_tx_id: call.sourceBurnTxId.0,
             recipient: call.recipient.0,
+            destination_chain_id: call.destinationChainId,
+            dst_eid: Some(call.dstEid),
             proof: call.proof.to_vec(),
         }
     }
