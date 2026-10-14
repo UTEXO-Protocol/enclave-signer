@@ -41,6 +41,7 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | --- | --- |
 | `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
 | `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
+| `InitializeKeyResponse.account_xpub_colored`, `PublicKeysResponse.account_xpub_colored` | The comment says `m/86'/827167'/0'`. The enclave derives `m/86'/827166'/0'` on mainnet and `m/86'/827167'/0'` on other networks. |
 | `EvmSignatureResponse.call_data` | The enclave returns the input calldata unchanged. It signs decoded typed fields, not a hash of raw calldata. |
 | `SignBtcRequest` | The enclave derives output ownership and applies value budgets. There is no `BTC_ALLOWED_SCRIPTS` setting. |
 | `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
