@@ -444,6 +444,10 @@ Initialize once: use `cli init --cloning-secret-file <file>` instead of
 and cloning are alternative ways to enter `Active`. Signing subcommands require
 complete proofs and configured pins; see their `--help` and the spec.
 
+A successful clone retains the verified session's cloning secret and can act
+as a donor for a replacement without another `init`. The export cap applies
+per enclave; it does not limit the total number of replicas across a cluster.
+
 ### Production (Nitro)
 
 ```bash

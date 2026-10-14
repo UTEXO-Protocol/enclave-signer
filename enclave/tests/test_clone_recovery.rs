@@ -1,9 +1,4 @@
-//! Characterize the current donor-recovery defect through the wire handlers.
-//!
-//! This passing test reproduces a defect, not the desired recovery behavior:
-//! a replica cloned without a boot-installed donor secret cannot become a donor,
-//! even when the operator knows and resubmits the original cloning secret.
-//! Change the failure assertions when donor recovery is implemented.
+//! A verified clone can replace its donor using the same operator secret.
 //!
 //! The local harness uses TCP and mock attestation; it does not test real Nitro
 //! attestation or production boot. Key and clone requests use the shipped wire
@@ -20,6 +15,7 @@ use utexo_bridge_enclave::proto::enclave_response::Response as Resp;
 use utexo_bridge_enclave::proto::*;
 
 const CLONING_SECRET: &str = "public-donor-recovery-test-secret-0123456789abcdef";
+const WRONG_SECRET: &str = "public-wrong-recovery-test-secret-0123456789abcdef";
 
 fn call(port: u16, request: Req) -> Resp {
     send_request(
@@ -32,11 +28,11 @@ fn call(port: u16, request: Req) -> Resp {
     .expect("response variant")
 }
 
-fn initialize_request() -> Req {
+fn initialize_request(secret: &str) -> Req {
     Req::InitializeKey(InitializeKeyRequest {
         seed: vec![],
         mnemonic: String::new(),
-        cloning_secret: CLONING_SECRET.into(),
+        cloning_secret: secret.into(),
     })
 }
 
@@ -47,11 +43,11 @@ fn public_keys(port: u16) -> PublicKeysResponse {
     }
 }
 
-fn initiate_requester(port: u16, target: &[u8]) -> Req {
+fn initiate_requester(port: u16, target: &[u8], secret: &str) -> Req {
     let Resp::InitiateCloning(init) = call(
         port,
         Req::InitiateCloning(InitiateCloningRequest {
-            cloning_secret: CLONING_SECRET.into(),
+            cloning_secret: secret.into(),
             cluster_public_key: target.to_vec(),
         }),
     ) else {
@@ -69,15 +65,16 @@ fn activate_requester(port: u16, response: Resp) {
     let Resp::GetClone(clone) = response else {
         panic!("expected successful export, got {response:?}");
     };
-    let response = call(
-        port,
-        Req::SetClone(SetCloneRequest {
-            encrypted_seed: clone.encrypted_seed,
-            donor_pubkey: clone.donor_pubkey,
-            donor_attestation: clone.donor_attestation,
-        }),
-    );
+    let response = call(port, set_clone_request(clone));
     assert!(matches!(response, Resp::SetClone(_)), "{response:?}");
+}
+
+fn set_clone_request(clone: GetCloneResponse) -> Req {
+    Req::SetClone(SetCloneRequest {
+        encrypted_seed: clone.encrypted_seed,
+        donor_pubkey: clone.donor_pubkey,
+        donor_attestation: clone.donor_attestation,
+    })
 }
 
 fn assert_error(response: Resp, code: u32, message: &str) {
@@ -89,15 +86,16 @@ fn assert_error(response: Resp, code: u32, message: &str) {
 }
 
 #[test]
-fn cloned_replica_cannot_donate_even_when_operator_resubmits_secret() {
+fn cloned_replica_replaces_original_donor_without_reinitialization() {
     // Explicit config avoids process environment affecting the policy. In
     // particular, B and C have no secret preinstalled through a state helper.
     let config = BridgeConfig::default();
     let donor_a = start_test_server_with_config(|_| {}, config.clone());
     let replica_b = start_test_server_with_config(|_| {}, config.clone());
-    let requester_c = start_test_server_with_config(|_| {}, config);
+    let requester_c = start_test_server_with_config(|_| {}, config.clone());
+    let wrong_requester = start_test_server_with_config(|_| {}, config);
 
-    let initialized = call(donor_a, initialize_request());
+    let initialized = call(donor_a, initialize_request(CLONING_SECRET));
     assert!(
         matches!(initialized, Resp::InitializeKey(_)),
         "{initialized:?}"
@@ -105,36 +103,65 @@ fn cloned_replica_cannot_donate_even_when_operator_resubmits_secret() {
     let identity = public_keys(donor_a);
 
     // A -> B succeeds through the ordinary three-message clone handshake.
-    let request_for_b = initiate_requester(replica_b, &identity.evm_address);
+    let request_for_b = initiate_requester(replica_b, &identity.evm_address, CLONING_SECRET);
     activate_requester(replica_b, call(donor_a, request_for_b));
     assert_eq!(public_keys(replica_b), identity);
 
-    // The operator still knows the secret and supplies it to fresh requester
-    // C. B holds the correct seed but lacks the separate donor-side secret.
-    let request_for_c = initiate_requester(requester_c, &identity.evm_address);
-    assert_error(
-        call(replica_b, request_for_c.clone()),
-        2,
-        "donor cloning secret not configured",
-    );
+    // A is not used again. B must retain the original authentication checks.
+    let wrong_request = initiate_requester(wrong_requester, &identity.evm_address, WRONG_SECRET);
+    assert_error(call(replica_b, wrong_request), 5, "digest");
 
-    // Supplying the same secret to B through InitializeKey cannot repair it:
-    // the Active phase rejects initialization before the secret setter runs.
+    // Active initialization must remain forbidden, including attempts to
+    // replace the donor credential with a different valid-length secret.
     assert_error(
-        call(replica_b, initialize_request()),
+        call(replica_b, initialize_request(WRONG_SECRET)),
         1,
         "already initialized",
     );
     assert_eq!(public_keys(replica_b), identity);
+
+    // B -> C succeeds using the original secret supplied through ordinary
+    // requests. No boot secret or second InitializeKey is needed on B.
+    let request_for_c = initiate_requester(requester_c, &identity.evm_address, CLONING_SECRET);
+    activate_requester(requester_c, call(replica_b, request_for_c));
+    assert_eq!(public_keys(requester_c), identity);
+}
+
+#[test]
+fn rejected_clone_can_retry_and_then_donate_without_preinstalled_secret() {
+    let config = BridgeConfig::default();
+    let donor_a = start_test_server_with_config(|_| {}, config.clone());
+    let replica_b = start_test_server_with_config(|_| {}, config.clone());
+    let requester_c = start_test_server_with_config(|_| {}, config);
+    assert!(matches!(
+        call(donor_a, initialize_request(CLONING_SECRET)),
+        Resp::InitializeKey(_)
+    ));
+    let identity = public_keys(donor_a);
+    let request_for_b = initiate_requester(replica_b, &identity.evm_address, CLONING_SECRET);
+    let Resp::GetClone(clone) = call(donor_a, request_for_b) else {
+        panic!("original donor must export successfully");
+    };
+
+    // A failed unseal must leave B inactive, retain its pending credential,
+    // and release the donor nonce so this exact response can be retried.
+    let mut tampered = clone.clone();
+    tampered.encrypted_seed[0] ^= 1;
+    assert!(matches!(
+        call(replica_b, set_clone_request(tampered)),
+        Resp::Error(_)
+    ));
     assert_error(
-        call(replica_b, request_for_c.clone()),
-        2,
-        "donor cloning secret not configured",
+        call(replica_b, Req::GetPublicKey(GetPublicKeyRequest {})),
+        1,
+        "key not initialized",
     );
 
-    // Positive control: the exact request B refused is valid. A accepts it,
-    // and C recovers the complete identity. The failure is B's donor state,
-    // not the operator's secret, C's attestation, or the clone transcript.
-    activate_requester(requester_c, call(donor_a, request_for_c));
+    activate_requester(replica_b, Resp::GetClone(clone.clone()));
+    assert_eq!(public_keys(replica_b), identity);
+    assert_error(call(replica_b, set_clone_request(clone)), 1, "replay");
+
+    let request_for_c = initiate_requester(requester_c, &identity.evm_address, CLONING_SECRET);
+    activate_requester(requester_c, call(replica_b, request_for_c));
     assert_eq!(public_keys(requester_c), identity);
 }

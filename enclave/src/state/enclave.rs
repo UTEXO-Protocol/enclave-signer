@@ -76,7 +76,9 @@ pub struct EnclaveState {
     #[cfg(feature = "kms-persistence")]
     seed_source: std::sync::OnceLock<Box<dyn crate::seed_persistence::SeedSource>>,
     /// Operator cloning secret for the donor role. `GetClone` requires it.
-    /// The requester gets its secret from `InitiateCloningRequest`.
+    /// A requester retains its `InitiateCloningRequest` secret in the pending
+    /// session and installs it together with the keys on verified completion.
+    /// When both mutexes are needed, always lock `inner` before this mutex.
     donor_cloning_secret: Mutex<Option<SecretBox<String>>>,
     /// Replay guard for nonces in peer attestations.
     pub replay_guard: NonceReplayGuard,
@@ -302,6 +304,8 @@ impl EnclaveState {
 
     /// Apply `f` to the donor cloning secret while the lock is held.
     /// The plaintext does not leave the closure.
+    /// The closure must not acquire the phase lock: completion locks phase
+    /// before donor secret, so reversing that order could deadlock.
     pub fn with_donor_cloning_secret<T>(&self, f: impl FnOnce(&str) -> Result<T>) -> Result<T> {
         let guard = self
             .donor_cloning_secret
@@ -398,32 +402,14 @@ impl EnclaveState {
         self.with_active(|km| Ok(*km.evm_address()))
     }
 
-    /// Initialize from a seed that the cloning handshake supplies.
-    ///
-    /// This production path does not need `allow-seed-import`.
-    /// The `Phase::Cloning` guard replaces that flag. The only caller is
-    /// `SetClone`, after it verifies the donor attestation and unseals the seed.
-    pub fn initialize_from_cloned_seed(&self, seed: [u8; 64]) -> Result<()> {
-        let mut guard = self.lock_phase()?;
-        match &*guard {
-            Phase::Cloning(_) => {}
-            other => {
-                return Err(EnclaveError::NotReady {
-                    state: other.name().into(),
-                });
-            }
-        }
-        let manager = KeyManager::from_seed(seed, self.network)?;
-        *guard = Phase::Active(Box::new(manager));
-        Ok(())
-    }
-
     /// Complete the cloning handshake atomically.
     ///
     /// The closure gets the current `CloningSession`. It must return a
     /// `KeyManager` from the unsealed seed, after any identity check
-    /// (derived address vs `cluster_public_key`). On `Ok`, the phase goes to
-    /// `Active`. On error it stays `Cloning`, so the operator can retry.
+    /// (derived address vs `cluster_public_key`). On `Ok`, the session's donor
+    /// credential replaces any boot credential and the phase goes to `Active`.
+    /// On error both the pending session and existing donor credential remain
+    /// unchanged, so the operator can retry.
     ///
     /// The phase stays locked across decrypt, derive, check and commit.
     /// This keeps the seed in memory for the shortest time.
@@ -440,8 +426,22 @@ impl EnclaveState {
                 });
             }
         };
-        let manager = f(session)?;
-        *guard = Phase::Active(Box::new(manager));
+        let manager = Box::new(f(session)?);
+        // Lock order is phase -> donor credential. Acquire both locks and
+        // finish every fallible operation before changing either value.
+        let mut donor_secret = self
+            .donor_cloning_secret
+            .lock()
+            .map_err(|e| EnclaveError::Internal(format!("lock poisoned: {}", e)))?;
+
+        // `Initial` is only a temporary move placeholder under the phase lock;
+        // no observer can see it. Move the authenticated session credential
+        // without copying plaintext, then publish its keys under the same locks.
+        let Phase::Cloning(session) = std::mem::replace(&mut *guard, Phase::Initial) else {
+            unreachable!("the phase is locked in Cloning during completion");
+        };
+        *donor_secret = Some(session.into_donor_cloning_secret());
+        *guard = Phase::Active(manager);
         Ok(())
     }
 

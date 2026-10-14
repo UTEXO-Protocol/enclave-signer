@@ -6,8 +6,8 @@
 //! KMS persistence disables cloning. Mock attestation skips NSM, COSE, and
 //! cert-chain validation. It still checks the pubkey, digest, nonce, and PCR
 //! bindings. `allow-seed-import` only gives the donor a known seed. The cloning
-//! path does not need it, because `Phase::Cloning` guards
-//! `initialize_from_cloned_seed`.
+//! path does not need it, because `complete_cloning` verifies the session
+//! before installing its keys and donor secret together.
 
 #![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
 
@@ -79,13 +79,8 @@ fn start_donor() -> (u16, PublicKeysResponse) {
 }
 
 fn start_requester() -> u16 {
-    // The requester gets the secret in InitiateCloningRequest. The test also
-    // sets a donor secret, as in a deployment that can take both roles.
-    start_test_server_with(|state| {
-        state
-            .set_donor_cloning_secret(CLONING_SECRET.into())
-            .expect("set_donor_cloning_secret");
-    })
+    // Supply the secret only through InitiateCloningRequest, as the CLI does.
+    start_test_server_with(|_| {})
 }
 
 fn initiate_cloning(

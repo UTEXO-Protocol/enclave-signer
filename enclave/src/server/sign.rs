@@ -885,7 +885,13 @@ mod key_not_ready {
     fn a_sign_is_refused_before_validation_while_the_key_is_not_ready() {
         let cloning = EnclaveState::default();
         cloning
-            .enter_cloning(CloningSession::new(CloneSession::new(), [1; 20]))
+            .enter_cloning(CloningSession::new(
+                CloneSession::new(),
+                [1; 20],
+                secrecy::SecretBox::new(Box::new(
+                    "public-sign-state-test-secret-0123456789abcdef".into(),
+                )),
+            ))
             .unwrap();
         for state in [EnclaveState::default(), cloning] {
             let (response, rpc_calls) =

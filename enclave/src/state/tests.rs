@@ -4,15 +4,25 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bitcoin::Network;
+use secrecy::SecretBox;
 
 use crate::cloning::CloneSession;
 use crate::error::EnclaveError;
+use crate::keys::KeyManager;
 
 use super::cloning_session::CLONING_SESSION_TTL;
 use super::enclave::*;
 use super::replay_guard::*;
 
 use super::*;
+
+const CLONING_SECRET: &str = "state-test-cloning-secret-0123456789abcdef";
+const BOOT_SECRET: &str = "state-test-boot-secret-0123456789abcdef";
+const REPLACEMENT_SECRET: &str = "state-test-replacement-secret-0123456789abcdef";
+
+fn protected_cloning_secret(secret: &str) -> SecretBox<String> {
+    SecretBox::new(Box::new(secret.to_owned()))
+}
 
 #[test]
 fn seed_export_counter_increments_monotonically() {
@@ -115,7 +125,12 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
 
     state
         .enter_cloning_at(
-            CloningSession::new_at(CloneSession::new(), [1u8; 20], t0),
+            CloningSession::new_at(
+                CloneSession::new(),
+                [1u8; 20],
+                protected_cloning_secret(CLONING_SECRET),
+                t0,
+            ),
             t0,
         )
         .unwrap();
@@ -124,7 +139,12 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
     // A second request is refused while the session is valid.
     let err = state
         .enter_cloning_at(
-            CloningSession::new_at(CloneSession::new(), [2u8; 20], t0),
+            CloningSession::new_at(
+                CloneSession::new(),
+                [2u8; 20],
+                protected_cloning_secret(REPLACEMENT_SECRET),
+                t0,
+            ),
             t0 + Duration::from_secs(10),
         )
         .unwrap_err();
@@ -140,7 +160,12 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
     let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
     state
         .enter_cloning_at(
-            CloningSession::new_at(CloneSession::new(), [3u8; 20], later),
+            CloningSession::new_at(
+                CloneSession::new(),
+                [3u8; 20],
+                protected_cloning_secret(REPLACEMENT_SECRET),
+                later,
+            ),
             later,
         )
         .unwrap();
@@ -153,11 +178,274 @@ fn enter_cloning_replaces_expired_but_protects_live_session() {
 }
 
 #[test]
+fn failed_clone_completion_preserves_secret_until_successful_retry() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    let seed = [41u8; 64];
+    let expected_address = *KeyManager::from_seed(seed, Network::Bitcoin)
+        .unwrap()
+        .evm_address();
+    let session = CloneSession::new();
+    let requester_public_key = session.public_key();
+    state
+        .enter_cloning(CloningSession::new(
+            session,
+            expected_address,
+            protected_cloning_secret(CLONING_SECRET),
+        ))
+        .unwrap();
+
+    assert!(matches!(
+        state.with_donor_cloning_secret(|_| Ok(())),
+        Err(EnclaveError::NotReady { .. })
+    ));
+    let err = state
+        .complete_cloning(|_| Err(EnclaveError::IdentityMismatch))
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::IdentityMismatch));
+    assert_eq!(state.phase_name(), "cloning");
+    assert!(!state.is_initialized());
+    assert!(matches!(
+        state.with_donor_cloning_secret(|_| Ok(())),
+        Err(EnclaveError::NotReady { .. })
+    ));
+
+    state
+        .complete_cloning(|pending| {
+            assert_eq!(pending.session.public_key(), requester_public_key);
+            assert_eq!(pending.cluster_public_key, expected_address);
+            KeyManager::from_seed(seed, Network::Bitcoin)
+        })
+        .unwrap();
+    assert_eq!(state.evm_address().unwrap(), expected_address);
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == CLONING_SECRET))
+        .unwrap());
+}
+
+#[test]
+fn clone_completion_replaces_boot_secret_only_on_success() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    state
+        .set_donor_cloning_secret(BOOT_SECRET.to_owned())
+        .unwrap();
+    state
+        .enter_cloning(CloningSession::new(
+            CloneSession::new(),
+            [1u8; 20],
+            protected_cloning_secret(CLONING_SECRET),
+        ))
+        .unwrap();
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == BOOT_SECRET))
+        .unwrap());
+
+    let err = state
+        .complete_cloning(|_| Err(EnclaveError::IdentityMismatch))
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::IdentityMismatch));
+    assert_eq!(state.phase_name(), "cloning");
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == BOOT_SECRET))
+        .unwrap());
+
+    state
+        .complete_cloning(|_| KeyManager::from_seed([42u8; 64], Network::Bitcoin))
+        .unwrap();
+    assert!(state.is_initialized());
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == CLONING_SECRET))
+        .unwrap());
+}
+
+// Exercises ciphertext/session binding and state activation, not NSM-signed
+// attestation. Server cloning tests cover handler identity/transcript checks.
+#[test]
+fn expired_clone_replacement_does_not_install_stale_secret() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    let seed = [43u8; 64];
+    let expected_address = *KeyManager::from_seed(seed, Network::Bitcoin)
+        .unwrap()
+        .evm_address();
+    let initial = CloneSession::new();
+    let initial_public_key = initial.public_key();
+    let (old_ciphertext, old_donor_public_key) =
+        crate::cloning::encrypt_seed_for_peer(&initial_public_key, &seed).unwrap();
+    let t0 = Instant::now();
+    state
+        .enter_cloning_at(
+            CloningSession::new_at(
+                initial,
+                expected_address,
+                protected_cloning_secret(CLONING_SECRET),
+                t0,
+            ),
+            t0,
+        )
+        .unwrap();
+
+    let replacement = CloneSession::new();
+    let replacement_public_key = replacement.public_key();
+    assert_ne!(replacement_public_key, initial_public_key);
+    let later = t0 + CLONING_SESSION_TTL + Duration::from_secs(1);
+    state
+        .enter_cloning_at(
+            CloningSession::new_at(
+                replacement,
+                expected_address,
+                protected_cloning_secret(REPLACEMENT_SECRET),
+                later,
+            ),
+            later,
+        )
+        .unwrap();
+
+    // A delayed response for the replaced ephemeral key must not activate the
+    // replacement session or publish either session's donor secret.
+    let err = state
+        .complete_cloning(|pending| {
+            let recovered = pending
+                .session
+                .decrypt_seed_from_peer(&old_donor_public_key, &old_ciphertext)?;
+            KeyManager::from_seed(*recovered, Network::Bitcoin)
+        })
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::Clone(_)));
+    assert_eq!(state.phase_name(), "cloning");
+    assert!(!state.is_initialized());
+    assert!(matches!(
+        state.with_donor_cloning_secret(|_| Ok(())),
+        Err(EnclaveError::NotReady { .. })
+    ));
+
+    let (replacement_ciphertext, replacement_donor_public_key) =
+        crate::cloning::encrypt_seed_for_peer(&replacement_public_key, &seed).unwrap();
+    state
+        .complete_cloning(|pending| {
+            assert_eq!(pending.session.public_key(), replacement_public_key);
+            assert_eq!(pending.cluster_public_key, expected_address);
+            let recovered = pending
+                .session
+                .decrypt_seed_from_peer(&replacement_donor_public_key, &replacement_ciphertext)?;
+            let keys = KeyManager::from_seed(*recovered, Network::Bitcoin)?;
+            assert_eq!(*keys.evm_address(), pending.cluster_public_key);
+            Ok(keys)
+        })
+        .unwrap();
+    assert_eq!(state.evm_address().unwrap(), expected_address);
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == REPLACEMENT_SECRET))
+        .unwrap());
+}
+
+#[test]
+fn concurrent_clone_completions_publish_one_key_and_session_secret() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Barrier;
+
+    let state = EnclaveState::new(Network::Bitcoin);
+    state
+        .set_donor_cloning_secret(BOOT_SECRET.to_owned())
+        .unwrap();
+    state
+        .enter_cloning(CloningSession::new(
+            CloneSession::new(),
+            [1u8; 20],
+            protected_cloning_secret(CLONING_SECRET),
+        ))
+        .unwrap();
+    let start = Barrier::new(2);
+    let completions = AtomicUsize::new(0);
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = [44u8, 45u8]
+            .into_iter()
+            .map(|seed_byte| {
+                let state = &state;
+                let start = &start;
+                let completions = &completions;
+                scope.spawn(move || {
+                    start.wait();
+                    let result = state.complete_cloning(|_| {
+                        completions.fetch_add(1, Ordering::SeqCst);
+                        KeyManager::from_seed([seed_byte; 64], Network::Bitcoin)
+                    });
+                    (seed_byte, result)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(completions.load(Ordering::SeqCst), 1);
+    let winners: Vec<_> = results
+        .iter()
+        .filter_map(|(seed_byte, result)| result.is_ok().then_some(*seed_byte))
+        .collect();
+    assert_eq!(winners.len(), 1);
+    for (_, result) in &results {
+        if let Err(err) = result {
+            assert!(matches!(err, EnclaveError::NotReady { state } if state == "active"));
+        }
+    }
+    let expected_address = *KeyManager::from_seed([winners[0]; 64], Network::Bitcoin)
+        .unwrap()
+        .evm_address();
+    assert_eq!(state.evm_address().unwrap(), expected_address);
+    assert!(state
+        .with_donor_cloning_secret(|secret| Ok(secret == CLONING_SECRET))
+        .unwrap());
+}
+
+#[test]
+fn poisoned_donor_secret_lock_prevents_clone_activation() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    state
+        .set_donor_cloning_secret(BOOT_SECRET.to_owned())
+        .unwrap();
+    let session = CloneSession::new();
+    let requester_public_key = session.public_key();
+    state
+        .enter_cloning(CloningSession::new(
+            session,
+            [1u8; 20],
+            protected_cloning_secret(CLONING_SECRET),
+        ))
+        .unwrap();
+
+    let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = state.with_donor_cloning_secret::<()>(|_| panic!("induced donor lock poison"));
+    }));
+    assert!(poison.is_err());
+    let err = state
+        .complete_cloning(|_| KeyManager::from_seed([46u8; 64], Network::Bitcoin))
+        .unwrap_err();
+    assert!(matches!(err, EnclaveError::Internal(_)));
+    assert_eq!(state.phase_name(), "cloning");
+    assert!(!state.is_initialized());
+    assert!(matches!(
+        state.get_keys(),
+        Err(EnclaveError::KeyNotInitialized)
+    ));
+    state
+        .with_cloning_session(|pending| {
+            assert_eq!(pending.session.public_key(), requester_public_key);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn enter_cloning_rejected_once_active() {
     let state = EnclaveState::new(Network::Bitcoin);
     state.initialize_from_seed([42u8; 64]).unwrap();
     let err = state
-        .enter_cloning(CloningSession::new(CloneSession::new(), [1u8; 20]))
+        .enter_cloning(CloningSession::new(
+            CloneSession::new(),
+            [1u8; 20],
+            protected_cloning_secret(CLONING_SECRET),
+        ))
         .unwrap_err();
     assert!(matches!(err, EnclaveError::AlreadyInitialized));
 }
@@ -233,8 +521,11 @@ fn sign_psbt_on_initial_errors() {
 #[test]
 fn cloning_phase_is_not_initialized() {
     let state = EnclaveState::new(Network::Bitcoin);
-    *state.inner.lock().unwrap() =
-        Phase::Cloning(CloningSession::new(CloneSession::new(), [0u8; 20]));
+    *state.inner.lock().unwrap() = Phase::Cloning(CloningSession::new(
+        CloneSession::new(),
+        [0u8; 20],
+        protected_cloning_secret(CLONING_SECRET),
+    ));
     assert_eq!(state.phase_name(), "cloning");
     assert!(!state.is_initialized());
     assert!(matches!(
@@ -246,8 +537,11 @@ fn cloning_phase_is_not_initialized() {
 #[test]
 fn initialize_from_cloning_phase_rejected() {
     let state = EnclaveState::new(Network::Bitcoin);
-    *state.inner.lock().unwrap() =
-        Phase::Cloning(CloningSession::new(CloneSession::new(), [0u8; 20]));
+    *state.inner.lock().unwrap() = Phase::Cloning(CloningSession::new(
+        CloneSession::new(),
+        [0u8; 20],
+        protected_cloning_secret(CLONING_SECRET),
+    ));
     let err = state.initialize_from_seed([42u8; 64]).unwrap_err();
     assert!(matches!(err, EnclaveError::AlreadyInitialized));
 }

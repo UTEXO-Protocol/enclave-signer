@@ -331,7 +331,7 @@ phase to the three phases used by other builds.
 |-----------|------------------------------------------|---------|--------------------------------------------------|
 | `Initial` | nothing                                  | no      | boot                                             |
 | `Initializing` | KMS initialization reservation | no | `initialize_from_persistence_until` (mint only) |
-| `Cloning` | ephemeral X25519 + target cluster pubkey | no | `enter_cloning` (requester) |
+| `Cloning` | ephemeral X25519 + target cluster pubkey + pending secret in `SecretBox` | no | `enter_cloning` (requester) |
 | `Active`  | `KeyManager` (seed in `SecretBox`)       | yes     | `initialize_from_entropy`, `initialize_from_persistence` (mint), or `complete_cloning` |
 
 Initialization from `Active` or `Cloning` fails with `AlreadyInitialized`.
@@ -648,10 +648,22 @@ enclave code *and* that the enclave runs the expected security posture (Sec 4).
 Three-message handshake, valid only between enclaves with identical PCR0/1/2,
 the same PCR3 (the parent instance IAM role), the same cluster pubkey, and the
 shared cloning secret (Sec 10). The donor learns
-the secret at runtime (`InitializeKey.cloning_secret`, or the legacy
-`UTEXO_CLONING_SECRET` env), never from the image. The CLI `clone` command
+the secret at runtime (`InitializeKey.cloning_secret`, a completed clone, or
+the legacy `UTEXO_CLONING_SECRET` env), never from the image. The CLI `clone` command
 drives it: `InitiateCloning` on the new enclave, the parent `Clone` RPC on the
 donor, `SetClone` on the new enclave. [Cloning](diagrams/06-seq-cloning.md)
+
+The requester retains the supplied secret in its pending session. Only after
+`SetClone` verifies the donor, seed, identity, policy and transcript does it
+install that session's secret and keys together. This secret replaces any
+legacy boot secret. A failed completion leaves both the pending session and
+any existing donor secret unchanged. Session replacement or drop zeroizes the
+pending secret; the expiry deadline alone does not erase it.
+
+The activated replica can then donate to another replica using the same
+operator secret, even when its original donor is unavailable. Each replica
+enforces its own export cap; this is not a cluster-wide replica limit or
+revocation mechanism. Blocking the original donor does not revoke its clones.
 
 After SetClone, the CLI performs a bounded read-only identity check, including
 when the response was lost. Automation must use the versioned
