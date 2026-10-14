@@ -70,13 +70,13 @@ fn configured_finality_tag_is_attested() {
             evm_finality_tag: tag,
             ..pinned_config()
         };
-        let policy = SecurityPolicy::resolve(
+        let policy = with_role(SecurityPolicy::resolve(
             &release_bridge_ctx(),
             &config,
             EvmDataSource::PinnedTlsRpc,
             a_tls_pin(),
             "e.test",
-        );
+        ));
         assert_eq!(
             policy.assert_valid_for_build(&release_bridge_ctx()).is_ok(),
             tag != EvmFinalityTag::Latest
