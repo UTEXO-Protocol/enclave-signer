@@ -310,6 +310,7 @@ mod asset_bind {
     }
 
     /// A pinned destination whose PSBT is `tx`, with no input data.
+    #[cfg(feature = "rgb-mint-burn")]
     fn with_psbt(tx: bitcoin::Transaction) -> (RgbDestination, BridgeConfig) {
         let id = asset_id();
         let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx)
@@ -322,12 +323,14 @@ mod asset_bind {
         (destination, pinned_config(&id))
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     fn mint_tx() -> bitcoin::Transaction {
         mint().bundles.last().unwrap().tx.clone()
     }
 
     /// The mint tx is unbroadcast, so no indexer knows it. It passes
     /// consensus and the PSBT bind, and stops at the next PSBT check.
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn the_unbroadcast_mint_tx_passes_when_it_is_the_psbt() {
         let (destination, config) = with_psbt(mint_tx());
@@ -335,6 +338,7 @@ mod asset_bind {
         assert!(msg.contains("carries no witness_utxo"), "{msg}");
     }
 
+    #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn an_unbroadcast_mint_tx_that_is_not_the_psbt_is_refused() {
         let mut other = mint_tx();
