@@ -337,7 +337,7 @@ pub fn parse_checkpoint_spec(
 /// Signet challenge script for the UTEXO custom signet (BIP-325).
 ///
 /// Layout:
-/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
+/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
 ///   spec (bitcoin#29365): 30s = `0x1e` little-endian u64.
 /// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
 ///    53 ae` - `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`

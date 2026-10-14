@@ -1,7 +1,6 @@
 //! The parent's header sync against a real enclave or a scripted one, with a
 //! fake Electrum server that serves synthetic regtest headers.
 
-use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -340,10 +339,7 @@ fn enclave_tip(port: u16) -> (u32, Vec<u8>) {
 // Sync
 
 fn service(port: u16) -> ParentAdapterService {
-    ParentAdapterService::new(
-        EnclaveTarget::Tcp(format!("127.0.0.1:{port}")),
-        HashSet::new(),
-    )
+    ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{port}")))
 }
 
 fn start_sync(
@@ -488,8 +484,40 @@ async fn fork_near_checkpoint_repairs_above_it() {
     task.abort();
 }
 
-/// A branch of 10 replaces the last 8 headers: the enclave follows it. A fork
-/// deeper than the enclave allows is sent once, not again every interval.
+/// A fork at the checkpoint: the enclave names the checkpoint, then refuses the
+/// repair above it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_at_checkpoint_is_refused_once() {
+    let a = extend(&genesis(), 250, 1);
+    let electrum = Electrum::start(a.clone());
+    let enclave = start_real_enclave_at(checkpoint_at(&a, 200));
+    let (relay, log) = start_relay(enclave);
+    let (task, mut rx) = start_sync(relay, Some(&electrum.url));
+    wait(&mut rx, 30, synced_at(250)).await;
+
+    let sent = submits(&log).len();
+    electrum.set_chain(extend(&a[..200], 60, 3));
+    let status = wait(&mut rx, 20, stalled).await;
+    let error = status.last_error.unwrap();
+    assert!(
+        error.contains("chain linkage broken at height 201"),
+        "{error}"
+    );
+    let starts = |log: &Log| -> Vec<u32> {
+        submits(log)[sent..]
+            .iter()
+            .map(|(_, s)| s.start_height)
+            .collect()
+    };
+    assert_eq!(starts(&log), [151, 201]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(enclave_tip(enclave), (250, block_hash(&a[250])));
+    assert_eq!(starts(&log), [151, 201], "nothing is sent again");
+    task.abort();
+}
+
+/// A branch of 10 replacing 8 is followed. A fork deeper than the reorg limit
+/// is sent once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fork_8_replaced_by_10_follows_and_too_deep_is_sent_once() {
     let a = extend(&genesis(), 150, 1);
@@ -846,7 +874,7 @@ fn self_signed_tls_source_is_refused() {
 
     let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert: CertificateDer<'static> = signed.cert.der().clone();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signed.signing_key.serialize_der()));
     let config = Arc::new(
         rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

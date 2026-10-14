@@ -284,7 +284,7 @@ fn test_sign_evm_recoverable() {
     let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
     let recovered_key = VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
 
-    let pubkey_bytes = recovered_key.to_encoded_point(false);
+    let pubkey_bytes = recovered_key.to_sec1_point(false);
     let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
     let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
 

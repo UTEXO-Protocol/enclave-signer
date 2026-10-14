@@ -1,10 +1,10 @@
 //! Guards the two invariants that keep the vendored proto slice honest.
 //!
-//! `enclave.rs` is committed pre-generated: there is no `build.rs` and no
-//! `prost-build` anywhere in the repo, deliberately, so that PCR0 does not
-//! depend on which `protoc`/`prost-build` version a builder happens to have.
-//! The cost of that choice is that `proto/enclave.proto` is inert - editing it
-//! changes nothing, and the schema silently drifts from the code.
+//! `enclave.rs` is committed pre-generated. This crate has no build script.
+//! The separate `enclave/build.rs` sets direction flags but generates no proto.
+//! Thus local protoc versions do not change the compiled schema.
+//! Editing only `proto/enclave.proto` leaves the Rust types unchanged. These
+//! tests detect changes that do not match the recorded provenance.
 //!
 //! Nothing but prose stood between us and that drift, and the prose has already
 //! been wrong once (the blob-hash table shipped with two incorrect hashes). So

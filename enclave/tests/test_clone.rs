@@ -202,6 +202,7 @@ fn clone_rejects_wrong_cloning_secret() {
     );
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("GetClone should reject a mismatched digest");
+    assert_eq!(err.code, 5);
     assert!(
         err.message.contains("digest") || err.message.contains("cloning"),
         "unexpected error: {}",
@@ -219,6 +220,7 @@ fn clone_rejects_wrong_cluster_public_key() {
     let init = initiate_cloning(requester_port, CLONING_SECRET, &wrong_target);
     let err = request_get_clone(donor_port, &wrong_target, &init)
         .expect_err("GetClone should reject mismatched cluster address");
+    assert_eq!(err.code, 4);
     assert!(
         err.message.contains("cluster_public_key") || err.message.contains("does not match"),
         "unexpected error: {}",
@@ -240,6 +242,7 @@ fn clone_donor_rejects_request_armed_for_a_different_target() {
     // Use this donor address to pass the initial address check.
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("donor must reject a request armed for a different target identity");
+    assert_eq!(err.code, 5);
     assert!(
         err.message.contains("digest") || err.message.contains("cloning"),
         "expected a digest-binding rejection (F03-AF-07), got: {}",
@@ -328,6 +331,7 @@ fn clone_rejects_duplicate_requester_attestation_nonce_on_donor() {
     // A replay of the same GetClone (same nonce) must hit the replay guard.
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &init)
         .expect_err("second GetClone should hit replay guard");
+    assert_eq!(err.code, 6);
     assert!(
         err.message.contains("replay") || err.message.contains("nonce"),
         "unexpected error: {}",
@@ -429,6 +433,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
 
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
         .expect_err("donor must abort when wire pubkey != attested pubkey");
+    assert_eq!(err.code, 5);
     assert!(
         err.message.contains("pubkey mismatch") || err.message.contains("does not match"),
         "expected a pubkey-binding rejection, got: {}",
@@ -473,6 +478,7 @@ fn clone_donor_refuses_pcr_mismatched_peer_but_accepts_matching_peer() {
 
     let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
         .expect_err("donor must refuse to seal to a PCR-mismatched peer");
+    assert_eq!(err.code, 5);
     assert!(
         err.message.contains("PCR"),
         "expected a PCR-mismatch rejection, got: {}",
@@ -491,4 +497,111 @@ fn clone_donor_refuses_pcr_mismatched_peer_but_accepts_matching_peer() {
     request_set_clone(good_requester_port, &clone).expect("SetClone should succeed");
     let good_keys = get_public_keys(good_requester_port);
     assert_eq!(good_keys.evm_address, donor_keys.evm_address);
+}
+
+#[test]
+fn clone_rejections_carry_their_codes() {
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+    let donor_target: [u8; 20] = donor_keys.evm_address.clone().try_into().unwrap();
+
+    // A donor with a cloning secret but no key.
+    let keyless_port = start_test_server_with(|state| {
+        state
+            .set_donor_cloning_secret(CLONING_SECRET.into())
+            .expect("set_donor_cloning_secret");
+    });
+    // A keyed donor without a cloning secret.
+    let secretless_port = start_test_server_with(|_| {});
+    initialize_key_from_mnemonic(secretless_port, DONOR_MNEMONIC);
+
+    let mut short_target = init.clone();
+    short_target.cloning_digest.clear();
+    let mut short_pubkey = init.clone();
+    short_pubkey.encryption_pubkey.pop();
+    let mut garbage_doc = init.clone();
+    garbage_doc.requester_attestation = vec![0xAB; 16];
+    let mut no_user_data = init.clone();
+    no_user_data.requester_attestation =
+        attestation_verify::build_mock_document(&[0x55u8; 32], Some(&init.encryption_pubkey), None)
+            .unwrap();
+    // The small-order key passes the HMAC and the attestation, then fails at sealing.
+    let mut small_order = init.clone();
+    small_order.encryption_pubkey = vec![0u8; 32];
+    small_order.cloning_digest = utexo_bridge_enclave::cloning::make_cloning_digest(
+        CLONING_SECRET,
+        &[0u8; 32],
+        &donor_target,
+    )
+    .to_vec();
+    small_order.requester_attestation = attestation_verify::build_mock_document(
+        &[0x66u8; 32],
+        Some(&small_order.encryption_pubkey),
+        Some(&small_order.cloning_digest),
+    )
+    .unwrap();
+
+    let cases: [(&str, u16, &[u8], &InitiateCloningResponse, u32); 8] = [
+        (
+            "short cluster_public_key",
+            donor_port,
+            &donor_keys.evm_address[..19],
+            &init,
+            4,
+        ),
+        (
+            "short cloning_digest",
+            donor_port,
+            &donor_keys.evm_address,
+            &short_target,
+            4,
+        ),
+        (
+            "short encryption_pubkey",
+            donor_port,
+            &donor_keys.evm_address,
+            &short_pubkey,
+            4,
+        ),
+        (
+            "donor without key",
+            keyless_port,
+            &donor_keys.evm_address,
+            &init,
+            3,
+        ),
+        (
+            "donor without cloning secret",
+            secretless_port,
+            &donor_keys.evm_address,
+            &init,
+            2,
+        ),
+        (
+            "garbage attestation",
+            donor_port,
+            &donor_keys.evm_address,
+            &garbage_doc,
+            5,
+        ),
+        (
+            "attestation without user_data",
+            donor_port,
+            &donor_keys.evm_address,
+            &no_user_data,
+            5,
+        ),
+        (
+            "small-order encryption_pubkey",
+            donor_port,
+            &donor_keys.evm_address,
+            &small_order,
+            4,
+        ),
+    ];
+    for (name, port, target, req, code) in cases {
+        let err = request_get_clone(port, target, req).expect_err(name);
+        assert_eq!(err.code, code, "{name}: {}", err.message);
+    }
 }

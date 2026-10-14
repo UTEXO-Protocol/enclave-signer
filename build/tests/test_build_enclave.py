@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -151,6 +153,21 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(argv[0], 'build')
                 self.assertFalse(any('KMS_' in value for value in argv))
 
+    def test_the_measured_image_env_is_published(self):
+        stubs = {
+            'docker': ('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && '
+                       'echo \'["EVM_CHAIN_ID=42161"]\'\nexit 0\n'),
+            'nitro-cli': ('#!/bin/sh\n[ "$1" = build-enclave ] && touch "$5"\n'
+                          '[ "$1" = describe-eif ] && echo \'{"Measurements": {}}\'\nexit 0\n'),
+            'jq': '#!/bin/sh\ncat\n',
+        }
+        for name, body in stubs.items():
+            (self.bin / name).write_text(body)
+        result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads((self.base / 'out/IMAGE-ENV.json').read_text())
+        self.assertEqual(env, ['EVM_CHAIN_ID=42161'])
+
     def test_ccd_does_not_require_asset(self):
         result = self.invoke('Dockerfile.enclave.ccd')
         self.assertEqual(result.returncode, 42, result.stderr)
@@ -164,6 +181,33 @@ class BuildArgumentsTests(unittest.TestCase):
 
 class ImageInputsTests(unittest.TestCase):
     RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+
+    def test_eif_apt_uses_only_https_snapshots(self):
+        for recipe in self.RECIPES:
+            text = (ROOT / 'build' / recipe).read_text().replace('\\\n', ' ')
+            stages = re.split(r'(?m)^FROM ', text)[1:]
+            for stage in stages:
+                with self.subTest(recipe=recipe, stage=stage.splitlines()[0]):
+                    updates = [line for line in stage.splitlines()
+                               if line.startswith('RUN ') and 'apt-get update' in line]
+                    self.assertTrue(updates, 'Stage must configure snapshot sources')
+                    for update in updates:
+                        tokens = shlex.split(update)
+                        sources = [token.split() for token in tokens
+                                   if token.startswith(('deb ', 'deb-src '))]
+                        self.assertTrue(sources, 'APT must not use inherited live sources')
+                        for source in sources:
+                            self.assertRegex(
+                                source[1],
+                                r'^https://snapshot\.debian\.org/archive/'
+                                r'debian(?:-security)?/[0-9]{8}T[0-9]{6}Z/?$',
+                            )
+                        self.assertIn('> /etc/apt/sources.list', update)
+                        self.assertLess(update.index('> /etc/apt/sources.list'),
+                                        update.index('apt-get update'))
+                        self.assertIn('rm -f /etc/apt/sources.list.d/*', update)
+                        self.assertLess(update.index('rm -f /etc/apt/sources.list.d/*'),
+                                        update.index('apt-get update'))
 
     def test_no_build_input_names_an_endpoint(self):
         files = [ROOT / 'build' / r for r in self.RECIPES]

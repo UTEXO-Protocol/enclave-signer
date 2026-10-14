@@ -99,6 +99,7 @@ pub fn complete(
                 keys: Some(keys),
             }
         }
+        // GetPublicKey reports KeyNotInitialized as code 1. Only GetClone uses codes 4-7.
         Ok(Err(ParentError::EnclaveError { code: 1, message }))
             if message == "key not initialized" && set_result.is_ok() && !acknowledged =>
         {

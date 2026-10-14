@@ -38,7 +38,6 @@ pub fn start_test_server_with_config(
         &bridge_config,
         EvmDataSource::Disabled,
         None,
-        None,
         "",
         0,
     );
@@ -75,7 +74,6 @@ pub fn start_test_server_with_evm_rpc(
         &BuildContext::current(),
         &bridge_config,
         EvmDataSource::Disabled,
-        None,
         None,
         "",
         0,

@@ -15,7 +15,7 @@ pub struct SubmitRateLimiter {
 }
 
 /// Maximum headers in each [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
-/// mainnet checkpoint is a few thousand blocks.
+/// mainnet checkpoint to the tip grows by approx 4,300 blocks each month.
 const MAX_HEADERS_PER_RATE_WINDOW: u64 = 100_000;
 /// Length of the rate-limit window.
 const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);

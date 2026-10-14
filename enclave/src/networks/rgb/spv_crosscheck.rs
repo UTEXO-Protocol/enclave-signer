@@ -259,7 +259,7 @@ pub fn assert_chain_not_stale(
 /// example `"sb"` for signet) must match the compiled network.
 ///
 /// The expected value comes from [`ChainNet::prefix()`], the same rgb-core
-/// code that makes the consignment string in `validation::rgb`
+/// code that makes the consignment string in `validation::consensus`
 /// (`transfer.genesis.chain_net.prefix()`). Thus the two sides use the same
 /// notation.
 ///
@@ -281,8 +281,8 @@ pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -
 
 /// The rgb-core [`ChainNet`] this enclave accepts consignments for.
 ///
-/// Same `bitcoin_network` -> `ChainNet` mapping as
-/// `validation::rgb::RgbValidator::new`. `BitcoinSignet` also covers our custom
+/// Same `bitcoin_network` -> `ChainNet` mapping as `RgbValidator::new`
+/// (validation/indexer.rs). `BitcoinSignet` also covers our custom
 /// signet: the challenge script is different, but the rgb-core chain identity
 /// (and the consignment prefix `"sb"`) is the same.
 #[cfg(rgb_to_evm)]

@@ -232,11 +232,50 @@ fn lz_funds_out_calldata(amount: u64, destination_chain_id: u64) -> Vec<u8> {
     .abi_encode()
 }
 
+/// `lz_release` that matches `lz_funds_out_calldata(1000, _)`.
+fn lz_release() -> crate::proto::LzReleaseParams {
+    let mut recipient = vec![0u8; 32];
+    recipient[31] = 0x05;
+    crate::proto::LzReleaseParams {
+        dst_eid: 30101,
+        min_amount_ld: 1000,
+        recipient,
+    }
+}
+
 fn lz_destination(destination_chain_id: u64) -> EvmDestination {
     EvmDestination {
         call_data: lz_funds_out_calldata(1000, destination_chain_id),
+        lz_release: Some(lz_release()),
         ..destination()
     }
+}
+
+// F05-NEW-AF-12: `lz_release` is present exactly when the selector is
+// `lzFundsOut`. The two valid forms pass above. The two mixed forms fail here.
+
+#[test]
+fn rejects_lz_selector_without_lz_release() {
+    let destination = EvmDestination {
+        lz_release: None,
+        ..lz_destination(137)
+    };
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&destination, ctx);
+        assert!(err.contains("requires lz_release"), "got: {err}");
+    });
+}
+
+#[test]
+fn rejects_direct_selector_with_lz_release() {
+    let destination = EvmDestination {
+        lz_release: Some(lz_release()),
+        ..destination()
+    };
+    with_ctx(&config(), |ctx| {
+        let err = destination_or_err(&destination, ctx);
+        assert!(err.contains("only valid with lzFundsOut"), "got: {err}");
+    });
 }
 
 /// The entrypoint route settles on a remote chain, so its calldata
@@ -450,7 +489,7 @@ fn rgb_release() -> ReleaseIdentity {
     ReleaseIdentity {
         burn_id: U256::ZERO,
         amount: U256::from(1000u64),
-        source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+        source_chain_id: U256::from(RGB_CHAIN_ID),
         source_address: String::new(),
         settlement_data: Vec::new(),
         source_burn_tx_id: [0x5b; 32],
@@ -469,7 +508,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
     // On chain, (sourceChainId, destinationChainId) selects the verifier and
     // commission rate. Each id but the RGB one must refuse, also the
     // execution chain id and zero.
-    for foreign in [0u64, 1, 42161, RGB_SOURCE_CHAIN_ID + 1] {
+    for foreign in [0u64, 1, 42161, RGB_CHAIN_ID + 1] {
         let release = ReleaseIdentity {
             source_chain_id: U256::from(foreign),
             ..rgb_release()
@@ -478,7 +517,7 @@ fn rgb_source_identity_rejects_a_foreign_source_chain() {
             .expect_err("foreign source chain must refuse")
             .to_string();
         assert!(
-            err.contains("sourceChainId") && err.contains(&RGB_SOURCE_CHAIN_ID.to_string()),
+            err.contains("sourceChainId") && err.contains(&RGB_CHAIN_ID.to_string()),
             "{foreign}: {err}"
         );
     }
@@ -506,7 +545,7 @@ fn direct_route_surfaces_its_release_identity() {
             recipient: Address::from([0x22; ADDRESS_LEN]),
             amount: U256::from(1000u64),
             burnId: U256::from(7u64),
-            sourceChainId: U256::from(RGB_SOURCE_CHAIN_ID),
+            sourceChainId: U256::from(RGB_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: "who".into(),
             proof: Bytes::from(vec![0xf0]),
@@ -521,7 +560,7 @@ fn direct_route_surfaces_its_release_identity() {
             ReleaseIdentity {
                 burn_id: U256::from(7u64),
                 amount: U256::from(1000u64),
-                source_chain_id: U256::from(RGB_SOURCE_CHAIN_ID),
+                source_chain_id: U256::from(RGB_CHAIN_ID),
                 source_address: "who".into(),
                 settlement_data: vec![0xd0, 0x0d],
                 source_burn_tx_id: [0x5b; 32],
@@ -556,6 +595,7 @@ fn entrypoint_route_surfaces_its_release_identity() {
         sourceBurnTxId: FixedBytes([0x6c; 32]),
     }
     .abi_encode();
+    destination.lz_release = Some(lz_release());
     with_ctx(&config(), |ctx| {
         assert_eq!(
             release_of(&destination, ctx),
@@ -576,15 +616,14 @@ fn entrypoint_route_surfaces_its_release_identity() {
 // ---- burnId recompute ----
 
 /// Pins the enclave recompute to the contract formula. The test uses the
-/// alloy `abi.encode` of the nine-word tuple, not the manual concatenation.
+/// alloy `abi.encode` of the eight-word tuple, not the manual concatenation.
 fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use alloy_primitives::{keccak256, B256};
     use alloy_sol_types::SolValue;
 
     let typehash: B256 = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,\
-         uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,\
-         bytes32 sourceBurnTxId)",
+         uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)",
     );
     let encoded = (
         typehash,
@@ -594,11 +633,10 @@ fn contract_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
         release.amount,
         release.source_chain_id,
         keccak256(release.source_address.as_bytes()),
-        keccak256(&release.settlement_data),
         B256::from(release.source_burn_tx_id),
     )
         .abi_encode();
-    assert_eq!(encoded.len(), 9 * 32, "nine static words");
+    assert_eq!(encoded.len(), 8 * 32, "eight static words");
     U256::from_be_bytes(keccak256(encoded).0)
 }
 
@@ -647,10 +685,6 @@ fn burn_id_recompute_binds_every_input() {
             ..base.clone()
         },
         ReleaseIdentity {
-            settlement_data: vec![0x01],
-            ..base.clone()
-        },
-        ReleaseIdentity {
             source_burn_tx_id: [0x5c; 32],
             ..base.clone()
         },
@@ -674,6 +708,76 @@ fn burn_id_recompute_binds_every_input() {
     ] {
         assert_ne!(expected_burn_id(&other_cfg, &base), base_id);
     }
+}
+
+#[test]
+fn burn_id_ignores_settlement_data() {
+    // One burn has one burnId, so a second release citing other deposits reverts.
+    let cfg = token_pinned_config();
+    let base = rgb_release();
+    let other = ReleaseIdentity {
+        settlement_data: vec![0x01],
+        ..base.clone()
+    };
+    assert_eq!(
+        expected_burn_id(&cfg, &other),
+        expected_burn_id(&cfg, &base)
+    );
+}
+
+/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID` (827166).
+#[test]
+fn burn_id_matches_the_shared_vector() {
+    let mut cfg = BridgeConfig {
+        chain_id: 42161,
+        ..config()
+    };
+    hex::decode_to_slice(
+        "50d244bca9273fd5faadbee2d653b80a23e89ee5",
+        &mut cfg.funds_in_contract,
+    )
+    .unwrap();
+    hex::decode_to_slice(
+        "fd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        &mut cfg.token_contract,
+    )
+    .unwrap();
+    let mut release = ReleaseIdentity {
+        amount: U256::from(100_000u64),
+        source_burn_tx_id: [0u8; 32],
+        ..rgb_release()
+    };
+    release.source_burn_tx_id[0] = 0xcd;
+    release.source_burn_tx_id[1] = 0x01;
+    release.source_burn_tx_id[31] = 0x03;
+
+    assert_eq!(
+        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        "29c56dee5d5c83392c91d778ef063a7e72432d0c5c3d85d509ad802df0a10fe5"
+    );
+}
+
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
+/// `sourceChainId` = 827166. The contract test still pins the 96 form.
+#[test]
+fn burn_id_matches_the_contract_vector() {
+    let cfg = BridgeConfig {
+        chain_id: 42161,
+        funds_in_contract: [0x11; ADDRESS_LEN],
+        token_contract: [0x22; ADDRESS_LEN],
+        ..config()
+    };
+    let mut release = ReleaseIdentity {
+        amount: U256::from(1_000_000u64),
+        source_burn_tx_id: [0u8; 32],
+        ..rgb_release()
+    };
+    release.source_burn_tx_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
+
+    assert_eq!(
+        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f"
+    );
 }
 
 #[test]

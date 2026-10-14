@@ -26,8 +26,8 @@ use crate::header_sync::SyncStatus;
 /// 30s enclave timeout, so a probe answers within its poll interval.
 ///
 /// It limits the answer, not the enclave work. The request runs on a blocking
-/// thread that cannot be cancelled. The socket read timeout and the enclave
-/// 30s request limit release an abandoned probe.
+/// thread that cannot be cancelled. Transport timeouts limit individual socket
+/// operations. They do not impose a total lifetime on the blocking worker.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the router. Public so tests can serve the real HTTP path on an

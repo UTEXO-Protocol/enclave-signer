@@ -407,8 +407,8 @@ fn create_utxo_allocation_dust_fits_the_budget() {
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
 }
 
-/// With the cap unset, a production build fails closed. Default and test
-/// builds use the dev path, after the other checks pass.
+/// With the cap unset, an `rgb-validation` build fails closed. Other builds
+/// and test builds use the dev path, after the other checks pass.
 #[test]
 fn unpinned_cap_behaviour_matches_build_profile() {
     let keys = km();

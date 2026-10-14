@@ -30,7 +30,7 @@ codegen-units = 1
 [patch.crates-io]
 # The `s/bfa` branches of the RGB crates, mirrored into our org, carry the BFA
 # schema. The mirrors are cut from 0.11.1-rc.10, which pulls electrum-client 0.24.
-# See the REVERT note in enclave/src/networks/rgb/validation/indexer.rs.
+# See the TEMPORARY note in enclave/src/networks/rgb/validation/indexer.rs.
 #
 # Local builds: these three repos are private. Load an SSH key with read
 # access to rgb-consensus-s-bfa, rgb-ops-s-bfa and rgb-schemas-s-bfa.

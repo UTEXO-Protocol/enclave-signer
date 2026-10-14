@@ -13,7 +13,7 @@
 //!
 //! Carve-out to `value == 0`: the payable `lzFundsOutCall` forwards the
 //! LayerZero messaging fee. Allowed only when the selector is `lzFundsOutCall`,
-//! `to` == pinned `BRIDGE_CONTRACT`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
+//! `to` == pinned `EVM_PROXY_CONTRACT_ADDRESS`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
 //! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
 //! Any unset pin fails the path closed. The attestation `user_data`
@@ -139,7 +139,7 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         // EOA that ignores calldata.
         if cfg.bridge_contract == [0u8; 20] {
             return Err(reject(
-                "gas tx: non-zero value requires a pinned BRIDGE_CONTRACT to check the \
+                "gas tx: non-zero value requires a pinned EVM_PROXY_CONTRACT_ADDRESS to check the \
                  destination against (unset) - refusing to sign",
             ));
         }

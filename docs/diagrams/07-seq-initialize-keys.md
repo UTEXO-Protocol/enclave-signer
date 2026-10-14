@@ -13,8 +13,8 @@ sequenceDiagram
     participant Km as KeyManager<br/>keys.rs
     participant Rand as getrandom<br/>(OS entropy)
 
-    Op->>Cli: utexo-bridge-parent-cli init [--cloning-secret S]
-    Cli->>PClient: initialize_keys(cloning_secret)
+    Op->>Cli: utexo-bridge-parent-cli init [--cloning-secret-file F]
+    Cli->>PClient: initialize_keys_with_secret(None, cloning_secret)
     PClient->>Srv: InitializeKeyRequest{seed=[], mnemonic="", cloning_secret}<br/>(length-prefixed proto)
 
     Srv->>Srv: path == "entropy" (no seed, no mnemonic)
@@ -30,14 +30,14 @@ sequenceDiagram
     Km->>Km: seed := mnemonic.to_seed("")
     Km->>Km: seed_box := SecretBox::new(seed), seed.zeroize()
     Km->>Km: master := Xpriv::new_master(network, seed)
-    Km->>Km: EVM bridge = m/44'/60'/0'/0/0<br/>EVM gas-tx = m/44'/60'/0'/0/1<br/>BTC = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/RGB_COIN'/0'<br/>CCD ed25519 (SLIP-0010) = m/44'/919'/0'/0'/0'
+    Km->>Km: EVM bridge = m/44'/60'/0'/0/0<br/>EVM gas-tx = m/44'/60'/0'/0/1<br/>BTC (retired, pubkey only) = m/84'/0'/0'/0/0<br/>BIP-86 vanilla = m/86'/COIN'/0'<br/>BIP-86 colored = m/86'/RGB_COIN'/0'<br/>CCD ed25519 (SLIP-0010) = m/44'/919'/0'/0'/0'
     Km->>Km: evm_address = keccak256(uncomp_pub[1..])[12..]
     Km-->>State: (KeyManager, Mnemonic)
 
     State->>State: *guard = Phase::Active(Box::new(km))
-    State-->>Srv: mnemonic (discarded by handler; never logged)
+    State-->>Srv: mnemonic (discarded by handler, never logged)
     opt cloning_secret non-empty
-        Srv->>State: set_donor_cloning_secret(SecretBox) — arms this enclave as a clone donor
+        Srv->>State: set_donor_cloning_secret(secret) - strength check, kept in SecretBox,<br/>arms this enclave as a clone donor
     end
 
     Srv->>State: get_keys()

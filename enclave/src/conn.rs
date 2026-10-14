@@ -4,8 +4,11 @@
 //! deadlines, a peer that holds back the body blocks a worker for ever.
 //! [`DeadlineStream`] sets two bounds through `SO_RCVTIMEO` / `SO_SNDTIMEO`:
 //!   * idle gap: one read or write blocks at most [`IO_IDLE_TIMEOUT`];
-//!   * total deadline: the request completes in [`TOTAL_REQUEST_TIMEOUT`].
-//!     This stops a slow trickle that stays below the idle timeout.
+//!   * socket deadline: reads and writes stop after [`TOTAL_REQUEST_TIMEOUT`].
+//!     This also limits a peer that sends data just before each idle timeout.
+//!
+//! The deadline does not interrupt handler computation or upstream RPC calls.
+//! KMS initialization also checks it before key activation.
 //!
 //! `main::serve` also caps work: [`WORKER_THREADS`] workers and a bounded queue
 //! of [`MAX_QUEUED_CONNECTIONS`].
@@ -20,7 +23,8 @@ use std::time::{Duration, Instant};
 /// Max time a single read or write syscall on the request socket may block.
 pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Max wall-clock time for one request, from accept to the last write.
+/// Socket deadline measured from accept, including time in the worker queue.
+/// This does not cancel work inside a handler.
 pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connection worker threads. The only peer is the parent, so a small pool is

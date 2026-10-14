@@ -1,8 +1,8 @@
-//! In-enclave verification of the EVM `FundsIn` deposit event for bridge-mode
-//! `signPsbt`.
+//! In-enclave verification of the EVM `FundsIn` deposit event for an
+//! EVM -> RGB `Sign`.
 //!
-//! Bridge-mode `signPsbt` releases RGB against an EVM deposit. The enclave does
-//! not trust the listener `evm_event_valid` / `evm_event_finalized` flags. It
+//! An EVM -> RGB `Sign` releases RGB against an EVM deposit. The enclave does
+//! not trust the listener `event_valid` / `event_finalized` flags. It
 //! gets the deposit receipt over an in-enclave EVM RPC. It checks that the
 //! pinned bridge contract emitted a `BridgeFundsIn` log with the claimed
 //! amount, at sufficient depth. Each predicate fails closed.
@@ -13,12 +13,12 @@
 //!
 //! The module does not match the raw log from the listener. It pins the
 //! contract from config and decodes the fields (`operationId`,
-//! gross/net/commission) itself. Thus `evm_log_index` / `evm_event_topics` /
-//! `evm_event_data` are not used.
+//! gross/net/commission) itself.
 //!
-//! Not bound here: `operationId` has no on-chain link to the signed RGB mint,
-//! so the listener supplies that link. Amounts are `u64`, as in the proto. A
-//! larger on-chain value fails closed (see [`extract_uint256_as_u64`]).
+//! `BridgeFundsIn.operationId` and the RGB OpId are different identifiers.
+//! For BFA mints, the caller also verifies the receipt's `FundsIn` RGB OpId
+//! against the mint transition. Amounts must fit the proto's `u64` fields.
+//! Larger values fail (see [`extract_uint256_as_u64`]).
 
 use sha3::{Digest, Keccak256};
 
@@ -69,6 +69,7 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
+const BFI_DEST_CHAIN_ID_OFF: usize = 192;
 /// Word 7: the byte offset of the `string destinationAddress` tail, not the
 /// string itself.
 const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
@@ -80,8 +81,8 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// `settlementData`) must be present. The `settlementData` tail is not read.
 const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
-/// Bridge `FundsIn` signature. Only the sender is indexed. The RGB OpId and
-/// the uint64 amount are two data words.
+/// Bridge `FundsIn` signature. The sender and the RGB OpId are indexed; the
+/// uint64 amount is the one data word.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 
 /// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
@@ -152,7 +153,7 @@ pub struct VerifiedFundsIn {
     pub destination_address: String,
 }
 
-/// Verifies the `FundsIn` deposit for a bridge-mode `signPsbt`.
+/// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
 /// Fails closed on: a missing or failed receipt, no matching log, an ambiguous
 /// match, a field mismatch, an on-chain value above `u64`, or low confirmation
@@ -204,6 +205,7 @@ pub fn verify_funds_in_event(
         net,
         commission,
         destination_address,
+        ..
     } = decode_bridge_funds_in(log)?;
 
     if expected_operation_id != operation_id.as_slice() {
@@ -219,7 +221,7 @@ pub fn verify_funds_in_event(
 
     // Bounded, not equal. The Bridge credits the measured balance delta and
     // `amount` stays nominal, so a fee-on-transfer token nets less
-    // (Bridge.sol:501-508). Only a `net` that is too high is unsafe.
+    // (`Bridge` fee-on-transfer balance delta). Only a `net` that is too high is unsafe.
     let max_net = gross.checked_sub(commission).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "BridgeFundsIn commission ({commission}) exceeds gross amount ({gross})"
@@ -263,6 +265,7 @@ struct BridgeFundsInRecord {
     gross: u64,
     net: u64,
     commission: u64,
+    dest_chain_id: u64,
     destination_address: String,
 }
 
@@ -290,6 +293,7 @@ fn decode_bridge_funds_in(log: &LogEntry) -> Result<BridgeFundsInRecord> {
         gross: decode_u64_word(&log.data, BFI_AMOUNT_OFF, "amount")?,
         net: decode_u64_word(&log.data, BFI_NET_AMOUNT_OFF, "netAmount")?,
         commission: decode_u64_word(&log.data, BFI_TOKEN_COMMISSION_OFF, "tokenCommission")?,
+        dest_chain_id: decode_u64_word(&log.data, BFI_DEST_CHAIN_ID_OFF, "destinationChainId")?,
         destination_address: decode_abi_string(
             &log.data,
             BFI_DEST_ADDRESS_HEAD_OFF,
@@ -417,9 +421,10 @@ fn select_unique_log<'a>(
     })
 }
 
-/// Depth of `receipt_block` below the current head. The head and receipt are
-/// two calls, so `min_confirmations` also bounds a reorg between them. A head
-/// below the receipt block means a reorg removed that block.
+/// Depth is `head - receipt_block`; the receipt block itself is not counted.
+/// Receipt and head come from separate RPC calls. A head below the receipt
+/// height is rejected. This does not detect a reorg at the same or greater
+/// height, because no block hash is compared. The RPC provider remains trusted.
 fn check_confirmation_depth(
     provider: &dyn EvmReceiptProvider,
     receipt_block: u64,
@@ -443,8 +448,8 @@ fn check_confirmation_depth(
 
 /// Decodes a `FundsIn` log, binds it to `expected_rgb_opid`, and returns the amount.
 ///
-/// Only one layout is accepted: topic0 and the indexed sender, then `data` holds
-/// the `rgbOpId` word and the amount word.
+/// Only one layout is accepted: topic0, the indexed sender and the indexed
+/// `rgbOpId` (the OpId bytes as a big-endian uint256), then the amount word.
 #[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
@@ -452,13 +457,13 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "log is not a FundsIn event".into(),
         ));
     }
-    if log.topics.len() != 2 || log.data.len() != 64 {
+    if log.topics.len() != 3 || log.data.len() != 32 {
         return Err(EnclaveError::CrossCheck(
             "unexpected FundsIn event layout".into(),
         ));
     }
-    let rgb_op_id: [u8; 32] = log.data[..32].try_into().expect("checked data length");
-    let amount = extract_uint256_as_u64(&log.data, 32)?;
+    let rgb_op_id = log.topics[2];
+    let amount = extract_uint256_as_u64(&log.data, 0)?;
     if &rgb_op_id != expected_rgb_opid {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn rgbOpId mismatch: on-chain 0x{} != consignment 0x{}",
@@ -484,6 +489,69 @@ pub struct VerifiedLock {
     pub minted: u64,
     pub operation_id: [u8; 32],
     pub net_amount: u64,
+}
+
+/// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
+#[cfg(feature = "bfa-validation")]
+const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
+     address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
+
+/// The `operationId` of the one deposit that can back a mint. Every input is
+/// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
+#[cfg(feature = "bfa-validation")]
+pub fn rgb_mint_deposit_id(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: &[u8; 32],
+    minted: u64,
+) -> Result<[u8; 32]> {
+    if cfg.token_contract == [0u8; 20] || cfg.chain_id == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "TOKEN_CONTRACT and EVM_CHAIN_ID must be pinned to derive a mint's deposit id - \
+             refusing to sign"
+                .into(),
+        ));
+    }
+    if minted == 0 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BFA mint 0x{} mints nothing, so no deposit can back it",
+            hex::encode(mint_opid)
+        )));
+    }
+
+    let word = |value: u64| {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&value.to_be_bytes());
+        w
+    };
+    let address = |a: &[u8; 20]| {
+        let mut w = [0u8; 32];
+        w[12..].copy_from_slice(a);
+        w
+    };
+    let mut hasher = Keccak256::new();
+    hasher.update(Keccak256::digest(RGB_MINT_DEPOSIT_TYPEHASH_STR.as_bytes()));
+    hasher.update(address(&cfg.funds_in_contract));
+    hasher.update(word(cfg.chain_id));
+    hasher.update(address(&cfg.token_contract));
+    hasher.update(word(crate::networks::evm::RGB_CHAIN_ID));
+    hasher.update(mint_opid);
+    hasher.update(word(minted));
+    Ok(hasher.finalize().into())
+}
+
+/// The lock of a mint: its deposit id, with the minted units as net amount.
+#[cfg(feature = "bfa-validation")]
+pub fn derived_lock(
+    cfg: &crate::config::BridgeConfig,
+    mint_opid: [u8; 32],
+    minted: u64,
+) -> Result<VerifiedLock> {
+    Ok(VerifiedLock {
+        mint_opid,
+        minted,
+        operation_id: rgb_mint_deposit_id(cfg, &mint_opid, minted)?,
+        net_amount: minted,
+    })
 }
 
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
@@ -525,8 +593,16 @@ pub fn verify_rgb_funds_in(
     let BridgeFundsInRecord {
         operation_id,
         net: net_amount,
+        dest_chain_id,
         ..
     } = decode_bridge_funds_in(bridge_log)?;
+    // FundsIn has no chain field, so the deposit's chain comes from BridgeFundsIn.
+    if dest_chain_id != crate::networks::evm::RGB_CHAIN_ID {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BridgeFundsIn destinationChainId {dest_chain_id} != RGB network id {}",
+            crate::networks::evm::RGB_CHAIN_ID
+        )));
+    }
 
     let depth = check_confirmation_depth(provider, receipt.block_number, min_confirmations)?;
 
@@ -575,7 +651,7 @@ const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback that a vsock forwarder tunnels to the EVM RPC. alloy is
-/// async, so boot builds a single-worker tokio runtime, and each call uses
+/// async, so the launch builds a single-worker tokio runtime, and each call uses
 /// `block_on`. One worker is sufficient and keeps the type `Send + Sync` for
 /// the shared `ServerContext`.
 pub struct AlloyEvmClient {
@@ -705,188 +781,6 @@ fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<Receipt
         block_number,
         logs,
     })
-}
-
-/// Boot-time limit for the Helios light-client initial sync. If the client is
-/// not synced in time, [`HeliosEvmClient::new`] fails and the provider stays
-/// unset. Bridge signing then fails closed.
-#[cfg(feature = "helios")]
-const HELIOS_BOOT_SYNC_TIMEOUT_SECS: u64 = 300;
-
-/// Trustless [`EvmReceiptProvider`]: the a16z Helios light client, in-process.
-/// Helios does not trust the execution/consensus RPCs. It verifies them
-/// against a pinned weak-subjectivity checkpoint.
-///
-/// Helios runs a background sync task, so boot builds a long-lived tokio
-/// runtime, and each query uses `block_on`. The alloy-1.x receipt maps to
-/// [`ReceiptData`], so no alloy-version types cross the
-/// [`EvmReceiptProvider`] boundary.
-#[cfg(feature = "helios")]
-pub struct HeliosEvmClient {
-    // Field order sets drop order: drop the client before the runtime.
-    client: helios_ethereum::EthereumClient,
-    runtime: tokio::runtime::Runtime,
-}
-
-#[cfg(feature = "helios")]
-impl HeliosEvmClient {
-    /// Builds and SYNCS the Helios client at boot. Blocks until sync, for max
-    /// [`HELIOS_BOOT_SYNC_TIMEOUT_SECS`], so the first query is verified. On
-    /// an error (bad config, no checkpoint, sync timeout), boot leaves the
-    /// provider unset and bridge signing fails closed.
-    pub fn new(cfg: &crate::config::HeliosConfig, expected_chain_id: u64) -> Result<Self> {
-        use helios_ethereum::{config::networks::Network, EthereumClientBuilder};
-
-        // Canonical chain id per network. Kept here, so the check below does
-        // not depend on Helios internals.
-        let (network, network_chain_id) = match cfg.network.to_ascii_lowercase().as_str() {
-            "mainnet" => (Network::Mainnet, 1u64),
-            "sepolia" => (Network::Sepolia, 11155111u64),
-            "holesky" => (Network::Holesky, 17000u64),
-            other => {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "helios: unsupported HELIOS_NETWORK {other:?} (want mainnet|sepolia|holesky)"
-                )))
-            }
-        };
-        // HELIOS_NETWORK must agree with the pinned EVM_CHAIN_ID. Else FundsIn
-        // is verified on the wrong chain. Skipped when EVM_CHAIN_ID is 0 (dev).
-        if expected_chain_id != 0 && expected_chain_id != network_chain_id {
-            return Err(EnclaveError::CrossCheck(format!(
-                "helios: HELIOS_NETWORK {:?} (chain id {network_chain_id}) is inconsistent with \
-                 the pinned EVM_CHAIN_ID {expected_chain_id} - refusing to verify FundsIn on a \
-                 different chain than the bridge is configured for",
-                cfg.network
-            )));
-        }
-        let checkpoint = parse_checkpoint(cfg.checkpoint.as_deref())?;
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|e| EnclaveError::CrossCheck(format!("helios: tokio runtime: {e}")))?;
-
-        let exec = cfg.execution_rpc.clone();
-        let cons = cfg.consensus_rpc.clone();
-        let strict = cfg.strict_checkpoint_age;
-
-        let client = runtime.block_on(async move {
-            let builder = EthereumClientBuilder::new()
-                .network(network)
-                .execution_rpc(&exec)
-                .map_err(|e| EnclaveError::CrossCheck(format!("helios: bad execution_rpc: {e}")))?
-                .consensus_rpc(&cons)
-                .map_err(|e| EnclaveError::CrossCheck(format!("helios: bad consensus_rpc: {e}")))?
-                .checkpoint(checkpoint);
-            // No `load_external_fallback`/`fallback`: the ONLY egress is the two
-            // forwarded RPCs, and the operator pins the checkpoint.
-            let builder = if strict {
-                builder.strict_checkpoint_age()
-            } else {
-                builder
-            };
-            let client = builder
-                .with_config_db() // in-memory, no disk in the enclave
-                .build()
-                .map_err(|e| EnclaveError::CrossCheck(format!("helios: build: {e}")))?;
-
-            let timeout = std::time::Duration::from_secs(HELIOS_BOOT_SYNC_TIMEOUT_SECS);
-            tokio::time::timeout(timeout, client.wait_synced())
-                .await
-                .map_err(|_| {
-                    EnclaveError::CrossCheck(format!(
-                        "helios: light client did not sync within {HELIOS_BOOT_SYNC_TIMEOUT_SECS}s \
-                         - refusing to start (bridge signing fails closed until synced)"
-                    ))
-                })?
-                .map_err(|e| EnclaveError::CrossCheck(format!("helios: sync failed: {e}")))?;
-            Ok::<_, EnclaveError>(client)
-        })?;
-
-        tracing::info!(
-            network = %cfg.network,
-            execution_rpc = %cfg.execution_rpc,
-            consensus_rpc = %cfg.consensus_rpc,
-            "Helios light client synced (trustless FundsIn verification)"
-        );
-        Ok(Self { client, runtime })
-    }
-}
-
-#[cfg(feature = "helios")]
-impl EvmReceiptProvider for HeliosEvmClient {
-    fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
-        let hash = alloy_primitives::B256::from_slice(tx_hash);
-        let receipt = self
-            .runtime
-            .block_on(self.client.get_transaction_receipt(hash))
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("helios: eth_getTransactionReceipt failed: {e}"))
-            })?;
-        // Mapped inline, so the alloy-1.x receipt type is never named (this
-        // crate uses alloy 2.x). Fails closed on a missing block_number.
-        receipt
-            .map(|r| {
-                let block_number = r.block_number.ok_or_else(|| {
-                    EnclaveError::CrossCheck(
-                        "helios: FundsIn receipt has no block_number (pending/malformed) - \
-                         refusing to treat an unmined receipt as confirmed"
-                            .into(),
-                    )
-                })?;
-                Ok(ReceiptData {
-                    status_success: r.status(),
-                    block_number,
-                    logs: r
-                        .inner
-                        .logs()
-                        .iter()
-                        .map(|log| LogEntry {
-                            address: log.address().into_array(),
-                            topics: log.topics().iter().map(|t| t.0).collect(),
-                            data: log.data().data.to_vec(),
-                        })
-                        .collect(),
-                })
-            })
-            .transpose()
-    }
-
-    fn get_block_number(&self) -> Result<u64> {
-        let n = self
-            .runtime
-            .block_on(self.client.get_block_number())
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("helios: eth_blockNumber failed: {e}"))
-            })?;
-        u64::try_from(n)
-            .map_err(|_| EnclaveError::CrossCheck("helios: head block number exceeds u64".into()))
-    }
-}
-
-/// Parses the operator-pinned `HELIOS_CHECKPOINT` (0x-prefixed 32-byte beacon
-/// block root) into an alloy-1.x `B256`. It is mandatory. `None` or a malformed
-/// value fails closed.
-#[cfg(feature = "helios")]
-fn parse_checkpoint(checkpoint: Option<&str>) -> Result<alloy_primitives::B256> {
-    let hex_str = checkpoint.ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "helios: HELIOS_CHECKPOINT is required (a recent weak-subjectivity beacon block root) \
-             - refusing to sync against an untrusted community checkpoint"
-                .into(),
-        )
-    })?;
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(stripped)
-        .map_err(|e| EnclaveError::CrossCheck(format!("helios: HELIOS_CHECKPOINT not hex: {e}")))?;
-    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-        EnclaveError::CrossCheck(format!(
-            "helios: HELIOS_CHECKPOINT must be 32 bytes, got {}",
-            v.len()
-        ))
-    })?;
-    Ok(alloy_primitives::B256::from(arr))
 }
 
 #[cfg(test)]

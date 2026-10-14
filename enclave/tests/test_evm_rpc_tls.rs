@@ -37,7 +37,7 @@ sol! {
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
 }
 
 const BRIDGE: [u8; 20] = [0xB1; 20];
@@ -98,7 +98,7 @@ fn forged_receipt() -> String {
         tokenCommission: U256::from(50),
         nativeCommission: U256::ZERO,
         sourceChainId: U256::ZERO,
-        destinationChainId: U256::ZERO,
+        destinationChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
         destinationAddress: INVOICE.into(),
         settlementData: Default::default(),
     };

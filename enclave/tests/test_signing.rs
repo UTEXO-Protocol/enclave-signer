@@ -76,7 +76,7 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
             burnId: U256::ZERO,
             // The RGB network id. The enclave refuses an RGB-sourced release
             // with another sourceChainId before the consignment binding.
-            sourceChainId: U256::from(96u64),
+            sourceChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
             destinationChainId: U256::from(1u64),
             sourceAddress: String::new(),
             proof: Bytes::new(),
@@ -98,7 +98,7 @@ fn placeholder_consignment_hash() -> Vec<u8> {
 }
 
 /// Build a valid enriched EVM-destination SignRequest for testing. `commission`
-/// stays outside the calldata but remains part of route-proof amount coverage.
+/// stays outside the calldata and does not reach the signed digest.
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     SignRequest {
         amount: amount + commission + 100, // plenty of headroom
@@ -109,7 +109,6 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             consignment_hash: placeholder_consignment_hash(),
             merkle_proofs: vec![],
             commission,
-            mint_ancestors: vec![],
         })),
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
             call_data: mock_funds_out_calldata([0x22; 20], amount),
@@ -383,7 +382,6 @@ fn sign_psbt_request(
             psbt_output_amount,
             asset_id: String::new(),
             consignment: vec![],
-            mint_ancestors: Vec::new(),
             consignment_hash: vec![],
         })),
     }
@@ -548,8 +546,8 @@ fn test_sign_evm_accepts_ccd_source_funds_out() {
     }
 }
 
-/// An lzFundsOut selector without `lz_release` yields no fundsOut params, so
-/// the EVM signer must refuse it with an error and no signature.
+/// An lzFundsOut selector without `lz_release` must fail in validation,
+/// before the key, with an error and no signature (F05-NEW-AF-12).
 #[cfg(all(feature = "rgb-validation", feature = "ccd"))]
 #[test]
 fn test_sign_evm_refuses_lz_selector_without_lz_release() {
@@ -605,7 +603,8 @@ fn test_sign_evm_refuses_lz_selector_without_lz_release() {
 
     match &resp.response {
         Some(Response::Error(e)) => assert!(
-            e.message.contains("LayerZero selector without lz_release"),
+            e.message
+                .contains("lzFundsOut calldata requires lz_release"),
             "expected the missing lz_release refusal, got: {}",
             e.message
         ),
@@ -653,11 +652,11 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 }
 
 // Route proofs bind the amount. RGB source validation emits the consignment
-// amount. EVM destination validation decodes `fundsOut.amount` and adds
-// `calldata_commission`. `validate_route_proofs` compares the two.
+// amount. EVM destination validation decodes `fundsOut.amount` and checks it
+// against `calldata_amount`. `validate_route_proofs` compares the two.
 
 /// A build without `spv` must refuse every `fundsOut`, even with no
-/// merkle_proofs. Without SPV, only the host-controlled Esplora resolver anchors
+/// merkle_proofs. Without SPV, only the host-controlled indexer anchors
 /// witness txs, so the enclave could sign against a fabricated anchor.
 ///
 /// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The
@@ -735,7 +734,7 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// The listener `evm_event_valid` and `evm_event_finalized` booleans do not
+/// The listener `event_valid` and `event_finalized` booleans do not
 /// authorize or block signing. With both `false`, no rejection comes from them.
 #[test]
 #[cfg(evm_to_rgb)]
@@ -871,7 +870,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
     }
 }
 
-// A production (rgb-validation) build rejects a SignPsbt with no consignment.
+// An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
 // An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
 // bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -916,7 +915,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 }
 
 // A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
-// SignPsbt always runs the bridge cross-checks and fails closed when no
+// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
 // consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]

@@ -6,7 +6,8 @@
 //!   and regtest check chain linkage only. BIP-325 signet signatures are not
 //!   verified.
 //! - `merkle.rs`: Bitcoin Merkle inclusion proof verifier.
-//! - `checkpoint.rs`: the compile-time checkpoint constants.
+//! - `checkpoint.rs`: the compile-time checkpoint constants and the dev-only
+//!   `SPV_CHECKPOINT` override.
 
 pub mod chain;
 pub mod checkpoint;

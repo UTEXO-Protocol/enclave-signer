@@ -5,7 +5,6 @@
 //! enclave error, bad reply) is `503`. Any other `5xx` can turn a slow restart
 //! into a failed deploy, so these tests cover each path.
 
-use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -66,10 +65,8 @@ async fn start_health_server(enclave_port: u16) -> u16 {
 }
 
 async fn start_health_server_with(enclave_port: u16, sync: SyncStatus) -> u16 {
-    let service = ParentAdapterService::new(
-        EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")),
-        HashSet::new(),
-    );
+    let service =
+        ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {

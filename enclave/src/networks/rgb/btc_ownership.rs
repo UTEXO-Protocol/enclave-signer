@@ -9,7 +9,7 @@
 //! (A) Its `script_pubkey` equals that of an input this enclave controls, as
 //! resolved by
 //! [`find_controlled_taproot_inputs`](crate::networks::rgb::signing::taproot::find_controlled_taproot_inputs):
-//! a BIP-86 key-path input whose internal key derives from our seed and,
+//! a Taproot key-path input whose internal key derives from a BIP-86 account and,
 //! tweaked with its merkle root, gives the output key. The sighash commits to
 //! the script. A tapret-tweaked input can commit to a script tree with foreign
 //! spend paths. Thus outputs on its script are exempt only up to the input

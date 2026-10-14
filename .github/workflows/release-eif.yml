@@ -118,4 +118,4 @@ jobs:
           echo "### Release EIF" >> "$GITHUB_STEP_SUMMARY"
           echo "- git_sha: \`${{ inputs.git_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- bucket: \`${{ vars.EIF_S3_BUCKET }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap." >> "$GITHUB_STEP_SUMMARY"
+          echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap, then deploy/verify-identity.sh to write the attestation bundles." >> "$GITHUB_STEP_SUMMARY"

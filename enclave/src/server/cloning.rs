@@ -1,7 +1,7 @@
 //! The cloning handshake. It moves a seed from a running donor enclave to a
 //! new requester enclave. The seed does not leave a TEE.
 //!
-//! See proto/enclave.proto for the full protocol.
+//! See `enclave-proto/proto/enclave.proto` for the full protocol.
 
 use super::context::ServerContext;
 use super::keys::{build_public_keys_response, clone_commitment, verify_clone_commitment};
@@ -100,7 +100,7 @@ pub(super) fn handle_get_clone(
     //    sending one request to unintended donors.
     let our_evm = state.evm_address()?;
     if req_cluster_pk != our_evm {
-        return Err(EnclaveError::Clone(format!(
+        return Err(EnclaveError::InvalidRequest(format!(
             "cluster_public_key {} does not match this enclave's address {}",
             hex::encode(req_cluster_pk),
             hex::encode(our_evm)
@@ -121,7 +121,9 @@ pub(super) fn handle_get_clone(
     // 3. Verify the requester attestation chain and PCRs. The expected nonce
     //    is `None` because the donor does not know it. The replay guard
     //    enforces freshness after the binding checks pass.
-    let expected_pcrs = attestation::get_own_pcrs()?;
+    // A local NSM fault is internal, not a refused peer.
+    let expected_pcrs =
+        attestation::get_own_pcrs().map_err(|e| EnclaveError::Internal(e.to_string()))?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
 
@@ -172,7 +174,8 @@ pub(super) fn handle_get_clone(
         &encrypted_seed,
     );
     let donor_attestation =
-        attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), Some(&commitment))?;
+        attestation::get_attestation(&donor_nonce, Some(&donor_pubkey), Some(&commitment))
+            .map_err(|e| EnclaveError::Internal(e.to_string()))?;
 
     reservation.commit();
 

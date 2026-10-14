@@ -2,8 +2,9 @@
 //!
 //! The chain starts at a compile-time `Checkpoint` (height, hash, bits, time).
 //! It grows as the parent sends batches of contiguous 80-byte headers to
-//! `submit_headers`. Each header must pass linkage, PoW, and nBits checks
-//! against its predecessor before it is appended.
+//! `submit_headers`. Each header must pass the linkage check against its
+//! predecessor before it is appended. Mainnet and testnet3 also check PoW and
+//! nBits.
 //!
 //! ## Three submission cases
 //!
@@ -46,7 +47,7 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 // 32 B cached hash). The checkpoint must be below the oldest anchor of any
 // bridgeable asset.
 //
-// Production runs the UTEXO custom signet, which has no PoW, so headers cost
+// On signet and regtest the enclave does not check PoW, so headers cost
 // nothing to make. `MAX_STORED_HEADERS` caps retention on every network.
 
 /// Absolute cap on retained headers. A batch that goes over it fails closed.

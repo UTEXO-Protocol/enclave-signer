@@ -35,6 +35,8 @@ const TIP_AGE_WARN_SECS: u32 = 3600;
 const TIP_AGE_ERROR_SECS: u32 = 7200;
 /// The enclave names its checkpoint in this refusal (`SpvError::BelowCheckpoint`).
 const BELOW_CHECKPOINT: &str = "below checkpoint ";
+/// The enclave names the first header that does not link (`SpvError::ChainLinkage`).
+const LINKAGE: &str = "chain linkage broken at height ";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,6 +75,9 @@ pub struct HeaderSync {
     /// The enclave's checkpoint height, once a refusal has named it. A fork
     /// repair never starts at or below it.
     floor: Option<u32>,
+    /// The last batch the enclave refused for linkage.
+    /// Keyed by enclave tip, start height and first header hash.
+    refused: Option<((BlockHash, u32, BlockHash), String)>,
 }
 
 impl HeaderSync {
@@ -100,6 +105,7 @@ impl HeaderSync {
             sent: VecDeque::new(),
             age_level: 0,
             floor: None,
+            refused: None,
         };
         (sync, rx)
     }
@@ -121,6 +127,12 @@ impl HeaderSync {
             .unwrap()
             .as_secs();
         let previous = self.status.borrow().state;
+        // The refusal `step` already logged.
+        let repeat = result.as_ref().err().is_some_and(|e| {
+            self.refused
+                .as_ref()
+                .is_some_and(|(_, r)| *r == format!("{e:#}"))
+        });
         let failures = &mut self.failures;
         let source_error = &self.source_error;
         self.status.send_modify(|s| match result {
@@ -137,7 +149,9 @@ impl HeaderSync {
             }
             Err(e) => {
                 *failures += 1;
-                tracing::warn!(error = format!("{e:#}"), "header sync step failed");
+                if !repeat {
+                    tracing::warn!(error = format!("{e:#}"), "header sync step failed");
+                }
                 s.last_error = Some(format!("{e:#}"));
                 if *failures >= STALL_AFTER {
                     s.state = SyncState::Stalled;
@@ -199,8 +213,24 @@ impl HeaderSync {
             .last()
             .context("source sent no headers")?
             .block_hash();
+        let key = (hash, start, headers[0].block_hash());
+        if let Some((_, error)) = self.refused.as_ref().filter(|(k, _)| *k == key) {
+            return Err(anyhow!(error.clone()));
+        }
         self.wait_for_rate(len).await;
-        let reply = self.submit(start, &headers).await?;
+        let reply = match self.submit(start, &headers).await {
+            Err(e) if format!("{e:#}").contains(&format!("{LINKAGE}{start}:")) => {
+                let error = format!("{e:#}");
+                tracing::error!(
+                    start,
+                    error,
+                    "The enclave refused the source branch. It is not sent again until the source or enclave tip changes."
+                );
+                self.refused = Some((key, error.clone()));
+                return Err(anyhow!(error));
+            }
+            reply => reply?,
+        };
         ensure!(
             reply.headers_accepted == len
                 && reply.last_block_height == last_height
@@ -343,7 +373,7 @@ type Batch = (u32, Vec<Header>);
 
 /// On one connection: the source tip, and the batch the enclave is missing
 /// above its tip `h` (`None` when it has them all). A fork is repaired from
-/// `rewind_to`. Every header is checked to link to the one before.
+/// `min(rewind_to, h + 1)`. Every header is checked to link to the one before.
 fn fetch(
     src: &ElectrumSource,
     h: u32,
@@ -371,11 +401,7 @@ fn fetch(
             s > h,
             "source header at {h} differs from the enclave; waiting for the source to get ahead"
         );
-        ensure!(
-            rewind_to <= h,
-            "source header at {h} differs from the enclave at its checkpoint; the chains do not meet"
-        );
-        (rewind_to, None)
+        (rewind_to.min(h + 1), None)
     };
     let count = (s - start + 1).min(MAX_HEADERS);
     let headers = session.headers(start, count)?;

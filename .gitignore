@@ -13,3 +13,5 @@
 # Python build-wiring tests
 __pycache__/
 .DS_Store
+!/.cargo/
+!.cargo/audit.toml

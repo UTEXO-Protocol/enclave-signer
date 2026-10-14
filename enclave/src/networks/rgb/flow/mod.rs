@@ -3,12 +3,12 @@
 //! The bridge has two RGB flows. Each flow is a separate enclave build with
 //! its own PCR0:
 //!
-//!   * **send/receive** (`rgb-swap`) - the bridge holds a pool of the asset.
+//!   * **send/receive** (`rgb-swap`, retired) - the bridge holds a pool of the asset.
 //!     A deposit pays the user with a BFA `Transfer`. A withdrawal is a
 //!     `Transfer` back to the bridge.
-//!   * **mint/burn** (`rgb-mint-burn`) - the bridge owns the mint right of the
-//!     contract. A deposit mints with a BFA `Bridge`. A withdrawal destroys
-//!     units with a BFA `Burn`.
+//!   * **mint/burn** (`rgb-mint-burn`, production) - the bridge owns the mint
+//!     right of the contract. A deposit mints with a BFA `Bridge`. A
+//!     withdrawal destroys units with a BFA `Burn`.
 //!
 //! The flows differ only in the accepted transition types and the amount
 //! binds. These are the checks that authorize value to move. Thus each flow

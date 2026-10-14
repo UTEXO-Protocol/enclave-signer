@@ -282,7 +282,7 @@ fn rejects_nonzero_value_when_bridge_contract_unpinned() {
     let err = validate_gas_tx_request(&req(tx), &unpinned).unwrap_err();
     assert!(
         err.to_string()
-            .contains("requires a pinned BRIDGE_CONTRACT"),
+            .contains("requires a pinned EVM_PROXY_CONTRACT_ADDRESS"),
         "got: {err}"
     );
 }

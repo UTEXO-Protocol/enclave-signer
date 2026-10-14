@@ -3,7 +3,7 @@
 
 use crate::config::BridgeConfig;
 #[cfg(feature = "evm-rpc")]
-use crate::config::{EvmRpcConfig, EvmRpcTls};
+use crate::config::EvmRpcTls;
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
@@ -78,8 +78,8 @@ pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
 
 /// Log the pinned bridge config, as an error when it is partially set.
 ///
-/// `SignEvm` fails closed on a partial config, and the boot gate in `main`
-/// stops a production build on it.
+/// An `rgb-validation` build refuses a `fundsOut` `Sign` without a full config,
+/// and the boot gate in `main` stops a release bridge build on it.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
     if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
         tracing::warn!(
@@ -104,42 +104,28 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             "bridge config PARTIALLY set - EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID must all \
-             be set (non-zero) or all unset; SignEvm will refuse to sign with this ambiguous pin"
+             be set (non-zero) or all unset; an rgb-validation build refuses fundsOut signing"
         );
     } else {
         tracing::warn!(
         "bridge config unconfigured (EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID unset) - \
-         SignEvm cross-check will fall back to legacy behaviour and the attestation bundle \
-         will commit to empty values"
+         fundsOut pin checks are skipped (an rgb-validation build refuses to sign) and the \
+         attestation bundle will commit to empty values"
     );
     }
 }
 
-/// The EVM `FundsIn` verification source, plus its Helios checkpoint or TLS pin.
+/// The EVM `FundsIn` verification source and its TLS pin.
 ///
-/// Uses the same rule as [`build_evm_rpc_client`]. Production uses the pinned
-/// TLS of `tls`. The unused `helios` feature with `HELIOS_EXECUTION_RPC` selects
-/// Helios.
+/// Uses the same rule as [`build_evm_rpc_client`]: the pinned TLS of `tls`.
 #[cfg(feature = "evm-rpc")]
-pub fn resolve_evm_data_source(
-    tls: &EvmRpcTls,
-) -> (EvmDataSource, Option<[u8; 32]>, Option<EvmRpcTlsPin>) {
-    #[cfg(feature = "helios")]
-    if std::env::var("HELIOS_EXECUTION_RPC").is_ok() {
-        // The checkpoint is the Helios trust root, so the attested policy
-        // commits it. A missing or bad value gives `None`, and boot fails.
-        let checkpoint = std::env::var("HELIOS_CHECKPOINT")
-            .ok()
-            .and_then(|s| hex::decode(s.strip_prefix("0x").unwrap_or(&s)).ok())
-            .and_then(|b| <[u8; 32]>::try_from(b).ok());
-        return (EvmDataSource::HeliosVerified, checkpoint, None);
-    }
+pub fn resolve_evm_data_source(tls: &EvmRpcTls) -> (EvmDataSource, Option<EvmRpcTlsPin>) {
     use sha2::Digest;
     let pin = EvmRpcTlsPin {
         host: tls.host.clone(),
         ca_sha256: sha2::Sha256::digest(&tls.ca_der).into(),
     };
-    (EvmDataSource::PinnedTlsRpc, None, Some(pin))
+    (EvmDataSource::PinnedTlsRpc, Some(pin))
 }
 
 /// Log the resolved policy. The attestation `user_data` commits it.
@@ -183,66 +169,6 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Start the TCP-to-vsock forwarders that this build needs at boot. The
-/// Electrum, EVM RPC and KMS forwarders start at launch, with the endpoints.
-///
-/// No-op off Linux or without `vsock`. Untrusted egress: see `vsock_forwarder`.
-pub fn start_vsock_forwarders() {
-    #[cfg(all(feature = "vsock", target_os = "linux"))]
-    {
-        // Helios execution and consensus RPC forwarders. Local ports match the
-        // HeliosConfig defaults (18545/18550). The host runs one vsock-proxy each.
-        #[cfg(feature = "helios")]
-        {
-            let exec_local: u16 = std::env::var("HELIOS_EXECUTION_LOCAL_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(18545);
-            let exec_vsock: u32 = std::env::var("HELIOS_EXECUTION_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(if cfg!(feature = "kms-persistence") {
-                    8005
-                } else {
-                    8003
-                });
-            let cons_local: u16 = std::env::var("HELIOS_CONSENSUS_LOCAL_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(18550);
-            let cons_vsock: u32 = std::env::var("HELIOS_CONSENSUS_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(if cfg!(feature = "kms-persistence") {
-                    8006
-                } else {
-                    8004
-                });
-            // KMS custody reserves 8003 (KMS) and 8004 (broker).
-            #[cfg(feature = "kms-persistence")]
-            assert!(
-                ![exec_vsock, cons_vsock]
-                    .iter()
-                    .any(|port| matches!(port, 8003 | 8004)),
-                "Helios vsock ports must not use the reserved KMS/broker ports 8003/8004"
-            );
-            tracing::info!(
-                exec_local,
-                exec_vsock,
-                cons_local,
-                cons_vsock,
-                "starting Helios execution + consensus vsock forwarders"
-            );
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(exec_local, exec_vsock) {
-                tracing::error!("failed to start Helios execution RPC forwarder: {e}");
-            }
-            if let Err(e) = crate::vsock_forwarder::start_forwarder(cons_local, cons_vsock) {
-                tracing::error!("failed to start Helios consensus RPC forwarder: {e}");
-            }
-        }
-    }
-}
-
 /// Build the RGB consignment validator for the Electrum URL set at launch.
 /// `None` makes the launch fail.
 #[cfg(feature = "rgb-validation")]
@@ -264,7 +190,7 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
 /// of the active network. The chain starts empty. `SubmitHeaders` fills it.
 ///
 /// Panics on a bad checkpoint: a placeholder in a release build, one not on a
-/// retarget boundary, or a malformed `SPV_CHECKPOINT` override. Such a chain
+/// retarget boundary on a PoW network, or a malformed `SPV_CHECKPOINT` override. Such a chain
 /// cannot advance.
 #[cfg(feature = "rgb-validation")]
 pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
@@ -293,8 +219,8 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
         panic!("{msg}");
     }
     if let Err(msg) = checkpoint.assert_retarget_aligned(spv_network) {
-        // A misaligned checkpoint stops the chain at the next retarget
-        // boundary: the epoch-start lookup falls below the checkpoint.
+        // On a PoW network, a misaligned checkpoint stops the chain at the next
+        // retarget boundary: the epoch-start lookup falls below the checkpoint.
         panic!("{msg}");
     }
     if !checkpoint.is_real {
@@ -320,67 +246,25 @@ pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderC
 /// unverified path.
 #[cfg(feature = "evm-rpc")]
 pub fn build_evm_rpc_client(
-    bridge_config: &BridgeConfig,
-    cfg: &EvmRpcConfig,
     tls: &EvmRpcTls,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {
-    // Only the Helios path reads the pinned chain id and `cfg`.
-    #[cfg(not(feature = "helios"))]
-    let _ = (bridge_config, cfg);
-
     use crate::networks::evm::events::{AlloyEvmClient, EvmReceiptProvider};
-    type Boxed = Box<dyn EvmReceiptProvider + Send + Sync>;
 
-    let build_alloy = || -> Option<Boxed> {
-        tracing::info!(
-            host = %tls.host,
-            tls_port = tls.tls_port,
-            "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
-             <EVM_RPC_VSOCK_PORT> {} {})",
-            tls.host,
-            tls.tls_port,
-        );
-        let built = AlloyEvmClient::with_pinned_tls(tls);
-        match built {
-            Ok(c) => Some(Box::new(c) as Boxed),
-            Err(e) => {
-                tracing::error!("failed to init EVM RPC client: {e}");
-                None
-            }
+    tracing::info!(
+        host = %tls.host,
+        tls_port = tls.tls_port,
+        "EVM FundsIn verification: pinned TLS (host must run: vsock-proxy \
+         <EVM_RPC_VSOCK_PORT> {} {})",
+        tls.host,
+        tls.tls_port,
+    );
+    match AlloyEvmClient::with_pinned_tls(tls) {
+        Ok(c) => Some(Box::new(c) as Box<dyn EvmReceiptProvider + Send + Sync>),
+        Err(e) => {
+            tracing::error!("failed to init EVM RPC client: {e}");
+            None
         }
-    };
-
-    // HELIOS_EXECUTION_RPC selects Helios, else pinned-TLS alloy. A Helios sync
-    // failure leaves no client, so bridge signing fails closed.
-    #[cfg(feature = "helios")]
-    let client: Option<Boxed> = match crate::config::HeliosConfig::from_env() {
-        Some(hcfg) => {
-            // Helios rejects a HELIOS_NETWORK that does not match EVM_CHAIN_ID
-            // (predicate 1).
-            match crate::networks::evm::events::HeliosEvmClient::new(&hcfg, bridge_config.chain_id)
-            {
-                Ok(c) => {
-                    tracing::info!(
-                        network = %hcfg.network,
-                        min_confirmations = cfg.min_confirmations,
-                        "EVM FundsIn verification: Helios-verified path (trustless)"
-                    );
-                    Some(Box::new(c) as Boxed)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Helios client init/sync failed: {e} - bridge signing will fail closed"
-                    );
-                    None
-                }
-            }
-        }
-        None => build_alloy(),
-    };
-    #[cfg(not(feature = "helios"))]
-    let client: Option<Boxed> = build_alloy();
-
-    client
+    }
 }
 
 #[cfg(test)]

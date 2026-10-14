@@ -22,7 +22,6 @@ fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
         psbt_output_amount: destination_amount,
         asset_id: "rgb:test-asset".into(),
         consignment: vec![],
-        mint_ancestors: Vec::new(),
         consignment_hash: vec![],
     })
 }
@@ -35,7 +34,6 @@ fn rgb_source() -> SourceNetwork {
         consignment_hash: vec![0x02; 32],
         merkle_proofs: vec![],
         commission: 20,
-        mint_ancestors: vec![],
     })
 }
 

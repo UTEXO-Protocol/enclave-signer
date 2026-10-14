@@ -64,7 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnclaveTarget::Tcp(cfg.enclave_addr.clone())
     };
 
-    tracing::info!(evm_network_ids = ?cfg.evm_network_ids, "EVM network IDs for TRANSACTION routing");
     let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
     let health_addr = format!("{}:{}", cfg.health_host, cfg.health_port).parse()?;
 
@@ -81,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind the probe first, so a bad HEALTH_PORT fails at boot.
     let health_listener = health::bind(health_addr).await?;
-    let service = ParentAdapterService::new(target, cfg.evm_network_ids.clone());
+    let service = ParentAdapterService::new(target);
 
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop

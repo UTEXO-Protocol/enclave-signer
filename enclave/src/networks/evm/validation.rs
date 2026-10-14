@@ -10,10 +10,10 @@ use alloy_sol_types::SolCall;
 #[cfg(rgb_to_evm)]
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
-#[cfg(rgb_to_evm)]
-use crate::networks::evm::ADDRESS_LEN;
 #[cfg(evm_to_rgb)]
 use crate::networks::evm::HASH_LEN as TX_HASH_LEN;
+#[cfg(rgb_to_evm)]
+use crate::networks::evm::{ADDRESS_LEN, RGB_CHAIN_ID};
 use crate::networks::RouteProof;
 #[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
@@ -38,27 +38,16 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 #[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
-/// Chain id of the RGB network: `networks.IDUtexo` in bridge-utexo and the
-/// `96 -> <evm>` routes that `DeployAll` registers. It is a protocol constant,
-/// so code pins it and PCR0 measures it.
-///
-/// The Router and CommissionManager select the verifier, settlement module and
-/// commission rate by `(sourceChainId, destinationChainId)`. A forged value
-/// sends an RGB release through a foreign verifier or rate.
-/// [`validate_rgb_source_identity`] enforces it on both release routes.
+/// Maximum `call_data` length: the Bridge's 90_000-byte settlement cap
+/// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. PCR-attested.
 #[cfg(rgb_to_evm)]
-pub const RGB_SOURCE_CHAIN_ID: u64 = 96;
-
-/// Maximum `call_data` length. A valid `fundsOut` call is a few hundred bytes.
-/// More than 64 KiB is malformed or a work-amplification attempt. PCR-attested.
-#[cfg(rgb_to_evm)]
-pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 64 * 1024;
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 96 * 1024;
 
 #[cfg(rgb_to_evm)]
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
-    /// Mirrors `IBridge.FundsOutParams` (IBridge.sol:294-304). Field order fixes
+    /// Mirrors `IBridge.FundsOutParams` (in IBridge.sol). Field order fixes
     /// both the ABI decode here and the `TeeFundsOut` struct hash in
     /// [`super::signing::funds_out_digest`].
     ///
@@ -184,29 +173,29 @@ impl ReleaseIdentity {
 
 /// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol` (bridge PRs
 /// #152 and #155). `recipient`, `proof` and `destinationChainId` are absent
-/// by design: the key is shared with `rebalanceLiquidity`.
+/// by design: the key is shared with `rebalanceLiquidity`. `settlementData` is
+/// absent so one burn has one `burnId` whatever deposits it cites.
 #[cfg(rgb_to_evm)]
 const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,address token,\
      uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,\
-     bytes32 settlementDataHash,bytes32 sourceBurnTxId)";
+     bytes32 sourceBurnTxId)";
 
 /// Recomputes `burnId` exactly as `Bridge._deriveBurnIdFromFields` does:
 ///
 /// ```text
 /// keccak256(abi.encode(BURN_TYPEHASH, bridge, chainId, token, amount,
-///     sourceChainId, keccak256(sourceAddress), keccak256(settlementData),
-///     sourceBurnTxId))
+///     sourceChainId, keccak256(sourceAddress), sourceBurnTxId))
 /// ```
 ///
 /// `bridge` is `address(this)` in the Bridge: the pinned `FUNDS_IN_CONTRACT`
 /// that emits `BridgeFundsIn`. `chainId` is the pinned `EVM_CHAIN_ID`. `token`
-/// is the pinned `TOKEN_CONTRACT`. All nine words are static, so `abi.encode`
+/// is the pinned `TOKEN_CONTRACT`. All eight words are static, so `abi.encode`
 /// is concatenation.
 #[cfg(rgb_to_evm)]
 pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     use sha3::{Digest, Keccak256};
 
-    let mut buf = Vec::with_capacity(32 * 9);
+    let mut buf = Vec::with_capacity(32 * 8);
     buf.extend_from_slice(&Keccak256::digest(BURN_TYPEHASH_STR.as_bytes()));
     buf.extend_from_slice(&[0u8; 12]);
     buf.extend_from_slice(&cfg.funds_in_contract);
@@ -216,7 +205,6 @@ pub fn expected_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> U256 {
     buf.extend_from_slice(&release.amount.to_be_bytes::<32>());
     buf.extend_from_slice(&release.source_chain_id.to_be_bytes::<32>());
     buf.extend_from_slice(&Keccak256::digest(release.source_address.as_bytes()));
-    buf.extend_from_slice(&Keccak256::digest(&release.settlement_data));
     buf.extend_from_slice(&release.source_burn_tx_id);
     U256::from_be_bytes::<32>(Keccak256::digest(&buf).into())
 }
@@ -238,7 +226,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
         return Err(EnclaveError::CrossCheck(format!(
             "calldata burnId {:#x} != {:#x}, the burnId the Bridge derives from the bound fields \
              (FUNDS_IN_CONTRACT, EVM_CHAIN_ID, TOKEN_CONTRACT, amount, sourceChainId, \
-             sourceAddress, settlementData, sourceBurnTxId) - refusing to sign a release the \
+             sourceAddress, sourceBurnTxId) - refusing to sign a release the \
              contract would revert with InvalidBurnId",
             release.burn_id, expected
         )));
@@ -248,7 +236,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 
 /// Binds the source fields of a release to an RGB source, on both routes.
 ///
-/// - `sourceChainId` MUST be [`RGB_SOURCE_CHAIN_ID`]. It selects the
+/// - `sourceChainId` MUST be [`RGB_CHAIN_ID`]. It selects the
 ///   verifier, settlement module and commission rate.
 /// - `sourceAddress` MUST be empty. RGB has no source address
 ///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). The field is
@@ -258,9 +246,9 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 /// names its own chain.
 #[cfg(rgb_to_evm)]
 pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
-    if source.source_chain_id != U256::from(RGB_SOURCE_CHAIN_ID) {
+    if source.source_chain_id != U256::from(RGB_CHAIN_ID) {
         return Err(EnclaveError::CrossCheck(format!(
-            "calldata sourceChainId {} != RGB network id {RGB_SOURCE_CHAIN_ID}: the source chain \
+            "calldata sourceChainId {} != RGB network id {RGB_CHAIN_ID}: the source chain \
              selects the verifier, settlement module and commission rate - refusing to sign an \
              RGB release under a foreign source chain",
             source.source_chain_id
@@ -318,6 +306,21 @@ pub fn validate_destination(
     // `destinationChainId` means different things on the two routes, so
     // `is_entrypoint_route` selects the check below.
     let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
+    // `lz_release` is required on the LayerZero route and refused on the
+    // direct route (F05-NEW-AF-12). The signer then routes on `params` only.
+    match (is_entrypoint_route, destination.lz_release.is_some()) {
+        (true, false) => {
+            return Err(EnclaveError::CrossCheck(
+                "lzFundsOut calldata requires lz_release".into(),
+            ))
+        }
+        (false, true) => {
+            return Err(EnclaveError::CrossCheck(
+                "lz_release is only valid with lzFundsOut calldata".into(),
+            ))
+        }
+        _ => {}
+    }
     let (proof, params, calldata_destination_chain_id, release) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
         let proof = lz_route_proof_from_params(&decoded)?;

@@ -1,7 +1,7 @@
 //! RGB -> EVM `fundsOut` cross-checks: they bind the signed calldata to the
 //! validated consignment. The module compiles only with `rgb-validation`,
-//! because each check reads a [`ValidatedConsignment`]. SPV builds also run
-//! the BtcRelay agreement check ([`verify_btc_relay_agreement`]).
+//! because each check reads a [`ValidatedConsignment`]. It includes the
+//! BtcRelay agreement check ([`verify_btc_relay_agreement`]).
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
@@ -35,11 +35,12 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// Amount cross-check for `fundsOut`. Binds the release `amount` to the
 /// consignment asset value:
 ///
-///   1. The last transition must be the type that this build's RGB flow
+///   1. The settling transition must be the type that this build's RGB flow
 ///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
 ///      `Burn` under `rgb-mint-burn`.
 ///   2. The amount that transition moves out of the source must cover the
-///      EVM release `amount`.
+///      EVM release `amount` under `rgb-swap`, and equal it under
+///      `rgb-mint-burn`.
 ///
 /// Both come from [`crate::networks::rgb::flow::funds_out_source_amount`],
 /// which also builds the route proof. Thus the two agree on the transition.
@@ -80,7 +81,7 @@ pub fn validate_funds_out_amount(
 ///
 /// This does not check the burn shape or amount. The caller must run
 /// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
-/// anything that is not a `Burn` that covers the released amount.
+/// anything that is not a `Burn` of exactly the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
@@ -120,8 +121,7 @@ pub fn validate_funds_out_burn_recipient(
 }
 
 /// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
-/// the settled transition. That is the last transition, which
-/// [`validate_funds_out_amount`] reads.
+/// the settling transition, which [`validate_funds_out_amount`] reads.
 ///
 /// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
 /// burn. `Bridge.fundsOut` and `rebalanceLiquidity` hash it into the
@@ -135,13 +135,21 @@ pub fn validate_funds_out_source_burn_tx_id(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck(
+    if validated.last_transition.is_none() {
+        return Err(EnclaveError::CrossCheck(
             "fundsOut requires a consignment with at least one transition".into(),
+        ));
+    }
+    // The OpId that RGB consensus validated, not the flat parser's copy.
+    // Validation fills it for a burn and refuses a consignment where the two
+    // walks disagree, so this bind cannot name one burn and pay another.
+    let expected = validated.last_transfer_op_id.ok_or_else(|| {
+        EnclaveError::CrossCheck(
+            "fundsOut requires the validated OpId of the settling burn, but the consignment \
+             summary carries none - refusing to sign"
+                .into(),
         )
     })?;
-
-    let expected = decode_op_id_to_bytes32(&last.op_id)?;
     let cited: [u8; 32] = release.source_burn_tx_id;
 
     // The Bridge also rejects zero (`ZeroSourceBurnTxId`). Refuse here, so the
@@ -164,23 +172,6 @@ pub fn validate_funds_out_source_burn_tx_id(
     Ok(())
 }
 
-/// Decodes a `TransitionSummary::op_id` (64 hex chars, optional `0x`) to the
-/// 32-byte calldata word. A malformed id is an internal error, so refuse.
-fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
-    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
-    let bytes = hex::decode(normalized).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "validated consignment op_id {op_id:?} is not hex-decodable: {e}"
-        ))
-    })?;
-    bytes.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "validated consignment op_id {op_id:?} is not a 32-byte OpId ({} bytes)",
-            bytes.len()
-        ))
-    })
-}
-
 /// Settlement bind for the BFA burn flow: `settlementData` must cite exactly
 /// the deposits behind the burn's mint ancestry.
 ///
@@ -190,13 +181,12 @@ fn decode_op_id_to_bytes32(op_id: &str) -> Result<[u8; 32]> {
 /// does not know the deposits behind a burn. The enclave knows, because it
 /// verified each ancestry lock receipt
 /// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
-/// equal that ancestry, pair for pair. Thus a second release of the same burn
-/// cannot cite other deposits to get a new `burnId`.
+/// equal that ancestry, pair for pair.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
-/// `operationId` order. `burnId` hashes the raw bytes, so a second order of
-/// the same pairs would give a second `burnId` (F05-NEW-AF-04). The strict
-/// order also refuses duplicates. An empty lock set refuses: each signable
+/// `operationId` order, which also refuses duplicates. `burnId` does not hash
+/// `settlementData`, so replay safety does not rest on this order
+/// (F05-NEW-AF-04). An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
@@ -288,7 +278,7 @@ struct ProofBlock {
 ///    enclave builds from its own chain ([`relay_record`]).
 ///
 /// The `proof` slot is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
-/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier.sol:115-117`).
+/// uint256 latestHeight, bytes32 latestCommit)` (`RGBVerifier` proof `abi.decode`).
 /// `source` holds the burn/transfer. `latest` is the relay tip. `latest` must
 /// be within `MAX_RELAY_TIP_LAG_BLOCKS` of the enclave tip, so freshness does
 /// not depend on a relay that the host also feeds. An empty `proof` is refused.

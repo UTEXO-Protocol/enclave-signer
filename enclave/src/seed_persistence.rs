@@ -39,8 +39,9 @@ fn failure(message: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!("seed persistence: {message}"))
 }
 
-/// The seed source. Production installs a persistent source at boot. Tests
-/// inject their own, so the wire protocol never accepts a plaintext seed.
+/// The seed source. Production installs a persistent source at launch. Tests
+/// inject their own. This interface does not import a plaintext seed from
+/// the parent. Separate dev-only handlers permit seed import.
 pub trait SeedSource: Send + Sync {
     /// `deadline` bounds every external operation. The state machine checks it
     /// again before it activates the keys.

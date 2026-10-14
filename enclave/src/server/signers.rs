@@ -6,8 +6,6 @@ use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
 #[cfg(rgb_to_evm)]
 use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
-#[cfg(rgb_to_evm)]
-use crate::networks::evm::validation::LZ_FUNDS_OUT_SELECTOR;
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 #[cfg(feature = "ccd")]
@@ -52,32 +50,20 @@ pub(super) fn handle_sign_evm(
 
     let domain_sep = domain.separator_hash();
 
-    // Route by selector and lz_release. The digest commits to the LZ fields
-    // of `lzFundsOutCall`. The proto field is the authority. The calldata
-    // selector is only a consistency check (see lz_funds_out_digest).
-    let is_lz = req.call_data.len() >= 4
-        && req.call_data[..4] == LZ_FUNDS_OUT_SELECTOR
-        && req.lz_release.is_some();
-
-    let digest = if is_lz {
-        lz_funds_out_digest(
-            &domain,
-            &req.call_data,
-            req.lz_release.as_ref().expect("checked above"),
-            req.nonce,
-            req.deadline,
-        )?
-    } else {
-        // Validation gives `params` for all non-LayerZero selectors. `None` here
-        // is an LZ selector without `lz_release`. Refuse, and do not decode again.
-        let params = params.ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "fundsOut digest requires validated calldata params (LayerZero selector without \
-                 lz_release?)"
-                    .into(),
-            )
-        })?;
-        funds_out_digest(&domain, params, req.nonce, req.deadline)?
+    // Validation picks the route (F05-NEW-AF-12): `params` is `Some` on the
+    // direct route, and `None` on the LayerZero route, which has `lz_release`.
+    // The digest commits to the LZ fields of `lzFundsOutCall`.
+    let digest = match (params, req.lz_release.as_ref()) {
+        (Some(params), None) => funds_out_digest(&domain, params, req.nonce, req.deadline)?,
+        (None, Some(lz_release)) => {
+            lz_funds_out_digest(&domain, &req.call_data, lz_release, req.nonce, req.deadline)?
+        }
+        // Validation refuses these forms. Fail closed if it did not run.
+        _ => {
+            return Err(EnclaveError::CrossCheck(
+                "EVM route mismatch: lz_release does not match the calldata selector".into(),
+            ))
+        }
     };
 
     tracing::info!(
@@ -141,7 +127,7 @@ pub(super) fn handle_sign_psbt(
         .state
         .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
 
-    // Refuse a no-op. `sign_psbt` returns Ok((bytes, 0)) when no input is ours.
+    // Refuse a no-op. `sign_psbt_scoped` returns Ok((bytes, 0)) when no input is ours.
     // A caller that checks only RPC success would count it as a signature.
     // Partial signing (0 < count < num_inputs) is allowed.
     if inputs_signed == 0 {
@@ -164,8 +150,8 @@ pub(super) fn handle_sign_psbt(
 
 /// Sign a plain-BTC PSBT (create_utxo, UTXO management).
 /// Unlike [`handle_sign_psbt`], it has no RGB consignment and no EVM event.
-/// Authorization: all outputs pay to enclave scripts, the pinned fee policy
-/// passes, and the operator amount cap holds
+/// Authorization: outputs pay to enclave scripts or fit the unowned budget,
+/// the pinned fee policy passes, and the operator amount cap holds
 /// ([`crate::networks::rgb::btc_crosscheck`]).
 /// A production build refuses to sign when the cap is not set.
 /// The separate request type is the structural part of the vanilla-bypass fix.

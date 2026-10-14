@@ -159,7 +159,9 @@ pub(super) fn dispatch(
         #[cfg(not(feature = "kms-persistence"))]
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
-            handle_get_clone(ctx, req)
+            let response = handle_get_clone(ctx, req)
+                .unwrap_or_else(|e| error_response(e.clone_error_code(), &e));
+            return (response, None);
         }
         #[cfg(not(feature = "kms-persistence"))]
         Some(Request::SetClone(req)) => {
@@ -223,15 +225,17 @@ pub(super) fn dispatch(
 
     let response = match result {
         Ok(resp) => resp,
-        Err(e) => {
-            tracing::warn!("handler error: {}", e);
-            EnclaveResponse {
-                response: Some(Response::Error(ErrorResponse {
-                    code: e.error_code(),
-                    message: e.to_string(),
-                })),
-            }
-        }
+        Err(e) => error_response(e.error_code(), &e),
     };
     (response, reservation)
+}
+
+fn error_response(code: u32, e: &EnclaveError) -> EnclaveResponse {
+    tracing::warn!("handler error: {}", e);
+    EnclaveResponse {
+        response: Some(Response::Error(ErrorResponse {
+            code,
+            message: e.to_string(),
+        })),
+    }
 }

@@ -1,25 +1,24 @@
 name: "Build EIF"
 
-# Produces the PRODUCTION enclave EIFs, captures their PCR measurements, and
+# Produces the release enclave EIFs, captures their PCR measurements, and
 # publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
-# Builds three variants (matrix): the combined rgb+ccd image (historical name +
-# S3 path, unchanged), an RGB-only image (eif/<sha>/rgb/), and a Concordium-only
-# image (eif/<sha>/ccd/). Deploy whichever the target host needs.
+# Builds five variants (matrix): combined (retired swap flow, historical name +
+# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production), and ccd.
+# Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
 # the SAME version the runtime hosts run (stage hosts: 1.4.5). Bump NITRO_CLI_VERSION
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
 # The image side is pinned too: base images are pinned by digest in
-# Dockerfile.enclave and layer timestamps are normalised via SOURCE_DATE_EPOCH +
-# BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
-# (apt/dnf) still float — pinning them is the next determinism step.
+# each enclave Dockerfile and layer timestamps are normalised via SOURCE_DATE_EPOCH +
+# BuildKit rewrite-timestamp (build/build-enclave.sh). EIF recipes pin OS
+# packages to a signed Debian snapshot.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
-#   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  consignment-utils access
 #   secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY        rgb-consensus-s-bfa access
 #   secrets.RGB_OPS_BFA_DEPLOY_KEY              rgb-ops-s-bfa access
 #   secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY          rgb-schemas-s-bfa access
@@ -62,14 +61,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Combined (rgb+ccd) — the historical artifact. Keeps the original
-          # eif name and S3 path so existing consumers are unaffected.
+          # Combined (rgb + rgb-swap + ccd), retired swap flow. Keeps the
+          # historical eif name and S3 path.
           - variant: combined
             dockerfile: Dockerfile.enclave
             eif_name: utexo-bridge-enclave.eif
             s3_subpath: ""
             artifact_suffix: ""
-          # RGB-only single-network EIF, send/receive flow (`rgb-swap`).
+          # RGB-only single-network EIF, send/receive flow (`rgb-swap`, retired).
           - variant: rgb
             dockerfile: Dockerfile.enclave.rgb
             eif_name: utexo-bridge-enclave-rgb.eif
@@ -101,7 +100,6 @@ jobs:
         env:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-          RGB_CONSIGNMENT_PARSER_DEPLOY_KEY: ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
           RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
           RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
           RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
@@ -188,20 +186,39 @@ jobs:
           cat artifacts/HOST-SHA256SUMS
 
       - name: Write build metadata
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          EIF_NAME: ${{ matrix.eif_name }}
+          IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
         run: |
           set -euxo pipefail
-          cat > artifacts/metadata.json <<EOF
-          {
-            "git_sha": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "variant": "${{ matrix.variant }}",
-            "eif_name": "${{ matrix.eif_name }}",
-            "nitro_cli_version": "${NITRO_CLI_VERSION}",
-            "run_id": "${{ github.run_id }}",
-            "debug_features": "${{ github.event.inputs.debug_features }}",
-            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
+          # Read the asset pin from the image used for the EIF.
+          docker image inspect "$IMAGE_TAG" | jq \
+            --arg git_sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg variant "$VARIANT" \
+            --arg dockerfile "$DOCKERFILE" \
+            --arg eif_name "$EIF_NAME" \
+            --arg nitro_cli_version "$NITRO_CLI_VERSION" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg debug_features "$DEBUG_FEATURES" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.[0].Config.Env
+            | map(select(startswith("RGB_ASSET_ID=")) | ltrimstr("RGB_ASSET_ID="))
+            | {
+                git_sha: $git_sha,
+                ref: $ref,
+                variant: $variant,
+                dockerfile: $dockerfile,
+                eif_name: $eif_name,
+                rgb_asset_id: (.[0] // null),
+                nitro_cli_version: $nitro_cli_version,
+                run_id: $run_id,
+                debug_features: $debug_features,
+                built_at: $built_at
+              }' > artifacts/metadata.json
           cat artifacts/metadata.json
 
       - name: Upload run artifacts
@@ -212,6 +229,7 @@ jobs:
           path: |
             artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
+            artifacts/IMAGE-ENV.json
             artifacts/SHA256SUMS
             artifacts/metadata.json
             artifacts/utexo-bridge-parent
