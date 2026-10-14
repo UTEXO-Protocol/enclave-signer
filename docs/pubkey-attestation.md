@@ -135,7 +135,9 @@ pass `--expect-chain-id`, `--expect-bridge-contract` and/or
 `--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
 exactly those pins, so onboarding can reject a valid attestation of the *wrong*
 chain, contract or RGB asset. When omitted, the pins are authenticated but not
-compared (legacy behaviour) — the caller must then compare them out of band.
+compared. A successful run prints each pin, and every other verified field, as
+one `name: value` line. The names are the paths of the exported bundle. Compare
+the values in that output or in the bundle.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`

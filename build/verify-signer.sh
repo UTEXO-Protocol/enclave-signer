@@ -58,9 +58,12 @@ out="$("$ATTEST_VERIFY" --from-file "$bundle" --pcr0 "$pcr0" --pcr1 "$pcr1" --pc
   --expect-chain-id "$EVM_CHAIN_ID" --expect-bridge-contract "$MULTISIG_PROXY" "$@")" \
   || fail "attest-verify rejected the bundle"
 printf '%s\n' "$out"
-# The address comes from the verified output, not from the file.
-addr="$(printf '%s\n' "$out" | sed -n 's/^ *EVM address *: *\(0x[0-9a-fA-F]\{40\}\)$/\1/p')"
+# The address comes from the verified output, not from the file. Older
+# attest-verify builds print `EVM address`.
+addr="$(printf '%s\n' "$out" | sed -n -e 's/^ *public_keys\.evm_address: *\(0x[0-9a-fA-F]\{40\}\)$/\1/p' \
+  -e 's/^ *EVM address *: *\(0x[0-9a-fA-F]\{40\}\)$/\1/p')"
 [ -n "$addr" ] || fail "attest-verify printed no EVM address"
+[ "$(printf '%s\n' "$addr" | wc -l)" -eq 1 ] || fail "attest-verify printed more than one EVM address"
 
 signers="$(cast call "$MULTISIG_PROXY" "getEnclaveSigners(uint256)(address[])" "$SOURCE_CHAIN_ID" \
   --rpc-url "$ARB_RPC_URL")" || fail "getEnclaveSigners call failed"
