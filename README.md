@@ -205,6 +205,9 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
 - The parent opens one new TCP or vsock connection per enclave RPC, with a
   30 s timeout.
+- `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
+  clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
+  the enclave.
 - `GET /health` on a loopback port tells if the enclave can sign now. See
   [Readiness endpoint](#readiness-endpoint).
 
@@ -605,6 +608,8 @@ Limits and dev knobs:
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
 | `HEALTH_PORT` | `5001` | Port for `GET /health` |
+| `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, `1..=10000`. Out of range stops the parent at boot. |
+| `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, `1..=10000`. Each call makes one NSM attestation in the enclave. Out of range stops the parent at boot. |
 | `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked), or `tcp://` to a loopback IP. The parent's header sync reads Bitcoin headers here. Unset: `header_sync.state` is `unconfigured`. Malformed: the parent still serves, `header_sync.state` is `unconfigured` and `last_error` says why. Deploy passes it through; it does not copy `ELECTRUM_URL`, whose enclave-side rules differ. |
 | `HEADER_SYNC_INTERVAL_SECS` | `10` | Seconds between header sync steps, `1..=600`. A malformed value stops the parent at boot. |
 | `RUST_LOG` | unset | Log filter. |

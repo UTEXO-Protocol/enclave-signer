@@ -13,6 +13,7 @@ it runs in the loopback test mode. Source: `parent/src/transport_security.rs`.
 | `GRPC_TLS_ACL_FILE` | Client ACL. One `<leaf_sha256> <role>` line per client. `<leaf_sha256>` is the SHA-256 of the client leaf certificate (DER), 64 hex characters. `#` starts a comment. At most 512 lines. |
 | `GRPC_MAX_CONNECTIONS` | Open connection cap, `1..4096`, default `64`. |
 | `GRPC_CLONE_MAX_PER_MINUTE` | `Clone` calls per minute for all clients, `1..10000`, default `30`. |
+| `GRPC_ATTEST_MAX_PER_MINUTE` | `AttestedPublicKey` calls per minute for all clients, `1..10000`, default `6`. |
 | `GRPC_ALLOW_INSECURE_LOOPBACK` | `true` turns off TLS and the ACL. The parent then requires a loopback bind and no `GRPC_TLS_*` setting. Use it only for tests. |
 
 The parent refuses to start with only some of the four `GRPC_TLS_*` files.
@@ -47,7 +48,7 @@ use plaintext only to a loopback IP.
 
 | Path into the enclave | Who can use it | Checks before the enclave | What it can send |
 | --- | --- | --- | --- |
-| Parent gRPC with mTLS | A client with a certificate from the client CA whose SHA-256 is in the ACL | TLS handshake, ACL pin, role, `Clone` budget (on `Clone` only), connection cap, concurrency limit, request timeout (`parent/src/main.rs`) | The RPCs of its role |
+| Parent gRPC with mTLS | A client with a certificate from the client CA whose SHA-256 is in the ACL | TLS handshake, ACL pin, role, `Clone` and `AttestedPublicKey` budgets (each on its own RPC), connection cap, concurrency limit, request timeout (`parent/src/main.rs`) | The RPCs of its role |
 | Parent gRPC, insecure loopback | Any process on the parent instance | None | Every parent RPC. `SubmitHeaders` is still refused. |
 | Parent `GET /health` (`HEALTH_HOST:HEALTH_PORT`, default `127.0.0.1:5001`) | Any process that reaches that address | None | `Health` only |
 | Parent CLI `utexo-bridge-parent-cli --addr vsock://<CID>:5000` | Any process on the parent instance | None. The CLI opens the vsock connection itself. | Its fixed commands: `init`, `init-seed`, `init-mnemonic`, `get-keys`, `sign-evm`, `sign-psbt`, `get-last-saved-block`, `health`, `set-endpoints`, `verify-launch`, `export-attestation`, `clone`, `interactive` |
