@@ -35,10 +35,10 @@ on:
     inputs:
       debug_features:
         description: >-
-          DANGER, debug EIFs only (F03-AF-12): extra cargo features to append,
-          e.g. `allow-debug-pcrs` so stage clone-drills in ENCLAVE_DEBUG_MODE can
-          verify each other. Leave EMPTY for production builds (empty => PCR0
-          unchanged). Never set this for a release.
+          Leave EMPTY for normal stage and release builds. For isolated debug
+          builds only: extra Cargo features such as `allow-debug-pcrs` for
+          enclaves launched in Nitro debug mode. This does not control log
+          verbosity; use RUST_LOG for logging.
         required: false
         default: ""
   push:
@@ -159,7 +159,7 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           EIF_NAME: ${{ matrix.eif_name }}
           IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
-          # Enable debug features only for manual test builds. (F03-AF-12)
+          # Extra debug features are only for isolated manual debug builds.
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
           # Public testnet4 stage asset, shared by Mint and Burn image builds.
           RGB_ASSET_ID: "rgb:IWhl__dh-G9mAHQM-qaGsgrJ-PrIvvji-T6QjYOc-J9BbJaY"
