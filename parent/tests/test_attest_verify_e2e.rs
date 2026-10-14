@@ -61,10 +61,11 @@ fn start_real_enclave() -> u16 {
 }
 
 async fn start_real_parent_grpc(enclave_port: u16) -> u16 {
-    let grpc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let grpc_addr = grpc_listener.local_addr().unwrap();
     let grpc_port = grpc_addr.port();
-    drop(grpc_listener);
+    // Keep the socket bound so parallel tests cannot take its port.
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
 
     let service =
         ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{enclave_port}")));
@@ -72,7 +73,7 @@ async fn start_real_parent_grpc(enclave_port: u16) -> u16 {
     tokio::spawn(async move {
         Server::builder()
             .add_service(ParentServiceServer::new(service))
-            .serve(grpc_addr)
+            .serve_with_incoming(incoming)
             .await
             .unwrap();
     });
@@ -456,14 +457,22 @@ exec {} "${{args[@]}}"
     let burn = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n";
     let bundle = |cid: u16| dir.join(format!("attestation-{cid}.json"));
 
-    let (code, log) = gate(burn, "");
-    assert_eq!(code, Some(0), "{log}");
-    let json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle(16)).unwrap()).unwrap();
-    let evm = json["public_keys"]["evm_address"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Approve the fixture identity before contacting either server. Never
+    // derive the expected map from the gate's own attestation output.
+    let approved = EnclaveState::new(bitcoin::Network::Bitcoin);
+    approved.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
+    let evm = format!("0x{}", hex::encode(approved.evm_address().unwrap()));
+
+    for (expected, missing_cid) in [(String::new(), 16), (format!("16={evm}"), 18)] {
+        let (code, log) = gate(burn, &expected);
+        assert_eq!(code, Some(2), "{log}");
+        assert!(
+            log.contains(&format!("missing EXPECTED_EVM entry for CID {missing_cid}")),
+            "{log}"
+        );
+        assert!(!log.contains("PASS:"), "{log}");
+        assert!(!bundle(16).exists() && !bundle(18).exists());
+    }
 
     let (code, log) = gate(burn, &format!("16={evm} 18={evm}"));
     assert_eq!(code, Some(0), "{log}");
@@ -488,8 +497,12 @@ exec {} "${{args[@]}}"
     );
     assert!(bundle(16).exists() && !bundle(18).exists());
 
-    let (code, log) = gate("IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n", "");
+    let (code, log) = gate(
+        "IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n",
+        &format!("16={evm} 18={evm}"),
+    );
     assert_eq!(code, Some(2), "{log}");
+    assert!(log.contains("PCR_FILE and IMAGE_ENV required"), "{log}");
 
     std::fs::remove_file(bundle(16)).unwrap();
     let (code, log) = gate("SIGNER_ROLE=mint\n", &format!("16={evm} 18={evm}"));
