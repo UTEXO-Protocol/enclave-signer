@@ -97,6 +97,32 @@ fn bip86_second_known_mnemonic() {
 }
 
 #[test]
+fn bip86_colored_xpub_coin_type_follows_the_network() {
+    // Coin type is 827166 on mainnet and 827167 on other networks.
+    let mnemonic = "rail item marble one share venture artist brisk useful upset bus amused";
+
+    let km = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
+    assert_eq!(
+        km.account_xpub_colored().to_string(),
+        "xpub6BpTsEaSGEwRS6ucdm4tQWenBnx6VniKR5S3wwu3e1hKLA3tAQUySodkH4bMTS4KaTgYpPzuJEQSSuosaD5yrvWQcTwy2LQLDYDo7zr3aBU"
+    );
+
+    for network in [
+        Network::Testnet,
+        Network::Testnet4,
+        Network::Signet,
+        Network::Regtest,
+    ] {
+        let km = KeyManager::from_mnemonic(mnemonic, network).unwrap();
+        assert_eq!(
+            km.account_xpub_colored().to_string(),
+            "tpubDDgKC4Kea1GDCQBdR7i2SBycbDhydEHqqDguZZze7A6rLGqRD5YAYD29JAHydzGAmkcoHHdkjazd54zBEr4KPWQftyN3LiyGxGKw7CM38HR",
+            "{network:?}"
+        );
+    }
+}
+
+#[test]
 fn bip86_vanilla_and_colored_xpubs_differ() {
     let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
     assert_ne!(
