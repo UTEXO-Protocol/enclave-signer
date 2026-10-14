@@ -47,6 +47,17 @@ fn read(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading TLS file {path}"))
 }
 
+fn per_minute(key: &str, default: &str) -> Result<u32> {
+    let limit = value(key)?
+        .unwrap_or_else(|| default.into())
+        .parse::<u32>()
+        .with_context(|| format!("invalid {key}"))?;
+    if !(1..=10000).contains(&limit) {
+        bail!("{key} must be 1..10000");
+    }
+    Ok(limit)
+}
+
 fn max_connections() -> Result<usize> {
     let max_connections = value("GRPC_MAX_CONNECTIONS")?
         .unwrap_or_else(|| "64".into())
@@ -114,16 +125,13 @@ impl ServerSecurity {
         let (Some(cert), Some(key), Some(ca), Some(acl)) = (cert, key, ca, acl) else {
             bail!("mTLS requires GRPC_TLS_CERT_FILE, GRPC_TLS_KEY_FILE, GRPC_TLS_CLIENT_CA_FILE and GRPC_TLS_ACL_FILE");
         };
-        let limit = value("GRPC_CLONE_MAX_PER_MINUTE")?
-            .unwrap_or_else(|| "30".into())
-            .parse::<u32>()
-            .context("invalid GRPC_CLONE_MAX_PER_MINUTE")?;
-        if !(1..=10000).contains(&limit) {
-            bail!("GRPC_CLONE_MAX_PER_MINUTE must be 1..10000");
-        }
+        let clone_limit = per_minute("GRPC_CLONE_MAX_PER_MINUTE", "30")?;
+        // Each call makes one NSM document. The enclave has 4 workers.
+        let attest_limit = per_minute("GRPC_ATTEST_MAX_PER_MINUTE", "6")?;
         let access = AccessLayer::from_acl(
             &std::fs::read_to_string(acl)?,
-            limit,
+            clone_limit,
+            attest_limit,
             Duration::from_secs(60),
         )?;
         let tls = ServerTlsConfig::new()
@@ -193,11 +201,44 @@ struct Window {
     start: Instant,
     used: u32,
 }
+/// A fixed window that all clients share.
+struct Budget {
+    limit: u32,
+    window: Mutex<Window>,
+}
+impl Budget {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            window: Mutex::new(Window {
+                start: Instant::now(),
+                used: 0,
+            }),
+        }
+    }
+    fn charge(&self, period: Duration, name: &str) -> Result<(), Status> {
+        let mut window = self
+            .window
+            .lock()
+            .map_err(|_| Status::unavailable(format!("{name} budget unavailable")))?;
+        if window.start.elapsed() >= period {
+            *window = Window {
+                start: Instant::now(),
+                used: 0,
+            };
+        }
+        if window.used >= self.limit {
+            return Err(Status::resource_exhausted(format!("{name} rate limit")));
+        }
+        window.used += 1;
+        Ok(())
+    }
+}
 struct Policy {
     roles: HashMap<[u8; 32], Role>,
-    limit: u32,
     period: Duration,
-    window: Mutex<Window>,
+    clone: Budget,
+    attest: Budget,
 }
 #[derive(Clone)]
 pub struct AccessLayer {
@@ -207,9 +248,20 @@ impl AccessLayer {
     fn unauthenticated() -> Self {
         Self { policy: None }
     }
-    pub fn from_acl(acl: &str, limit: u32, period: Duration) -> Result<Self> {
-        if limit == 0 || period.is_zero() {
+    pub fn from_acl(
+        acl: &str,
+        clone_limit: u32,
+        attest_limit: u32,
+        period: Duration,
+    ) -> Result<Self> {
+        if clone_limit == 0 {
             bail!("invalid Clone budget");
+        }
+        if attest_limit == 0 {
+            bail!("invalid AttestedPublicKey budget");
+        }
+        if period.is_zero() {
+            bail!("invalid budget period");
         }
         let mut roles = HashMap::new();
         for (i, line) in acl.lines().enumerate() {
@@ -243,12 +295,9 @@ impl AccessLayer {
         Ok(Self {
             policy: Some(Arc::new(Policy {
                 roles,
-                limit,
                 period,
-                window: Mutex::new(Window {
-                    start: Instant::now(),
-                    used: 0,
-                }),
+                clone: Budget::new(clone_limit),
+                attest: Budget::new(attest_limit),
             })),
         })
     }
@@ -292,23 +341,11 @@ impl AccessLayer {
         if !allowed {
             return Err(Status::permission_denied("RPC not authorized"));
         }
-        if method == "Clone" {
-            let mut window = policy
-                .window
-                .lock()
-                .map_err(|_| Status::unavailable("clone budget unavailable"))?;
-            if window.start.elapsed() >= policy.period {
-                *window = Window {
-                    start: Instant::now(),
-                    used: 0,
-                };
-            }
-            if window.used >= policy.limit {
-                return Err(Status::resource_exhausted("clone rate limit"));
-            }
-            window.used += 1;
+        match method {
+            "Clone" => policy.clone.charge(policy.period, "clone"),
+            "AttestedPublicKey" => policy.attest.charge(policy.period, "attestation"),
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 impl<S> Layer<S> for AccessLayer {
