@@ -45,7 +45,7 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 ## Enclave configuration
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
-`/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
+`/etc/utexo/enclave-<CID>.env` with `deploy/deploy-host.sh`). The image does not
 carry them, and the attested policy commits them:
 
 | Setting | Value |

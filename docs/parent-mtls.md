@@ -33,10 +33,10 @@ an RPC outside its role gets `PermissionDenied: RPC not authorized`.
 
 ## Host rollout
 
-`deploy/deploy-host.sh` reads `server.pem`, `server.key`, `client-ca.pem` and
-`clients.acl` from `$PARENT_TLS_DIR/<CID>/` (default `/etc/utexo/tls`). It
-stops before it changes a service if one of them is missing or not readable
-by the `ubuntu` user.
+`deploy/deploy-host.sh` reads the four TLS paths from each
+`DEPLOY_CONFIG_DIR/parent-<CID>.env`. It checks readability by `ubuntu`, server
+certificate/key match, private-IP SAN, expiry and ACL format before stopping a
+service. See [Mint/Burn deployment](deploy-mint-burn.md) for the configuration layout.
 
 Clients (`attest-verify`, `cli clone --donor-grpc`) use `https://` with
 `PARENT_TLS_CA_FILE`, `PARENT_TLS_CERT_FILE`, `PARENT_TLS_KEY_FILE` and, if

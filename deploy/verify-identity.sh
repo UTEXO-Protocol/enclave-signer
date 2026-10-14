@@ -16,12 +16,12 @@
 #      For SIGNER_ROLE burn or combined, export-attestation attests the address
 #      and writes $CLUSTER_DIR/attestation-<CID>.json; see docs/verify-a-signer.md.
 #
-# For SIGNER_ROLE=mint and ENCLAVE_DEBUG_MODE=1 (zero PCRs) step 3 reads get-keys:
+# For SIGNER_ROLE=mint or ENCLAVE_DEBUG_MODE=1 (zero PCRs) step 3 reads get-keys:
 # a fast STRUCTURAL check, NOT an attestation.
 #
 # Launch values (PCR_FILE, IMAGE_ENV, SIGNER_ROLE, ELECTRUM_URL, ...) come from
-# ENCLAVE_ENV (default /etc/utexo/enclave.env) and
-# /etc/nitro_enclaves/vsock-proxy-evmrpc.env, as utexo-enclave-ctl.sh reads them.
+# ENCLAVE_ENV for a single-role deployment, or ENCLAVE_ENV_DIR/enclave-<CID>.env
+# for a mixed Mint/Burn host. No shared RPC file overrides per-CID settings.
 #
 # Runs ON a node (as root, e.g. via SSM — same model as deploy-host.sh).
 # Self-contained; no infra identifiers baked in — pass them via env.
@@ -31,59 +31,139 @@
 #   EXPECTED_EVM="16=0x.. 18=0x.. 20=0x.." \
 #   [CIDS="16 18 20"] [ENCLAVE_ENV=/etc/utexo/enclave.env] bash verify-identity.sh
 #
-# Exit: 0 = all expected CIDs RUNNING + initialized + match registered identity.
+# EXPECTED_EVM must contain exactly one approved CID=0x<40 hex digits> entry
+# per CIDS member. Obtain it from the approved deployment record, not live keys.
+# For diagnostics only: bash verify-identity.sh --liveness (no map required).
+# Liveness success NEVER approves a signer for routing and exports no bundles.
+#
+# Exit: 0 = identity approved, or liveness only when explicitly requested.
 #       1 = at least one CID empty / diverged / unregistered / export failed
 #           -> do NOT route traffic.
 #       2 = misconfiguration (missing CLI / bad args / missing launch values).
 set -uo pipefail
 
-CIDS="${CIDS:-16 18 20}"
-CLUSTER_DIR="${CLUSTER_DIR:?CLUSTER_DIR required (dir containing utexo-bridge-parent-cli)}"
-read -ra CID_ARR <<< "$CIDS"
+log(){ printf '[verify-identity] %s\n' "$*"; }
+fatal(){ log "FATAL: $*"; exit 2; }
+mode=identity
+case "$#:$*" in
+  0:) ;;
+  1:--liveness) mode=liveness ;;
+  *) fatal "usage: verify-identity.sh [--liveness]" ;;
+esac
 
-for f in "${ENCLAVE_ENV:-/etc/utexo/enclave.env}" /etc/nitro_enclaves/vsock-proxy-evmrpc.env; do
-  if [ -r "$f" ]; then set -a; . "$f"; set +a; fi
+if [ -z "${ENCLAVE_ENV_DIR:-}" ] && [ -r "${ENCLAVE_ENV:-/etc/utexo/enclave.env}" ]; then
+  set -a; . "${ENCLAVE_ENV:-/etc/utexo/enclave.env}"; set +a
+fi
+[ -z "${ENCLAVE_ENV_DIR:-}" ] || [ -n "${CIDS:-}" ] || fatal "explicit CIDS required with ENCLAVE_ENV_DIR"
+
+# An explicitly empty list is an error; only an unset CIDS gets the default.
+CIDS="${CIDS-16 18 20}"
+read -ra CID_ARR <<< "${CIDS//$'\n'/ }"
+[ "${#CID_ARR[@]}" -gt 0 ] || fatal "CIDS must not be empty"
+valid_cid(){ [[ "$1" =~ ^[1-9][0-9]{0,9}$ ]] && (( $1 >= 4 && $1 < 4294967295 )); }
+declare -A TARGETS=() EXP_EVM=()
+for CID in "${CID_ARR[@]}"; do
+  valid_cid "$CID" || fatal "invalid CID: $CID"
+  [ -z "${TARGETS[$CID]:-}" ] || fatal "duplicate CID: $CID"
+  TARGETS[$CID]=1
 done
 
+# Validate the entire approved map before probing nodes or exporting bundles.
+if [ "$mode" = identity ]; then
+  expected="${EXPECTED_EVM:-}"
+  read -ra PAIRS <<< "${expected//$'\n'/ }"
+  for kv in "${PAIRS[@]}"; do
+    [[ "$kv" =~ ^([1-9][0-9]{0,9})=(0x[0-9a-fA-F]{40})$ ]] || fatal "invalid EXPECTED_EVM entry: $kv"
+    CID="${BASH_REMATCH[1]}"
+    address="${BASH_REMATCH[2]}"
+    [ -n "${TARGETS[$CID]:-}" ] || fatal "unexpected CID in EXPECTED_EVM: $CID"
+    [ -z "${EXP_EVM[$CID]:-}" ] || fatal "duplicate CID in EXPECTED_EVM: $CID"
+    EXP_EVM[$CID]="$address"
+  done
+  for CID in "${CID_ARR[@]}"; do
+    [ -n "${EXP_EVM[$CID]:-}" ] || fatal "missing EXPECTED_EVM entry for CID $CID"
+  done
+fi
+
+# Validate the full map and every launch file before checking individual roles.
+# Each child gets an isolated environment, so Mint KMS values cannot leak to Burn.
+if [ -n "${ENCLAVE_ENV_DIR:-}" ]; then
+  for CID in "${CID_ARR[@]}"; do
+    f="$ENCLAVE_ENV_DIR/enclave-$CID.env"
+    [ -r "$f" ] || fatal "missing launch file for CID $CID"
+    (set -a; . "$f"; set +a
+     [ -x "${CLI:-}" ] && [ -n "${PCR_FILE:-}" ] && [ -n "${IMAGE_ENV:-}" ] &&
+     [[ "${SIGNER_ROLE:-}" = mint || "${SIGNER_ROLE:-}" = burn ]]) || fatal "invalid launch configuration for CID $CID"
+  done
+  fail=0
+  for CID in "${CID_ARR[@]}"; do
+    if out="$(
+      for key in ${!KMS_@}; do unset "$key"; done
+      set -a; . "$ENCLAVE_ENV_DIR/enclave-$CID.env"; set +a
+      export ENCLAVE_ENV="$ENCLAVE_ENV_DIR/enclave-$CID.env"
+      unset ENCLAVE_ENV_DIR
+      export CLUSTER_DIR="$(dirname -- "$CLI")" CIDS="$CID" EXPECTED_EVM="$CID=${EXP_EVM[$CID]:-}"
+      args=(); [ "$mode" = liveness ] && args=(--liveness)
+      bash "$0" "${args[@]}"
+    )"; then
+      # Do not expose a partial PASS as host-wide approval.
+      printf '%s\n' "$out" | sed '/\[verify-identity\] PASS:/d'
+    else
+      printf '%s\n' "$out" | sed '/\[verify-identity\] PASS:/d'
+      fail=1
+    fi
+  done
+  [ "$fail" = 0 ] || { log 'FAILED: one or more CIDs failed; do NOT route traffic'; exit 1; }
+  if [ "$mode" = identity ]; then
+    log "PASS: all CIDs [$CIDS] match the complete approved identity map (Mint uses structural verification)"
+  else
+    log "LIVE: all configured CIDs initialized; identity NOT approved"
+  fi
+  exit 0
+fi
+
+[ -n "${CLUSTER_DIR:-}" ] || fatal "CLUSTER_DIR required (dir containing utexo-bridge-parent-cli)"
 CLI="$CLUSTER_DIR/utexo-bridge-parent-cli"
-[ -x "$CLI" ] || { echo "[verify-identity] FATAL: CLI not found/executable at $CLI"; exit 2; }
+[ -x "$CLI" ] || fatal "CLI not found/executable at $CLI"
 
-# Burn and combined signers prove the address with an attested export.
-attested=1
-if [ "${SIGNER_ROLE:-}" = "mint" ] || [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ]; then
-  attested=0
-elif [ -z "${PCR_FILE:-}" ] || [ -z "${IMAGE_ENV:-}" ] || [ -z "${SIGNER_ROLE:-}" ]; then
-  echo "[verify-identity] FATAL: PCR_FILE, IMAGE_ENV and SIGNER_ROLE required (set in ENCLAVE_ENV)"
-  exit 2
+# Liveness never exports an attestation or claims identity approval.
+attested=0
+if [ "$mode" = identity ] && [ "${ENCLAVE_DEBUG_MODE:-0}" != 1 ]; then
+  case "${SIGNER_ROLE:-}" in
+    mint) ;;
+    burn|combined)
+      [ -n "${PCR_FILE:-}" ] && [ -n "${IMAGE_ENV:-}" ] || fatal "PCR_FILE and IMAGE_ENV required (set in ENCLAVE_ENV)"
+      attested=1 ;;
+    *) fatal "SIGNER_ROLE must be mint, burn or combined (set in ENCLAVE_ENV)" ;;
+  esac
 fi
-
-# Registered / approved signing identity per CID, from EXPECTED_EVM="CID=0x.. ...".
-declare -A EXP_EVM
-if [ -n "${EXPECTED_EVM:-}" ]; then
-  for kv in $EXPECTED_EVM; do EXP_EVM[${kv%%=*}]="${kv#*=}"; done
-fi
-
-log(){ printf '[verify-identity] %s\n' "$*"; }
 fail=0
 
-# --- 1. exact enclave set RUNNING (host-local; mirrors F09-AF-07) -------------
-running="$(nitro-cli describe-enclaves 2>/dev/null | python3 -c '
+# --- 1. every configured enclave must be RUNNING ----------------------------
+if ! running="$(nitro-cli describe-enclaves 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     d = []
 print("\n".join(str(e["EnclaveCID"]) for e in d if e.get("State") == "RUNNING"))
-' 2>/dev/null)"
+' 2>/dev/null)"; then
+  log "FAIL: cannot read running enclave inventory"; exit 1
+fi
 for CID in "${CID_ARR[@]}"; do
   printf '%s\n' "$running" | grep -qx "$CID" || { log "FAIL: CID $CID not RUNNING"; fail=1; }
 done
 
-# pull the first EVM-looking address out of a get-keys blob.
+# Accept exactly one main EVM address; never fall back to gas/contract addresses.
 extract_evm() {
-  local blob="$1" hit
-  hit="$(printf '%s\n' "$blob" | grep -iE 'evm|eth' | grep -oiE '0x[0-9a-f]{40}' | head -1)"
-  [ -n "$hit" ] || hit="$(printf '%s\n' "$blob" | grep -oiE '0x[0-9a-f]{40}' | head -1)"
+  local blob="$1" line hit="" count=0
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*EVM[[:space:]]address:[[:space:]]*(0x[0-9a-fA-F]{40})[[:space:]]*$ ]]; then
+      hit="${BASH_REMATCH[1]}"
+      count=$((count + 1))
+    fi
+  done <<< "$blob"
+  [ "$count" = 1 ] || return 1
   printf '%s' "$hit"
 }
 
@@ -94,20 +174,23 @@ for CID in "${CID_ARR[@]}"; do
     bundle="$CLUSTER_DIR/attestation-$CID.json"
     rm -f "$bundle"
     args=(--pcr-file "$PCR_FILE" --image-env "$IMAGE_ENV" --signer-role "$SIGNER_ROLE" --out "$bundle")
-    [ -n "$exp" ] && args+=(--expect-evm-address "$exp")
+    args+=(--expect-evm-address "$exp")
     if ! out="$(timeout 45 "$CLI" --addr "vsock://$CID:5000" export-attestation "${args[@]}" 2>&1)"; then
       log "FAIL: CID $CID attested export failed: $(printf '%s\n' "$out" | tail -1)"; fail=1; continue
     fi
-    evm="$(printf '%s\n' "$out" | grep -oiE 'EVM address: 0x[0-9a-f]{40}' | grep -oiE '0x[0-9a-f]{40}')"
-    if [ -n "$exp" ]; then
-      log "OK:   CID $CID attested EVM $evm == registered identity; bundle $bundle"
-    else
-      log "warn: CID $CID attested EVM $evm — no EXPECTED_EVM entry, registration NOT verified; bundle $bundle"
+    evm="$(extract_evm "$out")"
+    if [ -z "$evm" ] || [ "${evm,,}" != "${exp,,}" ] || [ ! -s "$bundle" ]; then
+      log "FAIL: CID $CID missing bundle or unexpected attested EVM address"
+      rm -f "$bundle"
+      fail=1; continue
     fi
+    log "OK:   CID $CID attested EVM $evm == registered identity; bundle $bundle"
     continue
   fi
   [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && log "CID $CID bundle skipped: debug PCRs are zero"
-  out="$(timeout 20 "$CLI" --addr "vsock://$CID:5000" get-keys 2>&1)"
+  if ! out="$(timeout 20 "$CLI" --addr "vsock://$CID:5000" get-keys 2>&1)"; then
+    log "FAIL: CID $CID get-keys failed"; fail=1; continue
+  fi
   if printf '%s\n' "$out" | grep -qiE 'not initialized|key not'; then
     log "FAIL: CID $CID is EMPTY (key not initialized — restarted and not re-cloned)"; fail=1; continue
   fi
@@ -115,23 +198,23 @@ for CID in "${CID_ARR[@]}"; do
   if [ -z "$evm" ]; then
     log "FAIL: CID $CID no EVM address read (uninitialized / get-keys error)"; fail=1; continue
   fi
-  if [ -n "$exp" ]; then
+  if [ "$mode" = identity ]; then
     if [ "${evm,,}" = "${exp,,}" ]; then
       log "OK:   CID $CID live EVM $evm == registered identity"
     else
       log "FAIL: CID $CID live EVM $evm != registered identity $exp (unregistered/re-inited key)"; fail=1
     fi
   else
-    log "warn: CID $CID live EVM $evm — no EXPECTED_EVM entry, registration NOT verified"
+    log "LIVE: CID $CID initialized; identity NOT approved"
   fi
 done
 
 # --- verdict ------------------------------------------------------------------
 if [ "$fail" = 0 ]; then
-  if [ -n "${EXPECTED_EVM:-}" ]; then
+  if [ "$mode" = identity ]; then
     log "PASS: all CIDs [$CIDS] RUNNING + keys match the registered identity"
   else
-    log "PASS (liveness only): all CIDs [$CIDS] RUNNING with initialized keys — set EXPECTED_EVM to verify registration"
+    log "LIVE: all configured CIDs RUNNING with initialized keys; identity NOT approved; do NOT enable routing from this result"
   fi
   exit 0
 fi

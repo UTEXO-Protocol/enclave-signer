@@ -384,12 +384,10 @@ measurements do not apply to these images.
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
 `rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
 and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
-`release-eif.yml` deploys the `combined` EIF only: `deploy/deploy-host.sh`
-fetches `eif/<git_sha>/utexo-bridge-enclave.eif` and runs it on every CID.
-The `rgb-mint` and `rgb-burn` EIFs have no release path yet. The `cd-*.yml` workflows push container images for
-the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
-and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
-`SIGNER_ROLE` build arg).
+`release-eif.yml` deploys role-specific `rgb-mint` and `rgb-burn` bundles using
+per-CID configurations. Preflight is the default; cold restarts require an explicit
+`apply`. Follow [Mint/Burn deployment](docs/deploy-mint-burn.md).
+The `cd-*.yml` workflows push container images for the parent and dev enclaves.
 
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
@@ -455,12 +453,12 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ./utexo-bridge-parent
 ```
 
-`deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
-CIDs 16 / 18 / 20 with parents on ports 50051 / 50052 / 50053. It verifies the
-EIF checksum and PCR0 against the S3 manifest before and after start.
-A restart removes the in-memory keys. Initialize or clone each enclave again.
-Mint signers recover their saved KMS seed through `InitializeKey`. They require
-the verified address pin and do not support peer cloning.
+`deploy/deploy-host.sh` installs systemd units from per-CID launch and Parent
+configurations. Each CID selects its Mint or Burn bundle. It verifies checksums,
+PCR0/PCR1/PCR2 and approved image settings before restarting, and checks the
+running measurements again. See [deployment steps](docs/deploy-mint-burn.md).
+A cold restart removes in-memory Burn keys. Mint recovers its saved KMS seed
+through `InitializeKey` with the verified address pin; it does not support peer cloning.
 
 ### Lost `SetEndpoints` reply
 
@@ -577,7 +575,8 @@ EVM_CHAIN_ID=42161 EVM_RPC_CHECK_ONLY=1 bash deploy/host-prep-evmrpc.sh
 
 The check reads `eth_chainId` and `eth_blockNumber`; it verifies TLS and refuses
 redirects. It does not test the enclave's vsock route. `set-endpoints` reads the
-same path file. `deploy-host.sh` copies it with mode `0600` for the launcher.
+same path file. Provision it with mode `0600`, readable by `ubuntu`, before
+running `deploy-host.sh`; preflight checks it before any service change.
 The host provisioning account can read this provider credential; it is not an
 enclave-only secret. It is never a Docker build argument. The attested policy
 binds the RPC host and CA, not this credential path. RPC dependency tracing is

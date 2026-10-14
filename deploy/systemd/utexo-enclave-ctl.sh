@@ -12,10 +12,11 @@ set -uo pipefail
 
 ACTION="${1:?usage: utexo-enclave-ctl.sh start|stop <cid>}"
 CID="${2:?cid required}"
+[[ "$CID" =~ ^[1-9][0-9]{0,9}$ ]] && (( CID >= 4 && CID < 4294967295 )) || exit 2
 NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
 MEM="${ENCLAVE_MEMORY:-3072}"
-LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
+LOCK="${UTEXO_ENCLAVE_LOCK:-/run/utexo-enclaves/start.lock}"
 
 # Resolve the running enclave-id for our name (empty if not running).
 enc_id() {
@@ -25,12 +26,7 @@ enc_id() {
 
 # Set endpoints and KMS values once from the unit env.
 set_endpoints() {
-  : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
-  # systemd sources this via EnvironmentFile; a manual `start` does not, so
-  # source it here too (idempotent: harmless if already in the environment).
-  if [ -r /etc/nitro_enclaves/vsock-proxy-evmrpc.env ]; then
-    set -a; . /etc/nitro_enclaves/vsock-proxy-evmrpc.env; set +a
-  fi
+  : "${CLI:?CLI env required (set in /etc/utexo/enclave-<CID>.env)}"
   for _ in $(seq 30); do
     # `health` exits 1 until the enclave is ready. Any answer will do.
     case "$("$CLI" --addr "vsock://$CID:5000" health 2>/dev/null)" in
@@ -44,8 +40,11 @@ set_endpoints() {
 
 # Terminate this enclave if it runs. Fail if it still runs after.
 terminate() {
-  id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id"
-  [ -z "$(enc_id)" ] && return 0
+  local id remaining
+  id="$(enc_id)" || return 1
+  if [ -n "$id" ]; then nitro-cli terminate-enclave --enclave-id "$id" || return 1; fi
+  remaining="$(enc_id)" || return 1
+  [ -z "$remaining" ] && return 0
   echo "FATAL: enclave CID $CID still running after terminate" >&2
   return 1
 }
@@ -62,7 +61,7 @@ verify_launch() {
 }
 case "$ACTION" in
   start)
-    : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
+    : "${EIF:?EIF env required (set in /etc/utexo/enclave-<CID>.env)}"
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # Hold a host-wide lock so only one run-enclave runs at a time (anti-race).
     # `nitro-cli` children are spawned with fd 9 closed (9>&-) so an occasionally
@@ -76,7 +75,9 @@ case "$ACTION" in
     DEBUG_ARG=()
     [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && DEBUG_ARG=(--debug-mode)
     # Clear a stale instance of THIS enclave so the CPU pool is free (anti-E39).
-    old="$(enc_id)"; [ -n "$old" ] && nitro-cli terminate-enclave --enclave-id "$old" 9>&- || true
+    old="$(enc_id)" || exit 1
+    # Never silently destroy a live identity on a repeated start.
+    [ -z "$old" ] || { echo "CID $CID already exists; stop it explicitly first" >&2; exit 1; }
     for attempt in 1 2 3 4 5; do
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
@@ -88,7 +89,7 @@ case "$ACTION" in
         exit 1
       fi
       echo "run-enclave CID $CID attempt $attempt failed; cleaning up and retrying" >&2
-      bad="$(enc_id)"; [ -n "$bad" ] && nitro-cli terminate-enclave --enclave-id "$bad" 9>&- || true
+      terminate || exit 1
       sleep 3
     done
     echo "run-enclave CID $CID failed after retries" >&2

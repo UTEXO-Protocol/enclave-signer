@@ -6,8 +6,56 @@ bridge on Arbitrum One.
 
 The operator publishes one attestation bundle per burn enclave:
 `attestation-<CID>.json`. `deploy/verify-identity.sh` writes it after the
-enclave has its key. It fails and writes nothing if the attestation does not
-verify.
+enclave has its key and the operator supplies the complete approved identity
+map. An attestation failure returns nonzero; other CIDs may already have exported
+bundles. Do not treat individual files as approval of the whole deployment.
+
+## Operator: approve every signer before routing
+
+Obtain the expected main EVM address for **every CID** from the approved deployment
+record and confirm its on-chain registration. Do not generate this map from the
+live keys returned by the nodes you are checking.
+
+Run on each enclave host, replacing the paths and all three addresses:
+
+```bash
+ENCLAVE_ENV_DIR=/etc/utexo \
+CIDS="16 18 20" \
+EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
+bash deploy/verify-identity.sh
+```
+
+`CIDS` must list every signer that will receive traffic on this host.
+`EXPECTED_EVM` must contain exactly one address for each listed CID. Empty or
+partial maps, duplicate or extra CIDs, and malformed addresses return exit 2
+before any enclave is queried or bundle exported. An explicitly empty `CIDS`
+is also an error. With `ENCLAVE_ENV_DIR`, always supply explicit `CIDS`.
+The legacy single-role `ENCLAVE_ENV` mode defaults to `16 18 20` only when unset.
+
+For burn/combined signers in normal mode, configure `SIGNER_ROLE`, `PCR_FILE` and
+`IMAGE_ENV` in each `enclave-<CID>.env`, along with the release's launch values.
+The script loads each CID independently, so mixed Mint/Burn hosts use their own
+CLI, PCR manifest and image policy. Each export
+receives its approved address through `--expect-evm-address`. Mint or debug mode
+checks the main address with `get-keys`; this is a structural identity check,
+not an attestation. The script compares supplied approvals, not on-chain state.
+
+Routing automation must invoke the default identity mode and require exit 0
+for the full CID list, along with the deployment's other readiness checks.
+Any node failure or identity mismatch returns exit 1; configuration errors
+return exit 2. Do not continue routing on either error or use a partial bundle
+set as a substitute for the successful gate.
+
+For a diagnostic check of running enclaves and initialized keys only:
+
+```bash
+ENCLAVE_ENV_DIR=/etc/utexo CIDS="16 18 20" \
+bash deploy/verify-identity.sh --liveness
+```
+
+This explicit mode needs no identity map or release PCRs, exports no bundles,
+and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
+routing. Omitting the map in the default mode no longer falls back to liveness.
 
 ## What one bundle proves
 

@@ -118,9 +118,10 @@ ENV EVM_CHAIN_ID=42161 \
 ENV EVM_MIN_CONFIRMATIONS=12 \
     FUNDS_IN_CONTRACT=0xe9ca10eee76b0b3257135d31e69f784def07af8e \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    BTC_MAX_TOTAL_SATS=1000000
+    BTC_MAX_TOTAL_SATS=1000000 \
+    RGB_MAX_UNOWNED_SATS=10000 \
+    BTC_MAX_UNOWNED_SATS=10000
 
-# Production logging. This env is measured into PCR0 - do not flip it to `debug`
-# for a production EIF.
-ENV RUST_LOG=info
+# Stage diagnostics, measured into PCR0. Nitro debug mode remains disabled.
+ENV RUST_LOG=debug
 ENTRYPOINT ["/app/entrypoint.sh"]
