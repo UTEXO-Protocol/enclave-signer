@@ -337,6 +337,94 @@ fn from_hex0x(field: &str, value: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("bundle field {field} is not hex"))
 }
 
+impl BundleKeys {
+    fn new(r: &AttestedPublicKeyResponse) -> Self {
+        Self {
+            evm_address: hex0x(&r.evm_address),
+            btc_compressed_pub: hex0x(&r.btc_compressed_pub),
+            btc_xpub: r.btc_xpub.clone(),
+            master_fingerprint: hex0x(&r.master_fingerprint),
+            account_xpub_vanilla: r.account_xpub_vanilla.clone(),
+            account_xpub_colored: r.account_xpub_colored.clone(),
+            evm_uncompressed_pub: hex0x(&r.evm_uncompressed_pub),
+            chain_id: r.chain_id,
+            bridge_contract: hex0x(&r.bridge_contract),
+            rgb_asset_id: r.rgb_asset_id.clone(),
+            evm_gas_tx_uncompressed_pub: hex0x(&r.evm_gas_tx_uncompressed_pub),
+            evm_gas_tx_address: hex0x(&r.evm_gas_tx_address),
+            ccd_ed25519_pub: hex0x(&r.ccd_ed25519_pub),
+        }
+    }
+
+    /// Each key as (name, value), in field order.
+    fn fields(&self) -> [(&'static str, String); 13] {
+        let Self {
+            evm_address,
+            btc_compressed_pub,
+            btc_xpub,
+            master_fingerprint,
+            account_xpub_vanilla,
+            account_xpub_colored,
+            evm_uncompressed_pub,
+            chain_id,
+            bridge_contract,
+            rgb_asset_id,
+            evm_gas_tx_uncompressed_pub,
+            evm_gas_tx_address,
+            ccd_ed25519_pub,
+        } = self;
+        [
+            ("evm_address", evm_address.clone()),
+            ("btc_compressed_pub", btc_compressed_pub.clone()),
+            ("btc_xpub", btc_xpub.clone()),
+            ("master_fingerprint", master_fingerprint.clone()),
+            ("account_xpub_vanilla", account_xpub_vanilla.clone()),
+            ("account_xpub_colored", account_xpub_colored.clone()),
+            ("evm_uncompressed_pub", evm_uncompressed_pub.clone()),
+            ("chain_id", chain_id.to_string()),
+            ("bridge_contract", bridge_contract.clone()),
+            ("rgb_asset_id", rgb_asset_id.clone()),
+            (
+                "evm_gas_tx_uncompressed_pub",
+                evm_gas_tx_uncompressed_pub.clone(),
+            ),
+            ("evm_gas_tx_address", evm_gas_tx_address.clone()),
+            ("ccd_ed25519_pub", ccd_ed25519_pub.clone()),
+        ]
+    }
+}
+
+/// The `attest-verify` output on success: `OK`, then one `name: value` line
+/// per verified field. The names are the paths of the exported bundle. Control
+/// characters in a value are escaped, so each field is one line.
+pub fn verified_report(result: &AttestedPubkeyResult, mode: VerifyMode) -> String {
+    let v = &result.verified;
+    let pcr = |i| hex0x(v.pcrs.get(&i).map_or(&[][..], Vec::as_slice));
+    let keys = BundleKeys::new(&result.response).fields();
+    let policy = launch_check::fields(&result.policy);
+    let lines = [("mode".to_string(), format!("{mode:?}"))]
+        .into_iter()
+        .chain(keys.map(|(name, value)| (format!("public_keys.{name}"), value)))
+        .chain([
+            ("bundle_commitment".into(), hex0x(&result.bundle_commitment)),
+            ("pcr0".into(), pcr(0)),
+            ("pcr1".into(), pcr(1)),
+            ("pcr2".into(), pcr(2)),
+            ("timestamp_ms".into(), v.timestamp.to_string()),
+            ("nonce".into(), hex0x(&result.nonce_sent)),
+        ])
+        .chain(
+            policy
+                .into_iter()
+                .map(|(name, value)| (format!("policy.{name}"), value)),
+        );
+    let mut out = String::from("OK\n");
+    for (name, value) in lines {
+        out += &format!("  {name}: {}\n", value.escape_debug());
+    }
+    out
+}
+
 impl AttestationBundle {
     fn new(result: &AttestedPubkeyResult) -> Self {
         let r = &result.response;
@@ -344,21 +432,7 @@ impl AttestationBundle {
             format: BUNDLE_FORMAT.into(),
             nonce: hex0x(&result.nonce_sent),
             attestation_doc: BASE64.encode(&r.attestation_doc),
-            public_keys: BundleKeys {
-                evm_address: hex0x(&r.evm_address),
-                btc_compressed_pub: hex0x(&r.btc_compressed_pub),
-                btc_xpub: r.btc_xpub.clone(),
-                master_fingerprint: hex0x(&r.master_fingerprint),
-                account_xpub_vanilla: r.account_xpub_vanilla.clone(),
-                account_xpub_colored: r.account_xpub_colored.clone(),
-                evm_uncompressed_pub: hex0x(&r.evm_uncompressed_pub),
-                chain_id: r.chain_id,
-                bridge_contract: hex0x(&r.bridge_contract),
-                rgb_asset_id: r.rgb_asset_id.clone(),
-                evm_gas_tx_uncompressed_pub: hex0x(&r.evm_gas_tx_uncompressed_pub),
-                evm_gas_tx_address: hex0x(&r.evm_gas_tx_address),
-                ccd_ed25519_pub: hex0x(&r.ccd_ed25519_pub),
-            },
+            public_keys: BundleKeys::new(r),
             attested_policy: hex0x(&r.attested_policy),
             policy: launch_check::fields(&result.policy)
                 .into_iter()
@@ -1027,6 +1101,123 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("COSE signature"), "{err:#}");
+    }
+
+    #[test]
+    fn the_report_prints_every_verified_field() {
+        let expected = with_kms(Some(a_kms_pin()));
+        let mut result = verify_policy(attested_by(&expected, &[0x42; 32]), &expected).unwrap();
+        // The formatter sees these values; verification does not.
+        let r = &mut result.response;
+        r.btc_compressed_pub = vec![0x02; 33];
+        r.btc_xpub = "xpub-test".into();
+        r.master_fingerprint = vec![0xF1; 4];
+        r.account_xpub_vanilla = "tpub-vanilla".into();
+        r.account_xpub_colored = "tpub-colored".into();
+        r.evm_gas_tx_uncompressed_pub = vec![0x05; 65];
+        r.evm_gas_tx_address = vec![0x06; 20];
+        r.ccd_ed25519_pub = vec![0x07; 32];
+        result.response.rgb_asset_id = "rgb:x\n  public_keys.evm_address: 0xevil".into();
+
+        // A new field of the result does not compile until it is listed here.
+        let AttestedPubkeyResult {
+            response,
+            verified,
+            bundle_commitment,
+            nonce_sent,
+            policy,
+        } = &result;
+        let AttestedPublicKeyResponse {
+            evm_address,
+            evm_uncompressed_pub,
+            btc_compressed_pub,
+            btc_xpub,
+            master_fingerprint,
+            account_xpub_vanilla,
+            account_xpub_colored,
+            // The verified document itself. The bundle carries it.
+            attestation_doc: _,
+            chain_id,
+            bridge_contract,
+            rgb_asset_id,
+            evm_gas_tx_uncompressed_pub,
+            evm_gas_tx_address,
+            ccd_ed25519_pub,
+            // Printed decoded, as the `policy.*` lines.
+            attested_policy: _,
+        } = response;
+        let VerifiedAttestation {
+            // Verified equal to `evm_uncompressed_pub`.
+            enclave_pubkey: _,
+            pcrs: doc_pcrs,
+            timestamp,
+            // Verified equal to `bundle_commitment`.
+            user_data: _,
+            nonce: doc_nonce,
+        } = verified;
+        assert_eq!(doc_nonce, nonce_sent);
+        let hex = |b: &[u8]| format!("0x{}", hex::encode(b));
+        let mut want: Vec<(String, String)> = [
+            ("mode", "Mock".to_string()),
+            ("public_keys.evm_address", hex(evm_address)),
+            ("public_keys.btc_compressed_pub", hex(btc_compressed_pub)),
+            ("public_keys.btc_xpub", btc_xpub.clone()),
+            ("public_keys.master_fingerprint", hex(master_fingerprint)),
+            (
+                "public_keys.account_xpub_vanilla",
+                account_xpub_vanilla.clone(),
+            ),
+            (
+                "public_keys.account_xpub_colored",
+                account_xpub_colored.clone(),
+            ),
+            (
+                "public_keys.evm_uncompressed_pub",
+                hex(evm_uncompressed_pub),
+            ),
+            ("public_keys.chain_id", chain_id.to_string()),
+            ("public_keys.bridge_contract", hex(bridge_contract)),
+            ("public_keys.rgb_asset_id", rgb_asset_id.clone()),
+            (
+                "public_keys.evm_gas_tx_uncompressed_pub",
+                hex(evm_gas_tx_uncompressed_pub),
+            ),
+            ("public_keys.evm_gas_tx_address", hex(evm_gas_tx_address)),
+            ("public_keys.ccd_ed25519_pub", hex(ccd_ed25519_pub)),
+            ("bundle_commitment", hex(bundle_commitment)),
+            ("pcr0", hex(&doc_pcrs[&0])),
+            ("pcr1", hex(&doc_pcrs[&1])),
+            ("pcr2", hex(&doc_pcrs[&2])),
+            ("timestamp_ms", timestamp.to_string()),
+            ("nonce", hex(nonce_sent)),
+        ]
+        .map(|(name, value)| (name.to_string(), value))
+        .into();
+        want.extend(
+            launch_check::fields(policy)
+                .into_iter()
+                .map(|(name, value)| (format!("policy.{name}"), value)),
+        );
+        assert!(want.iter().any(|(name, _)| name == "policy.kms.key_arn"));
+
+        let report = verified_report(&result, VerifyMode::Mock);
+        let mut lines = report.lines();
+        assert_eq!(lines.next(), Some("OK"));
+        let printed: Vec<(String, String)> = lines
+            .map(|l| {
+                let (name, value) = l.strip_prefix("  ").unwrap().split_once(": ").unwrap();
+                (name.into(), value.into())
+            })
+            .collect();
+        let want: Vec<(String, String)> = want
+            .into_iter()
+            .map(|(name, value)| (name, value.escape_debug().to_string()))
+            .collect();
+        assert_eq!(printed, want);
+        assert!(report
+            .contains("\n  public_keys.rgb_asset_id: rgb:x\\n  public_keys.evm_address: 0xevil\n"));
+        assert_eq!(report.matches("public_keys.evm_address:").count(), 2);
+        assert_eq!(report.matches("\n  public_keys.evm_address:").count(), 1);
     }
 
     /// The enclave answer that `resp` maps from.

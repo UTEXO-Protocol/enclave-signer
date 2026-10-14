@@ -27,11 +27,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{
-    AttestedPolicy, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole,
-};
+use attestation_verify::{EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole};
 use utexo_bridge_parent::attest_verify::{
-    verify_attested_pubkey, verify_bundle, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
+    verified_report, verify_attested_pubkey, verify_bundle, ExpectedPolicy, VerifyMode,
 };
 
 #[derive(Parser)]
@@ -423,64 +421,8 @@ async fn run(cli: Cli) -> Result<()> {
         }
         None => verify_attested_pubkey(&cli.endpoint, expected_pcrs, mode, expected_policy).await?,
     };
-    print_ok(&result);
+    print!("{}", verified_report(&result, mode));
     Ok(())
-}
-
-fn print_ok(result: &AttestedPubkeyResult) {
-    let r = &result.response;
-    let v = &result.verified;
-    println!("OK");
-    println!(
-        "  EVM address           : 0x{}",
-        hex::encode(&r.evm_address)
-    );
-    println!(
-        "  EVM uncompressed pub  : 0x{}",
-        hex::encode(&r.evm_uncompressed_pub)
-    );
-    println!(
-        "  BTC compressed pub    : 0x{}",
-        hex::encode(&r.btc_compressed_pub)
-    );
-    println!("  BTC xpub              : {}", r.btc_xpub);
-    println!(
-        "  Master fingerprint    : 0x{}",
-        hex::encode(&r.master_fingerprint)
-    );
-    println!("  Account xpub (vanilla): {}", r.account_xpub_vanilla);
-    println!("  Account xpub (colored): {}", r.account_xpub_colored);
-    println!(
-        "  Bundle commitment     : 0x{}",
-        hex::encode(result.bundle_commitment)
-    );
-    if let AttestedPolicy::Production { kms: Some(k), .. } = &result.policy {
-        println!("  KMS key ARN           : {}", k.key_arn);
-        println!("  KMS region            : {}", k.region);
-        println!("  KMS seed id           : {}", k.seed_id);
-        println!(
-            "  KMS expected address  : {}",
-            k.expected_evm_address
-                .map_or("none".into(), |a| format!("0x{}", hex::encode(a)))
-        );
-    }
-    println!(
-        "  PCR0                  : 0x{}",
-        hex::encode(v.pcrs.get(&0).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!(
-        "  PCR1                  : 0x{}",
-        hex::encode(v.pcrs.get(&1).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!(
-        "  PCR2                  : 0x{}",
-        hex::encode(v.pcrs.get(&2).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!("  Attestation timestamp : {}", v.timestamp);
-    println!(
-        "  Nonce echoed          : 0x{}",
-        hex::encode(v.nonce.clone())
-    );
 }
 
 #[cfg(test)]
