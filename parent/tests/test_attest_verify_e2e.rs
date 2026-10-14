@@ -95,6 +95,7 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
     )
     .await
     .expect("end-to-end verification succeeds");
+    assert_eq!(result.mode, VerifyMode::Mock);
 
     // Check the structure only. The test does not hardcode key bytes.
     assert_eq!(result.response.evm_address.len(), 20);
@@ -189,14 +190,10 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
 }
 
 #[tokio::test]
-async fn e2e_attest_verify_fails_on_policy_mismatch() {
-    // The in-process mock enclave attests the `Development` posture. A
-    // verifier that expects production must reject the committed policy.
-    let enclave_port = start_real_enclave();
-    let grpc_port = start_real_parent_grpc(enclave_port).await;
-
+async fn e2e_attest_verify_refuses_mock_with_production() {
+    // Nothing listens here. The refusal comes before the connect.
     let err = verify_attested_pubkey(
-        &format!("http://127.0.0.1:{grpc_port}"),
+        "http://127.0.0.1:1",
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Mock,
         ExpectedPolicy::Production {
@@ -222,12 +219,12 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
         },
     )
     .await
-    .expect_err("expecting a production policy against a dev enclave must fail");
+    .expect_err("mock mode with a production expectation must fail");
 
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("user_data") || msg.contains("security posture") || msg.contains("policy"),
-        "expected a policy/user_data mismatch error, got: {msg}"
+        msg.starts_with("mock mode refuses a Production expectation"),
+        "{msg}"
     );
 }
 
@@ -417,9 +414,20 @@ async fn exported_bundle_round_trips_through_the_binaries() {
         ],
     );
     assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("  Verification mode: mock"),
+        "{out:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(bundle).unwrap()).unwrap();
+    assert_eq!(json["format"], "utexo-signer-attestation/2");
+    assert_eq!(json["verification_mode"], "mock");
 
     // No parent runs yet, so the check is offline.
     let offline = run_attest_verify(&["--from-file", bundle, "--mock"]).await;
+    assert!(
+        String::from_utf8_lossy(&offline.stdout).contains("  mode: Mock"),
+        "{offline:?}"
+    );
 
     let grpc_port = start_real_parent_grpc(enclave[10..].parse().unwrap()).await;
     let endpoint = format!("http://127.0.0.1:{grpc_port}");

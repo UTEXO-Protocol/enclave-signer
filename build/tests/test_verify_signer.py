@@ -86,6 +86,13 @@ class VerifySignerTests(unittest.TestCase):
             self.assertIn('set by this script', result.stderr)
         self.assertFalse(self.argv.exists())
 
+    def test_mock_is_refused(self):
+        for flag in ('--mock', '--mock=true'):
+            result = self.run_script(flag)
+            self.assertEqual(result.returncode, 2, flag)
+            self.assertIn('refused', result.stderr)
+        self.assertFalse(self.argv.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
