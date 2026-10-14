@@ -369,7 +369,8 @@ async fn attest_verify_cli_file_error_exits_one() {
 
 #[tokio::test]
 async fn attest_verify_cli_missing_pcr_exits_one_not_parse_error() {
-    let out = run_attest_verify(&[]).await;
+    // The finality tag is a required flag; give it so only the PCR is missing.
+    let out = run_attest_verify(&["--expect-evm-finality-tag", "safe"]).await;
     assert_cli_failure(&out, 1, "FAIL: --pcr0 required (or pass --mock)");
     assert_eq!(out.stderr, b"FAIL: --pcr0 required (or pass --mock)\n");
 }
