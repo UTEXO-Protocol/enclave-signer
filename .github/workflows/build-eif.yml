@@ -25,6 +25,10 @@ name: "Build EIF"
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
+#   secrets.ECR_PUBLIC_PULL_ROLE_ARN           separate OIDC role for public ECR pulls
+#                                              (optional; unset => anonymous pulls)
+#   The ECR role needs only ecr-public:GetAuthorizationToken and
+#   sts:GetServiceBearerToken (sts:AWSServiceName=ecr-public.amazonaws.com).
 #   vars.AWS_REGION                            AWS region for OIDC + S3 (e.g. eu-central-1)
 #   vars.EIF_S3_BUCKET                         target S3 bucket for the artifacts
 # No infra identifiers (account id, bucket, region) are hardcoded here — this is
@@ -53,6 +57,7 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   # Hoisted to env because secrets can't be referenced directly in `if:`.
   AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+  ECR_PUBLIC_PULL_ROLE: ${{ secrets.ECR_PUBLIC_PULL_ROLE_ARN }}
 
 jobs:
   build-eif:
@@ -126,6 +131,29 @@ jobs:
         with:
           path: ~/nitro-cli-dist
           key: nitro-cli-${{ env.NITRO_CLI_VERSION }}
+
+      - name: Configure AWS credentials for ECR Public
+        id: ecr-auth
+        if: ${{ steps.nitro-cache.outputs.cache-hit != 'true' && env.ECR_PUBLIC_PULL_ROLE != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUBLIC_PULL_ROLE }}
+          aws-region: us-east-1
+          role-duration-seconds: 900
+          output-env-credentials: false
+          output-credentials: true
+
+      - name: Authenticate Docker to ECR Public
+        if: ${{ steps.nitro-cache.outputs.cache-hit != 'true' && env.ECR_PUBLIC_PULL_ROLE != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.ecr-auth.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.ecr-auth.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.ecr-auth.outputs.aws-session-token }}
+        run: |
+          set -euo pipefail
+          # ECR Public authentication uses us-east-1 regardless of the S3 region.
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
 
       - name: Build nitro-cli ${{ env.NITRO_CLI_VERSION }}
         if: steps.nitro-cache.outputs.cache-hit != 'true'
