@@ -34,6 +34,8 @@ for a in "$@"; do
   case "$a" in
     --expect-chain-id*|--expect-bridge-contract*|--endpoint*|--from-file*)
       usage "$a is set by this script";;
+    --mock|--mock=*)
+      usage "$a is refused: a signer is verified in real mode only";;
   esac
 done
 

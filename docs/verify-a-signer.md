@@ -55,6 +55,11 @@ This explicit mode needs no identity map or release PCRs, exports no bundles,
 and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
 routing. Omitting the map in the default mode no longer falls back to liveness.
 
+The bundle format is `utexo-signer-attestation/2`. The `verification_mode`
+field tells how the exporter checked the document (`real` or `mock`).
+`attest-verify` refuses a bundle whose mode is not its own, and refuses an
+older format.
+
 ## What one bundle proves
 
 The bundle holds an AWS Nitro attestation document for a burn key. Verification
@@ -154,4 +159,5 @@ The script:
    827166 is the bridge's id for the RGB network (`RGB_CHAIN_ID`).
 
 Exit 0 means all checks pass. Exit 1 names the check that failed. Exit 2 is a
-usage error. Run the script once for each published bundle.
+usage error. The script refuses `--mock` with exit 2: a signer is verified in
+real mode only. Run the script once for each published bundle.
