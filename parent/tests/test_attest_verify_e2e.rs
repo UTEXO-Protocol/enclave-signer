@@ -391,7 +391,7 @@ fn key_lines(out: &std::process::Output) -> Vec<String> {
     assert!(stdout.starts_with("OK\n"), "{stdout}");
     stdout
         .lines()
-        .filter(|l| !l.contains("Nonce echoed") && !l.contains("Attestation timestamp"))
+        .filter(|l| !l.starts_with("  nonce:") && !l.starts_with("  timestamp_ms:"))
         .map(String::from)
         .collect()
 }
