@@ -80,6 +80,10 @@ pub fn bundle_cases(keys: &PublicKeysResponse) -> Vec<(&'static str, PublicKeysR
 
 pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     let mut cases = vec![("variant", AttestedPolicy::Development.to_bytes())];
+    // A peer must not attest these fields under the old depth-only version.
+    let mut old_version = policy.to_bytes();
+    old_version[0] = 8;
+    cases.push(("version", old_version));
     macro_rules! alter {
         ($field:ident, $value:expr) => {{
             let mut p = policy.clone();
@@ -104,9 +108,12 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     alter!(evm_source, EvmDataSource::Disabled);
     // The Rust enum has only SpvVerified. A peer with another policy
     // vocabulary can still sign a byte encoding with a different source.
-    // V8 layout: [version, production, vanilla, role, attestation, evm, btc].
+    // V9 layout: [version, production, vanilla, role, attestation, evm, btc].
     let mut btc_source = policy.to_bytes();
-    assert_eq!(&btc_source[..2], &[8, 1]);
+    assert_eq!(
+        &btc_source[..2],
+        &[attestation_verify::POLICY_COMMITMENT_V9, 1]
+    );
     btc_source[6] = 0;
     cases.push(("btc_source", btc_source));
     alter!(chain_id, *chain_id ^ 1);
@@ -121,12 +128,19 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x[0] ^= 1;
         x
     });
+    alter!(
+        evm_finality_tag,
+        if *evm_finality_tag == attestation_verify::EvmFinalityTag::Safe {
+            attestation_verify::EvmFinalityTag::Latest
+        } else {
+            attestation_verify::EvmFinalityTag::Safe
+        }
+    );
     alter!(token_contract, {
         let mut x = *token_contract;
         x[0] ^= 1;
         x
     });
-    alter!(evm_min_confirmations, *evm_min_confirmations ^ 1);
     alter!(electrum_host, format!("{electrum_host}x"));
     alter!(
         evm_rpc_tls,

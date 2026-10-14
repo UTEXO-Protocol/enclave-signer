@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use attestation_verify::{
-    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin,
-    ExpectedPcrs, KmsPin, SignerRole,
+    policy_commitment, AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource,
+    EvmFinalityTag, EvmRpcTlsPin, ExpectedPcrs, KmsPin, SignerRole,
 };
 use sha2::{Digest, Sha256};
 
@@ -36,6 +36,14 @@ pub fn expected_policy(
                 .map_err(|_| anyhow!("{key} {v:?} is not a number"))
         })
     }
+    // Match the enclave: only an absent tag defaults; empty/invalid values refuse.
+    let evm_finality_tag =
+        env.get("EVM_FINALITY_TAG")
+            .map_or(Ok(EvmFinalityTag::default()), |value| {
+                value
+                    .parse()
+                    .map_err(|e: String| anyhow!("EVM_FINALITY_TAG: {e}"))
+            })?;
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
@@ -78,10 +86,7 @@ pub fn expected_policy(
         )?,
         rgb_asset_id: required("RGB_ASSET_ID")?.to_string(),
         funds_in_contract: address20("FUNDS_IN_CONTRACT", required("FUNDS_IN_CONTRACT")?)?,
-        evm_min_confirmations: number(
-            "EVM_MIN_CONFIRMATIONS",
-            Some(required("EVM_MIN_CONFIRMATIONS")?),
-        )?,
+        evm_finality_tag,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
@@ -198,7 +203,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         bridge_contract,
         rgb_asset_id,
         funds_in_contract,
-        evm_min_confirmations,
+        evm_finality_tag,
         electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to,
@@ -228,7 +233,7 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("bridge_contract", hex(bridge_contract)),
         ("rgb_asset_id", rgb_asset_id.clone()),
         ("funds_in_contract", hex(funds_in_contract)),
-        ("evm_min_confirmations", evm_min_confirmations.to_string()),
+        ("evm_finality_tag", evm_finality_tag.to_string()),
         ("electrum_host", electrum_host.clone()),
         ("evm_rpc_tls", presence(evm_rpc_tls.is_some())),
     ];
@@ -286,7 +291,6 @@ mod tests {
             "RGB_ASSET_ID=rgb:asset",
             "FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951",
             "TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-            "EVM_MIN_CONFIRMATIONS=12",
             "GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951",
             "GAS_TX_MAX_GAS_LIMIT=300000",
             "GAS_TX_MAX_FEE_PER_GAS=1000",
@@ -312,6 +316,41 @@ mod tests {
 
     fn expected() -> AttestedPolicy {
         expected_policy(SignerRole::Combined, &image_env(), &endpoints()).unwrap()
+    }
+
+    #[test]
+    fn image_finality_tag_defaults_only_when_absent() {
+        assert!(matches!(
+            expected(),
+            AttestedPolicy::Production {
+                evm_finality_tag: EvmFinalityTag::Safe,
+                ..
+            }
+        ));
+        for value in [
+            "latest",
+            "safe",
+            "finalized",
+            "",
+            "SAFE",
+            " safe",
+            "safe ",
+            "pending",
+        ] {
+            let mut env: Vec<String> = serde_json::from_str(&image_env()).unwrap();
+            env.push(format!("EVM_FINALITY_TAG={value}"));
+            let result = expected_policy(
+                SignerRole::Combined,
+                &serde_json::to_string(&env).unwrap(),
+                &endpoints(),
+            );
+            match value.parse::<EvmFinalityTag>() {
+                Ok(expected_tag) => assert!(matches!(result.unwrap(), AttestedPolicy::Production {
+                    evm_finality_tag, ..
+                } if evm_finality_tag == expected_tag)),
+                Err(_) => assert!(result.unwrap_err().to_string().contains("EVM_FINALITY_TAG")),
+            }
+        }
     }
 
     /// The policy-only answer of an enclave that attests `policy`.
@@ -408,6 +447,16 @@ mod tests {
     }
 
     #[test]
+    fn evm_finality_tag_mismatch_aborts() {
+        for tag in [EvmFinalityTag::Latest, EvmFinalityTag::Finalized] {
+            assert_mismatch(
+                set!(evm_finality_tag, tag),
+                &format!("evm_finality_tag mismatch: expected safe, attested {tag}"),
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_btc_source_aborts_at_decode() {
         // SpvVerified is the only value. Byte 6 is btc_source.
         let mut bytes = expected().to_bytes();
@@ -454,14 +503,6 @@ mod tests {
                  attested 0x{}",
                 "22".repeat(20)
             ),
-        );
-    }
-
-    #[test]
-    fn evm_min_confirmations_mismatch_aborts() {
-        assert_mismatch(
-            set!(evm_min_confirmations, 1),
-            "evm_min_confirmations mismatch: expected 12, attested 1",
         );
     }
 
