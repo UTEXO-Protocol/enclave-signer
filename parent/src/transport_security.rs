@@ -47,6 +47,7 @@ fn read(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading TLS file {path}"))
 }
 
+#[cfg(not(feature = "insecure-dev"))]
 fn per_minute(key: &str, default: &str) -> Result<u32> {
     let limit = value(key)?
         .unwrap_or_else(|| default.into())
