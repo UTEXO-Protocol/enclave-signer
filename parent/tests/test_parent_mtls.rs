@@ -26,16 +26,9 @@ use utexo_bridge_parent::{
 mod pki;
 use pki::Pki;
 
-async fn server(
-    pki: &Pki,
-    operator: &str,
-    limit: u32,
-    period: Duration,
-    conn_limit: usize,
-) -> (
+async fn counting_enclave() -> (
     std::net::SocketAddr,
     Arc<AtomicUsize>,
-    tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,
 ) {
     let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -65,6 +58,23 @@ async fn server(
             });
         }
     });
+    (target, calls, backend_task)
+}
+
+async fn server(
+    pki: &Pki,
+    operator: &str,
+    limit: u32,
+    attest_limit: u32,
+    period: Duration,
+    conn_limit: usize,
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (target, calls, backend_task) = counting_enclave().await;
     let incoming = LimitedIncoming::bind("127.0.0.1:0".parse().unwrap(), conn_limit)
         .await
         .unwrap();
@@ -74,7 +84,7 @@ async fn server(
         .client_ca_root(Certificate::from_pem(pki.read("ca.pem")))
         .client_auth_optional(false)
         .timeout(Duration::from_millis(300));
-    let access = AccessLayer::from_acl(&pki.acl(operator), limit, period).unwrap();
+    let access = AccessLayer::from_acl(&pki.acl(operator), limit, attest_limit, period).unwrap();
     let task = tokio::spawn(async move {
         Server::builder()
             .tls_config(tls)
@@ -104,7 +114,7 @@ fn reached<T: std::fmt::Debug>(r: Result<T, tonic::Status>) {
 async fn mtls_roles_rate_budget_and_revocation() {
     let pki = Pki::new();
     let (addr, calls, task, backend) =
-        server(&pki, "operator", 2, Duration::from_millis(800), 32).await;
+        server(&pki, "operator", 2, 100, Duration::from_millis(800), 32).await;
     for role in ["operator", "listener", "observer"] {
         let mut c = ParentServiceClient::new(
             pki.endpoint(addr, Some(role), "parent.test", "ca.pem")
@@ -235,7 +245,8 @@ async fn mtls_roles_rate_budget_and_revocation() {
     backend.abort();
     // Restart with a new pin. The old certificate still chains to the CA but
     // loses access.
-    let (addr, _, task, backend) = server(&pki, "rotated", 2, Duration::from_secs(60), 4).await;
+    let (addr, _, task, backend) =
+        server(&pki, "rotated", 2, 100, Duration::from_secs(60), 4).await;
     let mut old = ParentServiceClient::new(
         pki.endpoint(addr, Some("operator"), "parent.test", "ca.pem")
             .connect()
@@ -264,7 +275,7 @@ async fn mtls_roles_rate_budget_and_revocation() {
 async fn invalid_tls_never_reaches_enclave_and_socket_cap_recovers() {
     let pki = Pki::new();
     let (addr, calls, task, backend) =
-        server(&pki, "operator", 2, Duration::from_secs(60), 4).await;
+        server(&pki, "operator", 2, 100, Duration::from_secs(60), 4).await;
     for (who, name, ca) in [
         (None, "parent.test", "ca.pem"),
         (Some("foreign"), "parent.test", "ca.pem"),
@@ -320,6 +331,121 @@ async fn invalid_tls_never_reaches_enclave_and_socket_cap_recovers() {
     backend.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attested_public_key_rate_budget() {
+    let pki = Pki::new();
+    let (addr, calls, task, backend) =
+        server(&pki, "operator", 2, 2, Duration::from_secs(60), 32).await;
+    let client = |role| {
+        let endpoint = pki.endpoint(addr, Some(role), "parent.test", "ca.pem");
+        async move { ParentServiceClient::new(endpoint.connect().await.unwrap()) }
+    };
+    let attest = || AttestedPublicKeyRequest { nonce: vec![1; 32] };
+    let mut observer = client("observer").await;
+    let mut listener = client("listener").await;
+    let mut operator = client("operator").await;
+    reached(observer.attested_public_key(attest()).await);
+    reached(observer.attested_public_key(attest()).await);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // The budget is shared by all clients. A refused call does not reach the enclave.
+    assert_eq!(
+        listener
+            .attested_public_key(attest())
+            .await
+            .unwrap_err()
+            .code(),
+        Code::ResourceExhausted
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // Other reads and Clone use other budgets.
+    reached(listener.public_key(PublicKeyRequest::default()).await);
+    reached(ParentServiceClient::clone(&mut operator, CloneRequest::default()).await);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    task.abort();
+    backend.abort();
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budgets_come_from_env() {
+    let pki = Pki::new();
+    std::fs::write(pki.0.join("clients.acl"), pki.acl("operator")).unwrap();
+    let (enclave, _, backend) = counting_enclave().await;
+    for (settings, clones, attests) in [
+        (
+            vec![
+                ("GRPC_CLONE_MAX_PER_MINUTE", "3"),
+                ("GRPC_ATTEST_MAX_PER_MINUTE", "2"),
+            ],
+            3,
+            2,
+        ),
+        (vec![("GRPC_CLONE_MAX_PER_MINUTE", "1")], 1, 6),
+    ] {
+        let port = free_port();
+        let mut c = tokio::process::Command::new(env!("CARGO_BIN_EXE_utexo-bridge-parent"));
+        c.env_clear()
+            .env("GRPC_HOST", "127.0.0.1")
+            .env("GRPC_PORT", port.to_string())
+            .env("HEALTH_PORT", free_port().to_string())
+            .env("ENCLAVE_ADDR", enclave.to_string())
+            .env("GRPC_TLS_CERT_FILE", pki.0.join("server.pem"))
+            .env("GRPC_TLS_KEY_FILE", pki.0.join("server.key"))
+            .env("GRPC_TLS_CLIENT_CA_FILE", pki.0.join("ca.pem"))
+            .env("GRPC_TLS_ACL_FILE", pki.0.join("clients.acl"))
+            .envs(settings)
+            .kill_on_drop(true)
+            .stderr(std::process::Stdio::null());
+        let mut parent = c.spawn().unwrap();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let mut channel = None;
+        for _ in 0..100 {
+            if let Ok(ch) = pki
+                .endpoint(addr, Some("operator"), "parent.test", "ca.pem")
+                .connect()
+                .await
+            {
+                channel = Some(ch);
+                break;
+            }
+            assert!(parent.try_wait().unwrap().is_none(), "parent exited");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut c = ParentServiceClient::new(channel.expect("parent did not start"));
+        for _ in 0..attests {
+            reached(
+                c.attested_public_key(AttestedPublicKeyRequest { nonce: vec![1; 32] })
+                    .await,
+            );
+        }
+        assert_eq!(
+            c.attested_public_key(AttestedPublicKeyRequest { nonce: vec![1; 32] })
+                .await
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        for _ in 0..clones {
+            reached(ParentServiceClient::clone(&mut c, CloneRequest::default()).await);
+        }
+        assert_eq!(
+            ParentServiceClient::clone(&mut c, CloneRequest::default())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    }
+    backend.abort();
+}
+
 #[test]
 fn bad_acl_and_missing_server_config_fail_closed() {
     for acl in [
@@ -328,7 +454,31 @@ fn bad_acl_and_missing_server_config_fail_closed() {
         format!("{} administrator", "00".repeat(32)),
         format!("{0} observer\n{0} listener", "00".repeat(32)),
     ] {
-        assert!(AccessLayer::from_acl(&acl, 1, Duration::from_secs(60)).is_err());
+        assert!(AccessLayer::from_acl(&acl, 1, 1, Duration::from_secs(60)).is_err());
+    }
+    let acl = format!("{} observer", "00".repeat(32));
+    assert!(AccessLayer::from_acl(&acl, 1, 1, Duration::from_secs(60)).is_ok());
+    assert!(AccessLayer::from_acl(&acl, 0, 1, Duration::from_secs(60)).is_err());
+    assert!(AccessLayer::from_acl(&acl, 1, 0, Duration::from_secs(60)).is_err());
+    for key in ["GRPC_CLONE_MAX_PER_MINUTE", "GRPC_ATTEST_MAX_PER_MINUTE"] {
+        for bad in ["0", "10001", "x", ""] {
+            let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_utexo-bridge-parent"));
+            c.env_clear().env("GRPC_HOST", "10.0.0.1").env(key, bad);
+            for file in [
+                "GRPC_TLS_CERT_FILE",
+                "GRPC_TLS_KEY_FILE",
+                "GRPC_TLS_CLIENT_CA_FILE",
+                "GRPC_TLS_ACL_FILE",
+            ] {
+                c.env(file, "/missing");
+            }
+            let output = c.output().unwrap();
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(key),
+                "{key}={bad}"
+            );
+        }
     }
     for settings in [
         vec![],
