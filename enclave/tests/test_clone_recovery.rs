@@ -123,8 +123,11 @@ fn cloned_replica_replaces_original_donor_without_reinitialization() {
     // B -> C succeeds using the original secret supplied through ordinary
     // requests. No boot secret or second InitializeKey is needed on B.
     let request_for_c = initiate_requester(requester_c, &identity.evm_address, CLONING_SECRET);
-    activate_requester(requester_c, call(replica_b, request_for_c));
+    activate_requester(requester_c, call(replica_b, request_for_c.clone()));
     assert_eq!(public_keys(requester_c), identity);
+
+    // The cloned donor must retain GetClone nonce replay enforcement too.
+    assert_error(call(replica_b, request_for_c), 6, "nonce replay detected");
 }
 
 #[test]

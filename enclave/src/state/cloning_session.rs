@@ -3,9 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use secrecy::SecretBox;
+use secrecy::{ExposeSecret, SecretBox};
 
-use crate::cloning::CloneSession;
+use crate::cloning::{validate_cloning_secret, CloneSession};
+use crate::error::Result;
 
 /// Time limit for a Cloning session. (F03-AF-01)
 /// A new initiation can replace an expired session without a restart.
@@ -30,11 +31,12 @@ pub struct CloningSession {
 }
 
 impl CloningSession {
+    /// Create a pending session after validating its future donor credential.
     pub fn new(
         session: CloneSession,
         cluster_public_key: [u8; 20],
         donor_cloning_secret: SecretBox<String>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_at(
             session,
             cluster_public_key,
@@ -49,13 +51,14 @@ impl CloningSession {
         cluster_public_key: [u8; 20],
         donor_cloning_secret: SecretBox<String>,
         created_at: Instant,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        validate_cloning_secret(donor_cloning_secret.expose_secret())?;
+        Ok(Self {
             session,
             cluster_public_key,
             donor_cloning_secret,
             created_at,
-        }
+        })
     }
 
     /// True when the session age is >= [`CLONING_SESSION_TTL`].

@@ -62,7 +62,7 @@ pub(super) fn handle_initiate_cloning(
         session,
         cluster_public_key,
         cloning_secret,
-    ))?;
+    )?)?;
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),

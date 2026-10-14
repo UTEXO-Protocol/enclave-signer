@@ -10,7 +10,7 @@ stateDiagram-v2
     Initializing : kms-persistence only (mint signer)
     Initializing : KMS seed recovery in progress, signing DISABLED
 
-    Cloning : holds CloningSession (ephemeral X25519 + cluster pubkey)
+    Cloning : holds CloningSession (ephemeral X25519 + cluster pubkey + pending donor secret in SecretBox)
     Cloning : signing DISABLED
 
     Active : holds Box of KeyManager (seed in SecretBox)
@@ -25,7 +25,7 @@ stateDiagram-v2
     Initial --> Cloning : enter_cloning() (InitiateCloning - requester, no kms-persistence)
     Cloning --> Cloning : enter_cloning() replaces an expired session
 
-    Cloning --> Active : complete_cloning() (SetClone - decrypt + install peer seed, assert evm_address == cluster_public_key, verify clone commitment)
+    Cloning --> Active : complete_cloning() (SetClone - decrypt, assert evm_address == cluster_public_key, verify clone commitment, atomically install keys + session donor secret)
 
     Active --> Active : Sign / SignBtc / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
     Initial --> Initial : SubmitHeaders / GetLastSavedBlock (no keys needed, any phase)

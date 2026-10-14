@@ -664,6 +664,11 @@ The activated replica can then donate to another replica using the same
 operator secret, even when its original donor is unavailable. Each replica
 enforces its own export cap; this is not a cluster-wide replica limit or
 revocation mechanism. Blocking the original donor does not revoke its clones.
+Each `EnclaveState` also owns its nonce replay guard. A successful export on
+one donor does not prevent another donor from accepting the same otherwise-valid
+requester attestation, subject to its own export cap. Each donor refuses a
+replay only while its nonce entry remains recorded; expiry or eviction can
+permit another acceptance.
 
 After SetClone, the CLI performs a bounded read-only identity check, including
 when the response was lost. Automation must use the versioned
@@ -868,7 +873,9 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   is TTL-bounded (1 h) with oldest-first eviction so it cannot be wedged.
   By design: authorization rests on the operator's cluster-wide secret
   delivered at runtime (not in PCRs), and the master seed stays resident so
-  the donor can re-seal it per clone. Both are accepted; no change planned.
+  the donor can re-seal it per clone. Every completed clone retains the secret
+  and can become a donor; blocking the original donor does not revoke its
+  descendants. These properties are accepted; no change planned.
 - **Federation / quorum:** unlock SHOULD require M-of-N enclave signatures;
   quorum is enforced on-chain in `MultisigProxy`. The EIP-712 digest is a pure
   function of `callData` / `nonce` / `deadline`, so quorum members sign
