@@ -384,6 +384,7 @@ fn sign_psbt_request(
             asset_id: String::new(),
             consignment: vec![],
             consignment_hash: vec![],
+            parent_psbt: vec![],
         })),
     }
 }
@@ -823,6 +824,15 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     }
 }
 
+/// The first RGB bind refusal of a bare PSBT: the swap flow needs a
+/// consignment, the mint signer reads the PSBT's own data and inputs.
+#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+const RGB_BIND_REFUSAL: &str = if cfg!(feature = "bfa-mint") {
+    "witness_utxo"
+} else {
+    "consignment"
+};
+
 #[test]
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 fn test_sign_psbt_rejects_amount_mismatch() {
@@ -863,7 +873,7 @@ fn test_sign_psbt_rejects_amount_mismatch() {
             assert_eq!(e.code, 3);
             assert!(
                 e.message.contains("amount mismatch")
-                    || e.message.contains("consignment")
+                    || e.message.contains(RGB_BIND_REFUSAL)
                     || e.message.contains("rgb_validator"),
                 "expected amount or RGB validation rejection, got: {}",
                 e.message
@@ -944,7 +954,7 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     common::send_request(port, &init_req);
 
     // An all-zero 32-byte hash passes the length check. The RgbDestination has
-    // no consignment, so bridge mode must fail closed.
+    // no consignment and its PSBT no RGB data, so bridge mode must fail closed.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0u8; 32],
@@ -961,10 +971,10 @@ fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
-            // Bridge mode ran and rejected the missing consignment binding.
+            // Bridge mode ran and its RGB bind refused.
             assert!(
-                e.message.contains("consignment"),
-                "expected a consignment-binding rejection (bridge mode), got: {}",
+                e.message.contains(RGB_BIND_REFUSAL),
+                "expected an RGB-binding rejection (bridge mode), got: {}",
                 e.message
             );
         }

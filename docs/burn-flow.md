@@ -328,6 +328,7 @@ On both routes, `burnId` is bound to the burn through B5.3, B5.6 and B5.7.
 |---------|--------|
 | `Sign` with an EVM source or an RGB destination (mint) | Refused: wrong signer role. |
 | `SignBtc` | Refused: wrong signer role. |
+| `SignRightsRefill` | Refused: wrong signer role. The burn signer holds no mint rights. |
 | `SignCcd` | Refused: not in this build. |
 | `SignRawMessage` | Refused in every build. |
 

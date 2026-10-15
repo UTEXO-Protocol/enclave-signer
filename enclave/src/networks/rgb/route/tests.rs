@@ -124,8 +124,8 @@ fn route_proof_rejects_the_other_flows_shape() {
     );
 }
 
-// Asset-identity binding, destination path. The checks are inline in
-// `validate_destination_anchor`, so that function is the smallest testable
+// Asset-identity binding, swap-flow destination path. The checks are inline
+// in `validate_destination_anchor`, so that function is the smallest testable
 // unit. The tests use a generated BFA mint.
 //
 // Intentional asymmetry: this path always enforces the RGB_ASSET_ID pin.
@@ -134,7 +134,7 @@ fn route_proof_rejects_the_other_flows_shape() {
 /// End-to-end asset binding. These tests run the full validator, so they
 /// prove that the bind is in the request path. The rule tests in
 /// `validation::tests::asset_binding_rule` cannot show this.
-#[cfg(evm_to_rgb)]
+#[cfg(all(feature = "rgb-swap", evm_to_rgb))]
 mod asset_bind {
     use super::*;
     use crate::config::BridgeConfig;
@@ -209,6 +209,7 @@ mod asset_bind {
             asset_id: asset_id.into(),
             consignment_hash: Keccak256::digest(&consignment).to_vec(),
             consignment,
+            parent_psbt: vec![],
         }
     }
 
@@ -309,48 +310,6 @@ mod asset_bind {
         );
     }
 
-    /// A pinned destination whose PSBT is `tx`, with no input data.
-    #[cfg(feature = "rgb-mint-burn")]
-    fn with_psbt(tx: bitcoin::Transaction) -> (RgbDestination, BridgeConfig) {
-        let id = asset_id();
-        let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx)
-            .unwrap()
-            .serialize();
-        let destination = RgbDestination {
-            psbt_bytes: psbt,
-            ..destination(&id)
-        };
-        (destination, pinned_config(&id))
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    fn mint_tx() -> bitcoin::Transaction {
-        mint().bundles.last().unwrap().tx.clone()
-    }
-
-    /// The mint tx is unbroadcast, so no indexer knows it. It passes
-    /// consensus and the PSBT bind, and stops at the next PSBT check.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn the_unbroadcast_mint_tx_passes_when_it_is_the_psbt() {
-        let (destination, config) = with_psbt(mint_tx());
-        let msg = run(&destination, &config).unwrap_err().to_string();
-        assert!(msg.contains("carries no witness_utxo"), "{msg}");
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn an_unbroadcast_mint_tx_that_is_not_the_psbt_is_refused() {
-        let mut other = mint_tx();
-        other.lock_time = bitcoin::absolute::LockTime::from_consensus(1);
-        let (destination, config) = with_psbt(other);
-        let msg = run(&destination, &config).unwrap_err().to_string();
-        assert!(
-            msg.contains("does not finalize the consignment's transition"),
-            "{msg}"
-        );
-    }
-
     /// A mint of an asset with a reject list, as a pinned destination.
     fn listed_mint() -> (History, RgbDestination, BridgeConfig) {
         let history = mint_of(Issue {
@@ -413,3 +372,7 @@ mod asset_bind {
     // empty. `assert_asset_binding` rejects it, and
     // `validation::tests::asset_binding_rule` covers the rule.
 }
+
+/// The mint signer's routes, from the PSBT and its parent alone.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+mod psbt_path;

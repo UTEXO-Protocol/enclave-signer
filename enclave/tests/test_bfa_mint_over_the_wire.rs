@@ -1,14 +1,15 @@
-//! A BFA mint over the wire, end to end, and the send-RGB txid bind.
+//! A BFA mint over the wire, end to end, and the txid bind.
 //!
-//! The txid bind assumes every input finalizes with an empty `scriptSig`. A
-//! P2SH-wrapped SegWit input pushes its redeemScript there (BIP-16), which
-//! changes the txid, so the broadcastable tx is not the one the consignment
-//! names.
+//! The mint signer reads the mint from the PSBT rgb-lib commits and the PSBT
+//! of the issuer's seed send that made its right. The txid bind assumes every
+//! input finalizes with an empty `scriptSig`. A P2SH-wrapped SegWit input
+//! pushes its redeemScript there (BIP-16), which changes the txid, so the
+//! broadcastable tx is not the one the PSBT commits.
 //!
-//! Runs over the wire through `handle_sign`, so the bridge-location pin, the
-//! `FundsIn` read with its finality, the anchor binding, the invoice bind
-//! and the mint-right rule are on the path. Issues a BFA asset over
-//! regtest funding transactions. Mint/burn flow only.
+//! Runs over the wire through `handle_sign`, so the `FundsIn` read with its
+//! finality, the invoice bind, the mint-right rule and the parent proof are on
+//! the path. A receiving consumer then validates the consignment in full.
+//! Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
 
@@ -21,6 +22,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use alloy_sol_types::{sol, SolCall, SolEvent};
+use bfa_consignment::Committed;
 use bfa_consignment::{History, Issue, Utxo};
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 use bitcoin::blockdata::script::{Builder, PushBytesBuf};
@@ -53,7 +55,6 @@ use utexo_bridge_enclave::keys::{AccountType, KeyManager};
 use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
 use utexo_bridge_enclave::networks::evm::reject_list::{entriesCall, lengthCall, Entry};
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network as SpvNet};
-use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
 use utexo_bridge_enclave::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
@@ -168,34 +169,39 @@ fn wrapped_segwit_aux() -> Aux {
 /// One BFA deposit, as the coordinator hands it to the enclave.
 struct Deposit {
     consignment: Vec<u8>,
-    witness_tx: Transaction,
+    /// The issuer's seed send. Its PSBT is the mint's parent proof.
+    seed: Committed,
+    mint: Committed,
     contract_id: ContractId,
-    mint_opid: OpId,
-    /// The genesis right the mint spent.
+    /// The seeded right the mint spent.
     right: Opout,
     invoice: String,
     user_funding: Transaction,
 }
 
-/// Issues a BFA asset on `genesis_chain`, with `reject_list` if any, and its
-/// mint right on `bridge_funding:0`. A `mint` gives `MINTED` units to the user's blinded
-/// seal. Its witness tx spends the right and `aux` (if any). The mint consumes
-/// the right, or in the old form (`keeps_right`) passes it on to the bridge
-/// change.
+/// Issues a BFA asset, with `reject_list` if any. The issuer seeds its right
+/// to the bridge's key-path output (`bridge_spk`, vout 1 of the seed). A
+/// `mint` gives `MINTED` units to the user's blinded seal. Its witness tx
+/// spends the right and `aux` (if any). The mint consumes the right, or in the
+/// old form (`keeps_right`) passes it on to the bridge change.
 fn issue_and_mint(
-    bridge_funding: &Transaction,
     bridge_spk: &ScriptBuf,
     aux: Option<&Aux>,
-    genesis_chain: u64,
     reject_list: Option<RejectListLocation>,
     keeps_right: bool,
 ) -> Deposit {
-    let right_utxo = OutPoint::new(bridge_funding.compute_txid(), 0);
+    let issuer_utxo = OutPoint::new(Txid::from_byte_array([0x15; 32]), 0);
     let mut history = History::issue(Issue {
         reject_list,
-        ..Issue::new(genesis_chain, FUNDS_IN_CONTRACT, vec![right_utxo])
+        ..Issue::new(EVM_CHAIN_ID, FUNDS_IN_CONTRACT, vec![issuer_utxo])
     });
-    let right: Utxo = history.genesis_right(0, right_utxo);
+    let genesis_right = history.genesis_right(0, issuer_utxo);
+    let seeded_to = TxOut {
+        value: Amount::from_sat(BRIDGE_FUNDS),
+        script_pubkey: bridge_spk.clone(),
+    };
+    let seed = history.send_rights(genesis_right, &[1], vec![], vec![seeded_to]);
+    let right: Utxo = bfa_consignment::rights_made(&seed, &[1])[0];
 
     // The recipient: a blinded seal on a UTXO the user already holds.
     let user_spk =
@@ -229,9 +235,9 @@ fn issue_and_mint(
 
     Deposit {
         consignment: history.consignment(vec![BuilderSeal::Concealed(secret)]),
-        witness_tx: mint.tx,
+        seed,
+        mint,
         contract_id: history.contract_id,
-        mint_opid: mint.opid,
         right: right.opout,
         invoice,
         user_funding,
@@ -384,7 +390,7 @@ fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
 fn operation_id(deposit: &Deposit) -> [u8; 32] {
     utexo_bridge_enclave::networks::evm::events::rgb_mint_deposit_id(
         &bridge_config(&deposit.contract_id),
-        &bfa_consignment::opid_bytes(deposit.mint_opid),
+        &bfa_consignment::opid_bytes(deposit.mint.opid),
         MINTED,
     )
     .unwrap()
@@ -411,9 +417,7 @@ fn context(contract_id: &ContractId, chain: DepositChain) -> ServerContext {
     );
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    // A first mint has no history, so validation reads no indexer.
-    launch.rgb_validator =
-        Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
+    // No indexer: the mint signer reads no consignment.
     launch.evm_rpc_client = Some(Box::new(chain));
     ctx
 }
@@ -436,52 +440,41 @@ fn sign_over_the_wire(ctx: &ServerContext, req: SignRequest) -> EnclaveResponse 
 struct Built {
     psbt: Psbt,
     deposit: Deposit,
-    bridge_funding: Transaction,
 }
 
-/// One deposit as the coordinator would hand it over. The bridge's input is
-/// its key-path funding output; `aux`, if any, is appended.
+/// One deposit as the coordinator would hand it over: the PSBT rgb-lib
+/// committed, with the metadata it writes. The bridge's input is the seeded
+/// right's output; `aux`, if any, is appended. The change is ours (rule C).
 fn build_on(
     aux: Option<&Aux>,
-    genesis_chain: u64,
     reject_list: Option<RejectListLocation>,
     keeps_right: bool,
 ) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
     let bridge_spk = bridge_address(our);
-    let bridge_funding = coinbase(101, BRIDGE_FUNDS, bridge_spk.clone());
-    let deposit = issue_and_mint(
-        &bridge_funding,
-        &bridge_spk,
-        aux,
-        genesis_chain,
-        reject_list,
-        keeps_right,
-    );
+    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right);
 
-    let mut psbt = Psbt::from_unsigned_tx(deposit.witness_tx.clone()).unwrap();
-    psbt.inputs[0].witness_utxo = Some(bridge_funding.output[0].clone());
-    psbt.inputs[0].non_witness_utxo = Some(bridge_funding.clone());
+    let origin = (vec![], (*keys.master_fingerprint(), our_path));
+    let mut psbt = deposit.mint.psbt.clone();
+    psbt.inputs[0].witness_utxo = Some(deposit.seed.tx.output[1].clone());
+    psbt.inputs[0].non_witness_utxo = Some(deposit.seed.tx.clone());
     psbt.inputs[0].tap_internal_key = Some(our);
-    psbt.inputs[0]
-        .tap_key_origins
-        .insert(our, (vec![], (*keys.master_fingerprint(), our_path)));
+    psbt.inputs[0].tap_key_origins.insert(our, origin.clone());
     if let Some(aux) = aux {
         psbt.inputs[1].witness_utxo = Some(aux.funding.output[0].clone());
         psbt.inputs[1].non_witness_utxo = Some(aux.funding.clone());
         psbt.inputs[1].redeem_script = Some(aux.redeem.clone());
     }
+    let change = psbt.outputs.len() - 1;
+    psbt.outputs[change].tap_internal_key = Some(our);
+    psbt.outputs[change].tap_key_origins.insert(our, origin);
 
-    Built {
-        psbt,
-        deposit,
-        bridge_funding,
-    }
+    Built { psbt, deposit }
 }
 
 fn build(aux: Option<&Aux>) -> Built {
-    build_on(aux, EVM_CHAIN_ID, None, false)
+    build_on(aux, None, false)
 }
 
 /// The built deposit through the front door, over the wire, against a lock
@@ -511,7 +504,7 @@ fn deposit_chain(
 ) -> DepositChain {
     DepositChain {
         receipt: deposit_receipt(
-            &built.deposit.mint_opid,
+            &built.deposit.mint.opid,
             operation_id(&built.deposit),
             &built.deposit.invoice,
             lock_block,
@@ -539,8 +532,11 @@ fn sign_request(built: &Built) -> SignRequest {
             psbt_bytes: built.psbt.serialize(),
             psbt_output_amount: 0,
             asset_id: built.deposit.contract_id.to_string(),
+            // The rollout bridge still sends the consignment; the mint signer
+            // reads only the PSBT and its parent.
             consignment: built.deposit.consignment.clone(),
             consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
+            parent_psbt: built.deposit.seed.psbt.serialize(),
         })),
     }
 }
@@ -710,7 +706,7 @@ fn consumer_validates(deposit: &Deposit, chain: Vec<Transaction>) -> Result<(), 
         transfer.validate_deterministic(&BridgedFungibleAsset::schema_rules(), &config)?;
     let location = BridgedFungibleAsset::bridge_location(pending.consignment().genesis()).unwrap();
     pending
-        .resolve_all_anchors(location, &LockedOnChain(deposit.mint_opid))
+        .resolve_all_anchors(location, &LockedOnChain(deposit.mint.opid))
         .expect("the consumer confirms the mint against its lock");
     pending.pending().resolve_all(&ChainWith(chain))?;
     assert!(pending.pending().is_resolved());
@@ -737,7 +733,7 @@ fn refusal(response: &EnclaveResponse) -> String {
 /// Control: the bridge native input alone. The enclave signs it, it finalizes
 /// to the bound txid, and the consumer accepts it.
 #[test]
-fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
+fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
     let native = build(None);
     let (signed, inputs_signed) = signed_psbt(&drive(&native)).expect("native deposit signs");
     assert_eq!(inputs_signed, 1);
@@ -748,12 +744,28 @@ fn native_deposit_signs_and_finalizes_to_the_bound_txid() {
     consumer_validates(
         &native.deposit,
         vec![
-            native.bridge_funding.clone(),
+            native.deposit.seed.tx.clone(),
             native.deposit.user_funding.clone(),
             final_tx,
         ],
     )
     .expect("consumer resolves the bound witness");
+}
+
+/// Plan B needs the PSBT that made the right: it pins the right's UTXO.
+#[test]
+fn refuses_a_mint_without_its_parent_psbt() {
+    let native = build(None);
+    let chain = deposit_chain(&native, LOCK_BLOCK, LOCK_BLOCK, vec![]);
+    let ctx = context(&native.deposit.contract_id, chain);
+    let mut request = sign_request(&native);
+    if let Some(DestinationNetwork::RgbDestination(destination)) =
+        request.destination_network.as_mut()
+    {
+        destination.parent_psbt.clear();
+    }
+    let refusal = refusal(&sign_over_the_wire(&ctx, request));
+    assert!(refusal.contains("parent_psbt required"), "{refusal}");
 }
 
 /// The same deposit plus one P2SH-P2WPKH input. The enclave must refuse it.
@@ -788,7 +800,7 @@ fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
     let err = consumer_validates(
         &wrapped.deposit,
         vec![
-            wrapped.bridge_funding.clone(),
+            wrapped.deposit.seed.tx.clone(),
             aux.funding.clone(),
             wrapped.deposit.user_funding.clone(),
             final_tx,
@@ -815,48 +827,26 @@ fn refuses_a_lock_at_or_before_after_block() {
     assert!(refusal.contains("afterBlock"), "{refusal}");
 }
 
-/// The asset's genesis names the pinned Bridge on another chain.
-#[test]
-fn refuses_an_asset_bridged_on_another_chain() {
-    let refusal = refusal(&drive(&build_on(None, 42161, None, false)));
-    assert!(refusal.contains("is not the pinned"), "{refusal}");
-}
-
 /// The old mint form passes its right on to the bridge change, an output the
 /// enclave owns. The mint signer refuses it all the same.
 #[test]
 fn refuses_a_mint_that_passes_its_right_on() {
-    let refusal = refusal(&drive(&build_on(None, EVM_CHAIN_ID, None, true)));
+    let refusal = refusal(&drive(&build_on(None, None, true)));
     assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
 }
 
 fn build_listed() -> Built {
     let list = bfa_consignment::evm_reject_list(EVM_CHAIN_ID, LIST);
-    build_on(None, EVM_CHAIN_ID, Some(list), false)
+    build_on(None, Some(list), false)
 }
 
-/// A mint of a listed asset reads the list through the pinned EVM client and
-/// refuses when its right lineage is rejected.
+/// The mint signer reads no reject list: the connector's rgb-lib checks it
+/// before `mint_begin`, and a deposit already names this mint. Even a list
+/// that rejects the right is never read.
 #[test]
-fn refuses_a_mint_whose_right_the_reject_list_rejects() {
+fn signs_a_listed_mint_without_reading_the_list() {
     let listed = build_listed();
     let (response, calls) = drive_listed(&listed, vec![(listed.deposit.right, true)]);
-    let refusal = refusal(&response);
-    assert!(refusal.contains("reject list: opout"), "{refusal}");
-    assert!(calls.contains(&lengthCall::SELECTOR));
-    assert!(calls.contains(&entriesCall::SELECTOR));
-}
-
-/// Control: an entry outside the mint's history leaves the mint signed.
-#[test]
-fn signs_a_listed_mint_with_only_unrelated_entries() {
-    let listed = build_listed();
-    let unrelated = Opout::new(
-        OpId::copy_from_slice([0x99; 32]).unwrap(),
-        schemata::OS_ASSET,
-        0,
-    );
-    let (response, calls) = drive_listed(&listed, vec![(unrelated, true)]);
-    signed_psbt(&response).expect("the list does not reach the mint");
-    assert!(calls.contains(&entriesCall::SELECTOR));
+    signed_psbt(&response).expect("the mint signer does not read the list");
+    assert!(calls.is_empty(), "eth_call made: {calls:?}");
 }

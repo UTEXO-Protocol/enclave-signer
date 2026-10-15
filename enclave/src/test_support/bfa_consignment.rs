@@ -1,8 +1,9 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
 //! genesis, then mints, transfers of units or rights and burns, each in a
-//! witness tx that commits its bundle in an OP_RETURN output. Tests need no
-//! stored V1 fixture. Deterministic: fixed times, nonces, blinding and
-//! entropy.
+//! witness tx that commits its bundle in an OP_RETURN output. Each one is
+//! committed as rgb-lib does it, through psbtu's `rgb_commit`, so its PSBT is
+//! the one a signer gets. Tests need no stored V1 fixture. Deterministic:
+//! fixed times, nonces, blinding and entropy.
 //!
 //! It uses only external crates, so integration tests include it with
 //! `#[path]`.
@@ -14,8 +15,10 @@ use amplify::{ByteArray, Bytes20, Bytes32};
 use bitcoin::blockdata::opcodes::all::OP_RETURN;
 use bitcoin::blockdata::script::Builder;
 use bitcoin::hashes::Hash;
+use bitcoin::psbt::Psbt;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction};
 use bitcoin::{TxIn, TxOut, Witness};
+use psrgbt::{RgbOutExt, RgbPsbtExt};
 use rgbstd::containers::{ConsignmentVer, FileContent, TerminalSeals, Transfer, WitnessBundle};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
@@ -27,6 +30,7 @@ use rgbstd::stl::{
     AssetSpec, BlockNumber, BridgeLocation, BurnReason, ContractTerms, EvmAddress, EvmContract,
     RejectListLocation, RicardianContract,
 };
+use rgbstd::txout::CloseMethod;
 use rgbstd::validation::{DbcProof, SchemaRules};
 use rgbstd::{
     Amount as RgbAmount, Anchor, BuilderSeal, ChainNet, ContractId, Genesis, GenesisSeal,
@@ -54,11 +58,24 @@ pub struct Mint {
     pub after_block: u64,
 }
 
-/// One transition committed in its witness tx.
+/// One transition committed in its witness tx, and the PSBT of that tx.
 #[derive(Debug, Clone)]
 pub struct Committed {
     pub opid: OpId,
     pub tx: Transaction,
+    // Only the mint signer's tests read the PSBT.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub psbt: Psbt,
+}
+
+impl Committed {
+    fn of(opid: OpId, psbt: Psbt) -> Self {
+        Self {
+            opid,
+            tx: psbt.unsigned_tx.clone(),
+            psbt,
+        }
+    }
 }
 
 /// A BFA contract and the bundles built on it, in order.
@@ -203,43 +220,74 @@ impl History {
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Transaction {
-        self.commit_bundle(bundle_of(transitions), inputs, outputs)
+        self.commit_psbt(transitions, inputs, outputs).unsigned_tx
     }
 
-    /// [`Self::commit`] for a bundle the caller built.
+    /// [`Self::commit`] as rgb-lib's `prepare_rgb_psbt` does it: each
+    /// transition pushed to the PSBT, the OP_RETURN marked as host with the
+    /// entropy, then `rgb_commit`. Returns the committed PSBT.
+    pub fn commit_psbt(
+        &mut self,
+        transitions: Vec<Transition>,
+        inputs: Vec<OutPoint>,
+        outputs: Vec<TxOut>,
+    ) -> Psbt {
+        // psbtu orders known transitions by a hash map; the bundle keeps ours.
+        let bundle = bundle_of(transitions.clone());
+        let tree = self.mpc_tree(&bundle);
+        let mut psbt = witness_psbt(inputs, outputs);
+        for transition in transitions {
+            psbt.push_rgb_transition(transition).unwrap();
+        }
+        rgb_commit(&mut psbt, 0, tree.entropy());
+        self.push_bundle(bundle, psbt.unsigned_tx.clone(), tree);
+        psbt
+    }
+
+    /// [`Self::commit`] for a bundle the caller built, which no PSBT holds.
     pub fn commit_bundle(
         &mut self,
         bundle: TransitionBundle,
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Transaction {
-        let protocol = ProtocolId::from(self.contract_id);
+        let tree = self.mpc_tree(&bundle);
+        let mut tx = witness_tx(inputs, outputs);
+        <Transaction as EmbedCommitVerify<Commitment, OpretFirst>>::embed_commit(
+            &mut tx,
+            &tree.commit_id(),
+        )
+        .unwrap();
+        self.push_bundle(bundle, tx.clone(), tree);
+        tx
+    }
+
+    /// The MPC tree of the next bundle: its one message, fixed entropy.
+    fn mpc_tree(&self, bundle: &TransitionBundle) -> MerkleTree {
         let mut source = MultiSource {
             static_entropy: Some(0x5eed + self.bundles.len() as u64),
             ..Default::default()
         };
         source
             .messages
-            .insert(protocol, Message::from(bundle.bundle_id()))
-            .unwrap();
-        let tree = MerkleTree::try_commit(&source).unwrap();
-        let commitment = tree.commit_id();
-        let mpc_proof = MerkleBlock::from(tree).to_merkle_proof(protocol).unwrap();
-
-        let mut tx = witness_tx(inputs, outputs);
-        let opret: OpretProof =
-            <Transaction as EmbedCommitVerify<Commitment, OpretFirst>>::embed_commit(
-                &mut tx,
-                &commitment,
+            .insert(
+                ProtocolId::from(self.contract_id),
+                Message::from(bundle.bundle_id()),
             )
             .unwrap();
+        MerkleTree::try_commit(&source).unwrap()
+    }
+
+    /// Records `bundle`, committed by `tx` under `tree`'s root in an OP_RETURN.
+    fn push_bundle(&mut self, bundle: TransitionBundle, tx: Transaction, tree: MerkleTree) {
+        let protocol = ProtocolId::from(self.contract_id);
+        let mpc_proof = MerkleBlock::from(tree).to_merkle_proof(protocol).unwrap();
         self.bundles.push(WitnessBundle {
-            tx: tx.clone(),
+            tx,
             spv_proof: None,
-            anchor: Anchor::new(mpc_proof, DbcProof::Opret(opret)),
+            anchor: Anchor::new(mpc_proof, DbcProof::Opret(OpretProof::default())),
             bundle,
         });
-        tx
     }
 
     /// Mints `amount` to `to`. The mint consumes the right, as rgb-lib builds
@@ -320,13 +368,13 @@ impl History {
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let tx = self.commit(vec![mint], inputs, outputs);
+        let psbt = self.commit_psbt(vec![mint], inputs, outputs);
         self.mints.push(Mint {
             opid,
             amount,
             after_block,
         });
-        Committed { opid, tx }
+        Committed::of(opid, psbt)
     }
 
     /// Mints `amount` to a revealed seal on vout 2 of its witness tx, so a
@@ -351,26 +399,43 @@ impl History {
     /// rights, on vouts 1..=count of its witness tx. One right in, any number
     /// out.
     pub fn duplicate_right(&mut self, right: Utxo, count: u16) -> Vec<Utxo> {
+        let vouts: Vec<u32> = (1..=u32::from(count)).collect();
+        let outputs = (1..=count).map(|_| dust(0x05)).collect();
+        let sent = self.send_rights(right, &vouts, vec![], outputs);
+        rights_made(&sent, &vouts)
+    }
+
+    /// The rights send a mint wallet refills with: spends `right`, then
+    /// `extra_inputs`, and puts one right on each of `vouts` of a tx that pays
+    /// `outputs` (vout 1..).
+    pub fn send_rights(
+        &mut self,
+        right: Utxo,
+        vouts: &[u32],
+        extra_inputs: Vec<OutPoint>,
+        outputs: Vec<TxOut>,
+    ) -> Committed {
+        let send = self.rights_transition(right, vouts);
+        let opid = send.id();
+        let inputs = std::iter::once(right.outpoint)
+            .chain(extra_inputs)
+            .collect();
+        let psbt = self.commit_psbt(vec![send], inputs, outputs);
+        Committed::of(opid, psbt)
+    }
+
+    /// The transfer [`Self::send_rights`] commits, for a bundle the caller
+    /// builds.
+    pub fn rights_transition(&mut self, right: Utxo, vouts: &[u32]) -> Transition {
         let mut send = self
             .transition("transfer")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap();
-        for vout in 1..=u32::from(count) {
+        for &vout in vouts {
             let seal = GraphSeal::with_blinded_vout(vout, self.nonce);
             send = send.add_rights("mintRight", seal).unwrap();
         }
-        let send = send.complete_transition().unwrap();
-        let opid = send.id();
-        let outputs = (1..=count).map(|_| dust(0x05)).collect();
-        let txid = self
-            .commit(vec![send], vec![right.outpoint], outputs)
-            .compute_txid();
-        (0..count)
-            .map(|no| Utxo {
-                opout: Opout::new(opid, OS_MINT, no),
-                outpoint: OutPoint::new(txid, u32::from(no) + 1),
-            })
-            .collect()
+        send.complete_transition().unwrap()
     }
 
     /// Moves `input` (holding `amount`) to vout 1 of a new witness tx.
@@ -409,8 +474,8 @@ impl History {
     ) -> Committed {
         let burn = self.burn_transition(input, held, burned, reason);
         let opid = burn.id();
-        let tx = self.commit(vec![burn], vec![input.outpoint], vec![dust(0x04)]);
-        Committed { opid, tx }
+        let psbt = self.commit_psbt(vec![burn], vec![input.outpoint], vec![dust(0x04)]);
+        Committed::of(opid, psbt)
     }
 
     /// The transition [`Self::burn`] commits, for a bundle the caller builds.
@@ -479,11 +544,41 @@ impl History {
     }
 }
 
+/// The rights `sent` made, one per vout of `vouts` in ascending order, as
+/// [`History::send_rights`] numbers them.
+pub fn rights_made(sent: &Committed, vouts: &[u32]) -> Vec<Utxo> {
+    let txid = sent.tx.compute_txid();
+    vouts
+        .iter()
+        .zip(0u16..)
+        .map(|(&vout, no)| Utxo {
+            opout: Opout::new(sent.opid, OS_MINT, no),
+            outpoint: OutPoint::new(txid, vout),
+        })
+        .collect()
+}
+
 /// The TFR file bytes of `transfer`.
 pub fn save(transfer: &Transfer) -> Vec<u8> {
     let mut bytes = Vec::new();
     transfer.save(&mut bytes).unwrap();
     bytes
+}
+
+/// The PSBT of a witness tx that spends `inputs` and pays `outputs` after an
+/// empty OP_RETURN at vout 0. It holds no RGB data yet.
+pub fn witness_psbt(inputs: Vec<OutPoint>, outputs: Vec<TxOut>) -> Psbt {
+    Psbt::from_unsigned_tx(witness_tx(inputs, outputs)).unwrap()
+}
+
+/// Commits the RGB data `psbt` holds as rgb-lib does: output `host` is the
+/// opret host with `entropy`, then psbtu's `rgb_commit`.
+pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) {
+    let output = &mut psbt.outputs[host];
+    output.set_opret_host();
+    output.set_mpc_entropy(entropy).unwrap();
+    psbt.set_rgb_close_method(CloseMethod::OpretFirst);
+    psbt.rgb_commit().unwrap();
 }
 
 /// A 1000-sat output to a throwaway P2WPKH.

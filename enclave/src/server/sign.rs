@@ -54,13 +54,13 @@ pub(super) fn handle_sign(
     let authorized_recipient =
         verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
 
-    // Self-owned-outpoint oracle for the send-RGB per-output recipient bind.
+    // Self-owned-outpoint oracle for the swap-flow per-output recipient bind.
     // The key lock is held only for each lookup, not across Electrum calls.
     //
     // An outpoint on this PSBT is resolved from its taproot metadata.
     // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib
     // puts RGB change on an existing UTXO when the tx has no BTC change.
-    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
     let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt, outpoint: bitcoin::OutPoint| {
         use crate::networks::rgb::btc_ownership;
 
@@ -112,20 +112,25 @@ pub(super) fn handle_sign(
         })
     };
 
-    // Binds each BFA mint anchor of the consignment to an EVM lock.
-    #[cfg(feature = "bfa-validation")]
+    // Binds each BFA mint anchor of a consignment to its derived lock.
+    #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
     let anchor_binder =
         |bridge: &crate::networks::rgb::validation::BfaBridge,
          anchors: &[crate::networks::rgb::validation::MintAnchor]| {
-            bind_anchors(ctx, source_ref, bridge, anchors)
+            super::bfa::derived_locks(ctx, bridge, anchors)
         };
 
-    #[cfg(feature = "bfa-validation")]
+    #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    #[cfg(not(feature = "bfa-validation"))]
+    #[cfg(not(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap"))))]
     let _ = deadline;
+
+    // The mint signer binds the mint its PSBT commits to this request's deposit.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    let mint_binder =
+        |mint: &crate::networks::rgb::psbt_validation::MintFacts| bind_mint(ctx, source_ref, mint);
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `assert_chain_pins_unchanged` reads these
@@ -135,22 +140,24 @@ pub(super) fn handle_sign(
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
-        #[cfg(feature = "rgb-validation")]
+        #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
         rgb_validator: ctx.launch()?.rgb_validator.as_ref(),
         #[cfg(feature = "rgb-validation")]
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
         chain_pins: &chain_pins,
-        // Only the RGB-destination (mint) bind uses it.
-        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        // Only the swap-flow destination bind uses it.
+        #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
         self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: Some(&psbt_fee_key_paths),
-        #[cfg(feature = "bfa-validation")]
+        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        mint_binder: Some(&mint_binder),
+        #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
         anchor_binder: None,
-        #[cfg(feature = "bfa-validation")]
+        #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
         reject_list_reader: Some(&reject_list_reader),
         #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
         reject_list_reader: None,
@@ -376,33 +383,30 @@ fn source_commission(source: &SourceNetwork) -> Result<u64> {
     }
 }
 
-/// The binder for this route. A mint binds its own deposit from the request's
-/// receipt. Every other history only derives its locks.
-#[cfg(feature = "bfa-validation")]
-fn bind_anchors(
+/// M6 for this request: the mint must be the one its EVM deposit pays.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+fn bind_mint(
     ctx: &ServerContext,
     source: &SourceNetwork,
-    bridge: &crate::networks::rgb::validation::BfaBridge,
-    anchors: &[crate::networks::rgb::validation::MintAnchor],
-) -> Result<crate::networks::rgb::validation::BoundAnchors> {
-    match source {
-        #[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
-        SourceNetwork::EvmSource(evm) => {
-            let tx_hash: [u8; 32] = evm.tx_hash.as_slice().try_into().map_err(|_| {
-                EnclaveError::CrossCheck(format!(
-                    "evm_tx_hash must be 32 bytes, got {}",
-                    evm.tx_hash.len()
-                ))
-            })?;
-            super::bfa::mint_locks(ctx, &tx_hash, bridge, anchors)
-        }
-        #[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
-        _ => super::bfa::derived_locks(ctx, bridge, anchors),
-        #[cfg(not(any(rgb_to_evm, feature = "rgb-swap")))]
-        _ => Err(EnclaveError::CrossCheck(
-            "BFA mint anchors on a route this signer does not mint on".into(),
-        )),
-    }
+    mint: &crate::networks::rgb::psbt_validation::MintFacts,
+) -> Result<()> {
+    let SourceNetwork::EvmSource(evm) = source else {
+        return Err(EnclaveError::CrossCheck(
+            "a mint is bound to an EVM deposit only".into(),
+        ));
+    };
+    super::bfa::bind_mint_deposit(ctx, &evm_tx_hash(evm)?, mint)
+}
+
+/// The deposit tx hash of an EVM source: exactly 32 bytes.
+#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+fn evm_tx_hash(source: &EvmSource) -> Result<[u8; 32]> {
+    source.tx_hash.as_slice().try_into().map_err(|_| {
+        EnclaveError::CrossCheck(format!(
+            "evm_tx_hash must be 32 bytes, got {}",
+            source.tx_hash.len()
+        ))
+    })
 }
 
 /// The recipient that a verified deposit authorizes. Uninhabited on builds
@@ -435,12 +439,7 @@ fn verify_funds_in_deposit(
     else {
         return Ok(None);
     };
-    let tx_hash: [u8; 32] = source.tx_hash.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "evm_tx_hash must be 32 bytes, got {}",
-            source.tx_hash.len()
-        ))
-    })?;
+    let tx_hash = evm_tx_hash(source)?;
     // `funds_in_operation_id` is the full 32-byte on-chain BridgeFundsIn
     // operationId. `verify_funds_in_event` fails closed on an empty or short value.
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
