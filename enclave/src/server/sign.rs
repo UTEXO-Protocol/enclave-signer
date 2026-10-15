@@ -129,7 +129,7 @@ pub(super) fn handle_sign(
     let _ = deadline;
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
-    // the header-chain lock at return. `assert_chain_pins_unchanged` reads these
+    // the header-chain lock at return. `sign_with_chain_pins_unchanged` reads these
     // blocks again immediately before the key is used (F05-NEW-AF-08).
     #[cfg(feature = "rgb-validation")]
     let chain_pins = crate::networks::rgb::spv_crosscheck::ChainPins::new();

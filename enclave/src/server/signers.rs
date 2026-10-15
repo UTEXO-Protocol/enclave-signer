@@ -11,19 +11,22 @@ use crate::proto::*;
 #[cfg(feature = "ccd")]
 use crate::state::EnclaveState;
 
-/// Check that all pinned Bitcoin blocks still have the same hash.
-/// Call it immediately before the signing key is used.
+/// Check that all pinned Bitcoin blocks still have the same hash, then run
+/// `sign` with the header-chain lock still held.
 ///
 /// Each SPV check releases the lock at return. Another worker can accept a
 /// reorg in that gap (F05-NEW-AF-08). An extension does not change the pinned
 /// heights, so signing continues. A reorg that replaces a pin is refused here.
+/// The lock is held until `sign` returns, so no header update can land between
+/// the check and the key use. Lock order: header chain, then key state.
 #[cfg(feature = "rgb-validation")]
-fn assert_chain_pins_unchanged(
+fn sign_with_chain_pins_unchanged<T>(
     ctx: &ServerContext,
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
-) -> Result<()> {
+    sign: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if pins.is_empty() {
-        return Ok(());
+        return sign();
     }
     // Fail on a poisoned lock, as the validation checks do.
     // A poisoned header chain can be in the middle of a reorg.
@@ -31,7 +34,10 @@ fn assert_chain_pins_unchanged(
         .header_chain
         .lock()
         .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
-    pins.assert_unchanged(&chain)
+    pins.assert_unchanged(&chain)?;
+    let signed = sign();
+    drop(chain);
+    signed
 }
 
 /// `params` comes from destination validation, so the digest commits to the
@@ -82,8 +88,8 @@ pub(super) fn handle_sign_evm(
     // Last gate before the key, for both routes. The checked chain must still
     // be the chain that the enclave holds.
     #[cfg(feature = "rgb-validation")]
-    assert_chain_pins_unchanged(ctx, pins)?;
-
+    let signature = sign_with_chain_pins_unchanged(ctx, pins, || ctx.state.sign_evm(&digest))?;
+    #[cfg(not(feature = "rgb-validation"))]
     let signature = ctx.state.sign_evm(&digest)?;
 
     tracing::info!(
@@ -116,16 +122,18 @@ pub(super) fn handle_sign_psbt(
         )
     })?;
 
+    // Colored account only. An unscoped sign co-signs all inputs with a known
+    // key, including vanilla inputs that no send-RGB bind checks.
+    let sign_colored = || {
+        ctx.state
+            .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))
+    };
     // Same gate as the EVM route. RGB source SPV evidence must still hold on
     // the current chain. No-op when nothing is pinned (an EVM source).
     #[cfg(feature = "rgb-validation")]
-    assert_chain_pins_unchanged(ctx, pins)?;
-
-    // Colored account only. An unscoped sign co-signs all inputs with a known
-    // key, including vanilla inputs that no send-RGB bind checks.
-    let (signed_psbt, inputs_signed) = ctx
-        .state
-        .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
+    let (signed_psbt, inputs_signed) = sign_with_chain_pins_unchanged(ctx, pins, sign_colored)?;
+    #[cfg(not(feature = "rgb-validation"))]
+    let (signed_psbt, inputs_signed) = sign_colored()?;
 
     // Refuse a no-op. `sign_psbt_scoped` returns Ok((bytes, 0)) when no input is ours.
     // A caller that checks only RPC success would count it as a signature.
@@ -259,4 +267,64 @@ pub(super) fn handle_sign_ccd(
             public_key: public_key.to_vec(),
         })),
     })
+}
+
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
+mod tests {
+    use super::*;
+    use crate::config::BridgeConfig;
+    use crate::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
+    use crate::networks::rgb::spv_crosscheck::ChainPins;
+    use crate::state::EnclaveState;
+    use std::cell::Cell;
+
+    fn pinned_context() -> (ServerContext, ChainPins) {
+        let ctx = ServerContext::new(
+            EnclaveState::default(),
+            BridgeConfig::default(),
+            crate::test_support::regtest_header_chain(),
+        );
+        let pins = ChainPins::new();
+        {
+            let chain = ctx.header_chain.lock().unwrap();
+            pins.pin(&chain, chain.tip_height()).unwrap();
+        }
+        (ctx, pins)
+    }
+
+    // F05-NEW-AF-08: no header update can land between the check and the key.
+    #[test]
+    fn header_chain_stays_locked_until_sign_returns() {
+        let (ctx, pins) = pinned_context();
+
+        let locked_during_sign = sign_with_chain_pins_unchanged(&ctx, &pins, || {
+            Ok(ctx.header_chain.try_lock().is_err())
+        })
+        .unwrap();
+
+        assert!(
+            locked_during_sign,
+            "header chain was unlocked while signing"
+        );
+        assert!(
+            ctx.header_chain.try_lock().is_ok(),
+            "lock not released after signing"
+        );
+    }
+
+    #[test]
+    fn replaced_pin_refuses_without_signing() {
+        let (ctx, pins) = pinned_context();
+        *ctx.header_chain.lock().unwrap() =
+            HeaderChain::new(Network::Signet, checkpoint_for(Network::Signet));
+
+        let signed = Cell::new(false);
+        let result = sign_with_chain_pins_unchanged(&ctx, &pins, || {
+            signed.set(true);
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!signed.get(), "sign ran after the pin check failed");
+    }
 }
