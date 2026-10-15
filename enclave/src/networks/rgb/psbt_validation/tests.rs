@@ -857,11 +857,8 @@ mod anchor {
             last_witness_txid: Some(txid),
             last_transfer_witness_prevouts: prevouts,
             last_bundle_fully_disclosed: true,
-            // The mint passes the right back to the bridge on vout 1.
-            last_mint_rights: vec![OutputSeal::Revealed {
-                txid: None,
-                vout: 1,
-            }],
+            // The mint consumes its right.
+            last_mint_rights: vec![],
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
             transitions_by_witness: vec![(txid, transitions)],
@@ -1157,15 +1154,14 @@ mod anchor {
     }
 
     /// Per output: an `OS_MINT` entry is the mint *right*, not delivered
-    /// value, so it cannot count as the recipient leg.
+    /// value, so the leg split never counts it. Rule 8 refuses such a mint
+    /// on its own, so this checks the split alone.
     #[cfg(feature = "rgb-mint-burn")]
     #[test]
     fn mint_right_output_is_not_a_recipient_leg() {
         let psbt = psbt_with_two_inputs();
         let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
         edit_signing_transition(&mut validated, |t| {
-            // A confidential mint right. The recipient sum skips it, so
-            // 1_000 == net credited.
             t.outputs.push(TransitionOutput {
                 assignment_type: bfa_ids::OS_MINT,
                 amount: 9_000_000,
@@ -1175,10 +1171,11 @@ mod anchor {
             });
             t.total_output_amount = 9_001_000;
         });
-        assert!(
-            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok(),
-            "OS_MINT mint right must not count toward the recipient leg"
-        );
+        let txid = psbt.unsigned_tx.compute_txid();
+        let committed = validated.transitions_committed_by(txid);
+        let legs = split_asset_legs(&psbt, txid, &committed, &owns_vout_1).unwrap();
+        assert_eq!(legs.recipient, 1_000);
+        assert_eq!(legs.change, 0);
     }
 
     /// A transition with no `OS_ASSET` assignments delivers nothing. There is
@@ -1393,155 +1390,42 @@ mod anchor {
         assert!(err.to_string().contains("signs exactly one mint"), "{err}");
     }
 
-    /// The mint must hand the right to mint back to the bridge: not drop it,
-    /// not hide it, not give it away, not split it.
+    /// A mint that consumes its right, as rgb-lib builds it, passes rule 8.
     #[cfg(feature = "rgb-mint-burn")]
     #[test]
-    fn rejects_a_mint_that_does_not_keep_the_mint_right() {
+    fn accepts_a_mint_with_no_mint_right_output() {
         let psbt = psbt_with_two_inputs();
-        let revealed = |vout| OutputSeal::Revealed { txid: None, vout };
-        for (rights, why) in [
-            (vec![], "passes 0"),
-            (
-                vec![OutputSeal::Confidential {
-                    secret_seal: "utxob:host".into(),
-                }],
-                "hides its seal",
-            ),
-            (vec![revealed(1), revealed(1)], "passes 2"),
-            (vec![revealed(0)], "cannot prove it owns"),
+        let validated = validated_for(&psbt, 1_000);
+        assert!(validated.last_mint_rights.is_empty());
+        validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+            .expect("a mint that consumes its right binds");
+    }
+
+    /// Any right a mint passes on is refused, even on a seal the enclave owns.
+    #[cfg(feature = "rgb-mint-burn")]
+    #[test]
+    fn refuses_a_mint_that_passes_a_mint_right_on() {
+        let psbt = psbt_with_two_inputs();
+        let owned = OutputSeal::Revealed {
+            txid: None,
+            vout: 1,
+        };
+        let hidden = OutputSeal::Confidential {
+            secret_seal: "utxob:host".into(),
+        };
+        for (rights, expected) in [
+            (vec![owned.clone()], "passes 1"),
+            (vec![hidden], "passes 1"),
+            (vec![owned.clone(), owned], "passes 2"),
         ] {
             let mut validated = validated_for(&psbt, 1_000);
             validated.last_mint_rights = rights;
             let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                err.contains("mintRight") || err.contains("mint passes"),
-                "{why}: {err}"
-            );
+            assert!(err.contains(expected), "{err}");
+            assert!(err.contains("consumes its right"), "{err}");
         }
-    }
-
-    /// A revealed seal on an outpoint the PSBT itself spends, as the bundle
-    /// names it (display-order txid).
-    #[cfg(feature = "rgb-mint-burn")]
-    fn seal_on_input(psbt: &Psbt, input: usize) -> OutputSeal {
-        let spent = psbt.unsigned_tx.input[input].previous_output;
-        let mut display = spent.txid.to_byte_array();
-        display.reverse();
-        OutputSeal::Revealed {
-            txid: Some(display),
-            vout: spent.vout,
-        }
-    }
-
-    /// The mint signs `validated` against `psbt` with an oracle that owns
-    /// every outpoint, and returns the error text.
-    #[cfg(feature = "rgb-mint-burn")]
-    fn mint_right_error(psbt: &Psbt, right: OutputSeal) -> String {
-        let owns_everything = |_: &Psbt, _: OutPoint| Ok(true);
-        let mut validated = validated_for(psbt, 1_000);
-        validated.last_mint_rights = vec![right];
-        validate_psbt_anchors_transition(psbt, &validated, 1_000, 0, &owns_everything)
-            .unwrap_err()
-            .to_string()
-    }
-
-    /// The old right's UTXO pays to an enclave script, so ownership alone
-    /// passes. But this tx spends it: a new right sealed there is lost.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_an_outpoint_the_psbt_spends() {
-        let psbt = psbt_with_two_inputs();
-        for input in 0..2 {
-            let err = mint_right_error(&psbt, seal_on_input(&psbt, input));
-            assert!(err.contains("this transaction spends"), "{input}: {err}");
-        }
-    }
-
-    /// Upstream rgb-lib with no BTC change (bdk dropped a dust drain) seals
-    /// the right to an existing wallet UTXO, off the signed tx.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn accepts_a_mint_right_on_an_owned_wallet_utxo_when_the_tx_has_no_change() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: Some([0x77; 32]),
-            vout: 3,
-        }];
-        let owned = |p: &Psbt, o: OutPoint| {
-            Ok(owns_vout_1(p, o)? || (o.vout == 3 && o.txid.to_byte_array() == [0x77; 32]))
-        };
-        validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owned)
-            .expect("an owned off-tx wallet UTXO keeps the right");
-    }
-
-    /// The oracle refuses an off-tx UTXO the indexer shows spent or unmined.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_a_wallet_utxo_the_oracle_finds_spent() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: Some([0x77; 32]),
-            vout: 3,
-        }];
-        let psbt_txid = psbt.unsigned_tx.compute_txid();
-        let spent = |p: &Psbt, o: OutPoint| {
-            if o.txid == psbt_txid {
-                return owns_vout_1(p, o);
-            }
-            Err(EnclaveError::CrossCheck(format!("outpoint {o} is spent")))
-        };
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &spent)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("is spent"), "{err}");
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn accepts_a_mint_right_on_an_owned_output_of_the_signed_tx() {
-        let psbt = psbt_with_two_inputs();
-        let mut display = psbt.unsigned_tx.compute_txid().to_byte_array();
-        display.reverse();
-        for txid in [None, Some(display)] {
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_mint_rights = vec![OutputSeal::Revealed { txid, vout: 1 }];
-            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-                .expect("an owned output of the signed tx keeps the right");
-        }
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_a_foreign_output_of_the_signed_tx() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: None,
-            vout: 0,
-        }];
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("cannot prove it owns"), "{err}");
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_an_output_the_signed_tx_does_not_have() {
-        let psbt = psbt_with_two_inputs();
-        let err = mint_right_error(
-            &psbt,
-            OutputSeal::Revealed {
-                txid: None,
-                vout: 2,
-            },
-        );
-        assert!(err.contains("has only 2 outputs"), "{err}");
     }
 
     #[test]
@@ -1711,7 +1595,10 @@ mod anchor {
             &psbt,
             vec![mint_right, confidential_to(1_000, "utxob:recipient")],
         );
-        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+        // The split alone: rule 8 refuses a mint with a right output.
+        let txid = psbt.unsigned_tx.compute_txid();
+        let committed = validated.transitions_committed_by(txid);
+        let legs = split_asset_legs(&psbt, txid, &committed, &owns_vout_1)
             .expect("the mintRight assignment is not a recipient leg");
         assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
     }

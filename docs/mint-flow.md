@@ -43,14 +43,14 @@ Its block must be at least `SPV_MIN_CONFIRMATIONS` deep below the indexer's
 tip. An unmined, unknown or shallow witness fails consensus, so a history
 built on an off-chain transfer is refused. The only exception is the last
 witness: the mint transaction being signed is not broadcast yet. The PSBT
-check then requires it to be the PSBT's own transaction (M5.3). A first mint
-spends the genesis right, has no history, and makes no indexer call.
+check then requires it to be the PSBT's own transaction (M5.3). A mint on a
+genesis right has no history and makes no indexer call.
 
-A witness that another mined witness spends is mined at least as deep, by
-Bitcoin consensus, so it needs no lookup. In practice a lane costs one lookup
-per mint, for the previous mint, however many mints the lane holds. An
-older witness is looked up only when no mined witness spends it, such as a
-right moved to an existing wallet UTXO.
+A mint consumes its right, so a mint's history is the rights sends that made
+its right, plus any old-form mint that passed it on (section 10). A witness
+that another mined witness spends is mined at least as deep, by Bitcoin
+consensus, so it needs no lookup. Each other witness is looked up, such as a
+send that put the right on an existing wallet UTXO (a blinded invoice).
 
 On Electrum the enclave uses only non-verbose calls, so any server works
 (romanz/electrs included): the history of the witness's first
@@ -67,9 +67,10 @@ read on chain (see section 10).
 
 On a mint image `SPV_MIN_CONFIRMATIONS` is this history depth only. The mint
 image bakes 3, the depth the bridge waits for (`INIT_OP_MIN_CONFIRMATIONS`); the
-burn image keeps 6. The connector must not pick a right lane before its
-previous mint is that deep: it passes `min_confirmations` of at least this
-value to `mint_begin`, or every mint on a fresh lane is refused until then.
+burn image keeps 6. The connector must not mint on a right before the send
+that made it is that deep: it passes `min_confirmations` of at least this
+value to `mint_begin`, or a mint on a freshly sent right is refused until
+then.
 
 ## 3. Sequence
 
@@ -241,12 +242,11 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
   - a blinded seal is a recipient leg;
   - a revealed seal must be owned by the enclave. If not: refuse.
   - The recipient legs must sum to exactly `amount - commission`.
-- **M5.10** The mint must pass exactly one `mintRight` on, to a revealed seal
-  the enclave owns: an output of the signed tx (checked from PSBT metadata),
-  or, when the tx has no BTC change, an existing wallet UTXO (fetched through
-  the indexer, which must show it mined and unspent). The seal may not be an
-  outpoint the PSBT spends: the tx would close it at once. Otherwise the
-  host could drop the right or take it.
+- **M5.10** The mint must pass no `mintRight` on: it consumes its right, as
+  rgb-lib builds it. A mint with a right output is refused, even to a seal
+  the enclave owns, so no ownership proof is needed and the host cannot take
+  a right. New rights come from a rights send, which the mint signer does
+  not sign.
 - **M5.11** Every colored input the enclave signs must spend a seal the mint
   closes. Spending another colored output would destroy the RGB state on it,
   such as another mint right.
@@ -323,8 +323,9 @@ replicas recover the same seed. See [KMS seed persistence](kms-persistence.md).
 
 ## 10. The main idea
 
-A mint spends the mint right (`OS_MINT`, no units) and makes units
-(`OS_ASSET`). The amount is checked three times:
+A mint spends one mint right (`OS_MINT`, no units) and makes units
+(`OS_ASSET`). It passes no right on, so each mint uses up a right. The amount
+is checked three times:
 
 1. RGB consensus: the mint's `OS_ASSET` outputs equal its `issuedSupply`, and
    its anchor confirms only against a `FundsIn` of exactly that amount, for
@@ -336,5 +337,8 @@ Known limit: the mint path binds ancestor mints to their derived deposits
 without reading them, and trusts the pinned indexer (not an SPV chain) for
 witness depth. A host that controls the bridge can then build a history that
 no receiving wallet accepts, after the user locked. It cannot mint units that
-no deposit backs, and it cannot pass an unmined history witness. Never mint outside the TEE flow: a mint the enclave did not
-sign makes the later mints of its lineage unacceptable to receivers.
+no deposit backs, and it cannot pass an unmined history witness. A mint that
+consumes its right leaves no right behind, so ancestor mints come mostly
+from rights that old-form mints passed on. Never mint outside the TEE flow:
+in the old form, a mint the enclave did not sign made the later mints of its
+lineage unacceptable to receivers.

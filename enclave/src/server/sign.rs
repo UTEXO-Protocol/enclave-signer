@@ -59,8 +59,7 @@ pub(super) fn handle_sign(
     //
     // An outpoint on this PSBT is resolved from its taproot metadata.
     // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib
-    // puts RGB change, or a mint's right, on an existing UTXO when the tx has
-    // no BTC change.
+    // puts RGB change on an existing UTXO when the tx has no BTC change.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt, outpoint: bitcoin::OutPoint| {
         use crate::networks::rgb::btc_ownership;
@@ -785,7 +784,7 @@ mod key_not_ready {
         let right = gen::outpoint(0xA0, 0);
         let mut history = History::issue(Issue::new(42161, BRIDGE, vec![right]));
         let right = history.genesis_right(0, right);
-        let (_, units) = history.mint_owned(right, 100_000, 90);
+        let units = history.mint_owned(right, 100_000, 90);
         history.burn(units, 100_000, Some(100_000), Some([0; 32]));
         history
     }

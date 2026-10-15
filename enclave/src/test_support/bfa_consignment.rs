@@ -1,7 +1,8 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
-//! genesis, then mints, transfers and burns, each in a witness tx that
-//! commits its bundle in an OP_RETURN output. Tests need no stored V1
-//! fixture. Deterministic: fixed times, nonces, blinding and entropy.
+//! genesis, then mints, transfers of units or rights and burns, each in a
+//! witness tx that commits its bundle in an OP_RETURN output. Tests need no
+//! stored V1 fixture. Deterministic: fixed times, nonces, blinding and
+//! entropy.
 //!
 //! It uses only external crates, so integration tests include it with
 //! `#[path]`.
@@ -241,10 +242,28 @@ impl History {
         tx
     }
 
-    /// Mints `amount` to `to`, and passes the right on to vout 1 of the
-    /// witness tx. The tx spends the right, then `extra_inputs`, and pays
-    /// `outputs` (vout 1..).
+    /// Mints `amount` to `to`. The mint consumes the right, as rgb-lib builds
+    /// it. The tx spends the right, then `extra_inputs`, and pays `outputs`
+    /// (vout 1..).
     pub fn mint(
+        &mut self,
+        right: Utxo,
+        amount: u64,
+        after_block: u64,
+        to: BuilderSeal<GraphSeal>,
+        extra_inputs: Vec<OutPoint>,
+        outputs: Vec<TxOut>,
+    ) -> Committed {
+        let mint = self
+            .mint_transition(right, amount, after_block, to)
+            .complete_transition()
+            .unwrap();
+        self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs)
+    }
+
+    /// [`Self::mint`] in the old form, which passes a new right on to vout 1.
+    /// rgb-lib no longer builds it, and the mint signer refuses it.
+    pub fn mint_keeping_right(
         &mut self,
         right: Utxo,
         amount: u64,
@@ -254,7 +273,28 @@ impl History {
         outputs: Vec<TxOut>,
     ) -> (Committed, Utxo) {
         let mint = self
-            .transition("mint")
+            .mint_transition(right, amount, after_block, to)
+            .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, self.nonce))
+            .unwrap()
+            .complete_transition()
+            .unwrap();
+        let minted = self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs);
+        let kept = Utxo {
+            opout: Opout::new(minted.opid, OS_MINT, 0),
+            outpoint: OutPoint::new(minted.tx.compute_txid(), 1),
+        };
+        (minted, kept)
+    }
+
+    /// The mint of `amount` to `to` on `right`, still open for more outputs.
+    fn mint_transition(
+        &mut self,
+        right: Utxo,
+        amount: u64,
+        after_block: u64,
+        to: BuilderSeal<GraphSeal>,
+    ) -> TransitionBuilder {
+        self.transition("mint")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap()
             .add_metadata("afterBlock", BlockNumber::from(after_block))
@@ -263,10 +303,19 @@ impl History {
             .unwrap()
             .add_fungible_state("assetOwner", to, amount)
             .unwrap()
-            .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, self.nonce))
-            .unwrap()
-            .complete_transition()
-            .unwrap();
+    }
+
+    /// Commits `mint` in a tx that spends `right`, then `extra_inputs`, and
+    /// records its anchor.
+    fn commit_mint(
+        &mut self,
+        mint: Transition,
+        amount: u64,
+        after_block: u64,
+        right: Utxo,
+        extra_inputs: Vec<OutPoint>,
+        outputs: Vec<TxOut>,
+    ) -> Committed {
         let opid = mint.id();
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
@@ -277,18 +326,14 @@ impl History {
             amount,
             after_block,
         });
-        let next_right = Utxo {
-            opout: Opout::new(opid, OS_MINT, 0),
-            outpoint: OutPoint::new(tx.compute_txid(), 1),
-        };
-        (Committed { opid, tx }, next_right)
+        Committed { opid, tx }
     }
 
     /// Mints `amount` to a revealed seal on vout 2 of its witness tx, so a
-    /// later transition can spend it. Returns the right and the units.
-    pub fn mint_owned(&mut self, right: Utxo, amount: u64, after_block: u64) -> (Utxo, Utxo) {
+    /// later transition can spend it. Returns the units.
+    pub fn mint_owned(&mut self, right: Utxo, amount: u64, after_block: u64) -> Utxo {
         let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 0x2000 + self.nonce));
-        let (minted, next_right) = self.mint(
+        let minted = self.mint(
             right,
             amount,
             after_block,
@@ -296,11 +341,36 @@ impl History {
             vec![],
             vec![dust(0x01), dust(0x02)],
         );
-        let units = Utxo {
+        Utxo {
             opout: Opout::new(minted.opid, OS_ASSET, 0),
             outpoint: OutPoint::new(minted.tx.compute_txid(), 2),
-        };
-        (next_right, units)
+        }
+    }
+
+    /// A rights send to witness invoices: spends `right` and makes `count`
+    /// rights, on vouts 1..=count of its witness tx. One right in, any number
+    /// out.
+    pub fn duplicate_right(&mut self, right: Utxo, count: u16) -> Vec<Utxo> {
+        let mut send = self
+            .transition("transfer")
+            .add_input(right.opout, AllocatedState::Void)
+            .unwrap();
+        for vout in 1..=u32::from(count) {
+            let seal = GraphSeal::with_blinded_vout(vout, self.nonce);
+            send = send.add_rights("mintRight", seal).unwrap();
+        }
+        let send = send.complete_transition().unwrap();
+        let opid = send.id();
+        let outputs = (1..=count).map(|_| dust(0x05)).collect();
+        let txid = self
+            .commit(vec![send], vec![right.outpoint], outputs)
+            .compute_txid();
+        (0..count)
+            .map(|no| Utxo {
+                opout: Opout::new(opid, OS_MINT, no),
+                outpoint: OutPoint::new(txid, u32::from(no) + 1),
+            })
+            .collect()
     }
 
     /// Moves `input` (holding `amount`) to vout 1 of a new witness tx.

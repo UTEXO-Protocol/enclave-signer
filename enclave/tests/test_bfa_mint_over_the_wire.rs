@@ -7,7 +7,7 @@
 //!
 //! Runs over the wire through `handle_sign`, so the bridge-location pin, the
 //! `FundsIn` read with its finality, the anchor binding, the invoice bind
-//! and the mint-right custody are on the path. Issues a BFA asset over
+//! and the mint-right rule are on the path. Issues a BFA asset over
 //! regtest funding transactions. Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
@@ -179,14 +179,16 @@ struct Deposit {
 
 /// Issues a BFA asset on `genesis_chain`, with `reject_list` if any, and its
 /// mint right on `bridge_funding:0`. A `mint` gives `MINTED` units to the user's blinded
-/// seal. Its witness tx spends the right and `aux` (if any) and passes the
-/// right on to the bridge change.
+/// seal. Its witness tx spends the right and `aux` (if any). The mint consumes
+/// the right, or in the old form (`keeps_right`) passes it on to the bridge
+/// change.
 fn issue_and_mint(
     bridge_funding: &Transaction,
     bridge_spk: &ScriptBuf,
     aux: Option<&Aux>,
     genesis_chain: u64,
     reject_list: Option<RejectListLocation>,
+    keeps_right: bool,
 ) -> Deposit {
     let right_utxo = OutPoint::new(bridge_funding.compute_txid(), 0);
     let mut history = History::issue(Issue {
@@ -209,14 +211,14 @@ fn issue_and_mint(
         value: Amount::from_sat(BRIDGE_CHANGE),
         script_pubkey: bridge_spk.clone(),
     };
-    let (mint, _) = history.mint(
-        right,
-        MINTED,
-        AFTER_BLOCK,
-        BuilderSeal::Concealed(secret),
-        extra,
-        vec![change],
-    );
+    let to = BuilderSeal::Concealed(secret);
+    let mint = if keeps_right {
+        history
+            .mint_keeping_right(right, MINTED, AFTER_BLOCK, to, extra, vec![change])
+            .0
+    } else {
+        history.mint(right, MINTED, AFTER_BLOCK, to, extra, vec![change])
+    };
 
     let invoice = RgbInvoiceBuilder::with(
         history.contract_id,
@@ -443,6 +445,7 @@ fn build_on(
     aux: Option<&Aux>,
     genesis_chain: u64,
     reject_list: Option<RejectListLocation>,
+    keeps_right: bool,
 ) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
@@ -454,6 +457,7 @@ fn build_on(
         aux,
         genesis_chain,
         reject_list,
+        keeps_right,
     );
 
     let mut psbt = Psbt::from_unsigned_tx(deposit.witness_tx.clone()).unwrap();
@@ -477,7 +481,7 @@ fn build_on(
 }
 
 fn build(aux: Option<&Aux>) -> Built {
-    build_on(aux, EVM_CHAIN_ID, None)
+    build_on(aux, EVM_CHAIN_ID, None, false)
 }
 
 /// The built deposit through the front door, over the wire, against a lock
@@ -814,13 +818,21 @@ fn refuses_a_lock_at_or_before_after_block() {
 /// The asset's genesis names the pinned Bridge on another chain.
 #[test]
 fn refuses_an_asset_bridged_on_another_chain() {
-    let refusal = refusal(&drive(&build_on(None, 42161, None)));
+    let refusal = refusal(&drive(&build_on(None, 42161, None, false)));
     assert!(refusal.contains("is not the pinned"), "{refusal}");
+}
+
+/// The old mint form passes its right on to the bridge change, an output the
+/// enclave owns. The mint signer refuses it all the same.
+#[test]
+fn refuses_a_mint_that_passes_its_right_on() {
+    let refusal = refusal(&drive(&build_on(None, EVM_CHAIN_ID, None, true)));
+    assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
 }
 
 fn build_listed() -> Built {
     let list = bfa_consignment::evm_reject_list(EVM_CHAIN_ID, LIST);
-    build_on(None, EVM_CHAIN_ID, Some(list))
+    build_on(None, EVM_CHAIN_ID, Some(list), false)
 }
 
 /// A mint of a listed asset reads the list through the pinned EVM client and

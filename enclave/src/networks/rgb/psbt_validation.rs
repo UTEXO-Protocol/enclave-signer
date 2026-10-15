@@ -115,9 +115,9 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      The outpoint can be off the signed tx: with no BTC change, rgb-lib puts
 ///      the RGB change on an existing wallet UTXO. That needs an indexer call,
 ///      capped at [`MAX_OFF_TX_CHANGE_OUTPOINTS`] per PSBT.
-///   8. Mint right (mint flow): the mint passes exactly one `mintRight` on, to
-///      a revealed seal that `self_owned` proves is ours and this tx does not
-///      spend.
+///   8. Mint right (mint flow): the mint consumes its `mintRight` and passes
+///      none on. New rights come from a rights send, which this signer does
+///      not sign.
 ///
 /// `self_owned` resolves whether an outpoint pays back to this enclave. It is a
 /// callback, not a `&KeyManager`, so the key lock is not held across the
@@ -233,6 +233,8 @@ pub fn validate_psbt_anchors_transition(
         )));
     }
     flow::assert_committed_group(&committed)?;
+    #[cfg(feature = "rgb-mint-burn")]
+    assert_mint_right_consumed(&validated.last_mint_rights)?;
 
     // The sum covers the whole group, so a sibling transition cannot move
     // value outside the bind.
@@ -248,11 +250,9 @@ pub fn validate_psbt_anchors_transition(
     let net_credited = source_amount.saturating_sub(source_commission);
     flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
 
-    // Per-output recipient bind. It runs last because only it and the mint
-    // right bind use the enclave keys.
+    // Per-output recipient bind. It runs last because only it uses the
+    // enclave keys.
     let legs = split_asset_legs(psbt, psbt_txid, &committed, self_owned)?;
-    #[cfg(feature = "rgb-mint-burn")]
-    assert_mint_right_kept(psbt, psbt_txid, &validated.last_mint_rights, self_owned)?;
     if legs.recipient != net_credited {
         return Err(EnclaveError::CrossCheck(format!(
             "send-RGB recipient amount mismatch: consignment pays {} asset units to \
@@ -408,54 +408,15 @@ fn split_asset_legs(
     Ok(legs)
 }
 
-/// The mint passes the right to mint on to exactly one seal this enclave
-/// owns. Off the tx (no BTC change), `self_owned` also needs it mined, unspent.
+/// A mint consumes its right, as rgb-lib builds it. A right it passed on
+/// could go to a seal the host controls.
 #[cfg(feature = "rgb-mint-burn")]
-fn assert_mint_right_kept(
-    psbt: &Psbt,
-    psbt_txid: bitcoin::Txid,
-    rights: &[super::validation::OutputSeal],
-    self_owned: SelfOwnedOutpoint<'_>,
-) -> Result<()> {
-    use super::validation::OutputSeal;
-    use bitcoin::hashes::Hash;
-
-    let [OutputSeal::Revealed { txid, vout }] = rights else {
+fn assert_mint_right_consumed(rights: &[super::validation::OutputSeal]) -> Result<()> {
+    if !rights.is_empty() {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint passes {} mintRight output(s) on, or hides its seal - the mint signer keeps \
-             exactly one, on a revealed seal it owns",
+            "mint passes {} mintRight output(s) on - the mint signer signs only a mint that \
+             consumes its right",
             rights.len()
-        )));
-    };
-    let txid = txid.map_or(psbt_txid, |bytes| {
-        let mut internal = bytes;
-        internal.reverse();
-        bitcoin::Txid::from_byte_array(internal)
-    });
-    let outpoint = bitcoin::OutPoint { txid, vout: *vout };
-    // The tx closes each outpoint it spends, so a right sealed there is lost.
-    if psbt
-        .unsigned_tx
-        .input
-        .iter()
-        .any(|txin| txin.previous_output == outpoint)
-    {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to {outpoint}, which this transaction spends - the right \
-             would be lost"
-        )));
-    }
-    let outputs = psbt.unsigned_tx.output.len();
-    if txid == psbt_txid && *vout as usize >= outputs {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to output {vout}, but the transaction being signed has \
-             only {outputs} outputs - the right would be lost"
-        )));
-    }
-    if !self_owned(psbt, outpoint)? {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to {outpoint}, which this enclave cannot prove it owns \
-             - refusing to give the right to mint away"
         )));
     }
     Ok(())

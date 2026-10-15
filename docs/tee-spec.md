@@ -490,10 +490,10 @@ build's flow accepts, and the group's asset outputs are checked against the
 credited amount. Which transition is accepted is the build's RGB flow:
 `TS_TRANSFER` under `rgb-swap` (coverage `>=`, since the surplus is bridge
 change), exactly one `TS_MINT` under `rgb-mint-burn` with a strict `==`, since
-any surplus is an over-mint. A mint must pass its one `mintRight` on to an
-owned seal the signed transaction does not spend: one of its outputs, or a
-wallet UTXO the indexer shows mined and unspent. Every colored input the
-enclave signs must spend a seal the signed bundle closes.
+any surplus is an over-mint. A mint must consume its `mintRight` and pass no
+right on: new rights come from a rights send, which the mint signer does not
+sign. Every colored input the enclave signs must spend a seal the signed
+bundle closes.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
 (the script of the enclave's single Colored input, or a BIP-86 key-path output

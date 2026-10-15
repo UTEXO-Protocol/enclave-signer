@@ -47,7 +47,7 @@ pub struct ValidatedConsignment {
     /// state moves the enclave never saw.
     pub last_bundle_fully_disclosed: bool,
     /// The `mintRight` (`OS_MINT`) outputs of the settling transition. A mint
-    /// must pass the right back to the enclave.
+    /// must have none: it consumes its right.
     pub last_mint_rights: Vec<OutputSeal>,
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`

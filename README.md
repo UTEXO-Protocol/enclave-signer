@@ -96,9 +96,8 @@ Before it signs, the mint signer:
 4. Binds the PSBT to the consignment. The txid, the inputs and the sighash
    types must match. The signed bundle holds exactly one mint and hides no
    transition. The minted units must equal `amount - commission` exactly.
-   The mint passes its `mintRight` to an output the enclave owns (on the
-   signed tx, or a mined, unspent wallet UTXO), and every colored input
-   spends a seal the mint closes.
+   The mint consumes its `mintRight` and passes no right on, and every
+   colored input spends a seal the mint closes.
 5. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
    the one blinded seal in the consignment must equal that invoice.
