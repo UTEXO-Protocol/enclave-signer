@@ -1,5 +1,18 @@
+# Enclave workspace: every crate measured into the EIF, plus the attestation
+# verifier it shares with the parent.
+#
+# `parent/` is a separate workspace. Cargo resolves every git source of a
+# workspace, also for a `-p` build. As a member, the private parent proto dep
+# needs credentials for every enclave build, which defeats the vendored
+# `enclave-proto/`. Keep `parent` out of `members`.
+# The private RGB mirrors still need credentials.
 [workspace]
-members = ["attestation-verify", "enclave", "parent"]
+members = [
+    "attestation-verify",
+    "enclave",
+    "enclave-proto",
+]
+exclude = ["parent"]
 resolver = "2"
 
 [profile.release]
@@ -9,8 +22,21 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
-# RGB ecosystem crates — pinned to git master for consignment validation.
+# RGB crates for consignment validation, pinned by rev, not by branch.
+# If upstream rebases a branch, the locked rev can become unreachable.
+# The build and PCR0 reproduction then fail.
+#
+# These revs must match parent/Cargo.toml exactly. Change both together.
 [patch.crates-io]
-rgb-ops = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
-rgb-invoicing = { git = "https://github.com/rgb-protocol/rgb-ops", branch = "master" }
-rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", branch = "master" }
+# The `s/bfa` branches of the RGB crates, mirrored into our org, carry the BFA
+# schema. The mirrors are cut from 0.11.1-rc.10, which pulls electrum-client 0.24.
+# See the TEMPORARY note in enclave/src/networks/rgb/validation/indexer.rs.
+#
+# Local builds: these three repos are private. Load an SSH key with read
+# access to rgb-consensus-s-bfa, rgb-ops-s-bfa and rgb-schemas-s-bfa.
+# Ask the team for a deploy key.
+rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
+rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }

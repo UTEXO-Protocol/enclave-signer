@@ -1,24 +1,34 @@
 name: "Build EIF"
 
-# Produces the PRODUCTION enclave image (release: vsock,rgb-validation,spv) as a
-# Nitro EIF, captures its PCR measurements, and publishes everything to S3 under
-# an immutable git-SHA path. Runtime hosts then pull the EIF by SHA instead of
-# anyone building on a side machine.
+# Produces the release enclave EIFs, captures their PCR measurements, and
+# publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
+# pull the EIF by SHA instead of anyone building on a side machine.
+#
+# Builds five variants (matrix): combined (retired swap flow, historical name +
+# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production), and ccd.
+# Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
 # the SAME version the runtime hosts run (stage hosts: 1.4.5). Bump NITRO_CLI_VERSION
 # here in lockstep with the hosts, or attestation (KMS PCR policy + clone) breaks.
 # The image side is pinned too: base images are pinned by digest in
-# Dockerfile.enclave and layer timestamps are normalised via SOURCE_DATE_EPOCH +
-# BuildKit rewrite-timestamp (build/build-enclave.sh). OS package versions
-# (apt/dnf) still float — pinning them is the next determinism step.
+# each enclave Dockerfile and layer timestamps are normalised via SOURCE_DATE_EPOCH +
+# BuildKit rewrite-timestamp (build/build-enclave.sh). EIF recipes pin OS
+# packages to a signed Debian snapshot.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
-#   secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY  read-only deploy key (already used by ci.yml)
+#   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
+#   secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY        rgb-consensus-s-bfa access
+#   secrets.RGB_OPS_BFA_DEPLOY_KEY              rgb-ops-s-bfa access
+#   secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY          rgb-schemas-s-bfa access
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
+#   secrets.ECR_PUBLIC_PULL_ROLE_ARN           separate OIDC role for public ECR pulls
+#                                              (optional; unset => anonymous pulls)
+#   The ECR role needs only ecr-public:GetAuthorizationToken and
+#   sts:GetServiceBearerToken (sts:AWSServiceName=ecr-public.amazonaws.com).
 #   vars.AWS_REGION                            AWS region for OIDC + S3 (e.g. eu-central-1)
 #   vars.EIF_S3_BUCKET                         target S3 bucket for the artifacts
 # No infra identifiers (account id, bucket, region) are hardcoded here — this is
@@ -26,6 +36,15 @@ name: "Build EIF"
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_features:
+        description: >-
+          Leave EMPTY for normal stage and release builds. For isolated debug
+          builds only: extra Cargo features such as `allow-debug-pcrs` for
+          enclaves launched in Nitro debug mode. This does not control log
+          verbosity; use RUST_LOG for logging.
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -38,32 +57,58 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   # Hoisted to env because secrets can't be referenced directly in `if:`.
   AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+  ECR_PUBLIC_PULL_ROLE: ${{ secrets.ECR_PUBLIC_PULL_ROLE_ARN }}
 
 jobs:
   build-eif:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Combined (rgb + rgb-swap + ccd), retired swap flow. Keeps the
+          # historical eif name and S3 path.
+          - variant: combined
+            dockerfile: Dockerfile.enclave
+            eif_name: utexo-bridge-enclave.eif
+            s3_subpath: ""
+            artifact_suffix: ""
+          # RGB-only single-network EIF, send/receive flow (`rgb-swap`, retired).
+          - variant: rgb
+            dockerfile: Dockerfile.enclave.rgb
+            eif_name: utexo-bridge-enclave-rgb.eif
+            s3_subpath: "rgb/"
+            artifact_suffix: "-rgb"
+          # RGB-only single-network EIFs, mint/burn flow. Two signer roles,
+          # each its own enclave with its own PCR0 and seed: the mint signer
+          # (EVM -> RGB) and the burn signer (RGB -> EVM).
+          - variant: rgb-mint
+            dockerfile: Dockerfile.enclave.mint
+            eif_name: utexo-bridge-enclave-mint.eif
+            s3_subpath: "rgb-mint/"
+            artifact_suffix: "-mint"
+          - variant: rgb-burn
+            dockerfile: Dockerfile.enclave.burn
+            eif_name: utexo-bridge-enclave-burn.eif
+            s3_subpath: "rgb-burn/"
+            artifact_suffix: "-burn"
+          # Concordium-only single-network EIF.
+          - variant: ccd
+            dockerfile: Dockerfile.enclave.ccd
+            eif_name: utexo-bridge-enclave-ccd.eif
+            s3_subpath: "ccd/"
+            artifact_suffix: "-ccd"
     steps:
       - uses: actions/checkout@v4
 
-      # Deploy key for the private `rgb-consignment` dep (rgb-validation/spv).
-      # Same secret the CI/CD workflows already use; `--ssh default` forwards it
-      # into the BuildKit build for the cargo fetch only.
-      - name: Set up SSH for private RGB deps
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}
-            ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
-
-      # Two private repos (federated-signer-proto + rgb-consignment-parser) live on
-      # github.com; a single ssh-agent with two repo-scoped deploy keys offers the
-      # wrong one first ("Repository not found"). Hand both keys to BuildKit as
-      # secret files so Dockerfile.enclave can pin a per-repo key via SSH aliases.
-      - name: Prepare BuildKit key files
-        run: |
-          umask 077
-          printf '%s\n' '${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}' > /tmp/federated_key
-          printf '%s\n' '${{ secrets.RGB_CONSIGNMENT_PARSER_DEPLOY_KEY }}' > /tmp/consignment_key
+      - name: Prepare private dependency keys
+        env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
+          FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          RGB_CONSENSUS_BFA_DEPLOY_KEY: ${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}
+          RGB_OPS_BFA_DEPLOY_KEY: ${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}
+          RGB_SCHEMAS_BFA_DEPLOY_KEY: ${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}
+        run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -71,11 +116,11 @@ jobs:
       - name: Install Rust (for nitro-cli build)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
           targets: x86_64-unknown-linux-musl
 
       - name: System deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang
 
       # Build + cache nitro-cli pinned to the host version. The repo's
       # blobs/x86_64 (kernel/init) determine PCR0/PCR1, so pinning the tag pins
@@ -86,6 +131,29 @@ jobs:
         with:
           path: ~/nitro-cli-dist
           key: nitro-cli-${{ env.NITRO_CLI_VERSION }}
+
+      - name: Configure AWS credentials for ECR Public
+        id: ecr-auth
+        if: ${{ steps.nitro-cache.outputs.cache-hit != 'true' && env.ECR_PUBLIC_PULL_ROLE != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUBLIC_PULL_ROLE }}
+          aws-region: us-east-1
+          role-duration-seconds: 900
+          output-env-credentials: false
+          output-credentials: true
+
+      - name: Authenticate Docker to ECR Public
+        if: ${{ steps.nitro-cache.outputs.cache-hit != 'true' && env.ECR_PUBLIC_PULL_ROLE != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.ecr-auth.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.ecr-auth.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.ecr-auth.outputs.aws-session-token }}
+        run: |
+          set -euo pipefail
+          # ECR Public authentication uses us-east-1 regardless of the S3 region.
+          aws ecr-public get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin public.ecr.aws
 
       - name: Build nitro-cli ${{ env.NITRO_CLI_VERSION }}
         if: steps.nitro-cache.outputs.cache-hit != 'true'
@@ -113,8 +181,16 @@ jobs:
 
       - name: Build EIF + measurements
         env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           OUT_DIR: ${{ github.workspace }}/artifacts
           NITRO_CLI_BLOBS: /home/runner/nitro-cli-dist/blobs
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          EIF_NAME: ${{ matrix.eif_name }}
+          IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          # Extra debug features are only for isolated manual debug builds.
+          ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
+          # Public testnet4 stage asset, shared by Mint and Burn image builds.
+          RGB_ASSET_ID: "rgb:IWhl__dh-G9mAHQM-qaGsgrJ-PrIvvji-T6QjYOc-J9BbJaY"
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
@@ -125,36 +201,64 @@ jobs:
       # do not depend on the host glibc version. Published next to the EIF under
       # the same git_sha so a host pulls a matching {EIF, parent, cli} set.
       - name: Build host binaries (parent + cli, static musl)
+        env:
+          PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
         run: |
           set -euxo pipefail
-          cargo build --release --locked -p utexo-bridge-parent --features vsock \
-            --target x86_64-unknown-linux-musl
-          BIN=target/x86_64-unknown-linux-musl/release
+          # `parent/` is its own workspace (see the root Cargo.toml comment),
+          # so build from inside it rather than with `-p` from the repo root.
+          sh build/with-private-deps.sh parent cargo build --release --locked --manifest-path parent/Cargo.toml \
+            --features vsock --target x86_64-unknown-linux-musl
+          BIN=parent/target/x86_64-unknown-linux-musl/release
           cp "$BIN/utexo-bridge-parent" "$BIN/utexo-bridge-parent-cli" artifacts/
           ( cd artifacts && sha256sum utexo-bridge-parent utexo-bridge-parent-cli > HOST-SHA256SUMS )
           cat artifacts/HOST-SHA256SUMS
 
       - name: Write build metadata
+        env:
+          VARIANT: ${{ matrix.variant }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          EIF_NAME: ${{ matrix.eif_name }}
+          IMAGE_TAG: utexo-bridge-enclave-${{ matrix.variant }}:latest
+          DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
         run: |
           set -euxo pipefail
-          cat > artifacts/metadata.json <<EOF
-          {
-            "git_sha": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "nitro_cli_version": "${NITRO_CLI_VERSION}",
-            "run_id": "${{ github.run_id }}",
-            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
+          # Read the asset pin from the image used for the EIF.
+          docker image inspect "$IMAGE_TAG" | jq \
+            --arg git_sha "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg variant "$VARIANT" \
+            --arg dockerfile "$DOCKERFILE" \
+            --arg eif_name "$EIF_NAME" \
+            --arg nitro_cli_version "$NITRO_CLI_VERSION" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg debug_features "$DEBUG_FEATURES" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.[0].Config.Env
+            | map(select(startswith("RGB_ASSET_ID=")) | ltrimstr("RGB_ASSET_ID="))
+            | {
+                git_sha: $git_sha,
+                ref: $ref,
+                variant: $variant,
+                dockerfile: $dockerfile,
+                eif_name: $eif_name,
+                rgb_asset_id: (.[0] // null),
+                nitro_cli_version: $nitro_cli_version,
+                run_id: $run_id,
+                debug_features: $debug_features,
+                built_at: $built_at
+              }' > artifacts/metadata.json
           cat artifacts/metadata.json
 
       - name: Upload run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: eif-${{ github.sha }}
+          # Use a separate artifact name for debug builds of the same commit.
+          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}${{ github.event.inputs.debug_features != '' && '-debug' || '' }}
           path: |
-            artifacts/utexo-bridge-enclave.eif
+            artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
+            artifacts/IMAGE-ENV.json
             artifacts/SHA256SUMS
             artifacts/metadata.json
             artifacts/utexo-bridge-parent
@@ -177,6 +281,11 @@ jobs:
         run: |
           set -euxo pipefail
           [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }
-          DEST="s3://${BUCKET}/eif/${{ github.sha }}/"
+          # Store debug EIFs in a separate S3 path to protect production artifacts.
+          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ github.event.inputs.debug_features != '' && 'debug/' || '' }}${{ matrix.s3_subpath }}"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"
+
+      - name: Remove private dependency keys
+        if: always()
+        run: rm -rf "${{ runner.temp }}/private-deps"

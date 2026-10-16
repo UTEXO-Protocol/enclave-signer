@@ -1,3 +1,32 @@
+# Separate workspace from the enclave workspace at the repo root. The parent
+# needs the private `federated-signer-proto` crate. A shared workspace makes
+# every enclave build need that credential and breaks public PCR0 reproduction.
+#
+# Build the parent from this directory (`cd parent && cargo build`).
+# This workspace has its own Cargo.lock. The `[patch.crates-io]` and
+# `[profile.release]` blocks copy the root blocks. Keep them in sync.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+
+# Must match the root workspace exactly. The dev-dependency on
+# `utexo-bridge-enclave` pulls its default features (`rgb` -> `spv` -> `rgb-validation`),
+# so the RGB crates are in this graph too. Pin by rev, not branch, so both
+# workspaces compile against the same rgb-ops. Bump both together.
+[patch.crates-io]
+# rgb-consensus is patched too: the `s/bfa` rgb-ops uses the ether extension,
+# which the crates.io rgb-consensus does not have.
+rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
+rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
+rgb-schemas = { git = "ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
+
 [package]
 name = "utexo-bridge-parent"
 version = "0.1.0"
@@ -17,37 +46,73 @@ path = "src/bin/attest_verify.rs"
 
 [dependencies]
 prost = "0.14"
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http = "1"
+# GlobalConcurrencyLimitLayer limits requests across connections. (F03-AF-13)
+tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
-federated-signer-proto = { git = "ssh://git@github.com/UTEXO-Protocol/federated-signer-proto.git", rev = "08ab48be2f42ec1ae11d93672f630dc2035245c5", package = "federated-signer-proto" }
-clap = { version = "4", features = ["derive"] }
+tokio-stream = "0.1"
+# The optional seed storage bridge uses the AWS role provider and S3 client.
+# The EC2 parent does not need SSO, credential subprocesses or SigV4a.
+aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.146.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-credential-types = "=1.3.0"
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1"
+# Full schema from the shared upstream repo. The parent runs on the untrusted
+# host, so a private build credential is acceptable here. Keep this rev equal
+# to the vendored slice in `enclave-proto/` (see its README).
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "a4b2339720f9425d8835d50492cdb58e93c407cd", package = "federated-signer-proto" }
+clap = { version = "4", features = ["derive", "env"] }
+# `GET /health` readiness probe. Keep the axum version equal to tonic's axum.
+axum = "0.8"
+serde_json = "1"
+
 
 thiserror = "2"
 anyhow = "1"
 
 hex = "0.4"
+# Header sync: `bitcoin` parses and hashes headers. The source is the raw
+# Electrum client (no default features). TLS trusts the WebPKI root bundle.
+bitcoin = "0.32"
+electrum-client = { version = "=0.24.1", default-features = false }
+webpki-roots = "1.0"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# attest-verify CLI dependencies. `mock` feature is enabled so the CLI can
-# verify documents from an enclave built with `mock-attestation` for dev/CI;
-# production verification (no --mock flag) goes through the real path.
+# attest-verify CLI. The `mock` feature lets the CLI verify documents from a
+# `mock-attestation` enclave in dev and CI. Without `--mock`, the CLI uses the
+# real verification path.
 attestation-verify = { path = "../attestation-verify", features = ["mock"] }
-sha2 = "0.10"
-# keccak256 for the CLI's consignment_hash integrity field (send-RGB PSBT path)
-sha3 = "0.10"
-rand = "0.8"
+sha2 = "0.11"
+# keccak256 for the CLI `consignment_hash` field (send-RGB PSBT path).
+sha3 = "0.12"
+rand = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
+tokio-vsock = "=0.7.2"
 
 [features]
 default = []
 vsock = []
+# DANGER: dev only. The parent serves plaintext gRPC with no client auth on
+# any bind address. A release build with it fails to compile.
+insecure-dev = []
 
 [dev-dependencies]
-# Real enclave (with mock-attestation + seed-import) for end-to-end tests
-# that drive the full CLI verifier against a live enclave + gRPC stack.
+tonic-prost = "0.14"
+# Edits a mock attestation document in the launch check tests.
+ciborium = "0.2"
+# Real enclave (mock-attestation, seed-import) for end-to-end tests of the
+# CLI verifier against a live enclave and gRPC stack.
 utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }
-bitcoin = "0.32"
+# Self-signed certificate for the header-sync TLS test, made in-process.
+# The mTLS tests use openssl (tests/fixtures/parent-pki.sh).
+rcgen = "0.14"
+# Real-format documents under a test root, for the offline bundle tests.
+attestation-verify = { path = "../attestation-verify", features = ["mock", "test-util"] }

@@ -23,8 +23,8 @@ fn roundtrip_encode_decode() {
 
 #[test]
 fn reject_oversized_message() {
-    // 5 MB > 4 MB limit
-    let len: u32 = 5 * 1024 * 1024;
+    // 25 MiB > 24 MiB limit
+    let len: u32 = 25 * 1024 * 1024;
     let buf = len.to_le_bytes().to_vec();
     let mut cursor = Cursor::new(buf);
     let result: Result<EnclaveRequest, _> = framing::read_message(&mut cursor);

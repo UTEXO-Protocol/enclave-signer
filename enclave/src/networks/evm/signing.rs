@@ -1,16 +1,24 @@
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
+use crate::networks::evm::validation::{decode_lz_funds_out_params, FundsOutParams};
 use crate::networks::evm::{ADDRESS_LEN, HASH_LEN};
-use crate::proto::EvmDestination;
+use crate::proto::{EvmDestination, LzReleaseParams};
 
 const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
-const BRIDGE_OP_TYPE_HASH_STR: &str =
-    "BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)";
 
-/// EIP-712 domain separator components.
-/// Must match the deployed MultisigProxy contract exactly.
+/// EIP-712 type string for `MultisigProxy.fundsOutCall`.
+/// The digest commits to each release field. `sourceBurnTxId` (bridge PR #152)
+/// follows `settlementData`.
+///
+/// A wrong struct recovers a different address. On chain, this shows only as
+/// an unregistered-signer rejection.
+const TEE_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeFundsOut(address recipient,uint256 amount,\
+     uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
+     bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)";
+
+/// EIP-712 domain separator fields. They must match the deployed MultisigProxy.
 pub struct Eip712Domain {
     pub name: String,
     pub version: String,
@@ -19,7 +27,7 @@ pub struct Eip712Domain {
 }
 
 impl Eip712Domain {
-    /// Compute the domain separator hash per EIP-712.
+    /// Computes the EIP-712 domain separator hash.
     pub fn separator_hash(&self) -> [u8; HASH_LEN] {
         let type_hash = Keccak256::digest(DOMAIN_TYPE_HASH_STR.as_bytes());
         let name_hash = Keccak256::digest(self.name.as_bytes());
@@ -36,39 +44,20 @@ impl Eip712Domain {
     }
 }
 
-/// Build EIP-712 domain from enriched request fields.
-/// In dev-mode, falls back to defaults if fields are missing.
+/// Builds the EIP-712 domain from the request fields.
 pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
-    let chain_id = if req.chain_id > 0 {
-        req.chain_id
-    } else {
-        #[cfg(feature = "dev-mode")]
-        {
-            1
-        }
-        #[cfg(not(feature = "dev-mode"))]
-        {
-            return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
-        }
-    };
+    if req.chain_id == 0 {
+        return Err(EnclaveError::CrossCheck("chain_id must be > 0".into()));
+    }
+    let chain_id = req.chain_id;
 
-    let verifying_contract: [u8; ADDRESS_LEN] = if req.proxy_contract.len() == ADDRESS_LEN {
+    let verifying_contract: [u8; ADDRESS_LEN] =
         req.proxy_contract.as_slice().try_into().map_err(|_| {
-            EnclaveError::CrossCheck("proxy_contract must be {ADDRESS_LEN} bytes".into())
-        })?
-    } else {
-        #[cfg(feature = "dev-mode")]
-        {
-            [0u8; ADDRESS_LEN]
-        }
-        #[cfg(not(feature = "dev-mode"))]
-        {
-            return Err(EnclaveError::CrossCheck(format!(
+            EnclaveError::CrossCheck(format!(
                 "proxy_contract must be {ADDRESS_LEN} bytes, got {}",
                 req.proxy_contract.len()
-            )));
-        }
-    };
+            ))
+        })?;
 
     Ok(Eip712Domain {
         name: "MultisigProxy".to_string(),
@@ -78,39 +67,39 @@ pub fn build_evm_domain(req: &EvmDestination) -> Result<Eip712Domain> {
     })
 }
 
-/// Build the EIP-712 digest matching MultisigProxy._buildDigest():
-///   keccak256(abi.encode(_BRIDGE_OP_TYPEHASH, selector, keccak256(callData), nonce, deadline))
+/// Builds the EIP-712 digest that `MultisigProxy.fundsOutCall` verifies.
 ///
-/// Fallible on short calldata (audit final I-02): this used to `assert!`,
-/// which with `panic = "abort"` took down the whole enclave. The validation
-/// layer rejects `< 4` bytes in production builds, but dev-mode bypasses that
-/// check, so the guard here must be an error, not an abort.
-pub fn sign_request_digest(
+/// Mirrors `MultisigProxy._fundsOutStructHash`:
+/// eleven fields, `string`/`bytes` pre-hashed, `bytes32 sourceBurnTxId` as-is.
+///
+/// The enclave hashes the decoded fields, so it commits to the values that the
+/// transactor submits.
+///
+/// Returns `Result`, not `assert!`: with `panic = "abort"`, bad input would
+/// stop the enclave.
+pub fn funds_out_digest(
     domain: &Eip712Domain,
-    call_data: &[u8],
+    params: &FundsOutParams,
     nonce: u64,
     deadline: u64,
 ) -> Result<[u8; HASH_LEN]> {
-    if call_data.len() < 4 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "call_data must contain at least a 4-byte selector, got {} bytes",
-            call_data.len()
-        )));
-    }
-
     let struct_hash = {
-        let type_hash = Keccak256::digest(BRIDGE_OP_TYPE_HASH_STR.as_bytes());
+        let type_hash = Keccak256::digest(TEE_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
 
-        // bytes4 selector: abi.encode pads to HASH_LEN bytes, left-aligned (same as Solidity).
-        let mut selector_padded = [0u8; HASH_LEN];
-        selector_padded[..4].copy_from_slice(&call_data[..4]);
-
-        let call_data_hash = Keccak256::digest(call_data);
-
-        let mut buf = Vec::with_capacity(HASH_LEN * 5);
+        let mut buf = Vec::with_capacity(HASH_LEN * 12);
         buf.extend_from_slice(&type_hash);
-        buf.extend_from_slice(&selector_padded);
-        buf.extend_from_slice(&call_data_hash);
+        buf.extend_from_slice(&abi_encode_address(&params.recipient.into_array()));
+        // Full-width uint256s - never narrowed to the cross-checks' u64.
+        buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.sourceChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.destinationChainId.to_be_bytes::<HASH_LEN>());
+        // Dynamic fields enter the struct hash pre-hashed, per EIP-712.
+        buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
+        buf.extend_from_slice(&Keccak256::digest(&params.proof));
+        buf.extend_from_slice(&Keccak256::digest(&params.settlementData));
+        // bytes32 sourceBurnTxId: a static word, used as-is (not pre-hashed).
+        buf.extend_from_slice(&params.sourceBurnTxId.0);
         buf.extend_from_slice(&abi_encode_u256(nonce));
         buf.extend_from_slice(&abi_encode_u256(deadline));
 
@@ -118,20 +107,116 @@ pub fn sign_request_digest(
         hash
     };
 
+    Ok(eip712_digest(domain, &struct_hash))
+}
+
+/// EIP-712 type string for `MultisigProxy.lzFundsOutCall`.
+/// Fourteen fields. `sourceBurnTxId` (bridge PR #152) follows `extraOptions`.
+const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
+     uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
+     bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,\
+     uint256 minAmountLD,bytes extraOptions,bytes32 sourceBurnTxId,uint256 nonce,\
+     uint256 deadline)";
+
+/// Builds the EIP-712 digest that `MultisigProxy.lzFundsOutCall` verifies.
+///
+/// Mirrors `MultisigProxy._lzFundsOutStructHash`:
+/// fourteen fields, dynamic fields pre-hashed, `dstEid` (uint32) padded to 32
+/// bytes, `sourceBurnTxId` (bytes32) as-is. The `lz_release` proto fields must
+/// match the decoded calldata before the digest is built.
+pub fn lz_funds_out_digest(
+    domain: &Eip712Domain,
+    call_data: &[u8],
+    lz_release: &LzReleaseParams,
+    nonce: u64,
+    deadline: u64,
+) -> Result<[u8; HASH_LEN]> {
+    if call_data.len() < 4 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lzFundsOut call_data must be at least 4 bytes, got {}",
+            call_data.len()
+        )));
+    }
+    let params = decode_lz_funds_out_params(call_data)?;
+
+    // Cross-check the LZ proto fields against the decoded calldata.
+    if lz_release.dst_eid != params.dstEid {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lz_release.dst_eid {} != calldata dstEid {}",
+            lz_release.dst_eid, params.dstEid
+        )));
+    }
+    let recipient_bytes: [u8; 32] = params.recipient.0;
+    if lz_release.recipient != recipient_bytes {
+        return Err(EnclaveError::CrossCheck(
+            "lz_release.recipient does not match calldata recipient".into(),
+        ));
+    }
+    let min_amount_ld: u64 = params
+        .minAmountLD
+        .try_into()
+        .map_err(|_| EnclaveError::CrossCheck("lzFundsOut minAmountLD exceeds u64 range".into()))?;
+    if lz_release.min_amount_ld != min_amount_ld {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lz_release.min_amount_ld {} != calldata minAmountLD {}",
+            lz_release.min_amount_ld, min_amount_ld
+        )));
+    }
+
+    let struct_hash = {
+        let type_hash = Keccak256::digest(TEE_LZ_FUNDS_OUT_TYPE_HASH_STR.as_bytes());
+
+        let mut buf = Vec::with_capacity(HASH_LEN * 15);
+        buf.extend_from_slice(&type_hash);
+        buf.extend_from_slice(&params.amount.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.burnId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.sourceChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&params.destinationChainId.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&Keccak256::digest(params.sourceAddress.as_bytes()));
+        buf.extend_from_slice(&Keccak256::digest(&params.proof));
+        buf.extend_from_slice(&Keccak256::digest(&params.settlementData));
+        // uint32 dstEid: right-aligned in a 32-byte word, as Solidity ABI-encodes it.
+        buf.extend_from_slice(&abi_encode_u32(params.dstEid));
+        // bytes32 recipient: used as-is.
+        buf.extend_from_slice(&recipient_bytes);
+        buf.extend_from_slice(&params.minAmountLD.to_be_bytes::<HASH_LEN>());
+        buf.extend_from_slice(&Keccak256::digest(&params.extraOptions));
+        buf.extend_from_slice(&params.sourceBurnTxId.0);
+        buf.extend_from_slice(&abi_encode_u256(nonce));
+        buf.extend_from_slice(&abi_encode_u256(deadline));
+
+        let hash: [u8; HASH_LEN] = Keccak256::digest(&buf).into();
+        hash
+    };
+
+    Ok(eip712_digest(domain, &struct_hash))
+}
+
+/// Wraps a struct hash into the final EIP-712 digest: `keccak256(0x1901 ||
+/// domainSeparator || structHash)`.
+fn eip712_digest(domain: &Eip712Domain, struct_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
     let domain_separator = domain.separator_hash();
 
     let mut buf = Vec::with_capacity(2 + HASH_LEN + HASH_LEN);
     buf.extend_from_slice(&[0x19, 0x01]);
     buf.extend_from_slice(&domain_separator);
-    buf.extend_from_slice(&struct_hash);
+    buf.extend_from_slice(struct_hash);
 
-    Ok(Keccak256::digest(&buf).into())
+    Keccak256::digest(&buf).into()
 }
 
 /// ABI-encode a u64 as a uint256 (HASH_LEN bytes, big-endian, right-aligned).
 fn abi_encode_u256(val: u64) -> [u8; HASH_LEN] {
     let mut buf = [0u8; HASH_LEN];
     buf[24..].copy_from_slice(&val.to_be_bytes());
+    buf
+}
+
+/// ABI-encode a u32 as a uint32 (HASH_LEN bytes, big-endian, right-aligned),
+/// as Solidity `abi.encode(uint32)` does.
+fn abi_encode_u32(val: u32) -> [u8; HASH_LEN] {
+    let mut buf = [0u8; HASH_LEN];
+    buf[28..].copy_from_slice(&val.to_be_bytes());
     buf
 }
 
@@ -143,188 +228,4 @@ fn abi_encode_address(addr: &[u8; ADDRESS_LEN]) -> [u8; HASH_LEN] {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use hex::decode;
-
-    #[test]
-    fn test_abi_encode_u256() {
-        let encoded = abi_encode_u256(42);
-        assert_eq!(encoded[31], 42);
-        assert!(encoded[..31].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_abi_encode_u256_large() {
-        let encoded = abi_encode_u256(u64::MAX);
-        assert_eq!(&encoded[24..], &u64::MAX.to_be_bytes());
-        assert!(encoded[..24].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_abi_encode_address() {
-        let addr = [0xAA; 20];
-        let encoded = abi_encode_address(&addr);
-        assert!(encoded[..12].iter().all(|&b| b == 0));
-        assert_eq!(&encoded[12..], &[0xAA; 20]);
-    }
-
-    #[test]
-    fn test_domain_separator_deterministic() {
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 1,
-            verifying_contract: [0u8; 20],
-        };
-        let hash1 = domain.separator_hash();
-        let hash2 = domain.separator_hash();
-        assert_eq!(hash1, hash2);
-        assert_ne!(hash1, [0u8; HASH_LEN]);
-    }
-
-    #[test]
-    fn test_sign_request_digest_deterministic() {
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 1,
-            verifying_contract: [0u8; 20],
-        };
-        let call_data = decode(
-            "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
-             0000000000000000000000000000000000000000000000000000000000000064",
-        )
-        .unwrap();
-        let digest1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
-        let digest2 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
-        assert_eq!(digest1, digest2);
-        assert_ne!(digest1, [0u8; HASH_LEN]);
-    }
-
-    #[test]
-    fn test_different_nonce_different_digest() {
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 1,
-            verifying_contract: [0u8; 20],
-        };
-        let call_data = decode("aabbccdd").unwrap();
-        let d1 = sign_request_digest(&domain, &call_data, 0, 1_700_000_000).unwrap();
-        let d2 = sign_request_digest(&domain, &call_data, 1, 1_700_000_000).unwrap();
-        assert_ne!(d1, d2);
-    }
-
-    #[test]
-    fn test_short_call_data_rejected() {
-        // audit final I-02: short calldata must yield an error, never an
-        // abort — with `panic = "abort"` the old assert! killed the enclave.
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 1,
-            verifying_contract: [0u8; 20],
-        };
-        let err = sign_request_digest(&domain, &[0xAA, 0xBB], 0, 1_000).unwrap_err();
-        assert!(
-            err.to_string().contains("at least a 4-byte selector"),
-            "expected short-calldata rejection, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_digest_matches_go_bridge_computation() {
-        // Cross-check: reproduce the exact digest that bridge-utexo/blsProxy/transactor.go
-        // computes for a known input, ensuring enclave and contract agree.
-        //
-        // Go side (buildExecuteDigest):
-        //   bridgeOpTypehash = keccak256("BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)")
-        //   selectorBytes = callData[:4] left-aligned in HASH_LEN bytes
-        //   structHash = keccak256(typehash || selectorBytes || keccak256(callData) || nonce || deadline)
-        //   digest = keccak256(0x19 0x01 || domainSeparator || structHash)
-
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 42161, // Arbitrum One
-            verifying_contract: {
-                let mut addr = [0u8; 20];
-                addr.copy_from_slice(&decode("eAB44D217C5Af0Cc2A46ba296b5e0eBa5B4362d0").unwrap());
-                addr
-            },
-        };
-
-        let call_data = decode(
-            "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
-             0000000000000000000000000000000000000000000000000000000000000064",
-        )
-        .unwrap();
-
-        let nonce: u64 = 0;
-        let deadline: u64 = 1_700_000_000;
-
-        // Manually compute the expected digest step by step.
-        let type_hash = Keccak256::digest(
-            b"BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)",
-        );
-
-        let mut selector_padded = [0u8; HASH_LEN];
-        selector_padded[..4].copy_from_slice(&call_data[..4]);
-
-        let call_data_hash = Keccak256::digest(&call_data);
-
-        let mut struct_buf = Vec::new();
-        struct_buf.extend_from_slice(&type_hash);
-        struct_buf.extend_from_slice(&selector_padded);
-        struct_buf.extend_from_slice(&call_data_hash);
-        struct_buf.extend_from_slice(&abi_encode_u256(nonce));
-        struct_buf.extend_from_slice(&abi_encode_u256(deadline));
-        let expected_struct_hash = Keccak256::digest(&struct_buf);
-
-        let domain_sep = domain.separator_hash();
-
-        let mut digest_buf = Vec::new();
-        digest_buf.extend_from_slice(&[0x19, 0x01]);
-        digest_buf.extend_from_slice(&domain_sep);
-        digest_buf.extend_from_slice(&expected_struct_hash);
-        let expected_digest: [u8; HASH_LEN] = Keccak256::digest(&digest_buf).into();
-
-        let actual_digest = sign_request_digest(&domain, &call_data, nonce, deadline).unwrap();
-        assert_eq!(actual_digest, expected_digest);
-    }
-
-    #[test]
-    fn test_different_chain_id_different_domain() {
-        let d1 = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 1,
-            verifying_contract: [0u8; 20],
-        };
-        let d2 = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 137,
-            verifying_contract: [0u8; 20],
-        };
-        assert_ne!(d1.separator_hash(), d2.separator_hash());
-    }
-
-    #[test]
-    fn test_domain_separator_matches_deployed_contract() {
-        let domain = Eip712Domain {
-            name: "MultisigProxy".to_string(),
-            version: "1".to_string(),
-            chain_id: 42161,
-            verifying_contract: {
-                let mut addr = [0u8; 20];
-                addr.copy_from_slice(&decode("eAB44D217C5Af0Cc2A46ba296b5e0eBa5B4362d0").unwrap());
-                addr
-            },
-        };
-        let on_chain =
-            decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff").unwrap();
-        assert_eq!(domain.separator_hash(), on_chain.as_slice());
-    }
-}
+mod tests;

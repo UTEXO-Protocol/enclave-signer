@@ -1,0 +1,145 @@
+# Verify a burn signer
+
+This guide shows how to check, without access to the operator, that a burn
+signer's EVM address belongs to approved enclave code and is a signer of the
+bridge on Arbitrum One.
+
+The operator publishes one attestation bundle per burn enclave:
+`attestation-<CID>.json`. `deploy/verify-identity.sh` writes it after the
+enclave has its key and the operator supplies the complete approved identity
+map. An attestation failure returns nonzero; other CIDs may already have exported
+bundles. Do not treat individual files as approval of the whole deployment.
+
+## Operator: approve every signer before routing
+
+Obtain the expected main EVM address for **every CID** from the approved deployment
+record and confirm its on-chain registration. Do not generate this map from the
+live keys returned by the nodes you are checking.
+
+Run on each enclave host, replacing the paths and all three addresses:
+
+```bash
+ENCLAVE_ENV_DIR=/etc/utexo \
+CIDS="16 18 20" \
+EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
+bash deploy/verify-identity.sh
+```
+
+`CIDS` must list every signer that will receive traffic on this host.
+`EXPECTED_EVM` must contain exactly one address for each listed CID. Empty or
+partial maps, duplicate or extra CIDs, and malformed addresses return exit 2
+before any enclave is queried or bundle exported. An explicitly empty `CIDS`
+is also an error. With `ENCLAVE_ENV_DIR`, always supply explicit `CIDS`.
+The legacy single-role `ENCLAVE_ENV` mode defaults to `16 18 20` only when unset.
+
+For burn/combined signers in normal mode, configure `SIGNER_ROLE`, `PCR_FILE` and
+`IMAGE_ENV` in each `enclave-<CID>.env`, along with the release's launch values.
+The script loads each CID independently, so mixed Mint/Burn hosts use their own
+CLI, PCR manifest and image policy. Each export
+receives its approved address through `--expect-evm-address`. Mint or debug mode
+checks the main address with `get-keys`; this is a structural identity check,
+not an attestation. The script compares supplied approvals, not on-chain state.
+
+Routing automation must invoke the default identity mode and require exit 0
+for the full CID list, along with the deployment's other readiness checks.
+Any node failure or identity mismatch returns exit 1; configuration errors
+return exit 2. Do not continue routing on either error or use a partial bundle
+set as a substitute for the successful gate.
+
+For a diagnostic check of running enclaves and initialized keys only:
+
+```bash
+ENCLAVE_ENV_DIR=/etc/utexo CIDS="16 18 20" \
+bash deploy/verify-identity.sh --liveness
+```
+
+This explicit mode needs no identity map or release PCRs, exports no bundles,
+and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
+routing. Omitting the map in the default mode no longer falls back to liveness.
+
+## What one bundle proves
+
+The bundle holds an AWS Nitro attestation document for a burn key. When it
+verifies, the approved code (the PCRs you trust) created this key and holds it:
+
+- The release burn build has no seed import.
+- Cloning sends the seed only to an enclave with the same PCRs.
+
+So every signature by the attested EVM address comes from that code.
+
+## What it does not prove
+
+- That the enclave runs now. The document is a record of one moment.
+- That the document is fresh. The operator chose the nonce. Use
+  `attest-verify --endpoint` with your own nonce for a live check (see
+  [pubkey-attestation.md](pubkey-attestation.md)).
+- Anything about the mint signer.
+
+The certificates in the document expire a few hours after it is made.
+`--from-file` checks them at the document's own time. If an AWS signing key
+leaks after its certificate expires, it can sign a backdated document.
+
+## What you need
+
+- `attest-verify`, built from the release tag: `cd parent && cargo build
+  --release --bin attest-verify`. The build needs the access described in the
+  README.
+- `cast` ([Foundry](https://getfoundry.sh)), and an Arbitrum One RPC URL.
+- The trusted `PCR.json` of the release: the release artifact, or your own
+  rebuild of the EIF. See
+  [Where the expected PCRs come from](pubkey-attestation.md#where-the-expected-pcrs-come-from).
+- The MultisigProxy address. The burn image pins it as
+  `EVM_PROXY_CONTRACT_ADDRESS` in `build/Dockerfile.enclave.burn`.
+
+## Choose the expected launch values
+
+The bundle's `policy` lists every attested launch value. Do not copy them. Read
+them, and decide whether you accept each one:
+
+| policy field | flag | source |
+|---|---|---|
+| `signer_role` | `--expect-signer-role burn` | always `burn` |
+| `rgb_asset_id` | `--expect-rgb-asset-id` | the BFA asset of the deployment |
+| `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json` |
+| `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json` |
+| `evm_min_confirmations` | `--expect-evm-min-confirmations` | `EVM_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
+| `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json` |
+| `electrum_host` | `--expect-electrum-host` | the Electrum server you accept |
+| `evm_rpc_tls.host` | `--expect-evm-rpc-host` | the EVM RPC host you accept |
+| `evm_rpc_tls.ca_sha256` | `--expect-evm-rpc-ca-sha256` | SHA-256 of the CA you accept, without `0x` |
+
+The script sets `chain_id` (42161) and `bridge_contract` (your
+`MULTISIG_PROXY`) itself.
+
+## Run the check
+
+```bash
+PCR_FILE=PCR.json \
+ARB_RPC_URL=https://arb1.arbitrum.io/rpc \
+MULTISIG_PROXY=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
+ATTEST_VERIFY=parent/target/release/attest-verify \
+bash build/verify-signer.sh https://<published location>/attestation-16.json \
+  --expect-signer-role burn \
+  --expect-rgb-asset-id 'rgb:<BFA contract id>' \
+  --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+  --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
+  --expect-evm-min-confirmations 12 \
+  --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
+  --expect-electrum-host <electrum host> \
+  --expect-evm-rpc-host <rpc host> \
+  --expect-evm-rpc-ca-sha256 <64 hex characters>
+```
+
+The script:
+
+1. Checks that the RPC serves chain 42161.
+2. Downloads the bundle when you give a URL.
+3. Runs `attest-verify --from-file` with your PCRs and flags. This checks the
+   certificate chain to the AWS Nitro root, the COSE signature, the PCRs, the
+   nonce, the public key and the commitment of the keys and the policy.
+4. Reads the EVM address from the verified output.
+5. Checks that the address is in `MultisigProxy.getEnclaveSigners(827166)`.
+   827166 is the bridge's id for the RGB network (`RGB_CHAIN_ID`).
+
+Exit 0 means all checks pass. Exit 1 names the check that failed. Exit 2 is a
+usage error. Run the script once for each published bundle.

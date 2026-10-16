@@ -2,25 +2,23 @@
 
 use thiserror::Error;
 
-/// Bitcoin block height. `u32` is enough for the foreseeable future
-/// (Bitcoin would have to mine for ~80,000 years to overflow).
+/// Bitcoin block height. `u32` overflows only after approx 80,000 years.
 pub type BlockHeight = u32;
 
 /// Block hash in Bitcoin internal byte order (32 bytes).
 pub type BlockHash = [u8; 32];
 
-/// Which Bitcoin network we are validating against. Determined at runtime
-/// from the `BITCOIN_NETWORK` env var, but baked into PCR0 because the env
-/// var is set in the Dockerfile.
+/// Bitcoin network for header validation. It comes from the `BITCOIN_NETWORK`
+/// env var. The Dockerfile sets that var, so PCR0 includes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
     Mainnet,
-    /// Default global signet OR a custom signet, distinguished only by the
-    /// challenge script that's also a compile-time constant. Header
-    /// validation behaviour is identical (signature in coinbase witness,
-    /// not enforced in PR 2 — see `validation.rs`).
+    /// Default global signet or a custom signet. Only the compile-time
+    /// challenge script makes them different. Header validation is the same:
+    /// the BIP-325 coinbase signature is not verified (see `validation.rs`).
     Signet,
     Testnet3,
+    Testnet4,
     Regtest,
 }
 
@@ -30,6 +28,7 @@ impl Network {
             "bitcoin" | "mainnet" => Ok(Self::Mainnet),
             "signet" => Ok(Self::Signet),
             "testnet" | "testnet3" => Ok(Self::Testnet3),
+            "testnet4" => Ok(Self::Testnet4),
             "regtest" => Ok(Self::Regtest),
             _ => Err("unknown network"),
         }
@@ -41,15 +40,15 @@ impl Network {
             Self::Mainnet => &bitcoin::consensus::params::MAINNET,
             Self::Signet => &bitcoin::consensus::params::SIGNET,
             Self::Testnet3 => &bitcoin::consensus::params::TESTNET3,
+            Self::Testnet4 => &bitcoin::consensus::params::TESTNET4,
             Self::Regtest => &bitcoin::consensus::params::REGTEST,
         }
     }
 
-    /// Whether real PoW is enforced. Mainnet + testnet3 yes; signet has
-    /// trivial PoW (real validation is the BIP-325 signature, see comment
-    /// in `validation.rs`); regtest is local-only and trivial.
+    /// True when PoW is enforced (mainnet, testnet3/4). Signet PoW is trivial
+    /// because its real check is the BIP-325 signature. Regtest is local only.
     pub fn enforces_pow(self) -> bool {
-        matches!(self, Self::Mainnet | Self::Testnet3)
+        matches!(self, Self::Mainnet | Self::Testnet3 | Self::Testnet4)
     }
 }
 
@@ -73,6 +72,12 @@ pub enum SpvError {
         expected: u32,
     },
 
+    #[error("invalid testnet4 timestamp at height {height}: {reason}")]
+    Timestamp {
+        height: BlockHeight,
+        reason: &'static str,
+    },
+
     #[error("batch start_height {got} leaves a gap above tip {tip}")]
     NonContiguous { got: BlockHeight, tip: BlockHeight },
 
@@ -90,7 +95,7 @@ pub enum SpvError {
 
     #[error(
         "alternative chain has weaker or equal cumulative work; rejecting reorg \
-         (this is normal — best chain wins)"
+         (this is normal - best chain wins)"
     )]
     WeakerChain,
 
@@ -106,7 +111,7 @@ pub enum SpvError {
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
 
-    #[error("checkpoint placeholder — refusing to operate")]
+    #[error("checkpoint placeholder - refusing to operate")]
     CheckpointPlaceholder,
 }
 

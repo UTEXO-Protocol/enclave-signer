@@ -1,12 +1,17 @@
+#[path = "cli/clone_completion.rs"]
+mod clone_completion;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use utexo_bridge_parent::client::{EnclaveClient, SignEvmRequest, SignPsbtRequest};
-use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysResponse};
+use utexo_bridge_parent::enclave_proto::{
+    InitializeKeyResponse, PublicKeysResponse, SetEndpointsRequest,
+};
 
 #[derive(Parser)]
 #[command(
@@ -15,8 +20,8 @@ use utexo_bridge_parent::enclave_proto::{InitializeKeyResponse, PublicKeysRespon
 )]
 struct Cli {
     /// Enclave address: `host:port` (TCP, dev builds) or `vsock://<cid>:<port>`
-    /// (Nitro, vsock builds — e.g. `vsock://18:5000`). On a vsock build you MUST
-    /// pass a `vsock://` addr or set ENCLAVE_VSOCK_CID; it will not default to CID 16.
+    /// (Nitro vsock builds, for example `vsock://18:5000`). A vsock build needs a
+    /// `vsock://` address or ENCLAVE_VSOCK_CID. It does not default to CID 16.
     #[arg(long, default_value = "127.0.0.1:5000")]
     addr: String,
 
@@ -28,10 +33,16 @@ struct Cli {
 enum Command {
     /// Initialize keys (generate new mnemonic in the enclave)
     Init {
-        /// Donor cloning secret, delivered at runtime (not baked into the EIF).
-        /// Set only on enclaves that should serve clone requests.
+        /// Donor cloning secret, sent at runtime (not in the EIF). Set it only on
+        /// enclaves that serve clone requests. Deprecated on the command line:
+        /// `ps`, shell history and SSM logs show it (F03-AF-06). Use
+        /// --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
     },
     /// Initialize from a hex-encoded 64-byte seed (testing only)
     InitSeed {
@@ -74,11 +85,11 @@ enum Command {
         /// Pre-extracted calldata commission
         #[arg(long, default_value = "0")]
         calldata_commission: u64,
-        /// Mark consignment as valid (required unless enclave is in dev-mode)
+        /// Mark consignment as valid
         #[arg(long)]
         consignment_valid: bool,
     },
-    /// Sign a PSBT (SegWit v0 P2WSH multisig)
+    /// Sign a bridge PSBT (Taproot key path, colored BIP-86 account)
     SignPsbt {
         /// Hex-encoded PSBT bytes
         #[arg(long)]
@@ -92,11 +103,9 @@ enum Command {
         /// EVM commission
         #[arg(long, default_value = "0")]
         evm_commission: u64,
-        /// On-chain BridgeFundsIn.operationId of the source deposit (bridge
-        /// transfer id). The enclave #60 check binds the on-chain operationId to
-        /// this value.
-        #[arg(long, default_value = "0")]
-        evm_funds_in_operation_id: u64,
+        /// On-chain BridgeFundsIn.operationId, 32-byte hex. Required.
+        #[arg(long, default_value = "")]
+        evm_funds_in_operation_id: String,
         /// PSBT total non-change output amount
         #[arg(long, default_value = "0")]
         psbt_output_amount: u64,
@@ -113,41 +122,80 @@ enum Command {
         #[arg(long, default_value = "")]
         consignment: String,
     },
-    /// Sign a raw message (fundsIn authorization, 1-of-n)
-    SignRawMessage {
-        /// Hex-encoded message bytes
-        #[arg(long)]
-        message: String,
-    },
-    /// Get the enclave's current SPV chain tip (height + hash).
-    /// Listener calls this on startup to know where to resume header sync.
+    /// Get the enclave SPV chain tip (height and hash).
+    /// The parent header sync reads it to find where to continue.
     GetLastSavedBlock,
-    /// Push a batch of Bitcoin block headers into the enclave's SPV chain.
-    ///
-    /// Headers are read from a file: one hex-encoded 80-byte header per line,
-    /// in ascending height order. Empty lines and lines starting with `#` are
-    /// ignored. Pass an empty file to send a no-op batch (useful for smoke
-    /// testing — proves the dispatch path without a fixture chain).
-    SubmitHeaders {
-        /// Block height of the first header in the batch.
+    /// Ask the enclave if it is ready to sign: endpoints set, key loaded and
+    /// SPV chain current. The parent `GET /health` gives the same answer.
+    /// Exits 0 when ready, 1 when not.
+    Health,
+    /// Set the chain endpoints and the KMS values once, after launch. The
+    /// enclave rejects a second call.
+    SetEndpoints {
+        #[command(flatten)]
+        endpoints: EndpointArgs,
+    },
+    /// Verify a fresh enclave's attested policy after `set-endpoints`.
+    /// Exits 1 and names the field on a mismatch.
+    VerifyLaunch {
+        /// `PCR.json` of the release.
         #[arg(long)]
-        start_height: u32,
-        /// Path to a file with one hex-encoded header per line (80 bytes = 160 hex chars).
+        pcr_file: PathBuf,
+        /// `IMAGE-ENV.json` of the release: the env of the measured image.
         #[arg(long)]
-        headers_file: PathBuf,
+        image_env: PathBuf,
+        /// Role of the deployed image.
+        #[arg(long, value_parser = ["combined", "mint", "burn"])]
+        signer_role: String,
+        /// The values that `set-endpoints` sent.
+        #[command(flatten)]
+        endpoints: EndpointArgs,
+    },
+    /// Verify a fresh burn-key attestation and export its bundle.
+    /// Check it offline with attest-verify --from-file.
+    ExportAttestation {
+        /// `PCR.json` of the release. With `--mock`, zero PCRs by default.
+        #[arg(long, required_unless_present = "mock")]
+        pcr_file: Option<PathBuf>,
+        /// `IMAGE-ENV.json` of the release: the env of the measured image.
+        #[arg(long, required_unless_present = "mock")]
+        image_env: Option<PathBuf>,
+        /// Role of the deployed image.
+        #[arg(long, value_parser = ["combined", "burn"], required_unless_present = "mock")]
+        signer_role: Option<String>,
+        /// The bundle file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// The registered EVM address. The attested address must equal it.
+        #[arg(long)]
+        expect_evm_address: Option<String>,
+        /// Expect a mock-attestation enclave with the Development policy.
+        /// For tests only.
+        #[arg(long)]
+        mock: bool,
+        /// The values that `set-endpoints` sent.
+        #[command(flatten)]
+        endpoints: EndpointArgs,
     },
     /// Clone the signing identity from a donor enclave into the local
-    /// (requester) enclave. Runs the full three-step handshake:
-    ///   1. InitiateCloning on the local enclave (vsock).
-    ///   2. gRPC Clone to the donor's parent adapter (relayed to its GetClone).
-    ///   3. SetClone on the local enclave (vsock), then verify the EVM address
-    ///      now matches the donor's cluster identity.
+    /// (requester) enclave. Steps:
+    ///   1. InitiateCloning on the local enclave.
+    ///   2. gRPC Clone to the donor parent (sent on to its GetClone).
+    ///   3. Read the donor identity with AttestedPublicKey.
+    ///   4. SetClone on the local enclave, then check that the identity
+    ///      matches the donor.
     Clone {
-        /// Pre-shared operator cloning secret (must match the donor enclave's
-        /// baked UTEXO_CLONING_SECRET).
+        /// Pre-shared operator cloning secret. Must match the donor enclave
+        /// cloning secret. Deprecated on the command line: `ps`, shell history
+        /// and SSM logs show it (F03-AF-06). Use --cloning-secret-file or
+        /// UTEXO_CLONING_SECRET.
         #[arg(long)]
-        cloning_secret: String,
-        /// Donor parent-adapter gRPC endpoint, e.g. http://10.0.1.23:50051
+        cloning_secret: Option<String>,
+        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
+        #[arg(long)]
+        cloning_secret_file: Option<PathBuf>,
+        /// Donor parent gRPC endpoint, for example https://10.0.1.23:50051
         #[arg(long)]
         donor_grpc: String,
         /// Donor cluster identity: 20-byte EVM address, hex (with or without 0x).
@@ -156,6 +204,96 @@ enum Command {
     },
     /// Enter interactive REPL mode
     Interactive,
+}
+
+/// Endpoint and KMS values. Each flag falls back to its environment variable.
+/// A value that is not given is sent empty.
+#[derive(Args)]
+struct EndpointArgs {
+    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). A
+    /// release enclave refuses plaintext; only a dev build accepts
+    /// `tcp://host:port` or `http://host[:port]`.
+    #[arg(long, env = "ELECTRUM_URL")]
+    electrum_url: Option<String>,
+    /// TLS host name of the EVM RPC.
+    #[arg(long, env = "EVM_RPC_HOST")]
+    evm_rpc_host: Option<String>,
+    /// TLS port of the EVM RPC. Empty means no port.
+    #[arg(long, env = "EVM_RPC_TLS_PORT")]
+    evm_rpc_tls_port: Option<String>,
+    /// DER file of the only CA the EVM RPC TLS trusts. Empty means no CA.
+    #[arg(long, env = "EVM_RPC_TLS_CA_DER_FILE")]
+    evm_rpc_ca_der_file: Option<PathBuf>,
+    /// File containing the RPC path (e.g. /v3/<API_KEY>). Omit for /.
+    /// The file is read at launch; its contents are never printed.
+    #[arg(long, env = "EVM_RPC_PATH_FILE")]
+    evm_rpc_path_file: Option<PathBuf>,
+    /// Full ARN of the KMS key that wraps the seed.
+    #[arg(long, env = "KMS_KEY_ARN")]
+    kms_key_arn: Option<String>,
+    /// AWS region of the KMS key.
+    #[arg(long, env = "KMS_REGION")]
+    kms_region: Option<String>,
+    /// Name of the seed object.
+    #[arg(long, env = "KMS_SEED_ID")]
+    kms_seed_id: Option<String>,
+    /// EVM address the seed must give.
+    #[arg(long, env = "KMS_EXPECTED_EVM_ADDRESS")]
+    kms_expected_evm_address: Option<String>,
+}
+
+fn fail(msg: String) -> ! {
+    eprintln!("Error: {msg}");
+    process::exit(1)
+}
+
+fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
+    let evm_rpc_path = args
+        .evm_rpc_path_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| read_rpc_path(&path).unwrap_or_else(|e| fail(e)))
+        .unwrap_or_default();
+    let evm_rpc_tls_port = args
+        .evm_rpc_tls_port
+        .filter(|p| !p.is_empty())
+        .map_or(0, |p| {
+            p.parse()
+                .unwrap_or_else(|_| fail(format!("EVM_RPC_TLS_PORT {p:?} is not a port")))
+        });
+    let evm_rpc_ca_der = args
+        .evm_rpc_ca_der_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| {
+            std::fs::read(&path)
+                .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
+        })
+        .unwrap_or_default();
+    SetEndpointsRequest {
+        electrum_url: args.electrum_url.unwrap_or_default(),
+        evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
+        evm_rpc_ca_der,
+        evm_rpc_tls_port,
+        evm_rpc_path,
+        kms_key_arn: args.kms_key_arn.unwrap_or_default(),
+        kms_region: args.kms_region.unwrap_or_default(),
+        kms_seed_id: args.kms_seed_id.unwrap_or_default(),
+        kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
+    }
+}
+
+fn read_rpc_path(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file =
+        std::fs::File::open(path).map_err(|_| "cannot open EVM_RPC_PATH_FILE".to_string())?;
+    let mut value = String::new();
+    file.take(2051)
+        .read_to_string(&mut value)
+        .map_err(|_| "cannot read EVM_RPC_PATH_FILE as UTF-8".to_string())?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.len() > 2048 {
+        return Err("EVM_RPC_PATH_FILE must contain a nonempty path of at most 2048 bytes".into());
+    }
+    Ok(value.into())
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -286,7 +424,17 @@ fn main() {
     let client = EnclaveClient::new(&cli.addr);
 
     match cli.command {
-        Command::Init { cloning_secret } => {
+        Command::Init {
+            cloning_secret,
+            cloning_secret_file,
+        } => {
+            let cloning_secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
             match client.initialize_keys_with_secret(None, cloning_secret) {
                 Ok(r) => print_init_response(&r),
                 Err(e) => {
@@ -362,6 +510,7 @@ fn main() {
                 merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
+                lz_release: None,
             };
             match client.sign_evm(req) {
                 Ok(r) => {
@@ -420,9 +569,27 @@ fn main() {
                     }
                 }
             };
+            let funds_in_operation_id = match hex::decode(
+                evm_funds_in_operation_id
+                    .strip_prefix("0x")
+                    .unwrap_or(&evm_funds_in_operation_id),
+            ) {
+                Ok(d) if d.len() == 32 => d,
+                Ok(d) => {
+                    eprintln!(
+                        "--evm-funds-in-operation-id must be 32 bytes (BridgeFundsIn operationId), got {}",
+                        d.len()
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Invalid hex evm_funds_in_operation_id: {}", e);
+                    process::exit(1);
+                }
+            };
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
-                evm_funds_in_operation_id,
+                evm_funds_in_operation_id: funds_in_operation_id,
                 operation_idx: 0,
                 evm_event_valid,
                 evm_event_finalized,
@@ -447,24 +614,6 @@ fn main() {
                 }
             }
         }
-        Command::SignRawMessage { message } => {
-            let msg_bytes = match hex::decode(&message) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex message: {}", e);
-                    process::exit(1);
-                }
-            };
-            match client.sign_raw_message(msg_bytes) {
-                Ok(r) => {
-                    println!("Signature (65 bytes): {}", hex::encode(&r.signature));
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
         Command::GetLastSavedBlock => match client.get_last_saved_block() {
             Ok(r) => {
                 println!("Block height: {}", r.block_height);
@@ -475,54 +624,280 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SubmitHeaders {
-            start_height,
-            headers_file,
+        Command::Health => match client.health() {
+            Ok(r) => {
+                println!("Ready:            {}", r.ready);
+                println!("Endpoints set:    {}", r.endpoints_set);
+                println!("Key loaded:       {}", r.key_loaded);
+                println!("SPV synced:       {}", r.spv_synced);
+                println!("Phase:            {}", r.phase);
+                println!("SPV tip height:   {}", r.spv_tip_height);
+                println!(
+                    "SPV tip age:      {}s (max {}s)",
+                    r.spv_tip_age_secs, r.spv_max_tip_age_secs
+                );
+                if !r.ready {
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        },
+        Command::SetEndpoints { endpoints } => {
+            match client.set_endpoints(endpoints_request(endpoints)) {
+                Ok(()) => println!("Endpoints set"),
+                Err(e) => fail(e.to_string()),
+            }
+        }
+        Command::VerifyLaunch {
+            pcr_file,
+            image_env,
+            signer_role,
+            endpoints,
         } => {
-            let headers = match read_headers_file(&headers_file) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("Error reading {}: {}", headers_file.display(), e);
-                    process::exit(1);
-                }
-            };
-            match client.submit_headers(start_height, headers) {
-                Ok(r) => {
-                    println!("Last block height: {}", r.last_block_height);
-                    println!("Last block hash:   {}", hex::encode(&r.last_block_hash));
-                    println!("Headers accepted:  {}", r.headers_accepted);
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::exit(1);
-                }
+            if let Err(e) = verify_launch(&client, &pcr_file, &image_env, &signer_role, endpoints) {
+                eprintln!("FAIL: {e:#}");
+                process::exit(1);
+            }
+        }
+        Command::ExportAttestation {
+            pcr_file,
+            image_env,
+            signer_role,
+            out,
+            expect_evm_address,
+            mock,
+            endpoints,
+        } => {
+            if let Err(e) = export_attestation(
+                &client,
+                pcr_file.as_deref(),
+                image_env.as_deref(),
+                signer_role.as_deref(),
+                &out,
+                expect_evm_address.as_deref(),
+                mock,
+                endpoints,
+            ) {
+                eprintln!("FAIL: {e:#}");
+                process::exit(1);
             }
         }
         Command::Clone {
             cloning_secret,
+            cloning_secret_file,
             donor_grpc,
             donor_evm,
         } => {
-            if let Err(e) = run_clone(&client, &cloning_secret, &donor_grpc, &donor_evm) {
-                eprintln!("Error: {}", e);
-                process::exit(1);
+            let secret = match resolve_cloning_secret(cloning_secret, cloning_secret_file) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!(
+                        "Error: a cloning secret is required for clone — pass \
+                         --cloning-secret-file, set UTEXO_CLONING_SECRET, or (deprecated) \
+                         --cloning-secret"
+                    );
+                    process::exit(1);
+                }
+                Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+            match run_clone(&client, &secret, &donor_grpc, &donor_evm) {
+                Ok(completion) => {
+                    println!("CLONE_RESULT_V1={}", completion.outcome.as_str());
+                    eprintln!("{}", completion.detail);
+                    // One-shot command. Exit also stops any I/O worker that
+                    // is still blocked after the reconciliation deadline.
+                    process::exit(if completion.outcome.is_success() {
+                        0
+                    } else {
+                        1
+                    });
+                }
+                Err(e) => {
+                    println!("CLONE_RESULT_V1=preflight_error");
+                    eprintln!("Error before SetClone: {e}");
+                    process::exit(1);
+                }
             }
         }
         Command::Interactive => run_interactive(&client),
     }
 }
 
-/// Drive the donor->requester cloning handshake. `client` targets the local
-/// (requester) enclave over vsock; the donor enclave is reached through its
-/// parent-adapter gRPC endpoint over TCP (cross-host within the VPC).
+fn verify_launch(
+    client: &EnclaveClient,
+    pcr_file: &std::path::Path,
+    image_env: &std::path::Path,
+    signer_role: &str,
+    endpoints: EndpointArgs,
+) -> anyhow::Result<()> {
+    use attestation_verify::SignerRole;
+    use utexo_bridge_parent::launch_check;
+
+    let pcrs = read_pcrs(pcr_file)?;
+    let role = match signer_role {
+        "mint" => SignerRole::Mint,
+        "burn" => SignerRole::Burn,
+        _ => SignerRole::Combined,
+    };
+    let expected =
+        launch_check::expected_policy(role, &read(image_env)?, &endpoints_request(endpoints))?;
+
+    let mut nonce = [0u8; 32];
+    rand::fill(&mut nonce);
+    let response = client.get_attested_public_key(nonce)?;
+    let policy = launch_check::check_launch(
+        response,
+        nonce,
+        &pcrs,
+        &expected,
+        utexo_bridge_parent::attest_verify::VerifyMode::Real,
+    )?;
+
+    println!("OK: the attested launch policy matches the deploy");
+    for (name, pcr) in [
+        ("PCR0", pcrs.pcr0),
+        ("PCR1", pcrs.pcr1),
+        ("PCR2", pcrs.pcr2),
+    ] {
+        println!("  {name:<26}: {}", hex::encode(pcr));
+    }
+    for (field, value) in launch_check::fields(&policy) {
+        println!("  {field:<26}: {value}");
+    }
+    Ok(())
+}
+
+fn read(path: &std::path::Path) -> anyhow::Result<String> {
+    use anyhow::Context;
+    std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// PCR0, PCR1 and PCR2 of a release `PCR.json`.
+fn read_pcrs(pcr_file: &std::path::Path) -> anyhow::Result<attestation_verify::ExpectedPcrs> {
+    use anyhow::Context;
+    let pcrs: serde_json::Value = serde_json::from_str(&read(pcr_file)?)
+        .with_context(|| format!("{} is not JSON", pcr_file.display()))?;
+    let pcr = |name: &str| {
+        pcrs[name]
+            .as_str()
+            .with_context(|| format!("{} has no {name}", pcr_file.display()))
+    };
+    Ok(attestation_verify::ExpectedPcrs::from_hex(
+        pcr("PCR0")?,
+        pcr("PCR1")?,
+        pcr("PCR2")?,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_attestation(
+    client: &EnclaveClient,
+    pcr_file: Option<&std::path::Path>,
+    image_env: Option<&std::path::Path>,
+    signer_role: Option<&str>,
+    out: &std::path::Path,
+    expect_evm_address: Option<&str>,
+    mock: bool,
+    endpoints: EndpointArgs,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use attestation_verify::{AttestedPolicy, ExpectedPcrs, SignerRole};
+    use utexo_bridge_parent::attest_verify::{export_bundle, VerifyMode};
+    use utexo_bridge_parent::launch_check;
+
+    let pcrs = pcr_file.map_or(Ok(ExpectedPcrs::zero()), read_pcrs)?;
+    let (mode, expected) = if mock {
+        (VerifyMode::Mock, AttestedPolicy::Development)
+    } else {
+        let role = match signer_role {
+            Some("burn") => SignerRole::Burn,
+            _ => SignerRole::Combined,
+        };
+        let image_env = image_env.context("--image-env required")?;
+        let endpoints = endpoints_request(endpoints);
+        let expected = launch_check::expected_policy(role, &read(image_env)?, &endpoints)?;
+        (VerifyMode::Real, expected)
+    };
+    let expect_evm = expect_evm_address
+        .map(|a| {
+            hex::decode(a.strip_prefix("0x").unwrap_or(a))
+                .ok()
+                .and_then(|b| <[u8; 20]>::try_from(b).ok())
+                .with_context(|| format!("--expect-evm-address {a:?} is not a 20-byte address"))
+        })
+        .transpose()?;
+
+    let mut nonce = [0u8; 32];
+    rand::fill(&mut nonce);
+    let response = client.get_attested_public_key(nonce)?;
+    let bundle = export_bundle(response, nonce, &pcrs, mode, &expected, expect_evm)?;
+
+    let tmp = out.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&bundle)? + "\n")
+        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, out).with_context(|| format!("cannot write {}", out.display()))?;
+    println!("OK: wrote {}", out.display());
+    println!("  EVM address: {}", bundle.public_keys.evm_address);
+    Ok(())
+}
+
+/// Read the secret from the file, the environment, or the deprecated argument,
+/// in that order. Arguments can show the secret in process lists and logs.
+/// (F03-AF-06) Return `None` if no source is set; Init without a donor secret
+/// accepts that.
+fn resolve_cloning_secret(
+    arg: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(path) = file {
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "failed to read --cloning-secret-file {}: {e}",
+                path.display()
+            )
+        })?;
+        let s = raw.trim().to_string();
+        if s.is_empty() {
+            return Err(format!("--cloning-secret-file {} is empty", path.display()).into());
+        }
+        return Ok(Some(s));
+    }
+    if let Ok(env_val) = std::env::var("UTEXO_CLONING_SECRET") {
+        let s = env_val.trim().to_string();
+        if !s.is_empty() {
+            return Ok(Some(s));
+        }
+    }
+    if let Some(s) = arg {
+        eprintln!(
+            "WARNING: --cloning-secret on the command line is visible in `ps`, shell history \
+             and SSM logs (F03-AF-06); prefer --cloning-secret-file or the UTEXO_CLONING_SECRET \
+             env var."
+        );
+        return Ok(Some(s));
+    }
+    Ok(None)
+}
+
+/// Run the donor->requester cloning handshake. `client` targets the local
+/// (requester) enclave. The donor enclave is reached through its parent gRPC
+/// endpoint.
 fn run_clone(
     client: &EnclaveClient,
     cloning_secret: &str,
     donor_grpc: &str,
     donor_evm: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<clone_completion::Completion, Box<dyn std::error::Error>> {
     use utexo_bridge_parent::grpc_proto::parent_service_client::ParentServiceClient;
-    use utexo_bridge_parent::grpc_proto::CloneRequest;
+    use utexo_bridge_parent::grpc_proto::{AttestedPublicKeyRequest, CloneRequest};
 
     let donor_addr = hex::decode(donor_evm.trim_start_matches("0x"))?;
     if donor_addr.len() != 20 {
@@ -533,6 +908,7 @@ fn run_clone(
         .into());
     }
 
+    let donor_endpoint = utexo_bridge_parent::transport_security::client_endpoint(donor_grpc)?;
     println!("[1/4] InitiateCloning on local enclave...");
     let init = client.initiate_cloning(cloning_secret, donor_addr.clone())?;
     println!(
@@ -541,19 +917,20 @@ fn run_clone(
     );
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
+    // Limit donor calls before SetClone. Completion and read-only
+    // reconciliation have their own caller deadline (F03-AF-05).
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
-        let mut grpc = ParentServiceClient::connect(donor_grpc.to_string()).await?;
+        let endpoint = donor_endpoint.clone();
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
         let req = CloneRequest {
             attestation: init.requester_attestation,
             encryption_pubkey: init.encryption_pubkey,
             cluster_public_key: donor_addr.clone(),
             cloning_digest: init.cloning_digest,
         };
-        // Disambiguate the generated RPC `clone(&mut self, req)` from
-        // `Clone::clone(&self)`: autoref tries `&self` before `&mut self`, so
-        // `grpc.clone(req)` would wrongly resolve to the derive. Call the
-        // inherent method via path syntax (inherent wins over the trait).
+        // `grpc.clone(req)` resolves to `Clone::clone(&self)`, because
+        // autoref tries `&self` first. Path syntax calls the generated RPC.
         let resp = ParentServiceClient::clone(&mut grpc, req).await?;
         Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
     })?;
@@ -562,47 +939,130 @@ fn run_clone(
         hex::encode(&clone_resp.donor_pubkey)
     );
 
-    println!("[3/4] SetClone on local enclave...");
-    client.set_clone(
-        clone_resp.encrypted_seed,
-        clone_resp.donor_pubkey,
-        clone_resp.donor_attestation,
-    )?;
+    // Get the comparison bundle before SetClone. A donor outage must not
+    // extend reconciliation after the requester commits.
+    println!("[3/4] Fetching donor identity before SetClone...");
+    let mut nonce = [0u8; 32];
+    rand::fill(&mut nonce);
+    let donor_bundle = rt.block_on(async {
+        let endpoint = donor_endpoint.clone();
+        let mut grpc = ParentServiceClient::new(endpoint.connect().await?);
+        let resp = grpc
+            .attested_public_key(AttestedPublicKeyRequest {
+                nonce: nonce.to_vec(),
+            })
+            .await?;
+        Ok::<_, Box<dyn std::error::Error>>(resp.into_inner())
+    })?;
 
-    println!("[4/4] Verifying cloned identity...");
-    let keys = client.get_public_keys()?;
-    let local_evm = hex::encode(&keys.evm_address);
-    let want_evm = hex::encode(&donor_addr);
-    print_keys_response(&keys);
-    if local_evm == want_evm {
-        println!("\nOK: cloned EVM address matches donor (0x{local_evm})");
-        Ok(())
-    } else {
-        Err(format!("clone mismatch: local EVM 0x{local_evm} != donor 0x{want_evm}").into())
+    if donor_bundle.evm_address != donor_addr {
+        return Err("donor bundle does not match --donor-evm; SetClone was not sent".into());
     }
+
+    println!("[4/4] SetClone and read-only identity reconciliation...");
+    let completion = clone_completion::complete(
+        client,
+        utexo_bridge_parent::enclave_proto::SetCloneRequest {
+            encrypted_seed: clone_resp.encrypted_seed,
+            donor_pubkey: clone_resp.donor_pubkey,
+            donor_attestation: clone_resp.donor_attestation,
+        },
+        &donor_addr,
+        &donor_bundle,
+    );
+    if let Some(keys) = &completion.keys {
+        print_keys_response(keys);
+        if completion.outcome.is_success() {
+            println!(
+                "OK: cloned identity matches the donor on all 13 fields (EVM 0x{})",
+                hex::encode(&keys.evm_address)
+            );
+        }
+    }
+    Ok(completion)
 }
 
-/// Parse a headers file: one hex-encoded 80-byte header per line, blank lines
-/// and `#` comments ignored. Wrong-length lines are surfaced as errors so
-/// silent corruption can't sneak in.
-fn read_headers_file(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
-    let contents = std::fs::read_to_string(path)?;
-    let mut headers = Vec::new();
-    for (lineno, raw) in contents.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let bytes = hex::decode(line).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("line {}: invalid hex: {}", lineno + 1, e),
-            )
-        })?;
-        // Don't enforce 80 bytes here — the enclave will reject on parse.
-        // Keeping the CLI permissive lets us deliberately send malformed
-        // headers in smoke tests.
-        headers.push(bytes);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_path_is_read_from_a_file_at_launch() {
+        let file = std::env::temp_dir().join(format!("rpc-path-test-{}", std::process::id()));
+        std::fs::write(&file, "/v3/fixture-key\n").unwrap();
+        let cli = Cli::try_parse_from([
+            "cli",
+            "set-endpoints",
+            "--evm-rpc-path-file",
+            file.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Command::SetEndpoints { endpoints } = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(endpoints_request(endpoints).evm_rpc_path, "/v3/fixture-key");
+        std::fs::write(&file, "").unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::write(&file, "x".repeat(2051)).unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::remove_file(&file).unwrap();
     }
-    Ok(headers)
+
+    #[test]
+    fn submit_headers_is_not_a_command() {
+        let err = Cli::try_parse_from([
+            "utexo-bridge-parent-cli",
+            "submit-headers",
+            "--start-height",
+            "1",
+            "--headers-file",
+            "h.txt",
+        ])
+        .err()
+        .expect("submit-headers must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn verify_launch_takes_the_ctl_arguments() {
+        let cli = Cli::try_parse_from([
+            "utexo-bridge-parent-cli",
+            "--addr",
+            "vsock://16:5000",
+            "verify-launch",
+            "--pcr-file",
+            "PCR.json",
+            "--image-env",
+            "IMAGE-ENV.json",
+            "--signer-role",
+            "combined",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::VerifyLaunch { .. }));
+    }
+
+    #[test]
+    fn export_attestation_takes_the_ctl_arguments() {
+        let args = |role: &'static str| {
+            [
+                "utexo-bridge-parent-cli",
+                "--addr",
+                "vsock://16:5000",
+                "export-attestation",
+                "--pcr-file",
+                "PCR.json",
+                "--image-env",
+                "IMAGE-ENV.json",
+                "--signer-role",
+                role,
+                "--out",
+                "attestation-16.json",
+                "--expect-evm-address",
+                "0x0000000000000000000000000000000000000001",
+            ]
+        };
+        let cli = Cli::try_parse_from(args("burn")).unwrap();
+        assert!(matches!(cli.command, Command::ExportAttestation { .. }));
+        assert!(Cli::try_parse_from(args("mint")).is_err());
+    }
 }

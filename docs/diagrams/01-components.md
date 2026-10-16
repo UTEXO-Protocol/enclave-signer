@@ -9,55 +9,65 @@ flowchart TB
 
     %% parent crate
     subgraph PARENT [parent crate — utexo-bridge-parent]
-        PMain[main.rs<br/>gRPC server tonic, 127.0.0.1]
+        PMain[main.rs<br/>tonic gRPC server,<br/>mTLS + client ACL - transport_security.rs]
         Grpc[grpc_server.rs<br/>ParentAdapterService — gRPC ↔ enclave wire<br/>TRANSACTION → Sign, EVM_GAS_TX → SignRawDigest,<br/>BTC_UTXO → SignBtc]
         PClient[client.rs<br/>EnclaveClient<br/>TCP / vsock]
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
         PCli[bin/cli.rs<br/>utexo-bridge-parent-cli]
-        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-vanilla-psbt,<br/>--expect-evm-source raw or helios or disabled]
-        PMisc[config.rs / error.rs]
+        AVCli[attest-verify CLI<br/>--pcr0/1/2, --expect-signer-role,<br/>--expect-vanilla-psbt,<br/>--expect-evm-source tls, raw or disabled,<br/>--expect-electrum-host,<br/>--expect-evm-rpc-host, --expect-evm-rpc-ca-sha256]
+        PMisc[config.rs / error.rs / health.rs<br/>header_sync.rs - Electrum headers to SubmitHeaders<br/>seed_persistence.rs - KMS custody broker, mint only]
     end
 
     %% attestation-verify shared crate
     subgraph ATTV [attestation-verify crate — shared]
         AV[verify_attestation<br/>COSE_Sign1, alg pinned ES384, raw 96-byte sig,<br/>cert chain + CA constraints + PCR0/1/2]
-        AVPol[policy.rs<br/>AttestedPolicy — canonical policy<br/>commitment encoding v1, audit C-01]
+        AVPol[policy.rs<br/>AttestedPolicy - canonical policy<br/>commitment encoding v8]
         AVMock[verify_mock_attestation<br/>feature 'mock']
         Root[Embedded AWS Nitro<br/>root CA PEM]
     end
 
+    %% vendored schema
+    subgraph EP [enclave-proto crate — vendored]
+        EPr[enclave.proto + pre-generated enclave.rs<br/>no build.rs, provenance test]
+    end
+
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs<br/>boot: resolve SecurityPolicy — a release<br/>bridge build panics unless valid Production —<br/>then listener loop vsock / TCP]
-        EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s total<br/>4 worker threads, queue of 16]
-        ESrv[server.rs<br/>ServerContext + handler dispatch<br/>+ SubmitHeaders rate limiter]
-        EPol[policy.rs<br/>SecurityPolicy C-01<br/>Production / Development,<br/>resolved once at boot]
-        EState[state.rs<br/>Phase Initial / Cloning / Active<br/>NonceReplayGuard 1 h TTL<br/>op_replay_guard 24 h TTL]
-        EFr[framing.rs<br/>len-prefixed proto, 4 MiB cap]
-        BCfg[config.rs — BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / FUNDS_IN_CONTRACT<br/>BTC_MAX_TOTAL_SATS]
-        VFwd[vsock_forwarder.rs<br/>loopback → vsock, per-port instances<br/>3443→8001 Esplora, 3444→8002 EVM RPC,<br/>18545→8003 / 18550→8004 Helios]
-        KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86<br/>SecretBox seed + keys]
+        EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production,<br/>then listener loop vsock / TCP]
+        EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s socket deadline<br/>4 worker threads, queue of 16]
+        ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
+        EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
+        EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL]
+        EFr[framing.rs<br/>len-prefixed proto, 24 MiB cap]
+        BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS]
+        VFwd["vsock_forwarder.rs<br/>loopback -> vsock, per-port instances<br/>started at SetEndpoints<br/>Electrum port -> 8001,<br/>EVM RPC TLS port -> 8002,<br/>KMS 443 -> 8003 (mint only)"]
+        KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
-            NEV[validation.rs<br/>selector allowlist 0xccddb768,<br/>canonical ABI decode + re-encode,<br/>64 KiB cap, pins, deadline]
-            NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof,<br/>consignment amount bind]
-            NEE[evm_event.rs<br/>independent FundsIn verify —<br/>alloy raw RPC or Helios in-TEE]
+            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>96 KiB cap, pins, destinationChainId, deadline]
+            NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
+            NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC,<br/>TLS ends in the enclave]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
-            NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>BridgeOperation digest]
+            NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation.rs<br/>rgbstd Transfer + Esplora resolver,<br/>typesystem pinned per schema]
-            NRP[psbt_validation.rs<br/>PSBT ↔ consignment anchor,<br/>fee-rate 3x cap]
-            NRB[btc_crosscheck.rs<br/>plain-BTC output self-ownership<br/>btc_ownership.rs + total-sats cap]
-            NRS[spv_validation.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
-            NRSIG[signing/<br/>psbt.rs P2WSH ECDSA<br/>taproot.rs BIP-341 Schnorr]
+            NRV[validation/<br/>indexer.rs Electrum resolver,<br/>consensus.rs rgb-ops Transfer validation,<br/>consignment.rs decode, schema.rs typesystem pin]
+            NRF["flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule"]
+            NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
+            NRP["psbt_validation.rs<br/>PSBT to consignment anchor,<br/>per-output legs, pinned fee policy<br/>(max rate + max fee, both PSBT paths)"]
+            NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
+            NRS[spv_crosscheck.rs<br/>coverage + depth ≥ 6<br/>+ chain_net + staleness]
+            NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
             subgraph SPVMOD [spv/]
                 SCh[chain.rs — HeaderChain<br/>full retention, 1M cap,<br/>bounded reorg ≤ 100]
                 SCp[checkpoint.rs<br/>compile-time anchors → PCR0]
                 SMk[merkle.rs]
                 SVal[validation.rs<br/>linkage + PoW + nBits]
             end
+        end
+        subgraph NCCD [networks/ccd.rs]
+            NCS[CcdSource: 32-byte tx hash,<br/>amount bind only — listener-trusted]
         end
         subgraph ATTGRP [attestation + cloning]
             AF[attestation.rs<br/>NSM facade<br/>+ verify_peer_attestation]
@@ -67,13 +77,13 @@ flowchart TB
 
     %% External
     NSM[(AWS NSM device<br/>/dev/nsm)]
-    Esp{{Esplora indexer}}
+    Esp{{Electrum indexer}}
     VP[(host vsock-proxy<br/>port 8001)]
-    EvmRpc{{EVM JSON-RPC / Helios<br/>exec + consensus upstreams}}
-    VPe[(host vsock-proxy<br/>8002 / 8003 / 8004)]
+    EvmRpc{{EVM JSON-RPC}}
+    VPe[(host vsock-proxy<br/>port 8002)]
 
     %% Wires
-    L -->|"gRPC ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO) /<br/>PublicKey / Initialize / Clone /<br/>SubmitHeaders / GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO; EVM / RGB / CCD payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
     V --> AVCli
     PCli --> PClient
@@ -84,7 +94,9 @@ flowchart TB
 
     PMain --> Grpc
     Grpc --> PFr
-    Grpc -.->|"u32 LE len + EnclaveRequest<br/>TCP 127.0.0.1:5000 or vsock CID 16:5000"| EFr
+    Grpc -.->|"u32 LE len + EnclaveRequest<br/>TCP 127.0.0.1:5000 or vsock CID:5000"| EFr
+    EPr -.-> EFr
+    EPr -.-> PFr
 
     EMain --> EPol
     EMain --> EConn
@@ -99,6 +111,10 @@ flowchart TB
     ESrv --> NRP
     ESrv --> NRB
     ESrv --> NRS
+    ESrv --> NRI
+    ESrv -->|"SignCcd / CcdSource"| NCS
+    NRV --> NRF
+    NRP --> NRF
     ESrv -->|"InitiateCloning / GetClone / SetClone /<br/>GetAttestedPublicKey"| AF
     ESrv --> CL
     ESrv -->|"SubmitHeaders / lookup"| SCh
@@ -107,13 +123,13 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"esplora_blocking via localhost:3443,<br/>30 s timeout"| VFwd
+    NRV -->|"Electrum 15 s timeout,<br/>via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
-    VP -->|"real HTTP"| Esp
+    VP -->|"Electrum TCP/TLS"| Esp
 
-    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — host-relayed evidence,<br/>or Helios-verified in-TEE"| VFwd
-    VFwd -->|"vsock 8002 / 8003 / 8004"| VPe
-    VPe -->|"real HTTP"| EvmRpc
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_blockNumber — TLS to pinned host and CA"| VFwd
+    VFwd -->|"vsock 8002"| VPe
+    VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 
     NRS --> SCh
     NRS --> SMk
@@ -130,5 +146,5 @@ flowchart TB
     BCfg -->|"gas-tx to-pin"| NEG
     BCfg -->|"BTC total-sats cap"| NRB
     BCfg --> EPol
-    EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment) — C-01"| AF
+    EPol -.->|"user_data = sha256(pubkey_bundle ‖<br/>policy commitment)"| AF
 ```

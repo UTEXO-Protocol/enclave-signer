@@ -1,23 +1,15 @@
 #![deny(unsafe_code)]
 
-// Release guards (audit TEE-IK-01 / TEE-CL-02 + dev-mode). Three dev-only
-// features are catastrophic if accidentally enabled in a shipped build:
+// Release guards for two dev-only features:
 //
-//   * `allow-seed-import` — the parent can install a chosen seed on a fresh
-//     enclave, defeating the in-enclave key custody.
-//   * `mock-attestation`  — zero-PCR attestation documents are accepted, so
-//     a forged "enclave" passes verification.
-//   * `dev-mode`          — every signing cross-check is skipped.
+//   * `allow-seed-import` - the parent can install a chosen seed, which
+//     defeats in-enclave key custody.
+//   * `mock-attestation`  - zero-PCR attestation documents pass, so a forged
+//     enclave passes verification.
 //
-// A release build (`debug_assertions` off) must never carry any of them, so
-// each trips a `compile_error!` instead of producing a binary. A misconfigured
-// Dockerfile or CI matrix fails loudly at build time rather than shipping a
-// trust-defeating enclave. `not(test)` exempts `cargo test --release`, which
-// legitimately exercises the dev paths; local dev images build in debug
-// (`build/Dockerfile.enclave-dev`), which keeps `debug_assertions` on.
-//
-// `dev_feature_release_guard!` keeps the three checks in one place so the
-// pattern can't drift between features.
+// A release build (`debug_assertions` off) with either one fails to compile.
+// `not(test)` exempts the unit-test compilation only. Integration tests also
+// compile the library without `cfg(test)`. Dev images build in debug mode.
 macro_rules! dev_feature_release_guard {
     ($feature:literal, $msg:literal) => {
         #[cfg(all(feature = $feature, not(debug_assertions), not(test)))]
@@ -35,44 +27,109 @@ dev_feature_release_guard!(
     "`mock-attestation` must not be enabled in a release build (debug_assertions off): \
      it accepts zero-PCR attestation documents."
 );
-dev_feature_release_guard!(
-    "dev-mode",
-    "`dev-mode` must not be enabled in a release build (debug_assertions off): \
-     it skips all signing cross-checks."
-);
 
-// `rgb-validation` validates a consignment by asking a resolver whether its
-// witness txs are mined. Without `spv` that resolver is the host-controlled
-// Esplora endpoint, so a malicious host can answer "mined at sufficient depth"
-// for a fabricated witness tx and the enclave would sign a `fundsOut` release
-// against a non-existent Bitcoin anchor (audit M-01 / #61). `spv` re-anchors
-// every witness tx against the enclave's own PoW-verified header chain, so a
-// build that can validate consignments MUST also carry SPV. Unlike the
-// dev-feature guards above, this combination is unsafe in every profile — so it
-// is not release-gated and must never compile.
+// Without `spv`, the host-controlled indexer tells if witness txs are mined.
+// A malicious host can then get a `fundsOut` signed against a fake anchor.
+// `spv` checks every witness tx against the enclave's own header chain.
+// Unsafe in every profile, so this guard is not release-gated (M-01).
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled Esplora resolver — build with `--features spv` (which \
+     the host-controlled indexer - build with `--features spv` (which \
      pulls in rgb-validation)"
 );
 
+// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The guard requires
+// `spv` when `rgb-validation` is selected directly. The stack uses the
+// `rgb-validation` gate; the `rgb` alias itself need not be enabled.
+
+// Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
+// The modules in `networks/rgb/flow/` export the same item names. These guards
+// give a clear message instead of many name-resolution errors.
+#[cfg(all(feature = "rgb-swap", feature = "rgb-mint-burn"))]
+compile_error!(
+    "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
+     ship as separate enclave instances. Build one image per flow - the default feature set \
+     carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
+     vsock,rgb,mint-signer` (or `burn-signer`)"
+);
+#[cfg(all(
+    feature = "rgb-validation",
+    not(feature = "rgb-swap"),
+    not(feature = "rgb-mint-burn")
+))]
+compile_error!(
+    "rgb-validation requires a flow: enable exactly one of `rgb-swap` (send/receive) or \
+     `rgb-mint-burn`. Without one the enclave has no rule for which RGB transition types it \
+     may sign, and refusing to build is safer than defaulting to either"
+);
+
+// Exactly one mint/burn signer role: each role is its own image with its own
+// seed. `build.rs` derives the direction cfgs from the same two features.
+#[cfg(all(feature = "mint-signer", feature = "burn-signer"))]
+compile_error!(
+    "mint-signer and burn-signer are mutually exclusive: the mint (EVM -> RGB) and burn \
+     (RGB -> EVM) signers ship as separate enclave images with separate seeds. Build one \
+     image per role"
+);
+#[cfg(all(
+    feature = "rgb-mint-burn",
+    not(feature = "mint-signer"),
+    not(feature = "burn-signer")
+))]
+compile_error!(
+    "a mint/burn build requires a signer role: enable exactly one of `mint-signer` \
+     (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
+     vsock,rgb,mint-signer`"
+);
+
+// The attested role reads the features. The gates read the `build.rs` cfgs.
+// A cfg set from outside (for example RUSTFLAGS) must not make them disagree.
+#[cfg(all(feature = "mint-signer", rgb_to_evm))]
+compile_error!(
+    "mint-signer with the `rgb_to_evm` cfg set: the image would attest Mint but compile the \
+     release path. Do not set direction cfgs by hand; `build.rs` derives them"
+);
+#[cfg(all(feature = "burn-signer", evm_to_rgb))]
+compile_error!(
+    "burn-signer with the `evm_to_rgb` cfg set: the image would attest Burn but compile the \
+     mint path. Do not set direction cfgs by hand; `build.rs` derives them"
+);
+
+// Only the mint signer has a persistent seed.
+#[cfg(all(feature = "kms-persistence", not(feature = "mint-signer")))]
+compile_error!(
+    "kms-persistence requires mint-signer; seed persistence is available only to the RGB mint signer"
+);
+
 pub mod attestation;
+// Boot sequence for `main.rs`. In the library so clippy and tests cover it.
+pub mod bootstrap;
 pub mod cloning;
+// Keeps CLOCK_REALTIME on the hypervisor PTP clock. Linux-only (`nix::time`).
+#[cfg(target_os = "linux")]
+pub mod clocksync;
 pub mod config;
 pub mod conn;
+// The TLS rule of the loopback forwarders. Plain std, so tests run on all
+// targets.
+pub mod egress;
 pub mod error;
 pub mod framing;
 pub mod keys;
+#[cfg(feature = "kms-persistence")]
+pub mod kms;
 pub mod networks;
 pub mod policy;
+#[cfg(feature = "kms-persistence")]
+pub mod seed_persistence;
 pub mod server;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(all(feature = "vsock", target_os = "linux"))]
 pub mod vsock_forwarder;
 
-pub use federated_signer_proto as grpc_proto;
-pub use federated_signer_proto::enclave as proto;
-pub use federated_signer_proto::parent as enriched;
-pub use federated_signer_proto::signer;
+// Only the `enclave` proto package is vendored into the TEE build.
+pub use enclave_proto as proto;

@@ -8,7 +8,6 @@ use utexo_bridge_enclave::proto::*;
 fn initialize_and_get_keys() {
     let port = common::start_test_server();
 
-    // Initialize with new entropy
     let req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
@@ -40,7 +39,7 @@ fn initialize_and_get_keys() {
     assert!(!init_resp.btc_xpub.is_empty());
     assert!(init_resp.btc_xpub.starts_with("xpub"));
 
-    // Get keys — should return same values
+    // GetPublicKey must return the same keys.
     let req2 = EnclaveRequest {
         request: Some(Request::GetPublicKey(GetPublicKeyRequest {})),
     };
@@ -89,6 +88,65 @@ fn double_initialize_returns_error() {
 }
 
 #[test]
+#[cfg(not(feature = "kms-persistence"))]
+fn refused_cloning_secret_keeps_phase_initial() {
+    let port = common::start_test_server();
+    let init = |secret: &str| {
+        common::send_request(
+            port,
+            &EnclaveRequest {
+                request: Some(Request::InitializeKey(InitializeKeyRequest {
+                    seed: vec![],
+                    mnemonic: String::new(),
+                    cloning_secret: secret.into(),
+                })),
+            },
+        )
+    };
+    let phase = || {
+        let req = EnclaveRequest {
+            request: Some(Request::Health(HealthRequest::default())),
+        };
+        match common::send_request(port, &req).response {
+            Some(Response::Health(h)) => h.phase,
+            other => panic!("expected Health, got {other:?}"),
+        }
+    };
+
+    match init("weak-secret").response {
+        Some(Response::Error(e)) => assert!(e.message.contains("cloning_secret"), "{}", e.message),
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(phase(), "initial");
+
+    let evm_address = match init("test-operator-cloning-secret-0123456789abcdef").response {
+        Some(Response::InitializeKey(r)) => r.evm_address,
+        other => panic!("expected InitializeKeyResponse, got {other:?}"),
+    };
+    assert_eq!(phase(), "active");
+
+    // The donor secret is stored: the digest check runs and fails.
+    let req = EnclaveRequest {
+        request: Some(Request::GetClone(GetCloneRequest {
+            cluster_public_key: evm_address,
+            encryption_pubkey: vec![0; 32],
+            cloning_digest: vec![0; 32],
+            requester_attestation: vec![],
+        })),
+    };
+    match common::send_request(port, &req).response {
+        Some(Response::Error(e)) => {
+            assert!(
+                e.message.contains("cloning digest mismatch"),
+                "{}",
+                e.message
+            )
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
 fn get_keys_before_init_returns_error() {
     let port = common::start_test_server();
 
@@ -127,7 +185,7 @@ fn deterministic_seed_import() {
         other => panic!("expected InitializeKeyResponse, got {:?}", other),
     };
 
-    // Same seed on a fresh server should produce identical keys
+    // The same seed on a fresh server must produce the same keys.
     let port2 = common::start_test_server();
     let resp2 = common::send_request(port2, &req);
 
@@ -157,23 +215,16 @@ fn deterministic_seed_import() {
     assert_eq!(init1.btc_xpub, init2.btc_xpub);
 }
 
-// A canonical BIP-39 test vector — a stable, non-secret mnemonic used to
-// exercise the caller-supplied-mnemonic import path.
+// Canonical BIP-39 test vector. It is stable and not secret.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// TI-1 (#112) — Production build (default `cargo test`, `allow-seed-import`
-/// OFF): an `InitializeKey` carrying a caller-supplied seed OR mnemonic must be
-/// REJECTED. The gate is the compile-time `#[cfg(not(feature =
-/// "allow-seed-import"))]` arm in `handle_initialize` (server.rs), which returns
-/// `EnclaveError::InvalidRequest` -> `Response::Error`. Because the rejection
-/// happens before any state mutation, a subsequent OS-entropy init (empty seed
-/// + empty mnemonic) on the same server must still succeed.
+/// Production build (`allow-seed-import` off): `handle_initialize` rejects a
+/// caller-supplied seed or mnemonic. The rejection occurs before any state
+/// change, so a later OS-entropy init on the same server succeeds.
 ///
-/// The dev-mode acceptance counterpart is
-/// `dev_build_accepts_caller_supplied_seed_and_mnemonic` below; CI must run both
-/// feature profiles (the gate is compile-time, so the two directions cannot be
-/// exercised in one build).
+/// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`.
+/// The gate is compile-time, so CI must run both feature profiles.
 #[test]
 #[cfg(not(feature = "allow-seed-import"))]
 fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
@@ -222,8 +273,7 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         ),
     }
 
-    // The rejected imports must not have consumed initialization: a plain
-    // OS-entropy init on the same server still succeeds.
+    // The rejected imports must not consume initialization.
     let entropy_req = EnclaveRequest {
         request: Some(Request::InitializeKey(InitializeKeyRequest {
             seed: vec![],
@@ -239,11 +289,8 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
     );
 }
 
-/// TI-1 (#112) — Dev build (`cargo test ... --features allow-seed-import`, debug
-/// profile): the SAME `InitializeKey` call that production rejects is ACCEPTED.
-/// The `#[cfg(feature = "allow-seed-import")]` arm of `handle_initialize`
-/// installs the caller's seed / mnemonic and returns `Response::InitializeKey`.
-/// Each import uses a fresh server (init is one-shot).
+/// Dev build (`--features allow-seed-import`): the enclave accepts the caller's
+/// seed or mnemonic. Each import uses a fresh server, because init is one-shot.
 #[test]
 #[cfg(feature = "allow-seed-import")]
 fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {

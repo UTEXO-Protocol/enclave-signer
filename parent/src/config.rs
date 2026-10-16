@@ -1,11 +1,15 @@
-use std::collections::HashSet;
+use std::time::Duration;
+
+use anyhow::Context;
+
+use crate::header_source::ElectrumSource;
 
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
-    /// Host for the gRPC server to bind (default 127.0.0.1; use 0.0.0.0 in Docker).
+    /// Bind host for the gRPC server (default 127.0.0.1; use 0.0.0.0 in Docker).
     pub grpc_host: String,
 
-    /// Port for the gRPC server (Listener connects here).
+    /// Port for the gRPC server. The Listener connects here.
     pub grpc_port: u16,
 
     /// Enclave TCP address for local dev.
@@ -20,8 +24,23 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// EVM network IDs — TRANSACTION with these network_ids routes to signEVM.
-    pub evm_network_ids: HashSet<u32>,
+    /// Maximum active gRPC requests across all connections. (F03-AF-13)
+    pub grpc_max_concurrent: usize,
+
+    /// Maximum in-flight gRPC requests and HTTP/2 streams per connection.
+    pub grpc_max_concurrent_per_conn: usize,
+
+    /// Time limit for each gRPC handler.
+    pub grpc_request_timeout_secs: u64,
+
+    /// Host for the `GET /health` readiness endpoint (default loopback).
+    /// Deploy polls it from the parent host. Do not expose it off-host.
+    /// Unlike `grpc_host`, do not set it to 0.0.0.0 in Docker.
+    pub health_host: String,
+
+    /// Port for the health endpoint. The gRPC listener is h2 only. The probe
+    /// is plain HTTP/1.1, so a shell script can curl it.
+    pub health_port: u16,
 }
 
 impl Config {
@@ -35,13 +54,39 @@ impl Config {
             use_vsock: std::env::var("USE_VSOCK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            evm_network_ids: std::env::var("EVM_NETWORK_IDS")
-                .unwrap_or_default()
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect(),
+            grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
+            grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
+            grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),
+            health_host: std::env::var("HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            health_port: env_or("HEALTH_PORT", 5001),
         }
     }
+}
+
+/// Parse `HEADER_ELECTRUM_URL` and `HEADER_SYNC_INTERVAL_SECS`.
+///
+/// An unset or empty value takes its default. A bad interval is an error that
+/// stops the parent. A bad URL comes back as the inner `Err`. Header sync
+/// reports it as `unconfigured`, and signing continues.
+pub fn header_sync(
+    url: Option<String>,
+    interval_secs: Option<String>,
+) -> anyhow::Result<(Result<Option<ElectrumSource>, String>, Duration)> {
+    let source = match url.as_deref() {
+        None | Some("") => Ok(None),
+        Some(url) => ElectrumSource::new(url)
+            .map(Some)
+            .map_err(|e| format!("HEADER_ELECTRUM_URL: {e:#}")),
+    };
+    let secs = match interval_secs.as_deref() {
+        None | Some("") => 10,
+        Some(v) => v
+            .parse::<u64>()
+            .ok()
+            .filter(|s| (1..=600).contains(s))
+            .with_context(|| format!("HEADER_SYNC_INTERVAL_SECS must be 1..=600, got {v:?}"))?,
+    };
+    Ok((source, Duration::from_secs(secs)))
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -49,4 +94,41 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(source set, interval)`; the source slot is `Err` for a bad URL.
+    fn parse(url: Option<&str>, secs: Option<&str>) -> anyhow::Result<(Result<bool, String>, u64)> {
+        header_sync(url.map(Into::into), secs.map(Into::into))
+            .map(|(source, interval)| (source.map(|s| s.is_some()), interval.as_secs()))
+    }
+
+    #[test]
+    fn header_sync_settings() {
+        assert_eq!(parse(None, None).unwrap(), (Ok(false), 10));
+        assert_eq!(parse(Some(""), Some("")).unwrap(), (Ok(false), 10));
+        assert_eq!(
+            parse(Some("ssl://e.example.com:50002"), Some("1")).unwrap(),
+            (Ok(true), 1)
+        );
+        assert_eq!(
+            parse(Some("tcp://127.0.0.1:50001"), Some("600")).unwrap(),
+            (Ok(true), 600)
+        );
+        // A bad URL does not stop the parent.
+        for url in ["tcp://192.0.2.1:50001", "electrum:50002"] {
+            let (source, secs) = parse(Some(url), None).unwrap();
+            assert!(
+                source.unwrap_err().starts_with("HEADER_ELECTRUM_URL: "),
+                "{url}"
+            );
+            assert_eq!(secs, 10);
+        }
+        for secs in ["0", "601", "-1", "ten"] {
+            assert!(parse(None, Some(secs)).is_err(), "{secs}");
+        }
+    }
 }

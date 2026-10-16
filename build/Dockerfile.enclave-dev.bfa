@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.4
+# Enclave (dev mode, TCP, no vsock) WITH the BFA mint path, one signer role.
+# SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
+# (RGB -> EVM). The two roles are two enclaves with two seeds.
+# Private Cargo dependencies require BuildKit secrets (see README, Building).
+# Supply github_token, or one deploy key per repo; keys never enter image layers.
+# Example: docker build --secret id=github_token,env=GITHUB_TOKEN \
+#   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
+# Builder glibc must stay compatible with the runtime stage below.
+FROM rust:1.96-slim AS builder
+
+# Builder-only tools: system Git and SSH for private dependencies.
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev git ca-certificates openssh-client make cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/
+
+WORKDIR /build/enclave
+# The dev image keeps `spv` (which implies `rgb-validation`), so the SPV path
+# runs without vsock. Without spv, the enclave fails closed on any request
+# that carries merkle_proofs, so a build mismatch fails loudly.
+#
+# DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
+# features that `compile_error!`s in a release build (`debug_assertions`
+# off) - see the release guards in `enclave/src/lib.rs`. Building the dev
+# image in debug keeps `debug_assertions` on so the guard stays quiet while
+# still refusing the feature in any production (release) build.
+#
+# `--no-default-features` is REQUIRED: defaults are `rgb,rgb-swap,ccd`, and a
+# plain `--features` still applies them. Keep the list below explicit.
+# `ccd` is listed because Concordium signing sits behind that feature; without it
+# every CCD request answers "not compiled in".
+#
+# Differs from Dockerfile.enclave-dev: the signer role (which implies
+# `bfa-mint`) replaces `rgb-swap`, and `mock-attestation` is on.
+# `ccd` stays in the list: init-enclaves.sh ends by asking each adapter for its
+# CCD_GOVERNANCE public key and fails the whole run if that answers "not
+# compiled in".
+#
+ARG SIGNER_ROLE
+RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
+      *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
+RUN --mount=type=secret,id=github_token \
+    --mount=type=secret,id=consensus_key \
+    --mount=type=secret,id=ops_key \
+    --mount=type=secret,id=schemas_key \
+    sh /build/build/with-private-deps.sh enclave cargo build --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE
+
+# ===== Runtime Stage =====
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m enclave
+
+WORKDIR /home/enclave
+
+COPY --from=builder /build/target/debug/utexo-bridge-enclave ./utexo-bridge-enclave
+
+RUN chown -R enclave:enclave .
+
+USER enclave
+
+ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
+ENV BITCOIN_NETWORK=testnet
+ENV RUST_LOG=debug
+
+EXPOSE 5000
+
+ENTRYPOINT ["./utexo-bridge-enclave"]

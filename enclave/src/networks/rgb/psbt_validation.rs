@@ -1,26 +1,29 @@
 use bitcoin::psbt::Psbt;
 
 #[cfg(feature = "rgb-validation")]
-use super::validation::{ifa, ValidatedConsignment};
+use super::flow;
+#[cfg(feature = "rgb-validation")]
+use super::validation::{bfa, ValidatedConsignment};
 use crate::error::{EnclaveError, Result};
 
-/// Derive the soft-dedup key for an EVM→RGB bridge PSBT operation.
+/// Soft-dedup key for an EVM->RGB bridge PSBT operation.
 ///
 /// 32-byte keccak over `(chain_id, bridge_contract, evm_tx_hash,
-/// operation_idx, rgb_asset_id)`. `chain_id` and `bridge_contract` come from
-/// the enclave's **pinned** [`crate::config::BridgeConfig`] (not the request),
-/// so they can't be varied per-call. The variable-length fields are
-/// length-prefixed and a domain tag is mixed in so two distinct tuples can't
-/// hash to the same key by concatenation ambiguity.
+/// funds_in_operation_id, rgb_asset_id)`. `chain_id` and `bridge_contract` come
+/// from the pinned [`crate::config::BridgeConfig`], not the request.
+/// `funds_in_operation_id` is the on-chain `BridgeFundsIn.operationId`, verified
+/// by [`crate::networks::evm::events::verify_funds_in_event`].
+/// A domain tag and length prefixes on variable-length fields prevent
+/// concatenation collisions.
 ///
-/// Consumed by the **soft** in-memory replay guard
-/// ([`crate::state::EnclaveState::op_replay_guard`]) — see its doc for why
-/// this is defense-in-depth and not a sufficient double-spend control (#84).
+/// The in-memory replay guard
+/// ([`crate::state::EnclaveState::op_replay_guard`]) uses it. That guard is
+/// defense in depth only, not a full double-spend control.
 pub fn psbt_operation_key(
     chain_id: u64,
     bridge_contract: &[u8; 20],
     evm_tx_hash: &[u8],
-    operation_idx: u64,
+    funds_in_operation_id: &[u8],
     rgb_asset_id: &str,
 ) -> [u8; 32] {
     use sha3::{Digest, Keccak256};
@@ -31,27 +34,23 @@ pub fn psbt_operation_key(
     h.update(bridge_contract);
     h.update((evm_tx_hash.len() as u64).to_be_bytes());
     h.update(evm_tx_hash);
-    h.update(operation_idx.to_be_bytes());
+    h.update((funds_in_operation_id.len() as u64).to_be_bytes());
+    h.update(funds_in_operation_id);
     h.update((rgb_asset_id.len() as u64).to_be_bytes());
     h.update(rgb_asset_id.as_bytes());
     h.finalize().into()
 }
 
-/// Shape whitelist for a raw PSBT: refuse payloads that aren't even a legitimate
-/// PSBT before any other predicate runs. Catches three classes of garbage
-/// up-front:
+/// Shape allowlist for a raw PSBT, before all other checks. It rejects:
 ///
-///   (a) empty bytes (handler tried to sign nothing),
-///   (b) bytes that don't conform to BIP-174 (random/truncated/tampered),
-///   (c) PSBTs with no inputs — there's literally nothing to sign, and the
-///       unsigned-tx-must-be-non-empty rule is implicit in BIP-174's signing
-///       semantics.
+///   (a) empty bytes,
+///   (b) bytes that are not valid BIP-174,
+///   (c) PSBTs with no inputs (nothing to sign).
 ///
-/// The signer would fail later on these too, but with a much noisier downstream
-/// error; failing here gives the caller a single clear reason. Returns the
-/// parsed PSBT so callers that need it (the plain-BTC `SignBtc` path) don't
-/// re-parse. Shared by the bridge/RGB `SignPsbt` path ([`validate_psbt_bytes`])
-/// and the plain-BTC `SignBtc` path ([`crate::networks::rgb::btc_crosscheck`]).
+/// The signer would also fail on these, but with a less clear error. Returns
+/// the parsed PSBT so callers do not parse it again. Used by the `SignPsbt`
+/// path ([`validate_psbt_bytes`]) and the `SignBtc` path
+/// ([`crate::networks::rgb::btc_crosscheck`]).
 pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
     if psbt_bytes.is_empty() {
         return Err(EnclaveError::CrossCheck("psbt_bytes is empty".into()));
@@ -60,63 +59,76 @@ pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
     if psbt.unsigned_tx.input.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "psbt has no inputs — nothing to sign".into(),
+            "psbt has no inputs - nothing to sign".into(),
         ));
     }
 
     Ok(psbt)
 }
 
-/// Validate the serialized PSBT shape owned by an RGB destination.
+/// Validates the shape of a serialized PSBT for an RGB destination.
 pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
     parse_psbt_shape(psbt_bytes).map(|_| ())
 }
 
-/// Bind a PSBT to the RGB consignment it claims to finalize.
+/// Binds a PSBT to the RGB consignment it claims to finalize.
 ///
-/// In this flow the PSBT being signed **is** the RGB transfer's witness
-/// transaction: the Bitcoin tx that spends the bridge's UTXOs holding the RGB
-/// allocation and carries the tapret/opret DBC commitment to the
-/// state-transition bundle. Without this check the signing path has no link
-/// between the PSBT and the consignment, so a compromised host could get the
-/// enclave to sign a PSBT that moves bridge BTC without committing to the
-/// claimed RGB state.
+/// The PSBT is the witness transaction of the RGB transfer. It spends the
+/// bridge UTXOs with the RGB allocation and carries the tapret/opret DBC
+/// commitment to the transition bundle. Without this bind, a compromised host
+/// could get a signature that moves bridge BTC without the claimed RGB state.
 ///
-/// Must be called only **after** [`crate::networks::rgb::validation::RgbValidator::
-/// validate_consignment`] has run full rgbstd validation — the txid-identity
-/// argument below is worthless otherwise (an attacker could put any tx in the
-/// consignment and a matching `unsigned_tx`; only `validate()` proves the
-/// commitment is genuinely anchored).
+/// Run it only after
+/// [`crate::networks::rgb::validation::RgbValidator::validate_consignment`],
+/// which proves the commitment is anchored.
 ///
-/// Enforces, fail-closed:
-///   1. The consignment's last transition is an IFA `Transfer`
-///      (`ifa::TS_TRANSFER`, the pools-mode send shape) or an IFA
-///      `Inflation` (`ifa::TS_INFLATION`, the mint-RGB shape — #54).
-///   2. **Identity bind:** `psbt.unsigned_tx.compute_txid()` equals the
-///      consignment's last witness txid. A segwit txid commits to every
-///      non-witness field (all inputs, all outputs incl. the commitment
-///      output), and rgbstd proved that transition's commitment lives in the
-///      tx with this txid — so equality means signing this PSBT finalizes
-///      exactly the validated transition, and every input is anchored.
-///   3. **Per-input canary:** when the consignment embeds the full witness tx,
-///      the set of PSBT input outpoints must equal the witness tx's input
-///      prevout set. Redundant given (2); a mismatch signals a broken
-///      consignment/encoding invariant and is rejected loudly.
-///   4. **Sighash guard:** refuse any input requesting a sighash other than
-///      ALL / taproot-DEFAULT, so a host can't splice our signature into a
-///      different tx (ANYONECANPAY / SINGLE / NONE).
-///   5. **Amount bind (coarse):** the transition's `asset_output_amount`
-///      (the `OS_ASSET`-typed allocations only — for a mint, excluding the
-///      `OS_INFLATION` allowance outputs) must cover the net amount credited
-///      by the source side (`source_amount` minus `source_commission`). This
-///      does not yet verify which output is the recipient leg (issue #58).
+/// The build's RGB flow ([`crate::networks::rgb::flow`]) owns the type and
+/// amount rules (1, 5, 6). A `rgb-swap` enclave accepts only BFA `Transfer`, a
+/// `rgb-mint-burn` enclave only BFA `Bridge`. The rest is shared PSBT logic.
+///
+/// Checks, fail-closed:
+///   1. The settling transition of the consignment is the type this flow signs.
+///   2. Identity bind: `psbt.unsigned_tx.compute_txid()` equals the last
+///      witness txid, and every input spends a native witness program. Such an
+///      input finalizes with an empty `scriptSig` (BIP-141), so the unsigned
+///      txid is the final txid. A `scriptSig` input (P2SH-wrapped SegWit,
+///      legacy) changes the txid, so it is refused.
+///   3. Per-input canary: when the consignment has the full witness tx, the
+///      PSBT input outpoints must equal its prevout set. Redundant with (2). A
+///      mismatch means a broken consignment invariant.
+///   4. Sighash guard: only ALL or taproot DEFAULT, so a host cannot splice our
+///      signature into a different tx.
+///   5. Whole-bundle scope: both amount binds cover every transition the
+///      signed txid commits. The group must not be empty, must contain the
+///      settling transition, and every member must be the type this flow signs.
+///   6. Aggregate amount bind: the summed `asset_output_amount` of the group
+///      (`OS_ASSET` only, not the `OS_BRIDGE` mint right) against
+///      `source_amount - source_commission`, under the flow rule: equality for
+///      a mint, a lower bound for a transfer (its total includes change).
+///   7. Per-output recipient bind: the seal classifies each `OS_ASSET` output.
+///      A confidential (`utxob:`) seal is a recipient leg. A revealed
+///      (`txid:vout`) seal is bridge change only if `self_owned` proves the
+///      outpoint is ours. All else is rejected. The recipient total must equal
+///      `net_credited`.
+///
+///      The outpoint can be off the signed tx: with no BTC change, rgb-lib puts
+///      the RGB change on an existing wallet UTXO. That needs an indexer call,
+///      capped at [`MAX_OFF_TX_CHANGE_OUTPOINTS`] per PSBT.
+///
+/// `self_owned` resolves whether an outpoint pays back to this enclave. It is a
+/// callback, not a `&KeyManager`, so the key lock is not held across the
+/// network calls of consignment validation.
+///
+/// Returns the classified [`AssetLegs`]. The route-level amount cross-check
+/// uses its recipient amount, not the wire `psbt_output_amount`.
 #[cfg(feature = "rgb-validation")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
     validated: &ValidatedConsignment,
     source_amount: u64,
     source_commission: u64,
-) -> Result<()> {
+    self_owned: SelfOwnedOutpoint<'_>,
+) -> Result<AssetLegs> {
     use std::collections::BTreeSet;
 
     let last = validated.last_transition.as_ref().ok_or_else(|| {
@@ -124,21 +136,13 @@ pub fn validate_psbt_anchors_transition(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
     })?;
-    if !matches!(last.transition_type, ifa::TS_TRANSFER | ifa::TS_INFLATION) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT requires a Transfer or Inflation transition (last transition_type = \
-             {}, want {} or {})",
-            last.transition_type,
-            ifa::TS_TRANSFER,
-            ifa::TS_INFLATION
-        )));
-    }
+    flow::assert_signing_transition(last)?;
 
-    // Derive the txid from `unsigned_tx`, never a finalized/extracted tx
-    // (a non-segwit input's scriptSig would change the txid post-signing).
-    let expected = validated.last_transfer_witness_txid.ok_or_else(|| {
+    // Use the txid of `unsigned_tx`, never a finalized tx. The input check
+    // below makes the two equal.
+    let expected = validated.last_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "consignment carries no witness txid for its last transition — \
+            "consignment carries no witness txid for its last transition - \
              cannot anchor the PSBT"
                 .into(),
         )
@@ -149,6 +153,22 @@ pub fn validate_psbt_anchors_transition(
             "PSBT does not finalize the consignment's transition: unsigned txid {psbt_txid} != \
              consignment witness txid {expected}"
         )));
+    }
+
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        let Some(utxo) = input.witness_utxo.as_ref() else {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
+                 without a scriptSig"
+            )));
+        };
+        if !utxo.script_pubkey.is_witness_program() {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} spends a non-native-SegWit output; its finalized \
+                 scriptSig would change the txid the consignment binds ({psbt_txid}) - \
+                 refusing to sign"
+            )));
+        }
     }
 
     if let Some(ref prevouts) = validated.last_transfer_witness_prevouts {
@@ -162,13 +182,13 @@ pub fn validate_psbt_anchors_transition(
         if psbt_set != expected_set {
             return Err(EnclaveError::CrossCheck(
                 "PSBT input outpoints do not match the consignment witness tx inputs \
-                 (txid matched but input set differs — broken consignment invariant)"
+                 (txid matched but input set differs - broken consignment invariant)"
                     .into(),
             ));
         }
     }
 
-    // 0x00 = taproot SIGHASH_DEFAULT, 0x01 = SIGHASH_ALL; anything else is spliceable.
+    // 0x00 = taproot SIGHASH_DEFAULT, 0x01 = SIGHASH_ALL. Others are spliceable.
     for (i, input) in psbt.inputs.iter().enumerate() {
         if let Some(sht) = input.sighash_type {
             let raw = sht.to_u32();
@@ -181,539 +201,327 @@ pub fn validate_psbt_anchors_transition(
         }
     }
 
-    let net_credited = source_amount.saturating_sub(source_commission);
-    // `asset_output_amount`, not `total_output_amount`: only `OS_ASSET`-typed
-    // allocations carry asset units. For a Transfer the two are equal; for an
-    // Inflation the total also counts `OS_INFLATION` allowance outputs (mint
-    // *capacity*), which must not cover the credited amount (#54).
-    if last.asset_output_amount < net_credited {
+    // A Bitcoin tx commits a bundle, which can hold several transitions.
+    let committed = validated.transitions_committed_by(psbt_txid);
+    if committed.is_empty() {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB amount mismatch: consignment asset_output_amount ({}) < net credited \
-             (source_amount {} - source_commission {} = {})",
-            last.asset_output_amount, source_amount, source_commission, net_credited
+            "send-RGB consignment commits no transition to the transaction being signed \
+             ({psbt_txid}) - refusing to sign an unbound witness"
+        )));
+    }
+    // Canary: this tx must commit the settling transition. Else the flat parser
+    // and the rgbstd walk disagree, and the binds below check a different
+    // operation.
+    if !committed.iter().any(|t| t.op_id == last.op_id) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB consignment inconsistency: settling transition {} is not committed by the \
+             transaction being signed ({psbt_txid})",
+            last.op_id
+        )));
+    }
+    flow::assert_committed_group(&committed)?;
+
+    // `asset_output_amount`, not `total_output_amount`: `OS_BRIDGE` outputs
+    // are mint capacity, not minted value. The sum covers the whole group, so
+    // a sibling transition cannot move value outside the bind.
+    let committed_asset_output: u64 = committed
+        .iter()
+        .try_fold(0u64, |acc, t| acc.checked_add(t.asset_output_amount))
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "send-RGB committed asset_output_amount total overflows u64".into(),
+            )
+        })?;
+
+    let net_credited = source_amount.saturating_sub(source_commission);
+    flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
+
+    // Per-output recipient bind. It runs last because only it uses the
+    // enclave keys.
+    let legs = split_asset_legs(psbt, psbt_txid, &committed, self_owned)?;
+    if legs.recipient != net_credited {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB recipient amount mismatch: consignment pays {} asset units to \
+             confidential (recipient) seals, but the source credited {net_credited} \
+             (source_amount {source_amount} - source_commission {source_commission}); \
+             {} units return to bridge-owned change seals",
+            legs.recipient, legs.change
         )));
     }
 
-    Ok(())
+    Ok(legs)
 }
 
-/// Maximum multiple of the recommended fee rate a send-RGB PSBT may pay
-/// (#55). Compile-time (PCR-attested), deliberately not host-tunable: an
-/// env knob would let the operator's host neutralize the check. 3x absorbs
-/// fee-market movement within the estimate's TTL plus the unsigned-vsize
-/// overestimate (see [`check_psbt_fee_rate`]).
-#[cfg(feature = "rgb-validation")]
-const FEE_RATE_HEADROOM: f64 = 3.0;
-
-/// Fee-rate sanity check for send-RGB PSBTs (#55): the implied fee rate must
-/// not exceed [`FEE_RATE_HEADROOM`] x the enclave-fetched recommendation.
-/// Without this, a compromised host could burn bridge BTC as miner fees on an
-/// otherwise fully-validated PSBT (the anchor bind pins inputs and the
-/// commitment output, but the fee is whatever the outputs leave behind).
+/// Resolves whether a Bitcoin outpoint pays back to this enclave.
 ///
-/// Fail-closed on every degenerate shape: `Psbt::fee()` errors (missing
-/// `witness_utxo`/`non_witness_utxo`, value overflow) reject, a zero-vsize tx
-/// rejects, and the comparison is written so a NaN rate rejects. The rate is
-/// computed over `unsigned_tx.vsize()`, which is smaller than the final
-/// witness-carrying vsize — the implied rate is therefore an OVERestimate,
-/// i.e. conservative in the rejecting direction; the headroom absorbs it.
+/// A callback, not a `&KeyManager`, so the key lock is not held across the
+/// network calls of consignment validation. Two cases:
+///
+///   * on this PSBT: from PSBT metadata only, via
+///     [`crate::networks::rgb::btc_ownership::self_owned_output_indices`];
+///   * on an earlier tx: the tx is fetched and verified by
+///     [`crate::networks::rgb::validation::RgbValidator::fetch_transaction`],
+///     then its `script_pubkey` must be in
+///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`].
 #[cfg(feature = "rgb-validation")]
-pub fn check_psbt_fee_rate(psbt: &Psbt, recommended_sat_vb: f64) -> Result<()> {
-    let fee = psbt.fee().map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "cannot compute PSBT fee (every input needs witness_utxo or non_witness_utxo): {e}"
-        ))
-    })?;
-    let vsize = psbt.unsigned_tx.vsize();
-    if vsize == 0 {
+pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
+
+/// Cap on distinct off-transaction outpoints per PSBT. Each one costs an
+/// indexer call, so no cap lets one request cause many egress calls. A real
+/// transfer uses one. The rest is for bundles.
+#[cfg(feature = "rgb-validation")]
+pub const MAX_OFF_TX_CHANGE_OUTPOINTS: usize = 4;
+
+/// The two legs an `OS_ASSET` output assignment can belong to, in asset units.
+#[cfg(feature = "rgb-validation")]
+#[derive(Debug)]
+pub struct AssetLegs {
+    /// Paid to confidential (blinded) seals: the recipient.
+    pub recipient: u64,
+    /// Paid to revealed seals on Bitcoin outputs this enclave provably
+    /// controls: bridge change.
+    pub change: u64,
+    /// The `utxob:...` seals behind `recipient`, in consignment order. The
+    /// amount bind and the [`crate::networks::rgb::invoice`] identity bind use
+    /// this one walk, so they cannot classify a leg differently.
+    pub recipient_seals: Vec<String>,
+}
+
+/// Splits the `OS_ASSET` outputs of all committed transitions into recipient
+/// and change. Rejects an output that is not provably one of them.
+///
+/// It takes the whole committed group, so a sibling transition cannot move
+/// value outside the bind. It skips `OS_BRIDGE`, because that amount is mint
+/// capacity, not delivered value.
+#[cfg(feature = "rgb-validation")]
+fn split_asset_legs(
+    psbt: &Psbt,
+    psbt_txid: bitcoin::Txid,
+    committed: &[&super::validation::TransitionSummary],
+    self_owned: SelfOwnedOutpoint<'_>,
+) -> Result<AssetLegs> {
+    use super::validation::OutputSeal;
+    use bitcoin::hashes::Hash;
+
+    let asset_outputs: Vec<&super::validation::TransitionOutput> = committed
+        .iter()
+        .flat_map(|t| t.outputs.iter())
+        .filter(|o| o.assignment_type == bfa::OS_ASSET)
+        .collect();
+    if asset_outputs.is_empty() {
         return Err(EnclaveError::CrossCheck(
-            "PSBT unsigned tx has zero vsize — cannot bound its fee rate".into(),
+            "send-RGB consignment's committed transitions carry no OS_ASSET output assignments - \
+             nothing to bind the credited amount to"
+                .into(),
         ));
     }
-    let rate = fee.to_sat() as f64 / vsize as f64;
-    let limit = FEE_RATE_HEADROOM * recommended_sat_vb;
-    // `partial_cmp` (not `a > b`): an incomparable (NaN) rate or limit must
-    // reject, never pass.
-    let within_limit = matches!(
-        rate.partial_cmp(&limit),
-        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+
+    // Cache per outpoint: change legs can share one UTXO, and each miss costs
+    // a lookup. The cap applies only to off-PSBT misses.
+    let mut verdicts: std::collections::HashMap<bitcoin::OutPoint, bool> =
+        std::collections::HashMap::new();
+    let mut off_tx_lookups = 0usize;
+
+    let mut legs = AssetLegs {
+        recipient: 0,
+        change: 0,
+        recipient_seals: Vec::new(),
+    };
+    for (i, out) in asset_outputs.iter().enumerate() {
+        match &out.seal {
+            OutputSeal::Confidential { secret_seal } => {
+                legs.recipient = legs.recipient.checked_add(out.amount).ok_or_else(|| {
+                    EnclaveError::CrossCheck(
+                        "send-RGB recipient leg total overflows u64 asset units".into(),
+                    )
+                })?;
+                legs.recipient_seals.push(secret_seal.clone());
+            }
+            OutputSeal::Revealed { txid, vout } => {
+                // `None` is the witness tx of this bundle, which the identity
+                // bind proved is the signed PSBT. Seal txids are display order
+                // and `Txid` is internal order, so reverse the bytes here.
+                let seal_txid = match txid {
+                    Some(bytes) => {
+                        let mut internal = *bytes;
+                        internal.reverse();
+                        bitcoin::Txid::from_byte_array(internal)
+                    }
+                    None => psbt_txid,
+                };
+                let outpoint = bitcoin::OutPoint {
+                    txid: seal_txid,
+                    vout: *vout,
+                };
+
+                let is_owned = match verdicts.get(&outpoint) {
+                    Some(known) => *known,
+                    None => {
+                        if seal_txid != psbt_txid {
+                            off_tx_lookups += 1;
+                            if off_tx_lookups > MAX_OFF_TX_CHANGE_OUTPOINTS {
+                                return Err(EnclaveError::CrossCheck(format!(
+                                    "send-RGB consignment names more than \
+                                     {MAX_OFF_TX_CHANGE_OUTPOINTS} distinct off-transaction \
+                                     change outpoints - refusing to sign"
+                                )));
+                            }
+                        }
+                        let verdict = self_owned(psbt, outpoint)?;
+                        verdicts.insert(outpoint, verdict);
+                        verdict
+                    }
+                };
+
+                if !is_owned {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "send-RGB OS_ASSET output {i} ({} units) has a revealed seal on outpoint \
+                         {outpoint}, which this enclave cannot prove it controls - a revealed leg \
+                         is only acceptable as bridge change, and an unprovable one is an \
+                         unverifiable payout destination",
+                        out.amount
+                    )));
+                }
+                legs.change = legs.change.checked_add(out.amount).ok_or_else(|| {
+                    EnclaveError::CrossCheck(
+                        "send-RGB change leg total overflows u64 asset units".into(),
+                    )
+                })?;
+            }
+        }
+    }
+
+    Ok(legs)
+}
+
+/// Pinned maximum fee rate (sat/vB) for every PSBT this enclave signs
+/// (`SignBtc` and `SignPsbt`). It is compile-time and in PCR0, so the host
+/// cannot change it. A change needs a new image that the federation agrees to.
+/// It is high on purpose: a safety limit against fee burn, not a fee estimator.
+/// The bridge checks the real rate before it locks user funds, so a fee market
+/// move before signing cannot strand a mint.
+pub const MAX_FEE_RATE_SAT_VB: u64 = 200;
+
+/// Pinned maximum absolute miner fee (sats) for every PSBT this enclave signs.
+/// It bounds the fee of one request at any transaction size.
+///
+/// At the maximum rate, this cap applies first above
+/// [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned vB (one key-path input and approx ten
+/// P2TR outputs). A wider `create_utxos` batch at a high rate must be split.
+/// The error names the crossover, so the operator can tell a size problem from
+/// a rate problem.
+pub const MAX_FEE_SATS: u64 = 100_000;
+
+/// Unsigned vsize above which [`MAX_FEE_SATS`] applies before
+/// [`MAX_FEE_RATE_SAT_VB`].
+pub const MAX_FEE_CAP_CROSSOVER_VB: u64 = MAX_FEE_SATS / MAX_FEE_RATE_SAT_VB;
+
+/// Minimum signed fee rate for bridge PSBTs. The caller cannot change it.
+const MIN_FEE_RATE_SAT_VB: u64 = 1;
+
+/// Resolves the key-path inputs using enclave keys, not caller-supplied claims.
+pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
+
+/// Key-path inputs of `account` that this enclave controls, signed or not.
+/// Resolved from enclave keys, never from the request. `account` is the scope
+/// the signer co-signs: Colored for send-RGB, Vanilla for plain-BTC. Only the
+/// send-RGB resolver calls it. Plain-BTC uses [`fee_key_path_inputs_of`].
+#[cfg(feature = "rgb-validation")]
+pub(crate) fn fee_key_path_inputs_scoped(
+    psbt: &Psbt,
+    keys: &crate::keys::KeyManager,
+    account: crate::keys::AccountType,
+) -> Vec<usize> {
+    let jobs = super::signing::taproot::find_controlled_taproot_inputs(
+        psbt,
+        keys.master_fingerprint(),
+        keys,
     );
-    if !within_limit {
+    fee_key_path_inputs_of(&jobs, account)
+}
+
+/// [`fee_key_path_inputs_scoped`] over resolved jobs, for a caller that
+/// already resolved the controlled inputs for another check.
+pub(crate) fn fee_key_path_inputs_of(
+    jobs: &[super::signing::taproot::TaprootSignJob],
+    account: crate::keys::AccountType,
+) -> Vec<usize> {
+    jobs.iter()
+        .filter(|job| job.account_type == account)
+        .map(|job| job.input_index)
+        .collect()
+}
+
+/// Pinned fee policy for every PSBT the enclave signs. `path` names the
+/// signing path in errors (`"send-RGB"` / `"plain-BTC"`).
+///
+/// Three compile-time bounds:
+///
+///   * the absolute fee is at most [`MAX_FEE_SATS`];
+///   * the fee rate is at most [`MAX_FEE_RATE_SAT_VB`] over
+///     `unsigned_tx.vsize()`. The unsigned size has no witnesses, so the host
+///     cannot pad it to lower the rate. It overstates the signed rate by the
+///     witness share (under a fifth for key-path Taproot). The high limit
+///     allows for that;
+///   * the fee pays at least [`MIN_FEE_RATE_SAT_VB`] over the estimated signed
+///     size (with witnesses), so the transaction can relay.
+///
+/// Fail-closed: a `Psbt::fee()` error (no `witness_utxo` / `non_witness_utxo`),
+/// zero vsize, or a spend shape with no size estimate all fail. If the
+/// finalizer uses a different witness or spend path, it must check the fee
+/// rate again. `key_path_inputs` must come from [`fee_key_path_inputs_scoped`]
+/// or [`fee_key_path_inputs_of`], never from the request.
+pub fn check_psbt_fee(psbt: &Psbt, key_path_inputs: &[usize], path: &str) -> Result<()> {
+    let fee = psbt
+        .fee()
+        .map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "cannot compute PSBT fee (every input needs witness_utxo or \
+                 non_witness_utxo): {e}"
+            ))
+        })?
+        .to_sat();
+    let vsize = psbt.unsigned_tx.vsize() as u64;
+    if vsize == 0 {
+        return Err(EnclaveError::CrossCheck(
+            "PSBT unsigned tx has zero vsize - cannot bound its fee rate".into(),
+        ));
+    }
+
+    if fee > MAX_FEE_SATS {
+        let rate = fee as f64 / vsize as f64;
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB PSBT fee rate too high: {rate:.2} sat/vB > {FEE_RATE_HEADROOM}x the \
-             recommended {recommended_sat_vb:.2} sat/vB — refusing to burn bridge BTC as fees"
+            "{path} PSBT fee too high: {fee} sat > the pinned maximum of {MAX_FEE_SATS} sat \
+             ({rate:.2} sat/vB over {vsize} unsigned vB; above {MAX_FEE_CAP_CROSSOVER_VB} vB \
+             the absolute cap binds before the {MAX_FEE_RATE_SAT_VB} sat/vB rate cap, so split \
+             a wider batch) - refusing to burn custody BTC as fees"
+        )));
+    }
+
+    let max_fee_for_size = vsize
+        .checked_mul(MAX_FEE_RATE_SAT_VB)
+        .ok_or_else(|| EnclaveError::CrossCheck("maximum PSBT fee calculation overflow".into()))?;
+    if fee > max_fee_for_size {
+        let rate = fee as f64 / vsize as f64;
+        return Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT fee rate too high: {rate:.2} sat/vB over {vsize} unsigned vB > the \
+             pinned maximum of {MAX_FEE_RATE_SAT_VB} sat/vB - refusing to burn custody BTC as \
+             fees"
+        )));
+    }
+
+    let signed_vsize = super::psbt_fee_size::estimated_signed_vsize(psbt, key_path_inputs)?;
+    let minimum_fee = signed_vsize
+        .checked_mul(MIN_FEE_RATE_SAT_VB)
+        .ok_or_else(|| EnclaveError::CrossCheck("minimum PSBT fee calculation overflow".into()))?;
+    if fee < minimum_fee {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT fee rate too low: {fee} sat for estimated signed size {signed_vsize} \
+             vB; need at least {minimum_fee} sat ({MIN_FEE_RATE_SAT_VB} sat/vB)"
         )));
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bitcoin::hashes::Hash;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-
-    /// Minimal but BIP-174-valid PSBT: one dummy input, one dummy output, no
-    /// signatures. Used as the "shape passes the whitelist" stand-in across
-    /// the validation tests — the request fields under test are everything
-    /// *around* the PSBT, not the PSBT contents themselves.
-    fn minimal_valid_psbt_bytes() -> Vec<u8> {
-        let unsigned_tx = Transaction {
-            version: bitcoin::transaction::Version(2),
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                        [0u8; 32],
-                    )),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::new(),
-            }],
-        };
-        Psbt::from_unsigned_tx(unsigned_tx)
-            .expect("from_unsigned_tx")
-            .serialize()
-    }
-
-    // =========================================================================
-    // PSBT shape whitelist tests
-    // =========================================================================
-
-    #[test]
-    fn accepts_valid_psbt_bytes() {
-        assert!(validate_psbt_bytes(&minimal_valid_psbt_bytes()).is_ok());
-    }
-
-    #[test]
-    fn rejects_empty_psbt_bytes() {
-        let err = validate_psbt_bytes(&[]).unwrap_err();
-        assert!(err.to_string().contains("psbt_bytes is empty"));
-    }
-
-    // =========================================================================
-    // PSBT shape whitelist rejection tests
-    // =========================================================================
-
-    #[test]
-    fn rejects_garbage_psbt_bytes() {
-        // Long enough to clear the empty-bytes guard but not a BIP-174 PSBT.
-        let err = validate_psbt_bytes(&[0xFF; 100]).unwrap_err();
-        assert!(
-            err.to_string().contains("not a valid PSBT"),
-            "expected PSBT parse rejection, got: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_truncated_psbt_below_magic() {
-        // Shorter than the 5-byte BIP-174 magic prefix.
-        let err = validate_psbt_bytes(&[0x70, 0x73]).unwrap_err();
-        assert!(
-            err.to_string().contains("not a valid PSBT"),
-            "expected PSBT parse rejection, got: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_psbt_with_no_inputs() {
-        // Build a PSBT whose unsigned tx has zero inputs. BIP-174 lets us
-        // serialise it; the validation layer is what enforces the
-        // "something to sign" invariant.
-        let unsigned_tx = Transaction {
-            version: bitcoin::transaction::Version(2),
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![],
-            output: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::new(),
-            }],
-        };
-        let psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-        let err = validate_psbt_bytes(&psbt.serialize()).unwrap_err();
-        assert!(
-            err.to_string().contains("no inputs"),
-            "expected no-inputs rejection, got: {err}"
-        );
-    }
-
-    // =========================================================================
-    // Operation-dedup key — `psbt_operation_key` (audit W-02 / #84)
-    // =========================================================================
-
-    #[test]
-    fn op_key_is_deterministic() {
-        let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
-        let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn op_key_varies_with_every_field() {
-        let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset");
-        assert_ne!(
-            base,
-            psbt_operation_key(2, &[0x11; 20], &[0xAA; 32], 7, "rgb:asset"),
-            "chain_id must change the key"
-        );
-        assert_ne!(
-            base,
-            psbt_operation_key(1, &[0x22; 20], &[0xAA; 32], 7, "rgb:asset"),
-            "bridge_contract must change the key"
-        );
-        assert_ne!(
-            base,
-            psbt_operation_key(1, &[0x11; 20], &[0xBB; 32], 7, "rgb:asset"),
-            "evm_tx_hash must change the key"
-        );
-        assert_ne!(
-            base,
-            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 8, "rgb:asset"),
-            "operation_idx must change the key"
-        );
-        assert_ne!(
-            base,
-            psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], 7, "rgb:other"),
-            "rgb_asset_id must change the key"
-        );
-    }
-
-    #[test]
-    fn op_key_length_prefix_blocks_concatenation_collision() {
-        // Without length-prefixing the variable fields, moving a byte from the
-        // end of evm_tx_hash to the front of rgb_asset_id would collide. The
-        // prefix must keep these distinct. evm_tx_hash is fixed at 32 bytes in
-        // practice, but the key fn must not rely on that for separation.
-        let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", 0, "C");
-        let k2 = psbt_operation_key(1, &[0x11; 20], b"A", 0, "BC");
-        assert_ne!(k1, k2);
-    }
-
-    // =========================================================================
-    // send-RGB anchoring — `validate_psbt_anchors_transition`
-    // =========================================================================
-    #[cfg(feature = "rgb-validation")]
-    mod fee_rate {
-        use super::*;
-
-        /// One segwit-ish input carrying `witness_utxo` of `input_sats`, one
-        /// output of `output_sats` — so `Psbt::fee()` = input − output.
-        fn psbt_with_fee(input_sats: u64, output_sats: u64) -> Psbt {
-            let unsigned_tx = Transaction {
-                version: bitcoin::transaction::Version(2),
-                lock_time: bitcoin::absolute::LockTime::ZERO,
-                input: vec![TxIn {
-                    previous_output: OutPoint {
-                        txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                            [0x11; 32],
-                        )),
-                        vout: 0,
-                    },
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                output: vec![TxOut {
-                    value: Amount::from_sat(output_sats),
-                    script_pubkey: ScriptBuf::new(),
-                }],
-            };
-            let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx");
-            psbt.inputs[0].witness_utxo = Some(TxOut {
-                value: Amount::from_sat(input_sats),
-                script_pubkey: ScriptBuf::new(),
-            });
-            psbt
-        }
-
-        #[test]
-        fn accepts_fee_rate_at_headroom() {
-            // rate == FEE_RATE_HEADROOM × recommended must pass (boundary is
-            // inclusive: reject only strictly above the cap).
-            let recommended = 10.0;
-            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
-            let fee_at_cap = (FEE_RATE_HEADROOM * recommended) as u64 * vsize;
-            let psbt = psbt_with_fee(100_000, 100_000 - fee_at_cap);
-            assert!(check_psbt_fee_rate(&psbt, recommended).is_ok());
-        }
-
-        #[test]
-        fn rejects_fee_rate_above_headroom() {
-            // One extra sat/vB above the cap → reject; nothing else about the
-            // PSBT is wrong, so the error must be the fee-rate one.
-            let recommended = 10.0;
-            let vsize = psbt_with_fee(100_000, 100_000).unsigned_tx.vsize() as u64;
-            let fee_over_cap = ((FEE_RATE_HEADROOM * recommended) as u64 + 1) * vsize;
-            let psbt = psbt_with_fee(100_000, 100_000 - fee_over_cap);
-            let err = check_psbt_fee_rate(&psbt, recommended).unwrap_err();
-            assert!(
-                err.to_string().contains("fee rate too high"),
-                "expected fee-rate rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_psbt_without_utxo_data() {
-            // No witness_utxo/non_witness_utxo → the fee is uncomputable and
-            // the check must fail closed, not skip.
-            let psbt = Psbt::deserialize(&minimal_valid_psbt_bytes()).unwrap();
-            let err = check_psbt_fee_rate(&psbt, 10.0).unwrap_err();
-            assert!(
-                err.to_string().contains("cannot compute PSBT fee"),
-                "expected uncomputable-fee rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_nan_recommendation() {
-            // A NaN limit must reject (the comparison is written as
-            // `!(rate <= limit)` so NaN can never pass). The recommendation
-            // is validated upstream, but the check must not rely on that.
-            let psbt = psbt_with_fee(100_000, 99_000);
-            assert!(check_psbt_fee_rate(&psbt, f64::NAN).is_err());
-        }
-    }
-
-    #[cfg(feature = "rgb-validation")]
-    mod anchor {
-        use super::*;
-        use crate::networks::rgb::validation::{ifa, TransitionSummary, ValidatedConsignment};
-        use bitcoin::psbt::PsbtSighashType;
-        use bitcoin::{OutPoint, Txid};
-
-        /// Build a two-input, one-output unsigned tx + its Psbt. The two
-        /// prevouts are deterministic so a test can reproduce the exact
-        /// witness-tx input set.
-        fn psbt_with_two_inputs() -> Psbt {
-            let mk_outpoint = |seed: u8, vout: u32| OutPoint {
-                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                    [seed; 32],
-                )),
-                vout,
-            };
-            let unsigned_tx = Transaction {
-                version: bitcoin::transaction::Version(2),
-                lock_time: bitcoin::absolute::LockTime::ZERO,
-                input: vec![
-                    TxIn {
-                        previous_output: mk_outpoint(0x11, 0),
-                        script_sig: ScriptBuf::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    },
-                    TxIn {
-                        previous_output: mk_outpoint(0x22, 1),
-                        script_sig: ScriptBuf::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    },
-                ],
-                output: vec![TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: ScriptBuf::new(),
-                }],
-            };
-            Psbt::from_unsigned_tx(unsigned_tx).expect("from_unsigned_tx")
-        }
-
-        fn transfer_summary(total_output_amount: u64) -> TransitionSummary {
-            TransitionSummary {
-                op_id: "transfer-op".into(),
-                transition_type: ifa::TS_TRANSFER,
-                total_output_amount,
-                // Transfers move only OS_ASSET, so the two sums are equal.
-                asset_output_amount: total_output_amount,
-                outputs: vec![],
-                burned_asset_amount: None,
-            }
-        }
-
-        /// A ValidatedConsignment bound to `psbt`'s actual txid + prevouts,
-        /// with the given transfer total. The "happy" baseline every test
-        /// then mutates.
-        fn validated_for(psbt: &Psbt, total_output_amount: u64) -> ValidatedConsignment {
-            let prevouts = psbt
-                .unsigned_tx
-                .input
-                .iter()
-                .map(|txin| txin.previous_output)
-                .collect();
-            ValidatedConsignment {
-                contract_id: "rgb:test".into(),
-                chain_net: "bc".into(),
-                witness_txids: vec![],
-                all_op_ids: vec!["transfer-op".into()],
-                mint_op_ids: vec![],
-                last_transition: Some(transfer_summary(total_output_amount)),
-                last_transfer_witness_txid: Some(psbt.unsigned_tx.compute_txid()),
-                last_transfer_witness_prevouts: Some(prevouts),
-                last_transfer_op_id: None,
-                non_mined_witness_txids: vec![],
-            }
-        }
-
-        #[test]
-        fn passes_when_txid_inputs_and_amount_match() {
-            let psbt = psbt_with_two_inputs();
-            let validated = validated_for(&psbt, 1_000);
-            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
-        }
-
-        #[test]
-        fn passes_when_total_output_exceeds_net_credited() {
-            let psbt = psbt_with_two_inputs();
-            let validated = validated_for(&psbt, 5_000);
-            // net credited = 1_000 - 100 = 900 <= 5_000
-            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 100).is_ok());
-        }
-
-        #[test]
-        fn rejects_txid_mismatch() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_txid = Some(Txid::from_raw_hash(
-                bitcoin::hashes::sha256d::Hash::from_byte_array([0xAB; 32]),
-            ));
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("does not finalize the consignment's transition"),
-                "expected txid-mismatch rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_missing_witness_txid() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_txid = None;
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string().contains("carries no witness txid"),
-                "expected missing-txid rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_prevout_set_mismatch() {
-            // txid still matches (we don't touch it), but the recorded prevout
-            // set differs — the canary must fire.
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_prevouts = Some(vec![OutPoint {
-                txid: Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-                    [0x99; 32],
-                )),
-                vout: 7,
-            }]);
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string().contains("input outpoints do not match"),
-                "expected prevout-mismatch rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn skips_prevout_canary_when_witness_tx_not_embedded() {
-            // PubWitness::Txid only → prevouts None → txid bind alone carries.
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transfer_witness_prevouts = None;
-            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
-        }
-
-        /// #54: the mint-RGB shape — an IFA Inflation last transition — binds
-        /// through the same anchor path as the pools-mode Transfer.
-        #[test]
-        fn accepts_inflation_shape() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_INFLATION;
-            assert!(validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok());
-        }
-
-        /// #54: for a mint, only `OS_ASSET`-typed outputs (the actually
-        /// minted units) may cover the credited amount — the `OS_INFLATION`
-        /// allowance (mint capacity) counted in `total_output_amount` must
-        /// not.
-        #[test]
-        fn inflation_allowance_does_not_cover_credited_amount() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            {
-                let last = validated.last_transition.as_mut().unwrap();
-                last.transition_type = ifa::TS_INFLATION;
-                // Minted 999 units; a large allowance rides along in the
-                // total. Net credited is 1_000 — must be rejected on the
-                // asset sum, not covered by the allowance-inflated total.
-                last.asset_output_amount = 999;
-                last.total_output_amount = 1_000_000;
-            }
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string().contains("asset_output_amount (999)"),
-                "expected asset-amount rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_non_transfer_transition() {
-            let psbt = psbt_with_two_inputs();
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_transition.as_mut().unwrap().transition_type = ifa::TS_BURN;
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("requires a Transfer or Inflation transition"),
-                "expected Transfer/Inflation-required rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_amount_under_net_credited() {
-            let psbt = psbt_with_two_inputs();
-            let validated = validated_for(&psbt, 999);
-            // net credited = 1_000 - 0 = 1_000 > 999
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string().contains("amount mismatch"),
-                "expected amount-mismatch rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn rejects_non_all_sighash() {
-            let psbt = {
-                let mut p = psbt_with_two_inputs();
-                // SIGHASH_SINGLE | ANYONECANPAY = 0x83 — spliceable.
-                p.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(0x83));
-                p
-            };
-            let validated = validated_for(&psbt, 1_000);
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).unwrap_err();
-            assert!(
-                err.to_string().contains("non-ALL sighash"),
-                "expected sighash rejection, got: {err}"
-            );
-        }
-
-        #[test]
-        fn accepts_sighash_all_and_default() {
-            for raw in [0x00u32, 0x01u32] {
-                let mut psbt = psbt_with_two_inputs();
-                psbt.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(raw));
-                let validated = validated_for(&psbt, 1_000);
-                assert!(
-                    validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0).is_ok(),
-                    "sighash 0x{raw:02x} should be accepted"
-                );
-            }
-        }
-    }
-}
+mod tests;

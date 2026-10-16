@@ -1,25 +1,29 @@
-//! Live-chain check of the #60 FundsIn binding, against a real `BridgeFundsIn`
-//! log rather than a synthetic one. The unit tests build their own logs, so a
-//! wrong event signature or topic index would pass both sides of the mistake.
+//! Live-chain check of the FundsIn binding against a real `BridgeFundsIn`
+//! log. The unit tests build their own logs, so a wrong event signature or
+//! topic index would pass on both sides.
 //!
-//! Skipped unless `UTEXO_LIVE_EVM_RPC` is set — no CI runner has a chain. Run it
-//! against the localnet after `make evm-fundsin`:
+//! Skipped unless `UTEXO_LIVE_EVM_RPC_HOST` is set. The client is the
+//! enclave's: TLS to `127.0.0.1:<port>`, under the CA in the DER file. Forward
+//! that port to the RPC first, for example
+//! `socat TCP-LISTEN:8443,fork TCP:<rpc host>:443`:
 //!
 //! ```sh
-//! UTEXO_LIVE_EVM_RPC=http://localhost:8545 \
-//! UTEXO_LIVE_BRIDGE=0x… UTEXO_LIVE_TX=0x… UTEXO_LIVE_OP_ID=42 \
+//! UTEXO_LIVE_EVM_RPC_HOST=<rpc host> UTEXO_LIVE_EVM_RPC_TLS_PORT=8443 \
+//! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
+//! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 UTEXO_LIVE_MIN_CONF=1 \
 //!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
 //! ```
-#![cfg(feature = "evm-rpc")]
+// FundsIn deposit verification: the EVM -> RGB direction.
+#![cfg(all(feature = "evm-rpc", evm_to_rgb))]
 
-use utexo_bridge_enclave::networks::evm::evm_event::{verify_funds_in_event, AlloyEvmClient};
+use utexo_bridge_enclave::networks::evm::events::{verify_funds_in_event, AlloyEvmClient};
 
 struct Live {
     client: AlloyEvmClient,
     bridge: [u8; 20],
     tx: [u8; 32],
-    op_id: [u8; 32],
+    op_id: Vec<u8>,
     amount: u64,
     commission: u64,
     min_conf: u64,
@@ -37,32 +41,39 @@ fn num(var: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// `operationId` is a `uint256` on chain that the enclave binds as the full
-/// 32-byte word (proto #24). Accept either a decimal or a `0x` literal so the
-/// value can be pasted straight from a tx receipt; both are left-padded
-/// big-endian into the 32-byte word, matching the on-chain ABI encoding.
-fn op_id(var: &str) -> [u8; 32] {
+/// `operationId` is a `bytes32` on chain. Accept hex with or without `0x` and
+/// left-pad it to 32 bytes, so a short value from a receipt still binds.
+fn op_id(var: &str) -> Vec<u8> {
     let v = std::env::var(var).unwrap_or_else(|_| panic!("{var} is required"));
-    let mut word = [0u8; 32];
-    match v.strip_prefix("0x") {
-        Some(hex) => {
-            let raw = hex::decode(hex).expect("operationId hex");
-            assert!(raw.len() <= 32, "operationId must fit in 32 bytes");
-            word[32 - raw.len()..].copy_from_slice(&raw);
-        }
-        None => {
-            let n: u128 = v.parse().expect("operationId must be a decimal or 0x hex");
-            word[16..].copy_from_slice(&n.to_be_bytes());
-        }
-    }
-    word
+    let raw = hex::decode(v.strip_prefix("0x").unwrap_or(&v)).expect("operationId hex");
+    assert!(raw.len() <= 32, "operationId must be at most 32 bytes");
+    let mut id = vec![0u8; 32 - raw.len()];
+    id.extend_from_slice(&raw);
+    id
 }
 
 /// `None` when the live chain is not configured, so the suite is a no-op in CI.
 fn live() -> Option<Live> {
-    let url = std::env::var("UTEXO_LIVE_EVM_RPC").ok()?;
+    let tls = utexo_bridge_enclave::config::EvmRpcTls {
+        host: std::env::var("UTEXO_LIVE_EVM_RPC_HOST").ok()?,
+        ca_der: std::fs::read(
+            std::env::var("UTEXO_LIVE_EVM_RPC_CA_DER_FILE")
+                .expect("UTEXO_LIVE_EVM_RPC_CA_DER_FILE is required"),
+        )
+        .expect("read the CA"),
+        tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443) as u16,
+        path: std::env::var("UTEXO_LIVE_EVM_RPC_PATH_FILE")
+            .ok()
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .expect("read RPC path")
+                    .trim_end()
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "/".into()),
+    };
     Some(Live {
-        client: AlloyEvmClient::new(&url).expect("build RPC client"),
+        client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),
         bridge: bytes("UTEXO_LIVE_BRIDGE")
             .try_into()
             .expect("20-byte bridge"),
@@ -90,14 +101,14 @@ fn live_deposit_binds_operation_id() {
     .expect("the real deposit must verify");
 }
 
-/// A different id must refuse — proves the comparison runs rather than the
-/// decode merely succeeding.
+/// A different id must fail. This proves that the comparison runs, not only
+/// the decode.
 #[test]
 fn live_deposit_rejects_wrong_operation_id() {
     let Some(l) = live() else { return };
-    // A different 32-byte operationId (bump the low byte, wrapping) must refuse.
-    let mut wrong = l.op_id;
-    wrong[31] = wrong[31].wrapping_add(1);
+    // Flip the last byte so the id is a valid 32-byte value that differs.
+    let mut wrong = l.op_id.clone();
+    wrong[31] ^= 1;
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,
@@ -112,8 +123,8 @@ fn live_deposit_rejects_wrong_operation_id() {
     assert!(e.contains("operationId mismatch"), "got: {e}");
 }
 
-/// The amount is bound off the same log, at a different word offset — a swapped
-/// or mis-numbered offset would still bind the id but not this.
+/// The amount comes from a different word offset in the same log. A wrong
+/// offset still binds the id but fails this test.
 #[test]
 fn live_deposit_rejects_wrong_amount() {
     let Some(l) = live() else { return };

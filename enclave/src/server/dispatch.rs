@@ -1,0 +1,241 @@
+//! Request router: each proto oneof variant goes to one handler.
+//!
+//! This is the only place that turns a handler `Err` into an `ErrorResponse`.
+
+#[cfg(not(feature = "kms-persistence"))]
+use super::cloning::{handle_get_clone, handle_initiate_cloning, handle_set_clone};
+use super::context::ServerContext;
+use super::endpoints::handle_set_endpoints;
+use super::health::handle_health;
+use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
+use super::sign::handle_sign;
+#[cfg(evm_to_rgb)]
+use super::signers::handle_sign_btc;
+#[cfg(feature = "ccd")]
+use super::signers::handle_sign_ccd;
+#[cfg(rgb_to_evm)]
+use super::signers::handle_sign_raw_digest;
+#[cfg(feature = "rgb-validation")]
+use super::spv::{handle_get_last_saved_block, handle_submit_headers};
+use crate::error::EnclaveError;
+use crate::proto::enclave_request::Request;
+use crate::proto::enclave_response::Response;
+use crate::proto::*;
+use crate::state::ReplayReservation;
+
+/// Error for a request whose network is not compiled into this build.
+/// Single-network EIFs (RGB-only / CCD-only) return it, so callers see the
+/// refusal. It is not a silent no-op.
+#[allow(dead_code)]
+pub(super) fn unsupported_build(network: &str) -> EnclaveError {
+    EnclaveError::InvalidRequest(format!(
+        "enclave was not built with `{network}` support: this binary does not handle {network} \
+         requests (rebuild with `--features {network}`)"
+    ))
+}
+
+/// Error for a request of the other signer role. A mint signer does not
+/// release, and a burn signer does not mint.
+#[allow(dead_code)]
+pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
+    let role = if cfg!(feature = "mint-signer") {
+        "the mint signer (EVM -> RGB)"
+    } else if cfg!(feature = "burn-signer") {
+        "the burn signer (RGB -> EVM)"
+    } else {
+        "a combined signer"
+    };
+    EnclaveError::InvalidRequest(format!("this enclave is {role}: it does not sign {what}"))
+}
+
+/// Dispatch one request. A sign that reserves a replay key returns the
+/// reservation uncommitted. The caller commits it after the response is written.
+pub(super) fn dispatch(
+    request: EnclaveRequest,
+    ctx: &ServerContext,
+    deadline: std::time::Instant,
+) -> (EnclaveResponse, Option<ReplayReservation<'_>>) {
+    let mut reservation = None;
+    let result = match request.request {
+        Some(Request::InitializeKey(req)) => {
+            let path = if !req.mnemonic.is_empty() {
+                "mnemonic-import"
+            } else if req.seed.is_empty() {
+                if cfg!(feature = "kms-persistence") {
+                    "kms"
+                } else {
+                    "entropy"
+                }
+            } else {
+                "seed-import"
+            };
+            tracing::info!("request: InitializeKey ({})", path);
+            handle_initialize(ctx, req, deadline)
+        }
+        Some(Request::GetPublicKey(req)) => {
+            tracing::info!("request: GetPublicKey");
+            handle_get_public_key(ctx, req)
+        }
+        // Signing waits for the endpoints the operator sets at launch.
+        Some(Request::Sign(req)) => {
+            ctx.launch()
+                .and_then(|_| handle_sign(ctx, req))
+                .map(|(response, reserved)| {
+                    reservation = reserved;
+                    response
+                })
+        }
+        Some(Request::SignBtc(req)) => {
+            tracing::info!("request: SignBtc");
+            // Plain-BTC signing prepares the UTXOs a mint spends.
+            #[cfg(evm_to_rgb)]
+            {
+                ctx.launch().and_then(|_| handle_sign_btc(ctx, req))
+            }
+            #[cfg(not(evm_to_rgb))]
+            {
+                let _ = req;
+                Err(wrong_signer_role("plain-BTC PSBTs"))
+            }
+        }
+        // The EIP-191 `personal_sign` path had no feature or policy gate. It
+        // signed any caller bytes with the main bridge key. The proto still has
+        // the variant, so refuse it explicitly.
+        Some(Request::SignRawMessage(_)) => {
+            tracing::warn!("request: SignRawMessage - removed, refusing");
+            Err(EnclaveError::InvalidRequest(
+                "SignRawMessage is removed; no replacement".into(),
+            ))
+        }
+        Some(Request::SignRawDigest(req)) => {
+            tracing::info!("request: SignRawDigest");
+            // The gas tx pays for the `fundsOut` submission.
+            #[cfg(rgb_to_evm)]
+            {
+                ctx.launch().and_then(|_| handle_sign_raw_digest(ctx, req))
+            }
+            #[cfg(not(rgb_to_evm))]
+            {
+                let _ = req;
+                Err(wrong_signer_role("EVM gas transactions"))
+            }
+        }
+        Some(Request::SignCcd(req)) => {
+            tracing::info!("request: SignCcd");
+            #[cfg(feature = "ccd")]
+            {
+                ctx.launch().and_then(|_| handle_sign_ccd(&ctx.state, req))
+            }
+            #[cfg(not(feature = "ccd"))]
+            {
+                let _ = req;
+                Err(unsupported_build("ccd"))
+            }
+        }
+        Some(Request::ProxyFederation(_req)) => {
+            tracing::info!("request: ProxyFederation");
+            return (
+                EnclaveResponse {
+                    response: Some(Response::Error(ErrorResponse {
+                        code: 1,
+                        message: "unsupported request".into(),
+                    })),
+                },
+                None,
+            );
+        }
+        #[cfg(feature = "kms-persistence")]
+        Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
+            Err(EnclaveError::InvalidRequest(
+                "cloning is disabled with KMS persistence; initialize each replica from its configured seed"
+                    .into(),
+            ))
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        Some(Request::InitiateCloning(req)) => {
+            tracing::info!("request: InitiateCloning");
+            handle_initiate_cloning(&ctx.state, req)
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        Some(Request::GetClone(req)) => {
+            tracing::info!("request: GetClone");
+            let response = handle_get_clone(ctx, req)
+                .unwrap_or_else(|e| error_response(e.clone_error_code(), &e));
+            return (response, None);
+        }
+        #[cfg(not(feature = "kms-persistence"))]
+        Some(Request::SetClone(req)) => {
+            tracing::info!("request: SetClone");
+            handle_set_clone(ctx, req)
+        }
+        Some(Request::SubmitHeaders(req)) => {
+            tracing::info!(
+                headers_len = req.headers.len(),
+                start_height = req.start_height,
+                "request: SubmitHeaders"
+            );
+            #[cfg(feature = "rgb-validation")]
+            {
+                handle_submit_headers(ctx, req)
+            }
+            #[cfg(not(feature = "rgb-validation"))]
+            {
+                let _ = req;
+                Err(unsupported_build("rgb"))
+            }
+        }
+        Some(Request::GetLastSavedBlock(req)) => {
+            tracing::info!("request: GetLastSavedBlock");
+            #[cfg(feature = "rgb-validation")]
+            {
+                handle_get_last_saved_block(ctx, req)
+            }
+            #[cfg(not(feature = "rgb-validation"))]
+            {
+                let _ = req;
+                Err(unsupported_build("rgb"))
+            }
+        }
+        Some(Request::GetAttestedPublicKey(req)) => {
+            tracing::info!("request: GetAttestedPublicKey");
+            handle_get_attested_public_key(ctx, req)
+        }
+        Some(Request::SetEndpoints(req)) => {
+            tracing::info!("request: SetEndpoints");
+            handle_set_endpoints(ctx, req)
+        }
+        // All builds must answer the readiness probe.
+        Some(Request::Health(_)) => {
+            tracing::debug!("request: Health");
+            handle_health(ctx)
+        }
+        None => {
+            tracing::warn!("received empty request (no oneof variant set)");
+            return (
+                EnclaveResponse {
+                    response: Some(Response::Error(ErrorResponse {
+                        code: 1,
+                        message: "empty request".into(),
+                    })),
+                },
+                None,
+            );
+        }
+    };
+
+    let response = match result {
+        Ok(resp) => resp,
+        Err(e) => error_response(e.error_code(), &e),
+    };
+    (response, reservation)
+}
+
+fn error_response(code: u32, e: &EnclaveError) -> EnclaveResponse {
+    tracing::warn!("handler error: {}", e);
+    EnclaveResponse {
+        response: Some(Response::Error(ErrorResponse {
+            code,
+            message: e.to_string(),
+        })),
+    }
+}

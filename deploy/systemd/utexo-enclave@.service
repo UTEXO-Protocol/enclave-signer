@@ -1,19 +1,22 @@
 [Unit]
 Description=UTEXO Nitro enclave (CID %i)
 # Enclaves need the allocator (CPU/memory pool) up first.
-After=nitro-enclaves-allocator.service
-Requires=nitro-enclaves-allocator.service
+After=nitro-enclaves-allocator.service vsock-proxy-electrs.service vsock-proxy-evmrpc.service
+Requires=nitro-enclaves-allocator.service vsock-proxy-electrs.service vsock-proxy-evmrpc.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 User=ubuntu
-# Allow for the serialized start lock (flock -w 180) plus run-enclave retries.
-TimeoutStartSec=300
-# EIF path + cpu/memory come from the deploy-written env file.
-EnvironmentFile=/etc/utexo/enclave.env
+# Allow for the serialized start lock (flock -w 180), run-enclave retries,
+# 60 s for the endpoint set and 50 s for the launch check.
+TimeoutStartSec=390
+# EIF path, cpu/memory, CLI, Electrum URL and EVM RPC CA come from the
+# per-CID deploy-written env file. Mint and Burn never share launch settings.
+EnvironmentFile=/etc/utexo/enclave-%i.env
 ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
-ExecStop=/usr/local/bin/utexo-enclave-ctl.sh stop %i
+# Also runs after a failed or timed-out start, so no enclave stays up.
+ExecStopPost=/usr/local/bin/utexo-enclave-ctl.sh stop %i
 
 [Install]
 WantedBy=multi-user.target

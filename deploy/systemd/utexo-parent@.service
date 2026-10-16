@@ -7,8 +7,8 @@ Requires=utexo-enclave@%i.service
 [Service]
 Type=simple
 User=ubuntu
-# Per-CID env (CLUSTER_DIR, GRPC_HOST/PORT, USE_VSOCK, ENCLAVE_VSOCK_CID/PORT)
-# is written by deploy-host.sh.
+# Per-CID env (CLUSTER_DIR, GRPC_*, HEALTH_*, USE_VSOCK, ENCLAVE_VSOCK_*,
+# HEADER_ELECTRUM_URL) is written by deploy-host.sh.
 EnvironmentFile=/etc/utexo/parent-%i.env
 ExecStart=/usr/local/bin/utexo-parent-ctl.sh
 Restart=on-failure

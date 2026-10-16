@@ -1,40 +1,50 @@
 #!/usr/bin/env bash
-# Build the production enclave image (vsock + rgb-validation + spv), convert it
-# to an EIF, and emit the artifacts a deployment needs:
-#   - utexo-bridge-enclave.eif   the enclave image
-#   - PCR.json                   PCR0/1/2 measurements (from `nitro-cli describe-eif`)
-#   - SHA256SUMS                 sha256 of the EIF (integrity check before run-enclave)
+# Build an enclave image and convert it to an EIF.
+# IMAGE-ENV.json is the env of the measured image. The deploy launch check
+# reads the expected policy pins from it.
+# The caller uploads these files to S3.
 #
-# Environment-agnostic: runs the same on a Nitro EC2 build host and on a CI
-# runner. It does NOT touch S3 — uploading/publishing is the caller's job
-# (the build-eif workflow handles AWS auth + S3). This keeps the script a pure,
-# reproducible build step.
+# Usage: ./build/build-enclave.sh
+# Environment:
+#   OUT_DIR          output directory (default: build/)
+#   IMAGE_TAG        image tag (default: utexo-bridge-enclave:latest)
+#   DOCKERFILE       recipe name (default: Dockerfile.enclave)
+#   EIF_NAME         output name (default: utexo-bridge-enclave.eif)
+#   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
+#   GITHUB_TOKEN     token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR alternatively, directory of per-repository key files
+#                    (consignment_key, consensus_key, ops_key, schemas_key)
+#   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
+#                    (combined, rgb, mint, burn)
+#   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
+#   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #
-# Private dep: the `rgb-validation`/`spv` features pull `rgb-consignment` over
-# SSH. BuildKit `--ssh default` forwards the host's ssh-agent into the build for
-# the duration of the cargo fetch only (no key in image layers). Make sure a
-# read-only deploy key is loaded into the agent before running:
-#   eval "$(ssh-agent -s)" && ssh-add <deploy-key>
+# Every variant resolves private RGB dependencies. Supply GITHUB_TOKEN with
+# read access, or PRIVATE_DEPS_DIR containing the per-repository deploy keys.
+# Credentials enter the build only through BuildKit secret mounts.
 #
-# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version + its blobs
-# (kernel/init), NOT just our code. Pin nitro-cli to the SAME version that runs
-# on the target hosts (stage hosts are on 1.4.5) or PCRs will not match.
+# Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
+# (kernel/init), not just our code. Pin nitro-cli to the same version the target
+# hosts run (stage is on 1.4.5) or the PCRs will not match.
 #
-# Reproducible PCR0 (build side): the EIF packs the runtime-stage rootfs, so the
-# image build must be deterministic. We (1) pin both base images by digest in
-# Dockerfile.enclave, and (2) normalise layer timestamps via SOURCE_DATE_EPOCH +
-# BuildKit's `rewrite-timestamp` exporter (requires `docker buildx` with a
-# container/containerd builder — CI sets this up via docker/setup-buildx-action).
-# SOURCE_DATE_EPOCH defaults to the commit time (stable per git_sha); override by
-# exporting it. NOTE: OS package versions (apt/dnf) still float — pinning them is
-# the next determinism step.
+# On the build side the EIF packs the runtime-stage rootfs, so the image build
+# must be deterministic: both base images are digest-pinned in each enclave
+# Dockerfile, and layer timestamps are normalised via SOURCE_DATE_EPOCH
+# plus BuildKit's `rewrite-timestamp` exporter (needs `docker buildx` with a
+# container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
+# EIF recipes pin OS packages to a signed Debian snapshot.
 #
 # Usage:
 #   ./build/build-enclave.sh
 # Tunables (env):
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
+#   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
+#                          declares ARG RGB_ASSET_ID (combined, rgb, mint, burn)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
+#   GITHUB_TOKEN           token with read access to the private RGB dependencies
+#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
+#                          (consensus_key, ops_key, schemas_key)
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping the build secret-free and the PCRs reproducible.
@@ -45,51 +55,81 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
-EIF_PATH="$OUT_DIR/utexo-bridge-enclave.eif"
+# Which enclave image to build. The default is the combined (rgb + rgb-swap +
+# ccd) image of the retired swap flow. Production is
+# DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
+# signer EIFs). Others: Dockerfile.enclave.rgb (swap, retired) and
+# Dockerfile.enclave.ccd. EIF_NAME names the output .eif and its SHA256SUMS
+# entry; the default keeps the historical artifact name.
+DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
+EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
+EIF_PATH="$OUT_DIR/$EIF_NAME"
 
 echo "=== Building UTEXO Bridge Enclave ==="
 echo "    project root : $PROJECT_ROOT"
 echo "    output dir   : $OUT_DIR"
 echo "    image tag    : $IMAGE_TAG"
+echo "    dockerfile   : $DOCKERFILE"
+echo "    eif name     : $EIF_NAME"
 
 command -v docker   &>/dev/null || { echo "Error: docker not found"; exit 1; }
 command -v nitro-cli &>/dev/null || { echo "Error: nitro-cli not found (install + pin to the host version)"; exit 1; }
 command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 
+# The same credential setup applies to every enclave Dockerfile.
+SECRET_ARGS=()
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    SECRET_ARGS=(--secret "id=github_token,env=GITHUB_TOKEN")
+elif [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
+    for key in consensus_key ops_key schemas_key; do
+        [ -s "$PRIVATE_DEPS_DIR/$key" ] || {
+            echo "Error: missing private dependency key file: $key" >&2
+            exit 1
+        }
+        SECRET_ARGS+=(--secret "id=$key,src=$PRIVATE_DEPS_DIR/$key")
+    done
+else
+    echo "Error: set GITHUB_TOKEN or PRIVATE_DEPS_DIR for the private RGB dependencies" >&2
+    exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 
-# --- 1. Build the docker image (BuildKit + ssh-agent forwarding) ------------
-# The Dockerfile's `RUN --mount=type=ssh` consumes `--ssh default`.
-#
+# Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
+# Reject a missing asset before the build starts. (F06-AF-38)
+# A fixed ENV asset does not need a build argument.
+BUILD_ARGS=()
+if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
+    if [ -z "${RGB_ASSET_ID:-}" ]; then
+        echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
+        echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; the image build fails without it." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
+    echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# Forward debug features only when set. (F03-AF-12)
+# Do not set ENCLAVE_DEBUG_FEATURES for production builds.
+if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
+    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
+    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
+fi
+
+# --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
 # layers, so two builds of the same commit yield the same rootfs -> same PCR0.
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
 export SOURCE_DATE_EPOCH
 
-# Private deps live in two separate github.com repos (federated-signer-proto over
-# SSH + rgb-consignment-parser for rgb-validation/spv). A single ssh-agent holding
-# two repo-scoped deploy keys offers the wrong one first ("Repository not found").
-# In CI we therefore ALSO hand both keys to BuildKit as secret files, and the
-# Dockerfile sets up per-host SSH aliases (see Dockerfile.enclave). Local builds
-# (no key files) fall back to `--ssh default` agent forwarding unchanged.
-FEDERATED_KEY_FILE="${FEDERATED_KEY_FILE:-/tmp/federated_key}"
-CONSIGNMENT_KEY_FILE="${CONSIGNMENT_KEY_FILE:-/tmp/consignment_key}"
-SECRET_ARGS=()
-if [ -f "$FEDERATED_KEY_FILE" ] && [ -f "$CONSIGNMENT_KEY_FILE" ]; then
-    SECRET_ARGS+=( --secret "id=federated_key,src=$FEDERATED_KEY_FILE" )
-    SECRET_ARGS+=( --secret "id=consignment_key,src=$CONSIGNMENT_KEY_FILE" )
-    echo "Using BuildKit secret keys (federated_key + consignment_key)."
-else
-    echo "No CI key files at $FEDERATED_KEY_FILE / $CONSIGNMENT_KEY_FILE; using ssh-agent (--ssh default) only."
-fi
-
-echo "Building Docker image (buildx, --ssh default, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
+# `${a[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 DOCKER_BUILDKIT=1 docker buildx build \
-    --ssh default \
-    "${SECRET_ARGS[@]}" \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    -f "$SCRIPT_DIR/Dockerfile.enclave" \
+    ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
+    ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
+    -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
     --output "type=docker,rewrite-timestamp=true" \
     "$PROJECT_ROOT"
@@ -107,6 +147,7 @@ nitro-cli build-enclave \
 echo "Extracting PCRs..."
 nitro-cli describe-eif --eif-path "$EIF_PATH" \
     | jq '.Measurements' > "$OUT_DIR/PCR.json"
+docker image inspect --format '{{json .Config.Env}}' "$IMAGE_TAG" > "$OUT_DIR/IMAGE-ENV.json"
 
 echo "Writing SHA256SUMS..."
 ( cd "$OUT_DIR" && sha256sum "$(basename "$EIF_PATH")" > SHA256SUMS )
@@ -115,6 +156,7 @@ echo ""
 echo "=== Build Complete ==="
 echo "EIF       : $EIF_PATH"
 echo "PCR.json  : $OUT_DIR/PCR.json"
+echo "IMAGE-ENV : $OUT_DIR/IMAGE-ENV.json"
 echo "SHA256SUMS: $OUT_DIR/SHA256SUMS"
 echo ""
 echo "PCRs:"
