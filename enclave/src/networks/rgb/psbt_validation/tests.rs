@@ -653,7 +653,9 @@ mod fee_policy {
 }
 
 // send-RGB anchoring - `validate_psbt_anchors_transition`
-#[cfg(feature = "rgb-validation")]
+// The swap flow's consignment bind. The mint signer's PSBT rules are tested
+// in `route/tests/psbt_path.rs` and beside each rule.
+#[cfg(feature = "rgb-swap")]
 mod anchor {
     use super::*;
     use crate::networks::rgb::validation::{
@@ -725,14 +727,12 @@ mod anchor {
     }
 
     /// Stand-in ownership oracles. Fn items coerce to `SelfOwnedOutpoint`.
-    #[cfg(feature = "rgb-swap")]
     fn owns_nothing(_: &Psbt, _: OutPoint) -> Result<bool> {
         Ok(false)
     }
     fn owns_vout_1(psbt: &Psbt, outpoint: OutPoint) -> Result<bool> {
         Ok(outpoint.txid == psbt.unsigned_tx.compute_txid() && outpoint.vout == 1)
     }
-    #[cfg(feature = "rgb-swap")]
     /// Owns vout 0 of [`OFF_TX_SEED`], an existing wallet UTXO.
     fn owns_off_tx_outpoint(_: &Psbt, outpoint: OutPoint) -> Result<bool> {
         Ok(outpoint == off_tx_outpoint())
@@ -754,7 +754,6 @@ mod anchor {
         }
     }
 
-    #[cfg(feature = "rgb-swap")]
     /// A change leg: revealed on `vout` of the signed witness tx (`txid: None`,
     /// as in the in-tree transfer fixture).
     fn revealed(amount: u64, vout: u32) -> TransitionOutput {
@@ -765,11 +764,9 @@ mod anchor {
         }
     }
 
-    #[cfg(feature = "rgb-swap")]
     /// Display-order seal bytes for the off-transaction change UTXO.
     const OFF_TX_SEED: [u8; 32] = [0x77; 32];
 
-    #[cfg(feature = "rgb-swap")]
     /// The same outpoint as a `bitcoin::OutPoint` (internal byte order).
     fn off_tx_outpoint() -> OutPoint {
         let mut internal = OFF_TX_SEED;
@@ -780,7 +777,6 @@ mod anchor {
         }
     }
 
-    #[cfg(feature = "rgb-swap")]
     /// A change leg on an existing wallet UTXO: a txid that is NOT the signed
     /// tx. Used when there is no BTC change.
     fn revealed_off_tx(amount: u64) -> TransitionOutput {
@@ -794,13 +790,8 @@ mod anchor {
         }
     }
 
-    /// The last-transition type this build's flow signs. The shared cases
-    /// below (txid bind, prevout canary, sighash, leg split) then run under
-    /// either flow.
-    #[cfg(feature = "rgb-swap")]
+    /// The last-transition type the swap flow signs.
     const SIGNING_TT: u16 = bfa_ids::TS_TRANSFER;
-    #[cfg(feature = "rgb-mint-burn")]
-    const SIGNING_TT: u16 = bfa_ids::TS_MINT;
 
     fn transfer_summary(outputs: Vec<TransitionOutput>) -> TransitionSummary {
         summary("transfer-op", SIGNING_TT, outputs)
@@ -857,11 +848,8 @@ mod anchor {
             last_witness_txid: Some(txid),
             last_transfer_witness_prevouts: prevouts,
             last_bundle_fully_disclosed: true,
-            // The mint passes the right back to the bridge on vout 1.
-            last_mint_rights: vec![OutputSeal::Revealed {
-                txid: None,
-                vout: 1,
-            }],
+            // The mint consumes its right.
+            last_mint_rights: vec![],
             last_transfer_op_id: None,
             non_mined_witness_txids: vec![],
             transitions_by_witness: vec![(txid, transitions)],
@@ -971,7 +959,6 @@ mod anchor {
     // Bridge-change shapes exist only in the swap flow. The mint rule rejects
     // the surplus as an over-mint before the leg split (see
     // `rejects_mint_over_mint`).
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn passes_when_change_returns_to_a_bridge_owned_seal() {
         let psbt = psbt_with_two_inputs();
@@ -984,7 +971,6 @@ mod anchor {
 
     /// Asset change stays valid after a signature merge, with the real
     /// ownership oracle.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn change_leg_survives_merging_our_own_signature() {
         use crate::keys::AccountType;
@@ -1032,7 +1018,6 @@ mod anchor {
     /// units to an attacker blinded seal. All other checks pass, and the
     /// aggregate bound (`asset_output_amount >= net_credited`) also passes.
     /// Only the recipient bind catches it.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_over_send_to_a_blinded_seal() {
         let psbt = psbt_with_two_inputs();
@@ -1047,7 +1032,6 @@ mod anchor {
 
     /// The same drain through a *revealed* seal. A revealed output that we
     /// cannot prove is ours fails.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_change_on_an_output_we_do_not_control() {
         let psbt = psbt_with_two_inputs();
@@ -1062,7 +1046,6 @@ mod anchor {
 
     /// A revealed seal on a vout that does not exist on this tx is not
     /// provably ours, so it fails.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_change_on_an_out_of_range_vout() {
         let psbt = psbt_with_two_inputs();
@@ -1077,7 +1060,6 @@ mod anchor {
 
     /// With no BTC change, rgb-lib puts the RGB change on an existing UTXO.
     /// This is valid if the outpoint is ours.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn passes_when_change_lands_on_an_existing_bridge_utxo() {
         let psbt = psbt_with_two_inputs();
@@ -1090,7 +1072,6 @@ mod anchor {
 
     /// Same shape, but we cannot prove the outpoint. Else the host could name
     /// any destination for the change.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_off_tx_change_on_an_outpoint_we_cannot_prove() {
         let psbt = psbt_with_two_inputs();
@@ -1105,7 +1086,6 @@ mod anchor {
 
     /// A bundle with more than [`MAX_OFF_TX_CHANGE_OUTPOINTS`] outpoints fails
     /// before the egress call.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_too_many_distinct_off_tx_outpoints() {
         let psbt = psbt_with_two_inputs();
@@ -1133,7 +1113,6 @@ mod anchor {
     }
 
     /// Several change legs on one UTXO use the cache, not the indexer.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn resolves_a_repeated_off_tx_outpoint_only_once() {
         use std::cell::Cell;
@@ -1154,31 +1133,6 @@ mod anchor {
         validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &oracle)
             .expect("two legs on one owned UTXO bind");
         assert_eq!(calls.get(), 1, "the outpoint verdict should be memoised");
-    }
-
-    /// Per output: an `OS_MINT` entry is the mint *right*, not delivered
-    /// value, so it cannot count as the recipient leg.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn mint_right_output_is_not_a_recipient_leg() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_with(&psbt, vec![confidential(1_000)]);
-        edit_signing_transition(&mut validated, |t| {
-            // A confidential mint right. The recipient sum skips it, so
-            // 1_000 == net credited.
-            t.outputs.push(TransitionOutput {
-                assignment_type: bfa_ids::OS_MINT,
-                amount: 9_000_000,
-                seal: OutputSeal::Confidential {
-                    secret_seal: "utxob:mint-right".into(),
-                },
-            });
-            t.total_output_amount = 9_001_000;
-        });
-        assert!(
-            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1).is_ok(),
-            "OS_MINT mint right must not count toward the recipient leg"
-        );
     }
 
     /// A transition with no `OS_ASSET` assignments delivers nothing. There is
@@ -1202,7 +1156,6 @@ mod anchor {
     /// sibling. Here the last transition pays 1_000 (the credit) and the
     /// sibling pays 10_000_000 to a blinded seal. The signed tx commits both,
     /// so both must be bound.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn rejects_over_send_in_a_sibling_transition() {
         let psbt = psbt_with_two_inputs();
@@ -1223,7 +1176,6 @@ mod anchor {
 
     /// Valid multi-transition shape: a send from two bridge UTXOs. The two
     /// recipient legs sum to the credit, and the change returns to us.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn passes_when_a_bundle_splits_the_payout_across_transitions() {
         let psbt = psbt_with_two_inputs();
@@ -1254,7 +1206,7 @@ mod anchor {
         let validated = validated_from(
             &psbt,
             vec![
-                // Neither flow signs a Burn on a deposit.
+                // The swap flow signs no Burn on a deposit.
                 summary("foreign-op", bfa_ids::TS_BURN, vec![confidential(500)]),
                 summary("signing-op", SIGNING_TT, vec![confidential(500)]),
             ],
@@ -1262,10 +1214,7 @@ mod anchor {
         let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
             .unwrap_err()
             .to_string();
-        #[cfg(feature = "rgb-swap")]
         assert!(err.contains("flow requires"), "{err}");
-        #[cfg(feature = "rgb-mint-burn")]
-        assert!(err.contains("signs exactly one mint"), "{err}");
     }
 
     /// The txid bind can pass while the consignment commits its transitions
@@ -1375,175 +1324,6 @@ mod anchor {
         assert!(err.to_string().contains("hides a transition"), "{err}");
     }
 
-    /// Two mints in one bundle: one could absorb the other's shortfall in the
-    /// group amount bind.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn rejects_two_mints_in_the_signed_bundle() {
-        let psbt = psbt_with_two_inputs();
-        let validated = validated_from(
-            &psbt,
-            vec![
-                summary("mint-a", SIGNING_TT, vec![confidential(500)]),
-                summary("mint-b", SIGNING_TT, vec![confidential(500)]),
-            ],
-        );
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-            .unwrap_err();
-        assert!(err.to_string().contains("signs exactly one mint"), "{err}");
-    }
-
-    /// The mint must hand the right to mint back to the bridge: not drop it,
-    /// not hide it, not give it away, not split it.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn rejects_a_mint_that_does_not_keep_the_mint_right() {
-        let psbt = psbt_with_two_inputs();
-        let revealed = |vout| OutputSeal::Revealed { txid: None, vout };
-        for (rights, why) in [
-            (vec![], "passes 0"),
-            (
-                vec![OutputSeal::Confidential {
-                    secret_seal: "utxob:host".into(),
-                }],
-                "hides its seal",
-            ),
-            (vec![revealed(1), revealed(1)], "passes 2"),
-            (vec![revealed(0)], "cannot prove it owns"),
-        ] {
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_mint_rights = rights;
-            let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains("mintRight") || err.contains("mint passes"),
-                "{why}: {err}"
-            );
-        }
-    }
-
-    /// A revealed seal on an outpoint the PSBT itself spends, as the bundle
-    /// names it (display-order txid).
-    #[cfg(feature = "rgb-mint-burn")]
-    fn seal_on_input(psbt: &Psbt, input: usize) -> OutputSeal {
-        let spent = psbt.unsigned_tx.input[input].previous_output;
-        let mut display = spent.txid.to_byte_array();
-        display.reverse();
-        OutputSeal::Revealed {
-            txid: Some(display),
-            vout: spent.vout,
-        }
-    }
-
-    /// The mint signs `validated` against `psbt` with an oracle that owns
-    /// every outpoint, and returns the error text.
-    #[cfg(feature = "rgb-mint-burn")]
-    fn mint_right_error(psbt: &Psbt, right: OutputSeal) -> String {
-        let owns_everything = |_: &Psbt, _: OutPoint| Ok(true);
-        let mut validated = validated_for(psbt, 1_000);
-        validated.last_mint_rights = vec![right];
-        validate_psbt_anchors_transition(psbt, &validated, 1_000, 0, &owns_everything)
-            .unwrap_err()
-            .to_string()
-    }
-
-    /// The old right's UTXO pays to an enclave script, so ownership alone
-    /// passes. But this tx spends it: a new right sealed there is lost.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_an_outpoint_the_psbt_spends() {
-        let psbt = psbt_with_two_inputs();
-        for input in 0..2 {
-            let err = mint_right_error(&psbt, seal_on_input(&psbt, input));
-            assert!(err.contains("this transaction spends"), "{input}: {err}");
-        }
-    }
-
-    /// Upstream rgb-lib with no BTC change (bdk dropped a dust drain) seals
-    /// the right to an existing wallet UTXO, off the signed tx.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn accepts_a_mint_right_on_an_owned_wallet_utxo_when_the_tx_has_no_change() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: Some([0x77; 32]),
-            vout: 3,
-        }];
-        let owned = |p: &Psbt, o: OutPoint| {
-            Ok(owns_vout_1(p, o)? || (o.vout == 3 && o.txid.to_byte_array() == [0x77; 32]))
-        };
-        validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owned)
-            .expect("an owned off-tx wallet UTXO keeps the right");
-    }
-
-    /// The oracle refuses an off-tx UTXO the indexer shows spent or unmined.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_a_wallet_utxo_the_oracle_finds_spent() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: Some([0x77; 32]),
-            vout: 3,
-        }];
-        let psbt_txid = psbt.unsigned_tx.compute_txid();
-        let spent = |p: &Psbt, o: OutPoint| {
-            if o.txid == psbt_txid {
-                return owns_vout_1(p, o);
-            }
-            Err(EnclaveError::CrossCheck(format!("outpoint {o} is spent")))
-        };
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &spent)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("is spent"), "{err}");
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn accepts_a_mint_right_on_an_owned_output_of_the_signed_tx() {
-        let psbt = psbt_with_two_inputs();
-        let mut display = psbt.unsigned_tx.compute_txid().to_byte_array();
-        display.reverse();
-        for txid in [None, Some(display)] {
-            let mut validated = validated_for(&psbt, 1_000);
-            validated.last_mint_rights = vec![OutputSeal::Revealed { txid, vout: 1 }];
-            validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-                .expect("an owned output of the signed tx keeps the right");
-        }
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_a_foreign_output_of_the_signed_tx() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        validated.last_mint_rights = vec![OutputSeal::Revealed {
-            txid: None,
-            vout: 0,
-        }];
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("cannot prove it owns"), "{err}");
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn refuses_a_mint_right_on_an_output_the_signed_tx_does_not_have() {
-        let psbt = psbt_with_two_inputs();
-        let err = mint_right_error(
-            &psbt,
-            OutputSeal::Revealed {
-                txid: None,
-                vout: 2,
-            },
-        );
-        assert!(err.contains("has only 2 outputs"), "{err}");
-    }
-
     #[test]
     fn colored_inputs_must_spend_seals_the_bundle_closes() {
         let psbt = psbt_with_two_inputs();
@@ -1559,62 +1339,6 @@ mod anchor {
         assert!(err.contains("which no transition"), "{err}");
         assert!(assert_colored_inputs_close_seals(&psbt, &[0, 1], &[first, second]).is_ok());
         assert!(assert_colored_inputs_close_seals(&psbt, &[9], &[first]).is_err());
-    }
-
-    /// For a mint, only `OS_ASSET` outputs (the minted units) can cover the
-    /// credited amount. Another amount in `total_output_amount` cannot.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn other_output_amounts_do_not_cover_credited_amount() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        edit_signing_transition(&mut validated, |t| {
-            // 999 minted units and a large non-asset amount in the total.
-            // Net credited is 1_000, so the asset sum must fail.
-            t.asset_output_amount = 999;
-            t.total_output_amount = 1_000_000;
-        });
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("asset_output_amount (999)"),
-            "expected asset-amount rejection, got: {err}"
-        );
-    }
-
-    /// A mint whose `OS_ASSET` output EXCEEDS the credited amount is an
-    /// over-mint and fails. The mint path requires exact equality.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn rejects_mint_over_mint() {
-        let psbt = psbt_with_two_inputs();
-        let mut validated = validated_for(&psbt, 1_000);
-        edit_signing_transition(&mut validated, |t| {
-            // 1_500 minted for a 1_000 credit: 500 over-mint.
-            t.asset_output_amount = 1_500;
-            t.total_output_amount = 1_500;
-        });
-        let err = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("mint-RGB amount mismatch"),
-            "expected over-mint rejection, got: {err}"
-        );
-    }
-
-    /// Reverse of `rejects_mint_over_mint`: a credit below the minted output.
-    /// The transfer rule would accept the surplus as change.
-    #[cfg(feature = "rgb-mint-burn")]
-    #[test]
-    fn rejects_mint_credited_below_output() {
-        let psbt = psbt_with_two_inputs();
-        let validated = validated_for(&psbt, 1_000);
-        let err =
-            validate_psbt_anchors_transition(&psbt, &validated, 900, 0, &owns_vout_1).unwrap_err();
-        assert!(
-            err.to_string().contains("mint-RGB amount mismatch"),
-            "a bridge mint must use the equality rule, got: {err}"
-        );
     }
 
     /// A transition type this build's flow does not sign fails first.
@@ -1682,7 +1406,6 @@ mod anchor {
     /// Change is revealed. With it, the invoice would be compared against a
     /// bridge-owned output. Swap only: mint/burn has no bridge-owned change
     /// leg.
-    #[cfg(feature = "rgb-swap")]
     #[test]
     fn skips_revealed_change_legs() {
         let psbt = psbt_with_two_inputs();
@@ -1711,7 +1434,10 @@ mod anchor {
             &psbt,
             vec![mint_right, confidential_to(1_000, "utxob:recipient")],
         );
-        let legs = validate_psbt_anchors_transition(&psbt, &validated, 1_000, 0, &owns_vout_1)
+        // The split alone: rule 8 refuses a mint with a right output.
+        let txid = psbt.unsigned_tx.compute_txid();
+        let committed = validated.transitions_committed_by(txid);
+        let legs = split_asset_legs(&psbt, txid, &committed, &owns_vout_1)
             .expect("the mintRight assignment is not a recipient leg");
         assert_eq!(legs.recipient_seals, vec!["utxob:recipient".to_string()]);
     }

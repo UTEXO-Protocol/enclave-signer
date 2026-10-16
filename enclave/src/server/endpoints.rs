@@ -271,6 +271,7 @@ mod tests {
         for request in [
             Request::Sign(SignRequest::default()),
             Request::SignBtc(SignBtcRequest::default()),
+            Request::SignRightsRefill(SignRightsRefillRequest::default()),
             Request::SignRawDigest(SignRawDigestRequest::default()),
             Request::SignCcd(SignCcdRequest::default()),
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
@@ -284,6 +285,11 @@ mod tests {
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
         ] {
             assert!(not_ready(call(&ctx, request)));
+        }
+        // The mint signer serves the refill, so it waits for the set too.
+        if cfg!(all(feature = "bfa-mint", evm_to_rgb)) {
+            let refill = Request::SignRightsRefill(SignRightsRefillRequest::default());
+            assert!(not_ready(call(&ctx, refill)));
         }
         let h = health(&ctx);
         assert!(!h.endpoints_set && !h.ready && h.key_loaded);
