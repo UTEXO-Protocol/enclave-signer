@@ -7,6 +7,7 @@
 //! - `witness.rs`: the on-chain witness resolver consensus runs with.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
+//! - `transition.rs`: read one transition's globals and seals, for both paths.
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
 //! - `bfa.rs`: the BFA mint anchors and their binding to EVM locks.
@@ -23,6 +24,7 @@ mod indexer;
 mod reject_list;
 mod schema;
 mod source;
+mod transition;
 mod types;
 mod witness;
 
@@ -41,5 +43,6 @@ pub(crate) use schema::BFA_RULES;
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
 pub use source::validate_source;
+pub use transition::{output_seal, single_global};
 pub use types::{OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment};
 pub use witness::{ConfirmedWitnesses, WitnessCheck};
