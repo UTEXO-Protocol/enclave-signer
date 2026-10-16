@@ -115,6 +115,9 @@ pub(super) fn handle_sign_psbt(
     // gate, a witness tx can satisfy the ledger and still take the BTC backing.
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
     ctx.state.with_keys(|keys| {
+        // M8: a mint pays no sat out. The budget below stays a second gate.
+        #[cfg(feature = "bfa-mint")]
+        crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")?;
         crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
             &psbt,
             &ctx.bridge_config,
@@ -131,10 +134,27 @@ pub(super) fn handle_sign_psbt(
     // Same gate as the EVM route. RGB source SPV evidence must still hold on
     // the current chain. No-op when nothing is pinned (an EVM source).
     #[cfg(feature = "rgb-validation")]
-    let (signed_psbt, inputs_signed) = sign_with_chain_pins_unchanged(ctx, pins, sign_colored)?;
+    let signed = sign_with_chain_pins_unchanged(ctx, pins, sign_colored)?;
     #[cfg(not(feature = "rgb-validation"))]
-    let (signed_psbt, inputs_signed) = sign_colored()?;
+    let signed = sign_colored()?;
 
+    signed_psbt_response(signed)
+}
+
+/// Signs the Colored inputs of a PSBT the caller validated: a rights refill.
+/// It has no chain pins to hold. Refuses a no-op.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub(super) fn sign_colored_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
+    // Colored account only. An unscoped sign co-signs all inputs with a known
+    // key, including vanilla inputs that no send-RGB bind checks.
+    signed_psbt_response(
+        ctx.state
+            .sign_psbt_scoped(psbt_bytes, Some(crate::keys::AccountType::Colored))?,
+    )
+}
+
+#[cfg(evm_to_rgb)]
+fn signed_psbt_response((signed_psbt, inputs_signed): (Vec<u8>, usize)) -> Result<EnclaveResponse> {
     // Refuse a no-op. `sign_psbt_scoped` returns Ok((bytes, 0)) when no input is ours.
     // A caller that checks only RPC success would count it as a signature.
     // Partial signing (0 < count < num_inputs) is allowed.

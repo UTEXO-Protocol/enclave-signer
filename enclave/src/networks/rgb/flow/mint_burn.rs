@@ -5,7 +5,9 @@
 //! See [`super`] for the reason for a separate file and the shared item names.
 
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::{is_mint_transition, TransitionSummary};
+use crate::networks::rgb::validation::is_mint_transition;
+#[cfg(rgb_to_evm)]
+use crate::networks::rgb::validation::TransitionSummary;
 
 /// Flow name for rejection messages. It lets an operator tell "wrong shape"
 /// from "wrong enclave".
@@ -19,53 +21,18 @@ pub fn is_signing_transition(transition_type: u16) -> bool {
     is_mint_transition(transition_type)
 }
 
-/// Checks the last transition of the consignment before the PSBT bind.
-#[cfg(evm_to_rgb)]
-pub fn assert_signing_transition(last: &TransitionSummary) -> Result<()> {
-    if !is_signing_transition(last.transition_type) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint-RGB PSBT requires a mint transition (last transition_type = {}, want {}) - \
-             this enclave is built for the {FLOW_NAME} flow",
-            last.transition_type,
-            schemata::TS_MINT
-        )));
-    }
-    Ok(())
-}
-
-/// The signed tx must commit exactly one transition: the mint.
-///
-/// A sibling of another type would move value under a rule the enclave did
-/// not apply to it. A second mint would let one mint's units absorb another's
-/// shortfall in the group amount bind: an unbacked over-mint.
-#[cfg(evm_to_rgb)]
-pub fn assert_committed_group(committed: &[&TransitionSummary]) -> Result<()> {
-    let [mint] = committed else {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint-RGB PSBT commits {} transitions - the {FLOW_NAME} flow signs exactly one mint",
-            committed.len()
-        )));
-    };
-    assert_signing_transition(mint)
-}
-
-/// Total amount bind over the committed group.
+/// The minted units equal the net deposit (M5).
 ///
 /// This is exact equality, not the send/receive lower bound. A mint has no
 /// prior allocation to return as change, so the credit must cover every
 /// minted unit. A surplus is an over-mint: supply with no deposit.
 #[cfg(evm_to_rgb)]
-pub fn assert_group_amount(
-    committed_asset_output: u64,
-    source_amount: u64,
-    source_commission: u64,
-) -> Result<()> {
+pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u64) -> Result<()> {
     let net_credited = source_amount.saturating_sub(source_commission);
-    if committed_asset_output != net_credited {
+    if minted != net_credited {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint-RGB amount mismatch: consignment asset_output_amount \
-             ({committed_asset_output}) != net credited (source_amount {source_amount} - \
-             source_commission {source_commission} = {net_credited})"
+            "mint-RGB amount mismatch: the mint issues {minted} != net credited (source_amount \
+             {source_amount} - source_commission {source_commission} = {net_credited})"
         )));
     }
     Ok(())
