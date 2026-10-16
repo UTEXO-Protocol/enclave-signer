@@ -6,6 +6,8 @@
 //! - `validation/`: consignment parsing, rgbstd validation, asset binding,
 //!   and the `RgbValidator` indexer client.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
+//! - `psbt_commit.rs`: the mint signer's core: the transition a PSBT commits.
+//! - `parent_proof.rs`: pins the UTXO of the right a mint or refill spends.
 //! - `btc_crosscheck.rs`: the plain-BTC (`SignBtc`) authorization gate.
 //! - `btc_ownership.rs`: proves that the enclave controls an output or input script.
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.
@@ -26,6 +28,11 @@ pub mod flow;
 // fetch that log (`evm-rpc` implies `rgb-validation`).
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 pub mod invoice;
+// The mint signer reads mints and refills from the PSBT, with no consignment.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub mod parent_proof;
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub mod psbt_commit;
 #[cfg(evm_to_rgb)]
 mod psbt_fee_size;
 #[cfg(evm_to_rgb)]
@@ -42,5 +49,7 @@ pub mod validation;
 pub use route::validate_destination;
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use route::validate_destination_anchor;
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub use route::validate_rights_refill;
 #[cfg(rgb_to_evm)]
 pub use route::validate_source;

@@ -556,3 +556,20 @@ fn test_sign_taproot_psbt_schnorr_signature_valid() {
         .verify_schnorr(&tap_sig.signature, &msg, &output_key)
         .is_ok());
 }
+
+#[test]
+fn colored_keychain_path_is_exactly_zero_then_a_normal_index() {
+    let normal = |i| ChildNumber::from_normal_idx(i).unwrap();
+    let hardened = |i| ChildNumber::from_hardened_idx(i).unwrap();
+    assert!(is_colored_keychain_path(&[normal(0), normal(7)]));
+    for refused in [
+        vec![],
+        vec![normal(0)],
+        vec![normal(1), normal(7)],
+        vec![hardened(0), normal(7)],
+        vec![normal(0), hardened(7)],
+        vec![normal(0), normal(7), normal(0)],
+    ] {
+        assert!(!is_colored_keychain_path(&refused), "{refused:?}");
+    }
+}

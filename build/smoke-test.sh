@@ -313,7 +313,7 @@ fi
 # ---------------------------------------------
 # 7. GetLastSavedBlock baseline
 # ---------------------------------------------
-log "7. GetLastSavedBlock — chain initialised at boot"
+log "7. GetLastSavedBlock - chain initialised at boot"
 LAST_BLOCK_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
 if [ $RC -eq 0 ] && echo "$LAST_BLOCK_OUTPUT" | grep -q "Block hash"; then

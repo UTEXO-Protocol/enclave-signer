@@ -86,27 +86,29 @@ Before it signs, the mint signer:
    have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
-3. Validates the RGB consignment (full RGB consensus, RGB 0.11.2 BFA). The
-   asset must be the pinned `RGB_ASSET_ID` and name the pinned Bridge and
-   `EVM_CHAIN_ID`. Each BFA `mint` leaves an anchor that is confirmed only
-   against its derived deposit. The mint being signed must also have that
-   deposit on chain: a `FundsIn` for its OpId and amount, after its
-   `afterBlock` and covered by the `EVM_FINALITY_TAG` head, read from a node on
-   the pinned chain.
-4. Binds the PSBT to the consignment. The txid, the inputs and the sighash
-   types must match. The signed bundle holds exactly one mint and hides no
-   transition. The minted units must equal `amount - commission` exactly.
-   The mint passes its `mintRight` to an output the enclave owns (on the
-   signed tx, or a mined, unspent wallet UTXO), and every colored input
-   spends a seal the mint closes.
-5. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
+3. Reads the mint from the PSBT rgb-lib committed, with no consignment. The
+   first `OP_RETURN` must commit exactly the bundles the PSBT discloses: one
+   bundle of the pinned `RGB_ASSET_ID`, holding one mint whose id is
+   recomputed. The txid and the sighash types cannot change. The mint
+   consumes one `mintRight`, passes no right on, and pays exactly
+   `amount - commission` units to one blinded seal.
+4. Checks the parent PSBT: the tx that made the spent right was a transfer
+   that put that right alone on its own output, and the PSBT spends that
+   output, its only input. So every signature for this mint spends the same
+   UTXO.
+5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
+   derives, after its `afterBlock` and covered by the `EVM_FINALITY_TAG` head,
+   read from a node on the pinned chain.
+6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
-   the one blinded seal in the consignment must equal that invoice.
-6. Checks the Bitcoin fee and the sats that leave the bridge.
-7. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
+   the mint's one blinded seal must equal that invoice.
+7. Checks the Bitcoin fee. No sat may leave the bridge's own outputs.
+8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
    A Tapret or script-tree root can be part of the output-key tweak.
 
-Full detail: [`docs/mint-flow.md`](docs/mint-flow.md).
+The mint signer validates no RGB history. A bad history makes the mint
+invalid for every receiver, so it is liveness only. Full detail:
+[`docs/mint-flow.md`](docs/mint-flow.md).
 
 ## Burn flow (RGB -> EVM)
 
@@ -198,7 +200,8 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   (`listener`, `clone-operator`, `observer`). See
   [`docs/parent-mtls.md`](docs/parent-mtls.md).
 - `Sign` routes by `data_type`: `TRANSACTION` -> enclave `Sign`,
-  `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`.
+  `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`,
+  `RGB_RIGHTS_REFILL` -> `SignRightsRefill` (no source proof).
 - `SubmitHeaders` answers `PERMISSION_DENIED` to every caller. The parent's
   header sync writes headers through the direct enclave protocol. Other direct
   enclave clients can also submit headers. The sync reads headers from
@@ -225,6 +228,7 @@ request per connection. Frame cap 24 MiB. Schema:
 | `GetAttestedPublicKey` | Active | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. |
 | `Sign` | Active | mint, burn | Bridge signing. Mint signer: EVM -> RGB only. Burn signer: RGB -> EVM only. |
 | `SignBtc` | Active | mint | Plain-BTC PSBT on the vanilla account. Off unless the attested policy turns it on. |
+| `SignRightsRefill` | Active | mint | The mint wallet sends one `mintRight` to 2..255 of its own Colored outputs. No units move. At most 12 per hour pass the PSBT gate. See [`docs/mint-flow.md`](docs/mint-flow.md#8-rights-refill-signrightsrefill). |
 | `SignRawDigest` | Active | burn | Gas transaction under the attested allowlist. |
 | `SignCcd` | Active | `ccd` builds | Ed25519 over a 32-byte hash. |
 | `SubmitHeaders` | any | RGB builds | Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). The parent denies this gRPC method to clients. Direct enclave callers can still submit headers. |
@@ -545,10 +549,10 @@ Data sources and transport:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer (mint path: history witness status and transaction fetch). |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it; the mint image still pins it. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
-| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx: SPV on the burn path, the indexer on the mint path (all but the mint tx being signed). Zero or a non-number stops the boot. Baked into the image: 3 in the mint image, 6 in the burn image. |
+| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -685,8 +689,8 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-swap` | `rgb` | Retired RGB flow: send/receive with BFA `Transfer`. In the default set. Not in production. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
-| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `rgb-psbt-utils` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the PSBT. |
+| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
@@ -724,9 +728,8 @@ Re-syncing changes PCR0. Procedure in
   if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
   transfer in the history fails validation. The burn signer proves this with
   the request's Merkle proofs against its own header chain. The mint signer
-  asks the pinned indexer; only its own unbroadcast mint tx, the last
-  witness and the PSBT's tx, may be unmined. The indexer depth counts every
-  block, testnet min-difficulty ones included.
+  checks no witness: it reads the mint from the PSBT, and a bad history makes
+  the mint invalid for every receiver.
 - **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
   authenticates the configured RPC hostname against the pinned CA. The host
   relay cannot alter authenticated responses without detection. The enclave
