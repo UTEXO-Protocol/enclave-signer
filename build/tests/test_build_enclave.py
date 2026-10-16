@@ -168,6 +168,44 @@ class BuildArgumentsTests(unittest.TestCase):
         env = json.loads((self.base / 'out/IMAGE-ENV.json').read_text())
         self.assertEqual(env, ['EVM_CHAIN_ID=42161'])
 
+    def captured_secrets(self):
+        argv = json.loads(self.argv.read_text())
+        return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
+
+    def test_every_recipe_takes_the_token_as_a_secret(self):
+        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
+                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
+            with self.subTest(recipe=recipe):
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertEqual(self.captured_secrets(), ['id=github_token,env=GITHUB_TOKEN'])
+
+    def test_the_token_file_of_private_deps_dir_wins(self):
+        deps = self.base / 'deps'
+        deps.mkdir()
+        (deps / 'github_token').write_text('fixture-file-token')
+        result = self.invoke('Dockerfile.enclave.ccd', PRIVATE_DEPS_DIR=str(deps))
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(self.captured_secrets(), [f'id=github_token,src={deps}/github_token'])
+        self.assertNotIn('fixture-file-token', self.argv.read_text())
+
+    def test_missing_token_refuses_before_docker(self):
+        env = dict(self.env)
+        env.pop('GITHUB_TOKEN')
+        empty = self.base / 'empty'
+        empty.mkdir()
+        for extra in ({}, {'PRIVATE_DEPS_DIR': str(empty)}):
+            with self.subTest(extra=extra):
+                self.argv.unlink(missing_ok=True)
+                result = subprocess.run(
+                    ['bash', str(ROOT / 'build/build-enclave.sh')],
+                    env=dict(env, DOCKERFILE='Dockerfile.enclave.ccd', **extra),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('github_token' if extra else 'rgb-lib-bfa', result.stderr)
+                self.assertFalse(self.argv.exists())
+
     def test_ccd_does_not_require_asset(self):
         result = self.invoke('Dockerfile.enclave.ccd')
         self.assertEqual(result.returncode, 42, result.stderr)

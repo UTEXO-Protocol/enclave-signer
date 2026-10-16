@@ -55,8 +55,9 @@ amplify = { version = "=4.8.1", optional = true }
 # Reads the RGB transitions and MPC entropy rgb-lib stores in a mint or refill
 # PSBT. The mint signer validates those from the PSBT, with no consignment.
 rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false, optional = true }
-# The flat V1 parser the bridge also uses. It turns on rgb-ops `serde`.
-rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "7c1bfb7023ff5b734c9bc3249820d2e5cce4ad5f", default-features = false, optional = true }
+# Reads the validated consignment with rgb-lib's wallet-free inspection. Our
+# private mirror of the RGB-Tools release, until it is public.
+rgb-lib = { git = "https://github.com/UTEXO-Protocol/rgb-lib-bfa.git", rev = "3f571ac58909400046d69143ebb535f4da1f4d42", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -157,7 +158,7 @@ allow-seed-import = []
 # `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
 # Bitcoin. A malicious host can then fake a Bitcoin anchor.
 # `spv` is not in this list because that makes a feature cycle.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
 # When OFF, handle_sign_evm refuses every `fundsOut` release (fail-closed).

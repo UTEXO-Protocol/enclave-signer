@@ -84,6 +84,7 @@ jobs:
         env:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+          RGB_LIB_BFA_TOKEN: ${{ secrets.RGB_LIB_BFA_TOKEN }}
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
@@ -111,6 +112,7 @@ jobs:
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
             federated_key=${{ runner.temp }}/private-deps/federated_key
+            github_token=${{ runner.temp }}/private-deps/github_token
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
@@ -131,6 +133,7 @@ jobs:
             ${{ matrix.name == 'parent' && inputs.stage == 'dev' && 'PROFILE_DIR=debug' || 'PROFILE_DIR=release' }}
           secret-files: |
             federated_key=${{ runner.temp }}/private-deps/federated_key
+            github_token=${{ runner.temp }}/private-deps/github_token
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}

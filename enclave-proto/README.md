@@ -3,9 +3,10 @@
 This crate contains the enclave wire protocol. Its local copy of the schema
 requires no credentials or private dependencies.
 
-Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
-mirrors over SSH, so an enclave build does need those deploy keys today. That
-is a separate dependency; this crate stays credential-free.
+Current caveat: the enclave takes rgb-lib from the private
+`UTEXO-Protocol/rgb-lib-bfa` mirror over HTTPS, so an enclave build needs a
+token with read access to it. That is a separate dependency; this crate stays
+credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —

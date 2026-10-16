@@ -52,7 +52,7 @@ pub struct ValidatedConsignment {
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
-    /// NOT from the flat `rgb_consignment` parser.
+    /// NOT from the flat rgb-lib inspection.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` when the
@@ -96,13 +96,12 @@ impl ValidatedConsignment {
     }
 }
 
-/// Flat summary of one RGB state transition. Mirrors
-/// `rgb_consignment::TransitionInfo` in local types, so the parser dependency
-/// stays out of the public API.
+/// Flat summary of one RGB state transition, read by rgb-lib's inspection.
+/// Local types keep rgb-lib out of the public API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransitionSummary {
-    /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from the
-    /// parser. It must be hex, not baid64:
+    /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from
+    /// rgb-lib. It must be hex, not baid64:
     /// `validation::bfa::decode_opid` decodes it to 32 bytes.
     pub op_id: String,
     /// BFA transition-type id. Compare with `schemata::TS_TRANSFER`,
@@ -142,7 +141,7 @@ pub struct TransitionOutput {
     pub seal: OutputSeal,
 }
 
-/// The seal of an output. Mirrors `rgb_consignment::SealInfo`.
+/// The seal of an output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSeal {
     /// Concrete `txid:vout`. `txid` is `None` if the seal points to the

@@ -4,8 +4,8 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use amplify::Wrapper;
 use bitcoin::OutPoint;
-use rgb_consignment::{FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo};
 use rgbstd::containers::FileContent;
 use rgbstd::contract::AllocatedState;
 use rgbstd::vm::WitnessPos;
@@ -635,25 +635,30 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
     assert_eq!(locked, vec![gen::opid_bytes(history.mints[0].opid)]);
 }
 
-/// The enclave and consignment-utils (which the bridge uses) read the same
-/// burn facts from the same bytes.
+/// The enclave's burn facts equal the globals rgb-lib's inspection reads from
+/// the same bytes.
 #[test]
-fn burn_facts_agree_with_the_bridge_parser() {
+fn burn_facts_agree_with_rgb_lib_inspection() {
+    use rgb_lib::inspect::TransitionGlobal;
     let bytes = burn_bytes();
     let last = validate(&bytes).unwrap().last_transition.unwrap();
 
-    let rgb_consignment::ConsignmentInfo::Transfer(info) = rgb_consignment::parse(&bytes).unwrap()
-    else {
-        panic!("a transfer");
-    };
-    let burn = info.witnesses.last().unwrap().transitions.last().unwrap();
-    let global = |ty: u16| {
-        let entry = burn.globals.iter().find(|g| g.global_type == ty).unwrap();
-        hex::decode(&entry.value_hex).unwrap()
-    };
-    let burned = u64::from_le_bytes(global(2015).try_into().unwrap());
-    assert_eq!(Some(burned), last.burned_asset_amount);
-    assert_eq!(global(3009), last.burn_reason.unwrap().to_vec());
+    let path = scratch("burn-facts");
+    let inspection = inspect_at(&path, &bytes).unwrap();
+    let burn = inspection.witnesses.last().unwrap().operations[0]
+        .transitions
+        .last()
+        .unwrap();
+    let burned = burn.globals.iter().find_map(|g| match g {
+        TransitionGlobal::BurnedAsset(amount) => Some(*amount),
+        _ => None,
+    });
+    let reason = burn.globals.iter().find_map(|g| match g {
+        TransitionGlobal::BurnReason(hex) => Some(hex.clone()),
+        _ => None,
+    });
+    assert_eq!(burned, last.burned_asset_amount);
+    assert_eq!(reason, last.burn_reason.map(hex::encode));
 }
 
 /// The hand decode of the globals equals their strict encoding.
@@ -1108,49 +1113,165 @@ fn settling_index_takes_the_burn_beside_a_transfer() {
     assert_eq!(settling_index::<u16>(&[], burn), None);
 }
 
-/// `asset_output_amount` counts only `OS_ASSET` allocations.
-#[test]
-fn transition_summary_counts_only_asset_outputs() {
-    let alloc = |assignment_type: u16, amount: u64| FungibleAllocation {
-        assignment_type,
-        entries: vec![FungibleEntry {
-            amount,
-            seal: SealInfo::Revealed {
-                txid: None,
-                vout: 0,
-            },
-        }],
-        total: amount,
+/// A scratch path of its own for each test.
+fn scratch(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "utexo-enclave-test-{name}-{}.rgb",
+        std::process::id()
+    ))
+}
+
+fn inspected_output(
+    assignment: rgb_lib::Assignment,
+    seal: OutputSeal,
+) -> rgb_lib::inspect::RgbOutputInfo {
+    let (txid, vout, recipient_id) = match seal {
+        OutputSeal::Revealed { txid, vout } => (txid.map(hex::encode), Some(vout), None),
+        OutputSeal::Confidential { secret_seal } => (None, None, Some(secret_seal)),
     };
-    let info = TransitionInfo {
-        op_id: "mint-op".into(),
-        transition_type: 8013,
-        input_count: 1,
-        fungible_allocations: vec![alloc(4000, 500), alloc(4999, 1_000_000)],
-        metadata: vec![],
+    rgb_lib::inspect::RgbOutputInfo {
+        txid,
+        vout,
+        assignment,
+        is_concealed: recipient_id.is_some(),
+        recipient_id,
+        is_ours: None,
+        is_terminal: Some(false),
+    }
+}
+
+fn inspected_transition(
+    r#type: rgb_lib::TypeOfTransition,
+    outputs: Vec<rgb_lib::inspect::RgbOutputInfo>,
+) -> rgb_lib::inspect::RgbTransitionInfo {
+    rgb_lib::inspect::RgbTransitionInfo {
+        r#type,
+        opid: "mint-op".into(),
+        inputs: vec![],
+        outputs,
         globals: vec![],
-    };
-    let summary = transition_summary(&info).unwrap();
+        metadata: vec![],
+    }
+}
+
+const WITNESS: [u8; 32] = [0x77; 32];
+
+fn revealed(txid: Option<[u8; 32]>, vout: u32) -> OutputSeal {
+    OutputSeal::Revealed { txid, vout }
+}
+
+/// Only fungible units are outputs: rights and other states are not.
+#[test]
+fn inspected_summary_lists_only_asset_units() {
+    use rgb_lib::Assignment;
+    let t = inspected_transition(
+        rgb_lib::TypeOfTransition::Mint,
+        vec![
+            inspected_output(Assignment::MintRight, revealed(Some(WITNESS), 1)),
+            inspected_output(Assignment::Fungible(500), revealed(Some([0x11; 32]), 2)),
+            inspected_output(Assignment::InflationRight(1_000_000), revealed(None, 3)),
+            inspected_output(Assignment::NonFungible, revealed(None, 4)),
+        ],
+    );
+    let summary = inspected_summary(&t, &hex::encode(WITNESS), "bcrt").unwrap();
+    assert_eq!(
+        summary.outputs,
+        vec![TransitionOutput {
+            assignment_type: schemata::OS_ASSET.to_inner(),
+            amount: 500,
+            seal: revealed(Some([0x11; 32]), 2),
+        }]
+    );
     assert_eq!(summary.asset_output_amount, 500);
-    assert_eq!(summary.total_output_amount, 1_000_500);
+    assert_eq!(summary.total_output_amount, 500);
+    assert_eq!(summary.op_id, "mint-op");
 }
 
 #[test]
-fn transition_summary_refuses_an_overflowing_total() {
-    let alloc = |amount: u64| FungibleAllocation {
-        assignment_type: 4000,
-        entries: vec![],
-        total: amount,
+fn inspected_summary_refuses_an_overflowing_total() {
+    use rgb_lib::Assignment;
+    let t = inspected_transition(
+        rgb_lib::TypeOfTransition::Transfer,
+        vec![
+            inspected_output(Assignment::Fungible(u64::MAX), revealed(Some(WITNESS), 1)),
+            inspected_output(Assignment::Fungible(1), revealed(Some(WITNESS), 2)),
+        ],
+    );
+    let err = inspected_summary(&t, &hex::encode(WITNESS), "bcrt")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("output amount overflow"), "{err}");
+}
+
+/// Each rgb-lib type maps back to its schema id.
+#[test]
+fn inspected_summary_keeps_the_schema_transition_type() {
+    use rgb_lib::TypeOfTransition as T;
+    for (ty, id) in [
+        (T::Transfer, schemata::TS_TRANSFER),
+        (T::Burn, schemata::TS_BURN),
+        (T::Mint, schemata::TS_MINT),
+        (T::Inflate, schemata::TS_INFLATION),
+    ] {
+        let summary = inspected_summary(&inspected_transition(ty, vec![]), "", "bcrt").unwrap();
+        assert_eq!(summary.transition_type, id.to_inner(), "{ty:?}");
+    }
+}
+
+/// rgb-lib fills a witness-relative seal with the witness txid: it reads
+/// back as `None`. Another txid stays.
+#[test]
+fn a_seal_on_the_witness_reads_as_witness_relative() {
+    let witness = hex::encode(WITNESS);
+    for (txid, expected) in [(WITNESS, None), ([0x11; 32], Some([0x11; 32]))] {
+        let t = inspected_transition(
+            rgb_lib::TypeOfTransition::Transfer,
+            vec![inspected_output(
+                rgb_lib::Assignment::Fungible(7),
+                revealed(Some(txid), 1),
+            )],
+        );
+        let summary = inspected_summary(&t, &witness, "bcrt").unwrap();
+        assert_eq!(summary.outputs[0].seal, revealed(expected, 1));
+    }
+}
+
+/// A concealed seal reads as the bare `utxob:` seal, without the chain
+/// prefix rgb-lib puts on the recipient id. Another chain is refused.
+#[test]
+fn a_concealed_seal_reads_without_its_chain_prefix() {
+    let concealed = |recipient: &str| {
+        let t = inspected_transition(
+            rgb_lib::TypeOfTransition::Transfer,
+            vec![inspected_output(
+                rgb_lib::Assignment::Fungible(7),
+                OutputSeal::Confidential {
+                    secret_seal: recipient.into(),
+                },
+            )],
+        );
+        inspected_summary(&t, "", "bcrt")
     };
-    let info = TransitionInfo {
-        op_id: "op".into(),
-        transition_type: 10000,
-        input_count: 1,
-        fungible_allocations: vec![alloc(u64::MAX), alloc(1)],
-        metadata: vec![],
-        globals: vec![],
-    };
-    assert!(transition_summary(&info).is_err());
+    let summary = concealed("bcrt:utxob:abc").unwrap();
+    assert_eq!(
+        summary.outputs[0].seal,
+        OutputSeal::Confidential {
+            secret_seal: "utxob:abc".into()
+        }
+    );
+    for other in ["bc:utxob:abc", "bcrtutxob:abc", "utxob:abc"] {
+        let err = concealed(other).unwrap_err().to_string();
+        assert!(err.contains("no bcrt recipient id"), "{other}: {err}");
+    }
+}
+
+#[test]
+fn a_revealed_output_without_a_vout_is_refused() {
+    let mut output = inspected_output(rgb_lib::Assignment::Fungible(7), revealed(Some(WITNESS), 1));
+    output.vout = None;
+    let t = inspected_transition(rgb_lib::TypeOfTransition::Transfer, vec![output]);
+    let err = inspected_summary(&t, "", "bcrt").unwrap_err().to_string();
+    assert!(err.contains("has no outpoint"), "{err}");
 }
 
 #[test]
@@ -1167,7 +1288,35 @@ fn the_flat_summary_refuses_random_bytes() {
     let err = extract_transition_summary(&[0u8; 64])
         .unwrap_err()
         .to_string();
-    assert!(err.contains("rgb-consignment parse failed"), "{err}");
+    assert!(
+        err.contains("rgb-lib consignment inspection failed"),
+        "{err}"
+    );
+}
+
+/// The scratch file is gone after a read, and after a refused one.
+#[test]
+fn inspection_removes_its_scratch_file() {
+    for (name, bytes) in [("removed-ok", burn_bytes()), ("removed-err", vec![0u8; 64])] {
+        let path = scratch(name);
+        let _ = inspect_at(&path, &bytes);
+        assert!(!path.exists(), "{name}");
+    }
+}
+
+/// A file already at the scratch path is refused and left in place.
+#[test]
+fn inspection_never_reuses_an_existing_file() {
+    let path = scratch("existing");
+    std::fs::write(&path, b"someone else's").unwrap();
+    let err = inspect_at(&path, &burn_bytes()).unwrap_err().to_string();
+    let kept = std::fs::read(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        err.contains("could not create the consignment scratch file"),
+        "{err}"
+    );
+    assert_eq!(kept.unwrap(), b"someone else's");
 }
 
 /// A BFA `mint` is the only mint shape. It is a signing shape only in the
@@ -2447,3 +2596,5 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
         consignment.len()
     );
 }
+
+mod summary;

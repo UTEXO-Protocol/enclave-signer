@@ -2,9 +2,9 @@
 # git dependencies, rather than cargo's bundled libgit2, which does not pick up
 # an SSH agent reliably across platforms.
 #
-# The parent workspace resolves its private dependency through an SSH alias.
-# Docker builds configure it in build/with-private-deps.sh; CI sets up the
-# matching deploy key. System Git also honors the token URL rewrites. The
-# enclave workspace has no private dependency.
+# Both workspaces fetch rgb-lib from the private UTEXO-Protocol/rgb-lib-bfa
+# mirror over HTTPS with a token; the parent also resolves its proto through
+# an SSH alias. Docker builds configure both in build/with-private-deps.sh; CI
+# sets up the token (build/ci-rgb-lib-access.sh) and the proto deploy key.
 [net]
 git-fetch-with-cli = true

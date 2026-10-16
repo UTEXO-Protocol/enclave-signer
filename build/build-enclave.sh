@@ -15,8 +15,11 @@
 #                    (combined, rgb, mint, burn)
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
+#   GITHUB_TOKEN     GitHub token with read access to UTEXO-Protocol/rgb-lib-bfa
+#   PRIVATE_DEPS_DIR or a directory with that token in a github_token file
 #
-# The enclave has no private dependency, so the build takes no credential.
+# rgb-lib comes from the private rgb-lib-bfa mirror. The token goes in a BuildKit
+# secret: never in a build arg, a layer, the image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -39,7 +42,7 @@
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
-# keeping the build secret-free and the PCRs reproducible.
+# keeping it out of the image and the PCRs reproducible.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +87,20 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
+if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
+    [ -s "$PRIVATE_DEPS_DIR/github_token" ] || {
+        echo "Error: $PRIVATE_DEPS_DIR/github_token is missing or empty." >&2
+        exit 1
+    }
+    SECRET_ARGS=(--secret "id=github_token,src=$PRIVATE_DEPS_DIR/github_token")
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+    SECRET_ARGS=(--secret id=github_token,env=GITHUB_TOKEN)
+else
+    echo "Error: the enclave build needs a GitHub token with read access to UTEXO-Protocol/rgb-lib-bfa." >&2
+    echo "       Set GITHUB_TOKEN, or PRIVATE_DEPS_DIR with a github_token file." >&2
+    exit 1
+fi
+
 # Forward debug features only when set. (F03-AF-12)
 # Do not set ENCLAVE_DEBUG_FEATURES for production builds.
 if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
@@ -103,6 +120,7 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
+    "${SECRET_ARGS[@]}" \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
     --output "type=docker,rewrite-timestamp=true" \

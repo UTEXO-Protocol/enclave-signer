@@ -257,11 +257,14 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
 
 - **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
   matters for reproducible PCR0.
-- **No private dependency for the enclave.** The RGB crates come from
-  crates.io (`0.11.2-rc.1`, exact pins) and `consignment-utils` is public,
-  fetched over HTTPS. The parent needs read access to
-  `federated-signer-proto` through the `github-federated-signer` SSH alias;
-  CI wires it in `.github/workflows/ci.yml`. Public access alone does not
+- **Read access to `UTEXO-Protocol/rgb-lib-bfa`.** The RGB crates come from
+  crates.io (`0.11.2-rc.1`, exact pins). rgb-lib, which reads consignments,
+  comes from our private mirror of the RGB-Tools release until that release
+  is public. Both workspaces fetch it over HTTPS, so Git needs a GitHub token
+  with read access to it. The parent also needs read access to
+  `federated-signer-proto` through the `github-federated-signer` SSH alias.
+  CI wires both in `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_TOKEN` and
+  `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). Repository access alone does not
   prove that a build reproduces the approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
@@ -316,6 +319,12 @@ profile. CI asserts every guard fires.
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
+Every enclave image needs a GitHub token with read access to
+`UTEXO-Protocol/rgb-lib-bfa` at build time: `GITHUB_TOKEN`, or a
+`github_token` file in `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes it as the
+BuildKit secret `github_token`, and `build/with-private-deps.sh enclave` reads
+it for the cargo build only. The token is never in a layer, the image or PCR0.
+
 ```bash
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn ./build/build-enclave.sh   # burn signer
@@ -353,14 +362,16 @@ Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
-Enclave images need no credential. Only `Dockerfile.parent` resolves a
-private dependency. Supply a GitHub token with read access to
-`federated-signer-proto`, or its deploy key as `federated_key`. Credentials are
+Every image resolves the private rgb-lib mirror: supply a GitHub token with
+read access to `UTEXO-Protocol/rgb-lib-bfa` as the `github_token` secret.
+`Dockerfile.parent` also resolves `federated-signer-proto`: the same token
+(if it can read it) or its deploy key as `federated_key`. Credentials are
 mounted as BuildKit secrets during Cargo's build step; they are not copied
 into image layers.
 
 ```bash
-docker build -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+docker build --secret id=github_token,env=GITHUB_TOKEN \
+  -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
 RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh
 
 # GITHUB_TOKEN must already be exported; the value is not a build argument.
@@ -368,10 +379,10 @@ docker build --secret id=github_token,env=GITHUB_TOKEN \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-`make build_parent*` uses the token option by default; `DOCKER_AUTH_ARGS` can
-override it with `--secret id=federated_key,src=<absolute-path>`. CD and EIF
-workflows use the `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secret configured for
-Rust CI. The workflow's automatic `GITHUB_TOKEN` is used for image publishing,
+`make build_parent*` and `make build_enclave*` use the token option by
+default. A `DOCKER_AUTH_ARGS` value replaces that default, so to pass the
+parent's deploy key set both: `--secret id=github_token,env=GITHUB_TOKEN --secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the `RGB_LIB_BFA_TOKEN` and
+`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The workflow's automatic `GITHUB_TOKEN` is used for image publishing,
 not cross-repository dependency access.
 
 The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
@@ -410,8 +421,8 @@ The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
 `TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
 measured into PCR0. The cloning secret is never baked. The chain endpoints and
-the KMS values are not in the image: anyone can rebuild the EIF and get the
-same PCR0 without knowing them.
+the KMS values are not in the image: a rebuild of the EIF gets the same PCR0
+without knowing them (build access: see Building).
 
 ## Running
 

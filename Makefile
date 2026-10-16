@@ -4,8 +4,8 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-# The parent's private proto dependency: the token stays in a BuildKit secret.
-# Enclave images have no private dependency and take no secret.
+# Private dependencies (the parent's proto, the rgb-lib-bfa mirror of both
+# workspaces): the token stays in a BuildKit secret.
 DOCKER_AUTH_ARGS ?= --secret id=github_token,env=GITHUB_TOKEN
 
 # Pass public values through Docker's environment form, not shell interpolation.
@@ -33,16 +33,16 @@ push_parent_dev: ## Push parent dev image tags.
 	docker push $(IMAGE_PARENT_DEV_LATEST)
 
 build_enclave: ## Build combined enclave image, retired swap flow (vsock+rgb+rgb-swap+ccd+bfa-validation).
-	docker build -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_BACKUP) . && \
-	docker build -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave -t $(IMAGE_ENCLAVE_LATEST) .
 
 push_enclave: ## Push combined enclave docker image.
 	docker push $(IMAGE_ENCLAVE_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_LATEST)
 
 build_enclave_rgb: ## Build RGB-only enclave image, retired swap flow (vsock+rgb+rgb-swap+bfa-validation).
-	docker build -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_BACKUP) . && \
-	docker build -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.rgb -t $(IMAGE_ENCLAVE_RGB_LATEST) .
 
 push_enclave_rgb: ## Push RGB-only enclave docker image.
 	docker push $(IMAGE_ENCLAVE_RGB_BACKUP) && \
@@ -52,24 +52,24 @@ check_mint_config:
 	@: "$${RGB_ASSET_ID:?RGB_ASSET_ID required for RGB mint builds}"
 
 build_enclave_mint: check_mint_config ## Build RGB mint signer image with KMS seed persistence.
-	docker build --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
-	docker build --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
 
 push_enclave_mint: ## Push RGB mint signer image.
 	docker push $(IMAGE_ENCLAVE_MINT_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_MINT_LATEST)
 
 build_enclave_ccd: ## Build Concordium-only enclave docker image (vsock+ccd).
-	docker build -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_BACKUP) . && \
-	docker build -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_LATEST) .
 
 push_enclave_ccd: ## Push Concordium-only enclave docker image.
 	docker push $(IMAGE_ENCLAVE_CCD_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_CCD_LATEST)
 
 build_enclave_dev: ## Build enclave dev docker image (TCP, no vsock).
-	docker build -f ./build/Dockerfile.enclave-dev -t $(IMAGE_ENCLAVE_DEV_BACKUP) . && \
-	docker build -f ./build/Dockerfile.enclave-dev -t $(IMAGE_ENCLAVE_DEV_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave-dev -t $(IMAGE_ENCLAVE_DEV_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave-dev -t $(IMAGE_ENCLAVE_DEV_LATEST) .
 
 push_enclave_dev: ## Push enclave dev docker image.
 	docker push $(IMAGE_ENCLAVE_DEV_BACKUP) && \

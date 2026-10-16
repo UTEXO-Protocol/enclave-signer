@@ -154,8 +154,8 @@ indexer and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.
 
-**Launch endpoints.** The endpoints are not in the image, so anyone can rebuild
-the EIF and get the same PCR0. The operator sends them once, after launch, in
+**Launch endpoints.** The endpoints are not in the image, so a rebuild of the
+EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
 expected EVM address. The burn signer still requires and pins the indexer URL
@@ -1006,9 +1006,12 @@ Known limits. Read them before deployment.
 - **Policy coverage.** The commitment does not hold all enforced settings
   (Sec 4). The attestation CLI authenticates the chain, contract and asset
   pins. The caller must compare them with the intended deployment.
-- **Build reproducibility.** Enclave builds need no credential: the RGB
-  crates are on crates.io (exact `=0.11.2-rc.1` pins) and `consignment-utils`
-  is public. All five EIF recipes pin both base images
+- **Build reproducibility.** The RGB crates are on crates.io (exact
+  `=0.11.2-rc.1` pins). rgb-lib comes from the private
+  `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, so an EIF build needs a
+  GitHub token with read access to it. The token is a BuildKit secret: it is
+  never in a layer, the image or PCR0. Until the RGB-Tools release is public,
+  only a holder of that access can reproduce PCR0. All five EIF recipes pin both base images
   by digest and install packages from the signed Debian snapshot
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,

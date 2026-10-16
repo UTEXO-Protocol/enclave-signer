@@ -3962,19 +3962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rgb-consignment"
-version = "0.1.0"
-source = "git+https://github.com/UTEXO-Protocol/consignment-utils.git?rev=7c1bfb7023ff5b734c9bc3249820d2e5cce4ad5f#7c1bfb7023ff5b734c9bc3249820d2e5cce4ad5f"
-dependencies = [
- "amplify",
- "rgb-ops",
- "rgb-strict-types",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "rgb-invoicing"
 version = "0.11.2-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3990,6 +3977,22 @@ dependencies = [
  "rgb-strict-encoding",
  "rgb-strict-types",
  "serde",
+]
+
+[[package]]
+name = "rgb-lib"
+version = "0.3.0-beta.7"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib-bfa.git?rev=3f571ac58909400046d69143ebb535f4da1f4d42#3f571ac58909400046d69143ebb535f4da1f4d42"
+dependencies = [
+ "amplify",
+ "hex",
+ "rgb-invoicing",
+ "rgb-ops",
+ "rgb-schemas",
+ "rgb-strict-encoding",
+ "rgb-strict-types",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5382,8 +5385,8 @@ dependencies = [
  "prost",
  "rgb-aluvm",
  "rgb-consensus",
- "rgb-consignment",
  "rgb-invoicing",
+ "rgb-lib",
  "rgb-ops",
  "rgb-schemas",
  "rustls-pki-types",

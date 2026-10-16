@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.4
 # Parent Adapter (gRPC proxy to Enclave)
 # Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or the federated-signer-proto deploy key; keys never
-# enter image layers.
+# github_token (read access to UTEXO-Protocol/rgb-lib-bfa) is required; the
+# federated-signer-proto deploy key (federated_key) is optional. Keys never enter image layers.
 # Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.parent .
 # Dev image (debug, `insecure-dev`: plaintext gRPC, no mTLS):
 #   --build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug
