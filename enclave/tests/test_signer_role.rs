@@ -119,6 +119,13 @@ mod mint_signer {
         let msg = refusal(mint_request());
         assert!(!msg.contains("mint signer"), "{msg}");
     }
+
+    /// The mint signer holds the rights, so it serves the refill.
+    #[test]
+    fn does_not_refuse_a_rights_refill_as_the_wrong_role() {
+        let msg = refusal(Request::SignRightsRefill(SignRightsRefillRequest::default()));
+        assert!(!msg.contains("mint signer"), "{msg}");
+    }
 }
 
 #[cfg(feature = "burn-signer")]
@@ -146,6 +153,14 @@ mod burn_signer {
         let msg = refusal(Request::SignBtc(SignBtcRequest::default()));
         assert!(msg.contains("burn signer"), "{msg}");
         assert!(msg.contains("plain-BTC"), "{msg}");
+    }
+
+    /// The burn signer holds no mint rights to refill.
+    #[test]
+    fn refuses_a_rights_refill() {
+        let msg = refusal(Request::SignRightsRefill(SignRightsRefillRequest::default()));
+        assert!(msg.contains("burn signer"), "{msg}");
+        assert!(msg.contains("rights refills"), "{msg}");
     }
 
     /// The refusal is about direction: a release is not refused as the

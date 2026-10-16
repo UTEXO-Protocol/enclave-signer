@@ -23,6 +23,7 @@ fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
         asset_id: "rgb:test-asset".into(),
         consignment: vec![],
         consignment_hash: vec![],
+        parent_psbt: vec![],
     })
 }
 
