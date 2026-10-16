@@ -23,7 +23,7 @@ fn listed_burn() -> (History, OpoutKey) {
         ..Issue::new(CHAIN, BRIDGE, vec![utxo])
     });
     let right = history.genesis_right(0, utxo);
-    let (_, units) = history.mint_owned(right, 100_000, 90);
+    let units = history.mint_owned(right, 100_000, 90);
     history.burn(units, 100_000, Some(100_000), Some([0; 32]));
     (history, right.opout.into())
 }

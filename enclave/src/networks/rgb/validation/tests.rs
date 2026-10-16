@@ -47,7 +47,7 @@ fn issue() -> History {
 fn minted() -> (History, Utxo) {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
-    let (_, units) = history.mint_owned(right, MINTED, 90);
+    let units = history.mint_owned(right, MINTED, 90);
     (history, units)
 }
 
@@ -183,7 +183,7 @@ fn listed() -> History {
 fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
     let mut history = listed();
     let right = history.genesis_right(0, right_utxo());
-    let (_, units) = history.mint_owned(right, MINTED, 90);
+    let units = history.mint_owned(right, MINTED, 90);
     let burn = history.burn(
         units,
         MINTED,
@@ -303,16 +303,34 @@ fn a_wide_transition_keeps_the_scope_linear() {
 fn mint_scope_checks_inputs_and_outputs() {
     let mut history = listed();
     let right = history.genesis_right(0, right_utxo());
-    let (next_right, units) = history.mint_owned(right, MINTED, 90);
+    let units = history.mint_owned(right, MINTED, 90);
     let scope = validate(&history.consignment(vec![]))
         .unwrap()
         .reject_scope
         .unwrap();
     assert_eq!(scope.settling_inputs, vec![key(right.opout)]);
-    assert_eq!(
-        scope.settling_outputs,
-        vec![key(units.opout), key(next_right.opout)]
-    );
+    assert_eq!(scope.settling_outputs, vec![key(units.opout)]);
+}
+
+/// A right from a rights send still descends from the genesis right, so a
+/// rejected genesis right reaches the mint through the send.
+#[test]
+fn mint_scope_reaches_the_genesis_right_through_a_rights_send() {
+    let mut history = listed();
+    let genesis_right = history.genesis_right(0, right_utxo());
+    let rights = history.duplicate_right(genesis_right, 3);
+    history.mint_owned(rights[1], MINTED, 90);
+    let scope = validate(&history.consignment(vec![]))
+        .unwrap()
+        .reject_scope
+        .unwrap();
+    assert_eq!(scope.settling_inputs, vec![key(rights[1].opout)]);
+    let list = Decisions {
+        reject: [key(genesis_right.opout)].into(),
+        ..Decisions::default()
+    };
+    let got = first_rejected(&scope.history, &list, &scope.settling_inputs).unwrap();
+    assert_eq!(got, Some(key(rights[1].opout)));
 }
 
 /// The reject-list rules, ported from rgb-lib `api/evm.rs` and `check_dag`.
@@ -597,6 +615,26 @@ fn validates_a_burn_and_reads_its_globals() {
     );
 }
 
+/// A rights send carries no anchor, so only the mint of the burned units is
+/// bound.
+#[test]
+fn a_burn_after_a_rights_send_binds_only_its_mint() {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let rights = history.duplicate_right(right, 3);
+    let units = history.mint_owned(rights[2], MINTED, 90);
+    history.burn(
+        units,
+        MINTED,
+        Some(MINTED),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    let validated = validate(&history.consignment(vec![])).expect("the burn is valid");
+    assert_eq!(validated.witness_txids.len(), 3);
+    let locked: Vec<[u8; 32]> = validated.mint_locks.iter().map(|l| l.mint_opid).collect();
+    assert_eq!(locked, vec![gen::opid_bytes(history.mints[0].opid)]);
+}
+
 /// The enclave and consignment-utils (which the bridge uses) read the same
 /// burn facts from the same bytes.
 #[test]
@@ -819,15 +857,15 @@ fn refuses_a_burn_with_no_asset_inputs() {
 
 // ===== mint anchors =====
 
-/// The mint a PSBT signs: its anchor is in the last bundle, its right goes
-/// back to vout 1, and the right's seal is what the bundle closes.
+/// The mint a PSBT signs: its anchor is in the last bundle, it consumes its
+/// right, and the right's seal is what the bundle closes.
 #[test]
 fn reads_a_mint_and_its_anchor() {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
     let recipient = GraphSeal::with_blinding(gen::outpoint(0xC0, 0).txid, 0u32, 7);
     let secret = recipient.to_secret_seal();
-    let (mint, _) = history.mint(
+    let mint = history.mint(
         right,
         MINTED,
         90,
@@ -855,13 +893,7 @@ fn reads_a_mint_and_its_anchor() {
     );
     assert!(validated.last_bundle_fully_disclosed);
     assert_eq!(validated.last_closed_seals, vec![right_utxo()]);
-    assert_eq!(
-        validated.last_mint_rights,
-        vec![OutputSeal::Revealed {
-            txid: None,
-            vout: 1
-        }]
-    );
+    assert!(validated.last_mint_rights.is_empty());
     let last = validated.last_transition.unwrap();
     assert!(is_mint_transition(last.transition_type));
     assert_eq!(last.asset_output_amount, MINTED);
@@ -869,6 +901,49 @@ fn reads_a_mint_and_its_anchor() {
         last.outputs[0].seal,
         OutputSeal::Confidential { .. }
     ));
+}
+
+/// A mint in the old form, which passes its right on to vout 1. Returns that
+/// right.
+fn old_form_mint() -> (History, Utxo) {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 7));
+    let (_, kept) = history.mint_keeping_right(
+        right,
+        MINTED,
+        90,
+        to,
+        vec![],
+        vec![gen::dust(1), gen::dust(2)],
+    );
+    (history, kept)
+}
+
+/// Consensus allows the old form, so the PSBT bind needs the right it passes
+/// on to refuse it.
+#[test]
+fn reads_the_right_an_old_form_mint_passes_on() {
+    let (history, _) = old_form_mint();
+    let validated = validate(&history.consignment(vec![])).expect("consensus allows it");
+    assert_eq!(
+        validated.last_mint_rights,
+        vec![OutputSeal::Revealed {
+            txid: None,
+            vout: 1
+        }]
+    );
+}
+
+/// Rights that old-form mints passed on still mint: only the settling
+/// transition must consume its right.
+#[test]
+fn a_mint_on_a_right_an_old_form_mint_passed_on_is_valid() {
+    let (mut history, kept) = old_form_mint();
+    history.mint_owned(kept, MINTED, 91);
+    let validated = validate(&history.consignment(vec![])).expect("the history is valid");
+    assert!(validated.last_mint_rights.is_empty());
+    assert_eq!(validated.mint_locks.len(), 2);
 }
 
 /// A mint of `MINTED` on `right`, to vout 2 of a witness tx that also spends
@@ -1235,12 +1310,13 @@ fn burn_after_transfer() -> Vec<u8> {
     history.consignment(vec![])
 }
 
-/// Two mints on the same right: the second is the one a PSBT would sign.
-fn second_mint() -> Vec<u8> {
+/// A rights send of the genesis right, then a mint a PSBT would sign on one
+/// of the new rights.
+fn mint_after_a_rights_send() -> Vec<u8> {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
-    let (next, _) = history.mint_owned(right, MINTED, 90);
-    history.mint_owned(next, MINTED, 91);
+    let rights = history.duplicate_right(right, 2);
+    history.mint_owned(rights[0], MINTED, 90);
     history.consignment(vec![])
 }
 
@@ -1293,11 +1369,19 @@ fn mint_path_refuses_an_unmined_transfer_in_the_history() {
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
+/// The send is history, and the mint consumes the right it made.
 #[test]
-fn mint_path_refuses_an_unmined_earlier_mint() {
-    let bytes = second_mint();
-    let first = witness_ids(&bytes)[0];
-    let err = error_of(validate_without(&bytes, first, true));
+fn accepts_a_mint_on_a_right_from_a_rights_send() {
+    let validated = validate(&mint_after_a_rights_send()).expect("the history is valid");
+    assert!(validated.last_mint_rights.is_empty());
+    assert_eq!(validated.mint_locks.len(), 1);
+}
+
+#[test]
+fn mint_path_refuses_an_unmined_rights_send() {
+    let bytes = mint_after_a_rights_send();
+    let send = witness_ids(&bytes)[0];
+    let err = error_of(validate_without(&bytes, send, true));
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
@@ -1314,7 +1398,7 @@ fn burn_path_refuses_an_unmined_last_witness() {
 /// the result names it so the PSBT bind can check it.
 #[test]
 fn mint_path_allows_only_the_last_witness_unmined() {
-    let bytes = second_mint();
+    let bytes = mint_after_a_rights_send();
     let last = *witness_ids(&bytes).last().unwrap();
     let validated = validate_without(&bytes, last, true).expect("the mint tx may be unbroadcast");
     assert_eq!(validated.last_witness_txid, Some(last));
@@ -1334,7 +1418,11 @@ fn mint_path_refuses_history_an_unreachable_indexer_cannot_confirm() {
         allow_unbroadcast_last: true,
         infer_spent_ancestors: true,
     };
-    let err = error_of(validator.validate_consignment(&second_mint(), Some(&bind_all), &check));
+    let err = error_of(validator.validate_consignment(
+        &mint_after_a_rights_send(),
+        Some(&bind_all),
+        &check,
+    ));
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
@@ -1358,13 +1446,14 @@ fn a_first_mint_needs_no_indexer() {
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
 
-/// Three mints on one right, each spending the last one's right output.
-fn three_mints() -> Vec<u8> {
+/// Two rights sends, the second spending a right of the first, then a mint
+/// on a right of the second.
+fn mint_after_two_rights_sends() -> Vec<u8> {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
-    let (right, _) = history.mint_owned(right, MINTED, 90);
-    let (right, _) = history.mint_owned(right, MINTED, 91);
-    history.mint_owned(right, MINTED, 92);
+    let rights = history.duplicate_right(right, 2);
+    let rights = history.duplicate_right(rights[0], 2);
+    history.mint_owned(rights[1], MINTED, 90);
     history.consignment(vec![])
 }
 
@@ -1400,19 +1489,19 @@ fn mint_path_asks(
     (result, source.asked.into_inner())
 }
 
-/// The mint tx's parent is mined, so every older mint it builds on is too.
+/// The mint tx's parent is mined, so every older send it builds on is too.
 #[test]
 fn mint_path_asks_the_indexer_only_about_the_parent_of_the_mint_tx() {
-    let bytes = three_mints();
+    let bytes = mint_after_two_rights_sends();
     let ids = witness_ids(&bytes);
     let (result, asked) = mint_path_asks(&bytes, &mined(&ids[1..2]));
-    result.expect("the older mint is as deep as the mined parent");
+    result.expect("the older send is as deep as the mined parent");
     assert_eq!(asked, vec![ids[1]]);
 }
 
 #[test]
-fn mint_path_refuses_an_unmined_parent_even_over_a_mined_older_mint() {
-    let bytes = three_mints();
+fn mint_path_refuses_an_unmined_parent_even_over_a_mined_older_send() {
+    let bytes = mint_after_two_rights_sends();
     let ids = witness_ids(&bytes);
     let (result, _) = mint_path_asks(&bytes, &mined(&ids[..1]));
     let err = error_of(result);
@@ -1422,7 +1511,7 @@ fn mint_path_refuses_an_unmined_parent_even_over_a_mined_older_mint() {
 /// The burn path proves each witness itself: its proofs are checked anyway.
 #[test]
 fn burn_path_asks_about_every_witness() {
-    let bytes = three_mints();
+    let bytes = mint_after_two_rights_sends();
     let ids = witness_ids(&bytes);
     let chain = mined(&ids);
     let source = Recording {

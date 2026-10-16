@@ -109,6 +109,9 @@ pub(super) fn handle_sign_psbt(
     // gate, a witness tx can satisfy the ledger and still take the BTC backing.
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
     ctx.state.with_keys(|keys| {
+        // M8: a mint pays no sat out. The budget below stays a second gate.
+        #[cfg(feature = "bfa-mint")]
+        crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")?;
         crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
             &psbt,
             &ctx.bridge_config,
@@ -121,11 +124,18 @@ pub(super) fn handle_sign_psbt(
     #[cfg(feature = "rgb-validation")]
     assert_chain_pins_unchanged(ctx, pins)?;
 
+    sign_colored_psbt(ctx, &req.psbt_bytes)
+}
+
+/// Signs the Colored inputs of a PSBT the caller validated: a mint or a
+/// rights refill. Refuses a no-op.
+#[cfg(evm_to_rgb)]
+pub(super) fn sign_colored_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.
     let (signed_psbt, inputs_signed) = ctx
         .state
-        .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))?;
+        .sign_psbt_scoped(psbt_bytes, Some(crate::keys::AccountType::Colored))?;
 
     // Refuse a no-op. `sign_psbt_scoped` returns Ok((bytes, 0)) when no input is ours.
     // A caller that checks only RPC success would count it as a signature.

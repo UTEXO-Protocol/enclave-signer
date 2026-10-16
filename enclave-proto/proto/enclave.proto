@@ -28,6 +28,7 @@ message EnclaveRequest {
     SignCcdRequest sign_ccd = 15;
     HealthRequest health = 16;
     SetEndpointsRequest set_endpoints = 17;
+    SignRightsRefillRequest sign_rights_refill = 18;
   }
 }
 
@@ -218,6 +219,8 @@ message RgbDestination {
   // 7 was mint_ancestors, dropped: deposit ids are derived from the mint.
   reserved 7;
   reserved "mint_ancestors";
+  // PSBT of the tx that created the right a mint spends; it pins that UTXO.
+  bytes parent_psbt = 8;
 }
 
 message MerkleProofEntry {
@@ -254,6 +257,19 @@ message SignedPsbtResponse {
 // Response is a SignedPsbtResponse, same as the RGB-send path. Audit M-01 / #69.
 message SignBtcRequest {
   bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
+}
+
+// BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
+// 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
+// source and no EVM deposit, so only the mint signer handles it, by shape alone, from
+// the PSBT's own RGB data. Response is a SignedPsbtResponse.
+message SignRightsRefillRequest {
+  reserved 2, 3;
+  reserved "consignment", "consignment_hash";
+  bytes psbt_bytes = 1;
+  string asset_id = 4;
+  // PSBT of the tx that created the right the refill spends; it pins that UTXO.
+  bytes parent_psbt = 5;
 }
 
 message SignRawMessageRequest {

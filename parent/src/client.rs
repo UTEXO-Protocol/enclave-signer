@@ -58,6 +58,8 @@ pub struct SignPsbtRequest {
     pub rgb_asset_id: String,
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
+    /// PSBT of the tx that made the right the mint spends.
+    pub parent_psbt: Vec<u8>,
 }
 
 /// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`.
@@ -377,8 +379,7 @@ impl EnclaveClient {
                                 asset_id: req.rgb_asset_id,
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
-                                // The CLI cannot resolve the deposits behind
-                                // a chained mint, so the enclave rejects one.
+                                parent_psbt: req.parent_psbt,
                             },
                         ),
                     ),
