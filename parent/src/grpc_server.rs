@@ -335,6 +335,7 @@ impl ParentAdapterService {
                         asset_id: payload.rgb_asset_id,
                         consignment: payload.consignment,
                         consignment_hash: payload.consignment_hash,
+                        parent_psbt: payload.parent_psbt,
                     },
                 )
             }
@@ -346,6 +347,55 @@ impl ParentAdapterService {
             sign_request::Data::CcdData(_) => {
                 unreachable!("CCD sign requests are handled before destination dispatch")
             }
+        }
+    }
+
+    /// A rights refill has no source: the mint enclave authorizes it by shape
+    /// alone, so a source here is a routing error.
+    fn rights_refill_request(req: grpc_proto::SignRequest) -> Result<EnclaveRequest, Status> {
+        if req.source.is_some() {
+            return Err(Status::invalid_argument(
+                "RGB_RIGHTS_REFILL carries no source proof",
+            ));
+        }
+        let Some(sign_request::Data::RgbData(payload)) = req.data else {
+            return Err(Status::invalid_argument(
+                "RGB_RIGHTS_REFILL sign requires RgbData with the PSBT and its parent PSBT",
+            ));
+        };
+        Ok(EnclaveRequest {
+            request: Some(enclave_request::Request::SignRightsRefill(
+                enclave_proto::SignRightsRefillRequest {
+                    psbt_bytes: payload.psbt_bytes,
+                    asset_id: payload.rgb_asset_id,
+                    parent_psbt: payload.parent_psbt,
+                },
+            )),
+        })
+    }
+
+    /// The signed PSBT of a `SignBtc` or `SignRightsRefill` reply.
+    fn signed_psbt_reply(
+        resp: EnclaveResponse,
+        signer_network_id: u32,
+        rpc: &str,
+    ) -> Result<Response<SignatureResponse>, Status> {
+        match resp.response {
+            Some(enclave_response::Response::SignedPsbt(r)) => {
+                Ok(Response::new(SignatureResponse {
+                    signer_network_id,
+                    signature: r.signed_psbt,
+                    identifier: None,
+                    call_data: Vec::new(),
+                    // A PSBT carries per-input key material of its own.
+                    public_key: Vec::new(),
+                }))
+            }
+            Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
+            other => Err(Status::internal(format!(
+                "unexpected enclave response for {rpc}: {:?}",
+                other
+            ))),
         }
     }
 
@@ -382,6 +432,8 @@ impl ParentService for ParentAdapterService {
     /// - TRANSACTION: cross-network Sign (bridge, RGB send, EVM).
     /// - EVM_GAS_TX: unsigned gas-tx preimage to SignRawDigest.
     /// - BTC_UTXO: plain-BTC PSBT to SignBtc (vanilla BIP-86 path).
+    /// - RGB_RIGHTS_REFILL: the mint wallet's rights send to SignRightsRefill
+    ///   (no source).
     async fn sign(
         &self,
         request: Request<grpc_proto::SignRequest>,
@@ -627,25 +679,16 @@ impl ParentService for ParentAdapterService {
                 };
 
                 let resp = self.send_to_enclave(enclave_req).await?;
-                match resp.response {
-                    Some(enclave_response::Response::SignedPsbt(r)) => {
-                        Ok(Response::new(SignatureResponse {
-                            signer_network_id,
-                            signature: r.signed_psbt,
-                            identifier: None,
-                            call_data: Vec::new(),
-                            // A PSBT carries per-input key material of its own.
-                            public_key: Vec::new(),
-                        }))
-                    }
-                    Some(enclave_response::Response::Error(e)) => {
-                        Err(Self::enclave_error_to_status(&e))
-                    }
-                    other => Err(Status::internal(format!(
-                        "unexpected enclave response for SignBtc: {:?}",
-                        other
-                    ))),
-                }
+                Self::signed_psbt_reply(resp, signer_network_id, "SignBtc")
+            }
+            DataType::RgbRightsRefill => {
+                let enclave_req = Self::rights_refill_request(inner)?;
+                tracing::info!(
+                    dst_network_id = signer_network_id,
+                    "gRPC Sign: rights refill (data_type=RGB_RIGHTS_REFILL)"
+                );
+                let resp = self.send_to_enclave(enclave_req).await?;
+                Self::signed_psbt_reply(resp, signer_network_id, "SignRightsRefill")
             }
             other => {
                 tracing::warn!(?other, "unsupported data_type in Sign request");
