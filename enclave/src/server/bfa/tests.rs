@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::BridgeConfig;
 use crate::error::Result;
 use crate::networks::evm::events::{
     rgb_mint_deposit_id, BlockData, EvmReceiptProvider, ReceiptData,
@@ -25,20 +26,6 @@ fn context(cfg: BridgeConfig, rpc: Box<dyn EvmReceiptProvider + Send + Sync>) ->
     ctx
 }
 
-const PINNED: BfaBridge = BfaBridge {
-    chain_id: CHAIN_ID,
-    address: BRIDGE,
-};
-
-fn anchor(tag: u8, amount: u64, in_last_bundle: bool) -> MintAnchor {
-    MintAnchor {
-        opid: [tag; 32],
-        amount,
-        after_block: 90,
-        in_last_bundle,
-    }
-}
-
 /// A binder that must not read the chain.
 struct NoRpc;
 
@@ -63,6 +50,21 @@ impl EvmReceiptProvider for NoRpc {
 #[cfg(rgb_to_evm)]
 mod burn {
     use super::*;
+    use crate::networks::rgb::validation::{BfaBridge, MintAnchor};
+
+    const PINNED: BfaBridge = BfaBridge {
+        chain_id: CHAIN_ID,
+        address: BRIDGE,
+    };
+
+    fn anchor(tag: u8, amount: u64, in_last_bundle: bool) -> MintAnchor {
+        MintAnchor {
+            opid: [tag; 32],
+            amount,
+            after_block: 90,
+            in_last_bundle,
+        }
+    }
 
     /// Finding 47: a burn's locks come from its mints alone.
     #[test]
@@ -118,6 +120,7 @@ mod burn {
 mod mint {
     use super::*;
     use crate::networks::evm::events::{LogEntry, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG};
+    use crate::networks::rgb::psbt_validation::MintFacts;
     use crate::test_support::{abi_word, bridge_funds_in_data, FakeEvm};
     use sha3::{Digest, Keccak256};
 
@@ -157,37 +160,58 @@ mod mint {
         deposit(opid, amount, id)
     }
 
-    #[test]
-    fn binds_the_signed_mint_to_its_receipt_and_derives_the_ancestors() {
-        let anchors = [anchor(1, 7, false), anchor(2, 100, true)];
-        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+    /// The mint a PSBT commits: `issued` units of mint `[2; 32]`, after block 90.
+    fn mint(issued: u64) -> MintFacts {
+        MintFacts {
+            right: rgbstd::Opout::new(rgbstd::OpId::from([1; 32]), schemata::OS_MINT, 0),
+            opid: [2; 32],
+            issued,
+            after_block: 90,
+            recipient_seal: "utxob:recipient".into(),
+        }
+    }
 
-        let bound = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap();
-        assert_eq!(bound.evm_chain_id, CHAIN_ID);
-        assert_eq!(bound.locks.len(), 2);
-        assert_eq!(bound.locks[0].mint_opid, [1; 32]);
-        assert_eq!(bound.locks[1].mint_opid, [2; 32]);
+    fn bind(ctx: &ServerContext, mint: &MintFacts) -> String {
+        bind_mint_deposit(ctx, &TX, mint).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn binds_the_mint_to_its_receipt() {
+        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        bind_mint_deposit(&ctx, &TX, &mint(100)).unwrap();
     }
 
     #[test]
     fn refuses_a_shadow_deposit_for_the_same_mint() {
         let ctx = context(config(), Box::new(deposit([2; 32], 100, [0xd2; 32])));
-        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("not the one mint"), "{err}");
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("not the one mint"), "{err}");
     }
 
     #[test]
-    fn refuses_a_deposit_of_another_amount() {
+    fn refuses_deposit_of_other_amount() {
         let ctx = context(config(), Box::new(paid([2; 32], 99)));
-        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("not the one mint"), "{err}");
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("not the one mint"), "{err}");
     }
 
     #[test]
-    fn refuses_a_deposit_for_another_mint() {
+    fn refuses_deposit_of_other_opid() {
         let ctx = context(config(), Box::new(paid([3; 32], 100)));
-        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("rgbOpId mismatch"), "{err}");
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("rgbOpId mismatch"), "{err}");
+    }
+
+    /// An RGB receiver refuses a lock at or before the mint's `afterBlock`.
+    #[test]
+    fn refuses_deposit_not_after_block() {
+        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        let late = MintFacts {
+            after_block: 100,
+            ..mint(100)
+        };
+        let err = bind(&ctx, &late);
+        assert!(err.contains("not after the mint's afterBlock"), "{err}");
     }
 
     #[test]
@@ -197,8 +221,8 @@ mod mint {
             ..paid([2; 32], 100)
         };
         let ctx = context(config(), Box::new(node));
-        let err = mint_locks(&ctx, &TX, &PINNED, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("reports chain id 1"), "{err}");
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("reports chain id 1"), "{err}");
     }
 
     /// A node whose `covered` head holds the lock and whose other heads are
@@ -232,7 +256,6 @@ mod mint {
     /// The mint lock follows the attested `EVM_FINALITY_TAG`, not a fixed tag.
     #[test]
     fn checks_the_lock_against_the_configured_finality_tag() {
-        let anchors = [anchor(2, 100, true)];
         for tag in [
             EvmFinalityTag::Latest,
             EvmFinalityTag::Safe,
@@ -247,7 +270,7 @@ mod mint {
                 covered: tag,
             };
             let ctx = context(cfg.clone(), Box::new(covered));
-            assert!(mint_locks(&ctx, &TX, &PINNED, &anchors).is_ok(), "{tag}");
+            assert!(bind_mint_deposit(&ctx, &TX, &mint(100)).is_ok(), "{tag}");
 
             let other = if tag == EvmFinalityTag::Safe {
                 EvmFinalityTag::Finalized
@@ -259,37 +282,21 @@ mod mint {
                 covered: other,
             };
             let ctx = context(cfg, Box::new(below));
-            let err = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains(&format!("above RPC {tag} block 99")),
-                "{err}"
-            );
+            let err = bind(&ctx, &mint(100));
+            assert!(err.contains(&format!("above RPC {tag} block 99")), "{err}");
         }
     }
 
     /// The pins are checked before any RPC read.
     #[test]
-    fn refuses_an_asset_of_another_bridge_before_reading_the_chain() {
-        let ctx = context(config(), Box::new(NoRpc));
-        let bridge = BfaBridge {
-            chain_id: 1,
-            ..PINNED
+    fn refuses_an_unpinned_token_before_reading_the_chain() {
+        let cfg = BridgeConfig {
+            token_contract: [0; 20],
+            ..config()
         };
-        let err = mint_locks(&ctx, &TX, &bridge, &[anchor(2, 100, true)]).unwrap_err();
-        assert!(err.to_string().contains("is not the pinned"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_signed_bundle_without_exactly_one_mint() {
-        let ctx = context(config(), Box::new(NoRpc));
-        for anchors in [
-            vec![anchor(1, 1, false)],
-            vec![anchor(1, 1, true), anchor(2, 1, true)],
-        ] {
-            let err = mint_locks(&ctx, &TX, &PINNED, &anchors).unwrap_err();
-            assert!(err.to_string().contains("exactly one mint anchor"), "{err}");
-        }
+        let ctx = context(cfg, Box::new(NoRpc));
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("TOKEN_CONTRACT"), "{err}");
     }
 
     const DERIVED: VerifiedLock = VerifiedLock {
