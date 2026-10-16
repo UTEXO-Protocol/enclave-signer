@@ -27,7 +27,7 @@ stateDiagram-v2
 
     Cloning --> Active : complete_cloning() (SetClone - decrypt, assert evm_address == cluster_public_key, verify clone commitment, atomically install keys + session donor secret)
 
-    Active --> Active : Sign / SignBtc / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
+    Active --> Active : Sign / SignBtc / SignRightsRefill / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
     Initial --> Initial : SubmitHeaders / GetLastSavedBlock (no keys needed, any phase)
     Active --> Active : GetClone (donor - exports sealed seed, stays Active)
 

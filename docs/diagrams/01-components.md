@@ -10,7 +10,7 @@ flowchart TB
     %% parent crate
     subgraph PARENT [parent crate — utexo-bridge-parent]
         PMain[main.rs<br/>tonic gRPC server,<br/>mTLS + client ACL - transport_security.rs]
-        Grpc[grpc_server.rs<br/>ParentAdapterService — gRPC ↔ enclave wire<br/>TRANSACTION → Sign, EVM_GAS_TX → SignRawDigest,<br/>BTC_UTXO → SignBtc]
+        Grpc[grpc_server.rs<br/>ParentAdapterService - gRPC ↔ enclave wire<br/>TRANSACTION → Sign, EVM_GAS_TX → SignRawDigest,<br/>BTC_UTXO → SignBtc, RGB_RIGHTS_REFILL → SignRightsRefill]
         PClient[client.rs<br/>EnclaveClient<br/>TCP / vsock]
         PFr[framing.rs<br/>u32 LE len + protobuf]
         PALib[attest_verify.rs<br/>library half of CLI —<br/>rebuilds expected policy + bundle]
@@ -52,10 +52,10 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs mint-path witness status + tx fetch,<br/>consensus.rs two-phase rgb-ops validation,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs BFA rules]
+            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs swap-path witness status + tx fetch,<br/>consensus.rs two-phase rgb-ops validation,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs BFA rules]
             NRF["flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule"]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
-            NRP["psbt_validation.rs<br/>PSBT to consignment anchor,<br/>per-output legs, pinned fee policy<br/>(max rate + max fee, both PSBT paths)"]
+            NRP["psbt_validation.rs<br/>swap: PSBT to consignment anchor, per-output legs;<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs + parent_proof.rs<br/>mint signer: the transition a PSBT commits, its parent"]
             NRB[btc_crosscheck.rs<br/>plain-BTC + send-RGB sats gates<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budgets]
             NRS[spv_crosscheck.rs<br/>coverage + depth ≥ SPV_MIN_CONFIRMATIONS<br/>+ chain_net + staleness]
             NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
@@ -83,7 +83,7 @@ flowchart TB
     VPe[(host vsock-proxy<br/>port 8002)]
 
     %% Wires
-    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO; EVM / RGB / CCD payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO / RGB_RIGHTS_REFILL; EVM / RGB / CCD payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
     V --> AVCli
     PCli --> PClient
