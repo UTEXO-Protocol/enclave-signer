@@ -8,6 +8,8 @@ use super::context::ServerContext;
 use super::endpoints::handle_set_endpoints;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+use super::rights_refill::handle_sign_rights_refill;
 use super::sign::handle_sign;
 #[cfg(evm_to_rgb)]
 use super::signers::handle_sign_btc;
@@ -130,6 +132,21 @@ pub(super) fn dispatch(
             {
                 let _ = req;
                 Err(unsupported_build("ccd"))
+            }
+        }
+        Some(Request::SignRightsRefill(req)) => {
+            tracing::info!("request: SignRightsRefill");
+            // Only the mint signer holds mint rights. Like every signing
+            // request it waits for launch; the rule itself reads no network.
+            #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+            {
+                ctx.launch()
+                    .and_then(|_| handle_sign_rights_refill(ctx, req))
+            }
+            #[cfg(not(all(feature = "bfa-mint", evm_to_rgb)))]
+            {
+                let _ = req;
+                Err(wrong_signer_role("rights refills"))
             }
         }
         #[cfg(feature = "kms-persistence")]

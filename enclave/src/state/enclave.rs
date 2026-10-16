@@ -93,6 +93,10 @@ pub struct EnclaveState {
     /// authorize a request. Durable uniqueness needs a separate control.
     pub op_replay_guard: NonceReplayGuard,
 
+    /// RR15: rights refills admitted past the cheap gate in the last hour.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    pub refill_rate: super::RefillRateLimit,
+
     /// Successful exports from this enclave process. (F03-AF-10)
     /// A restart resets the count. The slot counter enforces the hard quota.
     pub(super) seed_export_count: AtomicU64,
@@ -154,6 +158,8 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_MAX,
                 DEFAULT_OP_DEDUP_TTL,
             ),
+            #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+            refill_rate: super::RefillRateLimit::default(),
             seed_export_count: AtomicU64::new(0),
             seed_export_slots: AtomicU64::new(0),
             seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)

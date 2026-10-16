@@ -57,8 +57,8 @@ Every signing check lives in the enclave. The parent decides only who may
 call it. The enclave applies the same checks on every path
 (`enclave/src/server/dispatch.rs`):
 
-- `Sign`, `SignBtc`, `SignRawDigest` and `SignCcd` are refused until
-  `SetEndpoints` is accepted.
+- `Sign`, `SignBtc`, `SignRightsRefill`, `SignRawDigest` and `SignCcd` are
+  refused until `SetEndpoints` is accepted.
 - `Sign` checks the signer role, then the source, destination and route
   proofs, then signs with the key.
 - `SignRawMessage` is always refused.

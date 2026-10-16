@@ -4750,6 +4750,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgb-psbt-utils"
+version = "0.11.2-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16167fb6520c432702b42dbc6344c94573ff8873082386c129718a66bcb535ce"
+dependencies = [
+ "amplify",
+ "getrandom 0.3.4",
+ "rgb-ops",
+ "rgb-strict-encoding",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "rgb-schemas"
 version = "0.11.2-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6187,6 +6201,7 @@ dependencies = [
  "rgb-consignment",
  "rgb-invoicing",
  "rgb-ops",
+ "rgb-psbt-utils",
  "rgb-schemas",
  "rgb-strict-encoding",
  "rsa",

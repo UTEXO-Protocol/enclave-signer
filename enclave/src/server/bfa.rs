@@ -1,17 +1,23 @@
-//! BFA anchor binding: every mint anchor of a consignment is bound to the
-//! deposit id it derives. The mint a PSBT signs must also have that deposit
-//! on the pinned EVM chain, covered by the `EVM_FINALITY_TAG` head.
+//! BFA deposit binding. A consignment's mint anchors are bound to the deposit
+//! ids they derive. The mint signer binds the mint its PSBT commits to the
+//! request's own deposit on the pinned EVM chain, covered by the
+//! `EVM_FINALITY_TAG` head (M6).
 //!
 //! `server/mod.rs` gates this module on `bfa-validation`.
 
 use super::context::ServerContext;
-use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::events::derived_lock;
-use crate::networks::rgb::validation::{BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
+use crate::networks::rgb::validation::VerifiedLock;
+#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+use crate::{
+    config::BridgeConfig,
+    networks::rgb::validation::{BfaBridge, BoundAnchors, MintAnchor},
+};
 
 /// The asset's genesis must name the pinned Bridge on the pinned chain. Only
 /// that contract's deposits can back a mint this federation signs.
+#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
 fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
     if bridge.chain_id != cfg.chain_id || bridge.address != cfg.funds_in_contract {
         return Err(EnclaveError::CrossCheck(format!(
@@ -27,6 +33,7 @@ fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
 }
 
 /// The derived lock of each anchor, in consignment order; no RPC read.
+#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
 fn derive_all(cfg: &BridgeConfig, anchors: &[MintAnchor]) -> Result<Vec<VerifiedLock>> {
     anchors
         .iter()
@@ -49,22 +56,18 @@ pub(super) fn derived_locks(
     })
 }
 
-/// Binds a mint's history. Ancestors get derived locks. The signed mint's
-/// derived lock is bound only once the request's own receipt proves it.
-#[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
-pub(super) fn mint_locks(
+/// M6: the receipt of `tx_hash` holds the one deposit the mint derives, on the
+/// pinned chain, after its `afterBlock`. The pins are checked before any RPC.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub(super) fn bind_mint_deposit(
     ctx: &ServerContext,
     tx_hash: &[u8; 32],
-    bridge: &BfaBridge,
-    anchors: &[MintAnchor],
-) -> Result<BoundAnchors> {
+    mint: &crate::networks::rgb::psbt_validation::MintFacts,
+) -> Result<()> {
     use crate::networks::evm::events::{check_node_chain_id, verify_rgb_funds_in};
 
     let cfg = &ctx.bridge_config;
-    check_bridge(cfg, bridge)?;
-    let locks = derive_all(cfg, anchors)?;
-    let signed = signed_mint(anchors)?;
-
+    let derived = derived_lock(cfg, mint.opid, mint.issued)?;
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
@@ -72,38 +75,20 @@ pub(super) fn mint_locks(
                 .into(),
         )
     })?;
-    let evm_chain_id = check_node_chain_id(&**client, cfg.chain_id)?;
+    check_node_chain_id(&**client, cfg.chain_id)?;
     let paid = verify_rgb_funds_in(
         &**client,
         &cfg.funds_in_contract,
         cfg.evm_finality_tag,
         tx_hash,
-        &signed.opid,
-        signed.after_block,
+        &mint.opid,
+        mint.after_block,
     )?;
-    bind_request_deposit(&derived_lock(cfg, signed.opid, signed.amount)?, &paid)?;
-    Ok(BoundAnchors {
-        evm_chain_id,
-        locks,
-    })
-}
-
-/// The one anchor of the bundle the PSBT signs: the mint this request pays.
-#[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
-fn signed_mint(anchors: &[MintAnchor]) -> Result<&MintAnchor> {
-    let mut signed = anchors.iter().filter(|a| a.in_last_bundle);
-    match (signed.next(), signed.next()) {
-        (Some(anchor), None) => Ok(anchor),
-        _ => Err(EnclaveError::CrossCheck(
-            "the signed bundle must hold exactly one mint anchor - refusing to guess which \
-             mint this request pays"
-                .into(),
-        )),
-    }
+    bind_request_deposit(&derived, &paid)
 }
 
 /// The request's deposit must equal the mint's derived lock.
-#[cfg(all(feature = "rgb-mint-burn", evm_to_rgb))]
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<()> {
     if paid != derived {
         return Err(EnclaveError::CrossCheck(format!(

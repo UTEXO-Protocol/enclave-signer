@@ -21,8 +21,25 @@ use crate::networks::rgb::signing::taproot::{find_taproot_sign_jobs, sign_taproo
 const RGB_COIN_TYPE_MAINNET: u32 = 827166;
 const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 
+/// The keychain of rgb-lib's colored descriptor (`rgb-lib::utils::KEYCHAIN_RGB`).
+const COLORED_KEYCHAIN: u32 = 0;
+
 /// SLIP-44 coin type for Concordium.
 const CONCORDIUM_COIN_TYPE: u32 = 919;
+
+/// True only for a child path `[0, i]`, both steps non-hardened: the addresses
+/// rgb-lib scans. State on any other path of our keys is lost to the wallet.
+pub fn is_colored_keychain_path(child_path: &[ChildNumber]) -> bool {
+    matches!(
+        child_path,
+        [
+            ChildNumber::Normal {
+                index: COLORED_KEYCHAIN
+            },
+            ChildNumber::Normal { .. }
+        ]
+    )
+}
 
 type HmacSha512 = Hmac<Sha512>;
 
