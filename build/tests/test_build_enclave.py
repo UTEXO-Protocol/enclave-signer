@@ -53,7 +53,7 @@ class BuildArgumentsTests(unittest.TestCase):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
-            GITHUB_TOKEN='fixture-not-a-real-token',
+            RGB_LIB_BFA_DEPLOY_KEY='fixture-deploy-key-not-a-real-credential',
             OUT_DIR=str(self.base / 'out'),
             SOURCE_DATE_EPOCH='1700000000',
             TEST_DOCKER_ARGV=str(self.argv),
@@ -71,7 +71,7 @@ class BuildArgumentsTests(unittest.TestCase):
     def captured_build_args(self):
         argv = json.loads(self.argv.read_text())
         self.assertEqual(argv[:2], ['buildx', 'build'])
-        self.assertNotIn(self.env['GITHUB_TOKEN'], ' '.join(argv))
+        self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--build-arg']
 
     def test_rgb_recipes_reject_missing_asset_before_docker(self):
@@ -135,7 +135,7 @@ class BuildArgumentsTests(unittest.TestCase):
                          ['RGB_ASSET_ID'])
         self.assertEqual(json.loads(self.docker_env.read_text())['RGB_ASSET_ID'],
                          'rgb:test-bfa-asset')
-        self.assertNotIn(self.env['GITHUB_TOKEN'], ' '.join(argv))
+        self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
 
     def test_make_mint_rejects_missing_asset_before_docker(self):
         result = self.invoke_make('build_enclave_mint')
@@ -172,26 +172,26 @@ class BuildArgumentsTests(unittest.TestCase):
         argv = json.loads(self.argv.read_text())
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
 
-    def test_every_recipe_takes_the_token_as_a_secret(self):
+    def test_every_recipe_takes_the_deploy_key_as_a_secret(self):
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
                        'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_secrets(), ['id=github_token,env=GITHUB_TOKEN'])
+                self.assertEqual(self.captured_secrets(), ['id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY'])
 
     def test_the_token_file_of_private_deps_dir_wins(self):
         deps = self.base / 'deps'
         deps.mkdir()
-        (deps / 'github_token').write_text('fixture-file-token')
+        (deps / 'lib_key').write_text('fixture-deploy-key-file')
         result = self.invoke('Dockerfile.enclave.ccd', PRIVATE_DEPS_DIR=str(deps))
         self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_secrets(), [f'id=github_token,src={deps}/github_token'])
-        self.assertNotIn('fixture-file-token', self.argv.read_text())
+        self.assertEqual(self.captured_secrets(), [f'id=lib_key,src={deps}/lib_key'])
+        self.assertNotIn('fixture-deploy-key-file', self.argv.read_text())
 
     def test_missing_token_refuses_before_docker(self):
         env = dict(self.env)
-        env.pop('GITHUB_TOKEN')
+        env.pop('RGB_LIB_BFA_DEPLOY_KEY')
         empty = self.base / 'empty'
         empty.mkdir()
         for extra in ({}, {'PRIVATE_DEPS_DIR': str(empty)}):
@@ -203,7 +203,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('github_token' if extra else 'rgb-lib-bfa', result.stderr)
+                self.assertIn('lib_key' if extra else 'rgb-lib-bfa', result.stderr)
                 self.assertFalse(self.argv.exists())
 
     def test_ccd_does_not_require_asset(self):

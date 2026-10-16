@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
 # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret github_token with read access to it. The secret is
+# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
 # never in a layer, the image or PCR0.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN \
+# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
@@ -44,7 +44,7 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-RUN --mount=type=secret,id=github_token \
+RUN --mount=type=secret,id=lib_key \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
 
 

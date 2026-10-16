@@ -37,7 +37,7 @@ jobs:
       # loads every git source of the lock, so every build here fetches it.
       - name: Set up access to the rgb-lib mirror
         env:
-          RGB_LIB_BFA_TOKEN: ${{ secrets.RGB_LIB_BFA_TOKEN }}
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
         run: sh build/ci-rgb-lib-access.sh
 
       # The parent's private proto dep uses the SSH Host alias
@@ -64,8 +64,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            !~/.cargo/git/db/rgb-lib-bfa-*
-            !~/.cargo/git/checkouts/rgb-lib-bfa-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
@@ -230,7 +228,7 @@ jobs:
       # loads every git source of the lock, so every build here fetches it.
       - name: Set up access to the rgb-lib mirror
         env:
-          RGB_LIB_BFA_TOKEN: ${{ secrets.RGB_LIB_BFA_TOKEN }}
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
         run: sh build/ci-rgb-lib-access.sh
 
       - name: Set up SSH for private deps
@@ -254,8 +252,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            !~/.cargo/git/db/rgb-lib-bfa-*
-            !~/.cargo/git/checkouts/rgb-lib-bfa-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
@@ -298,7 +294,7 @@ jobs:
       # loads every git source of the lock, so every build here fetches it.
       - name: Set up access to the rgb-lib mirror
         env:
-          RGB_LIB_BFA_TOKEN: ${{ secrets.RGB_LIB_BFA_TOKEN }}
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
         run: sh build/ci-rgb-lib-access.sh
 
       - name: Cache cargo registry
@@ -307,8 +303,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            !~/.cargo/git/db/rgb-lib-bfa-*
-            !~/.cargo/git/checkouts/rgb-lib-bfa-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}

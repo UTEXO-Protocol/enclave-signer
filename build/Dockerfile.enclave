@@ -2,9 +2,9 @@
 # Combined enclave image, retired swap flow (vsock + rgb + rgb-swap + ccd +
 # bfa-validation). Not a production image: see Dockerfile.enclave.mint/.burn.
 # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret github_token with read access to it. The secret is
+# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
 # never in a layer, the image or PCR0.
-# Example: docker build --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave .
+# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY -f build/Dockerfile.enclave .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
@@ -39,7 +39,7 @@ ENV CARGO_INCREMENTAL=0 \
 # For debug tests only: allow-debug-pcrs accepts all-zero peer PCRs.
 # Leave this argument empty for production builds. (F03-AF-12)
 ARG ENCLAVE_DEBUG_FEATURES=""
-RUN --mount=type=secret,id=github_token \
+RUN --mount=type=secret,id=lib_key \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --features vsock,rgb,rgb-swap,ccd,bfa-validation${ENCLAVE_DEBUG_FEATURES:+,${ENCLAVE_DEBUG_FEATURES}}
 
 

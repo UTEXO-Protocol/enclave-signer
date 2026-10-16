@@ -1,18 +1,18 @@
 #!/bin/sh
-# CI only: lets system Git read the private UTEXO-Protocol/rgb-lib-bfa mirror
-# with RGB_LIB_BFA_TOKEN. A credential helper reads the token from a file under
-# RUNNER_TEMP, so it is never in a URL, a config value or a log.
+# CI only: adds the rgb-lib-bfa deploy key to SSH so Cargo
+# (via CARGO_NET_GIT_FETCH_WITH_CLI=true) can fetch the private
+# UTEXO-Protocol/rgb-lib-bfa mirror via the github-rgb-lib SSH alias.
 set -eu
-: "${RGB_LIB_BFA_TOKEN:?Missing RGB_LIB_BFA_TOKEN}"
-: "${RUNNER_TEMP:?Set RUNNER_TEMP to a directory outside the checkout}"
-umask 077
-helper="$RUNNER_TEMP/rgb-lib-bfa-credential"
-printf '%s' "$RGB_LIB_BFA_TOKEN" > "$helper.token"
-cat > "$helper" <<HELPER
-#!/bin/sh
-[ "\$1" = get ] || exit 0
-echo username=x-access-token
-echo "password=\$(cat '$helper.token')"
-HELPER
-chmod 700 "$helper"
-git config --global credential.https://github.com.helper "$helper"
+: "${RGB_LIB_BFA_DEPLOY_KEY:?Missing RGB_LIB_BFA_DEPLOY_KEY}"
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+printf '%s\n' "$RGB_LIB_BFA_DEPLOY_KEY" > ~/.ssh/key_lib
+chmod 600 ~/.ssh/key_lib
+cat >> ~/.ssh/config << 'SSHCONF'
+Host github-rgb-lib
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/key_lib
+  IdentitiesOnly yes
+SSHCONF
+chmod 600 ~/.ssh/config
