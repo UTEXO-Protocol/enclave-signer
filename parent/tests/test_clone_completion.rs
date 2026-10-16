@@ -240,6 +240,7 @@ async fn run_cli_completion(secure: bool) {
             utexo_bridge_parent::transport_security::AccessLayer::from_acl(
                 &pki.acl("operator"),
                 30,
+                30,
                 Duration::from_secs(60),
             )
             .unwrap(),

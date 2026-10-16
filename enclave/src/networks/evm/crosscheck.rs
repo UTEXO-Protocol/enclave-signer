@@ -5,6 +5,8 @@
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
+#[cfg(feature = "rgb-mint-burn")]
+use crate::networks::evm::burn_destination::{self, BurnDestinationRecord};
 use crate::networks::evm::validation::ReleaseIdentity;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv_crosscheck;
@@ -14,7 +16,7 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map. Thus confirmation does not rest on the SPV header chain alone.
+/// ordinal map, which the burn path fills from verified SPV proofs only.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -70,22 +72,23 @@ pub fn validate_funds_out_amount(
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
-/// Payout bind for the burn flow: the burner's target (`MS_BURN_RECIPIENT`)
-/// must equal the final payee. That is the `fundsOut` `recipient`, or the
-/// `lzFundsOut` LayerZero `recipient`. `dstEid` is not bound: the burn does not
-/// name a chain.
+/// Payout bind for the burn flow: the release must be the one that the burn's
+/// `burnReason` names: route, `dstEid`, `destinationChainId` and payee.
+/// Rules: [`burn_destination`] and `docs/burn-destination.md`.
 ///
-/// This makes a redemption unforgeable. The 32 bytes are in the burn
-/// operation, so its OpId covers them and the spender of the burned units signs
-/// them. A holder of a consignment copy cannot redirect the release.
+/// This makes a redemption unforgeable. The 32 bytes are a global of the burn
+/// operation, so its OpId covers them and the burner's Bitcoin signature
+/// commits to that OpId. A holder of a consignment copy cannot redirect the
+/// release.
 ///
-/// This does not check the burn shape or amount. The caller must run
-/// [`validate_funds_out_amount`] first. Under `rgb-mint-burn`, it rejects
-/// anything that is not a `Burn` of exactly the released amount.
+/// The schema does not require `burnReason`, so this is its only guard. The
+/// caller must run [`validate_funds_out_amount`] first. Under `rgb-mint-burn`,
+/// it rejects anything that is not a burn of exactly the released amount.
 #[cfg(feature = "rgb-mint-burn")]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
+    record: Option<&BurnDestinationRecord>,
 ) -> Result<()> {
     let last = validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
@@ -93,30 +96,38 @@ pub fn validate_funds_out_burn_recipient(
         )
     })?;
 
-    let recipient = last.burn_recipient.as_deref().ok_or_else(|| {
+    let reason = last.burn_reason.ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "burn transition carries no MS_BURN_RECIPIENT metadata - this burn cannot authorise \
-             a bridged redemption"
+            "burn transition carries no burnReason (GS_BURN_REASON) global - this burn cannot \
+             authorise a bridged redemption"
                 .into(),
         )
     })?;
-    // 32 bytes with a 20-byte EVM address in the low bytes, ABI-style. The
-    // high 12 bytes must be zero. Truncation would pay a target that nobody
-    // signed.
-    if recipient.len() != 32 || recipient[..12] != [0u8; 12] {
+    let target = burn_destination::resolve(&reason, record)?;
+
+    // `None` = direct fundsOut. A legacy (V0) burn names no chain, so it is
+    // direct only.
+    if target.dst_eid != release.dst_eid {
         return Err(EnclaveError::CrossCheck(format!(
-            "MS_BURN_RECIPIENT is not a left-padded EVM address: 0x{}",
-            hex::encode(recipient)
+            "dstEid mismatch: burn names {:?}, calldata sends to {:?} (None = direct fundsOut)",
+            target.dst_eid, release.dst_eid
         )));
     }
-    if recipient != release.recipient.as_slice() {
+    if let Some(chain) = target.destination_chain_id {
+        if release.destination_chain_id != alloy_primitives::U256::from(chain) {
+            return Err(EnclaveError::CrossCheck(format!(
+                "destinationChainId mismatch: burn names {chain}, calldata routes to {}",
+                release.destination_chain_id
+            )));
+        }
+    }
+    if target.recipient != release.recipient {
         return Err(EnclaveError::CrossCheck(format!(
             "recipient mismatch: burn commits to 0x{}, calldata releases to 0x{}",
-            hex::encode(recipient),
+            hex::encode(target.recipient),
             hex::encode(release.recipient)
         )));
     }
-
     Ok(())
 }
 
@@ -177,11 +188,12 @@ pub fn validate_funds_out_source_burn_tx_id(
 ///
 /// `RgbSettlementModule.beforeFundsOut` decodes `settlementData` as
 /// `abi.encode(bytes32[] operationIds, uint256[] amounts)`. It checks each
-/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`. It
-/// does not know the deposits behind a burn. The enclave knows, because it
-/// verified each ancestry lock receipt
-/// ([`crate::networks::evm::events::verify_rgb_funds_in`]). The cited set must
-/// equal that ancestry, pair for pair.
+/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`, but
+/// does not know which deposits are behind a burn. The enclave derives one
+/// deposit id per ancestry mint ([`crate::networks::evm::events::derived_lock`])
+/// without reading the chain. That deposit's existence is enforced by
+/// `beforeFundsOut`, so the release route must use `RgbSettlementModule`.
+/// The cited set must equal the derived ancestry, pair for pair.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
 /// `operationId` order, which also refuses duplicates. `burnId` does not hash
@@ -191,7 +203,7 @@ pub fn validate_funds_out_source_burn_tx_id(
 #[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,
-    locks: &[crate::networks::evm::events::VerifiedLock],
+    locks: &[crate::networks::rgb::validation::VerifiedLock],
 ) -> Result<()> {
     use alloy_primitives::{B256, U256};
     use alloy_sol_types::SolValue;
@@ -308,6 +320,7 @@ pub fn verify_btc_relay_agreement(
     chain: &HeaderChain,
     pins: &ChainPins,
     mode: BtcRelayMode,
+    min_confirmations: u32,
 ) -> Result<()> {
     let (source, latest) = decode_funds_out_proof(release)?;
 
@@ -339,7 +352,7 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain)?;
+    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain, min_confirmations)?;
     pins.pin(chain, anchor.height)?;
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
@@ -484,13 +497,14 @@ struct ConsignmentAnchor {
 ///
 /// The proof is verified again here. The earlier `validate_source_chain` pass
 /// held a different header-chain lock. A concurrent `SubmitHeaders` reorg (up
-/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS = 6`) can
+/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS`) can
 /// replace the header between the two. Inclusion and header hash must come
 /// from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
+    min_confirmations: u32,
 ) -> Result<ConsignmentAnchor> {
     use bitcoin::hashes::Hash as _;
 
@@ -536,7 +550,7 @@ fn resolve_consignment_anchor(
         chain,
         &[txid],
         std::slice::from_ref(proof),
-        spv_crosscheck::SPV_MIN_CONFIRMATIONS,
+        min_confirmations,
     )?;
 
     Ok(ConsignmentAnchor {

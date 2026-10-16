@@ -12,15 +12,17 @@
 //! the bundle commits empty values.
 
 use crate::error::{EnclaveError, Result};
+use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 
 /// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
 /// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
 ///
 /// The three defaults below are sized for a history of 10_000 state
-/// transitions. A consignment has approx 6 KB of fixed data, and each
-/// transition adds 470 to 600 bytes (measured: BFA transfer 468, BFA burn 560,
-/// BFA mint 593). Thus 10_000 transitions need 4.7 to 6 MB.
-pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 8 * 1024 * 1024;
+/// transitions. A V1 consignment carries no schema or types, and each
+/// transition adds approx 470 bytes, or 890 with an SPV proof of a full
+/// mainnet block. Measured: 10_002 transitions, each with a proof, are
+/// 8_932_088 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 12 * 1024 * 1024;
 /// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
 /// one proof for each witness tx in its history.
 pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
@@ -29,6 +31,11 @@ pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
 /// fits: 16_384 x 448 bytes = 7.3 MB.
 pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
+
+/// Env var of [`BridgeConfig::spv_min_confirmations`].
+pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
+/// Default depth of each Bitcoin witness tx before the enclave signs.
+pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 6;
 
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
@@ -93,12 +100,17 @@ pub struct BridgeConfig {
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
     /// this deployment, so set it explicitly.
     pub funds_in_contract: [u8; 20],
+    /// RPC block tag required for deposit inclusion (`EVM_FINALITY_TAG`). Attested.
+    pub evm_finality_tag: EvmFinalityTag,
     /// The ERC-20 that the Bridge releases (`TOKEN_CONTRACT`, `Bridge.TOKEN`).
     /// An input of the `burnId` preimage
     /// (`networks::evm::validation::validate_burn_id`). Zero = unset: dev skips
     /// the check, production does not boot ([`crate::policy::ProductionPolicy`]).
     /// Attested.
     pub token_contract: [u8; 20],
+    /// Bitcoin network (`BITCOIN_NETWORK`, default mainnet). The same value
+    /// selects the SPV header chain and the consignment network. Attested.
+    pub bitcoin_network: BitcoinNetwork,
     /// If a `fundsOut` proof must carry BtcRelay commitments that the enclave
     /// checks against its own chain (`BTC_RELAY_MODE`). Default `required`.
     /// `none` is for a local stand only; production does not boot on it
@@ -110,10 +122,23 @@ pub struct BridgeConfig {
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
+    /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
+    /// 6, at least 1). Image env, so PCR0 measures it, and attested.
+    pub spv_min_confirmations: u32,
 }
 
 /// Env var selecting [`BtcRelayMode`].
 pub const BTC_RELAY_MODE_ENV: &str = "BTC_RELAY_MODE";
+
+fn parse_evm_finality_tag(
+    value: std::result::Result<String, std::env::VarError>,
+) -> std::result::Result<EvmFinalityTag, String> {
+    match value {
+        Ok(value) => value.parse(),
+        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Safe),
+        Err(std::env::VarError::NotUnicode(_)) => Err("value must be valid Unicode".into()),
+    }
+}
 
 /// How the `fundsOut` finality proof's BtcRelay commitment words are checked.
 /// See `networks::evm::crosscheck::verify_btc_relay_agreement`.
@@ -164,17 +189,20 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
+            evm_finality_tag: EvmFinalityTag::Safe,
             token_contract: [0u8; 20],
+            bitcoin_network: BitcoinNetwork::Mainnet,
             btc_relay_mode: BtcRelayMode::Required,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
+            spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
         }
     }
 }
 
 impl BridgeConfig {
-    /// Load from env. A missing or invalid field gives its zero or empty value.
+    /// Load from env. An invalid `EVM_FINALITY_TAG` refuses startup.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
             .ok()
@@ -256,12 +284,21 @@ impl BridgeConfig {
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or(bridge_contract);
 
+        let evm_finality_tag = parse_evm_finality_tag(std::env::var("EVM_FINALITY_TAG"))
+            .expect("EVM_FINALITY_TAG must be latest, safe, or finalized");
+
         let token_contract = std::env::var("TOKEN_CONTRACT")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok())
             .unwrap_or([0u8; 20]);
 
         let btc_relay_mode = BtcRelayMode::from_env_value(std::env::var(BTC_RELAY_MODE_ENV).ok());
+
+        // Unknown gives mainnet, as `bootstrap::resolve_bitcoin_network` does.
+        let bitcoin_network = std::env::var("BITCOIN_NETWORK")
+            .ok()
+            .and_then(|s| BitcoinNetwork::from_env_str(&s))
+            .unwrap_or(BitcoinNetwork::Mainnet);
 
         // Without both caps every gas tx fails. Show this at boot.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
@@ -287,6 +324,10 @@ impl BridgeConfig {
         let max_total_proof_bytes =
             parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
 
+        let spv_min_confirmations =
+            parse_spv_min_confirmations(std::env::var(SPV_MIN_CONFIRMATIONS_ENV).ok().as_deref())
+                .unwrap_or_else(|e| panic!("{e}"));
+
         Self {
             chain_id,
             bridge_contract,
@@ -300,11 +341,14 @@ impl BridgeConfig {
             rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
+            evm_finality_tag,
             token_contract,
+            bitcoin_network,
             btc_relay_mode,
             max_consignment_bytes,
             max_merkle_proofs,
             max_total_proof_bytes,
+            spv_min_confirmations,
         }
     }
 
@@ -339,6 +383,21 @@ impl BridgeConfig {
     }
 }
 
+/// Parse `SPV_MIN_CONFIRMATIONS`. Unset or empty gives the default. Zero or a
+/// non-number is an error, so a typo cannot lower the depth.
+pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u32, String> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_SPV_MIN_CONFIRMATIONS);
+    };
+    match raw.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "{SPV_MIN_CONFIRMATIONS_ENV} {raw:?} is not valid: set a whole number of at least 1, \
+             or leave it unset for {DEFAULT_SPV_MIN_CONFIRMATIONS}"
+        )),
+    }
+}
+
 /// Parse 40 hex chars, with or without `0x`, into 20 bytes.
 fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     let stripped = s.strip_prefix("0x").unwrap_or(s);
@@ -352,16 +411,6 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
     })
 }
 
-/// Boot config of the in-enclave `FundsIn` verification (`evm-rpc`).
-/// The endpoint comes at launch ([`Endpoints`]).
-#[cfg(feature = "evm-rpc")]
-#[derive(Debug, Clone)]
-pub struct EvmRpcConfig {
-    /// Min confirmations of a `FundsIn` receipt below the RPC head block
-    /// (`EVM_MIN_CONFIRMATIONS`, default 12).
-    pub min_confirmations: u64,
-}
-
 /// The TLS pin of the EVM RPC endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmRpcTls {
@@ -371,30 +420,6 @@ pub struct EvmRpcTls {
     pub ca_der: Vec<u8>,
     /// The upstream TLS port. The forwarder listens on it in the enclave.
     pub tls_port: u16,
-}
-
-#[cfg(feature = "evm-rpc")]
-impl EvmRpcConfig {
-    /// A safe head distance for most EVM chains.
-    const DEFAULT_MIN_CONFIRMATIONS: u64 = 12;
-
-    /// Load `EVM_MIN_CONFIRMATIONS` from env.
-    pub fn from_env() -> Self {
-        let min_confirmations = std::env::var("EVM_MIN_CONFIRMATIONS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_MIN_CONFIRMATIONS);
-        Self { min_confirmations }
-    }
-}
-
-#[cfg(feature = "evm-rpc")]
-impl Default for EvmRpcConfig {
-    fn default() -> Self {
-        Self {
-            min_confirmations: Self::DEFAULT_MIN_CONFIRMATIONS,
-        }
-    }
 }
 
 /// Endpoints and KMS pins set once at launch and committed in the attested policy.
@@ -557,8 +582,8 @@ fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
 /// development policy.
 ///
 /// Over `tcp://` or `http://` the host reads and changes every indexer answer.
-/// The mint path has no SPV check, so the indexer is its only source of the
-/// witness history. The attested policy commits the indexer host, not its
+/// The mint path has no SPV check, so the indexer alone says whether its
+/// history witnesses are mined. The attested policy commits the indexer host, not its
 /// scheme. Thus a release image refuses plaintext: the rule is in the code,
 /// and PCR0 measures it.
 #[cfg(feature = "rgb-validation")]
@@ -639,6 +664,28 @@ mod tests {
     use crate::proto::SetEndpointsRequest;
 
     #[test]
+    fn finality_tag_env_defaults_only_when_absent() {
+        assert_eq!(
+            parse_evm_finality_tag(Err(std::env::VarError::NotPresent)).unwrap(),
+            EvmFinalityTag::Safe
+        );
+        for (value, tag) in [
+            ("latest", EvmFinalityTag::Latest),
+            ("safe", EvmFinalityTag::Safe),
+            ("finalized", EvmFinalityTag::Finalized),
+        ] {
+            assert_eq!(parse_evm_finality_tag(Ok(value.into())).unwrap(), tag);
+        }
+        for value in ["", "finilized", "pending", "Safe", " safe "] {
+            assert!(parse_evm_finality_tag(Ok(value.into())).is_err());
+        }
+        assert!(parse_evm_finality_tag(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::new()
+        )))
+        .is_err());
+    }
+
+    #[test]
     fn parse_eth_address_with_prefix() {
         let a = parse_eth_address("0x0102030405060708090a0b0c0d0e0f1011121314").unwrap();
         assert_eq!(
@@ -688,6 +735,26 @@ mod tests {
                 BtcRelayMode::Required,
                 "{v}"
             );
+        }
+    }
+
+    #[test]
+    fn spv_min_confirmations_defaults_to_six_when_unset() {
+        assert_eq!(parse_spv_min_confirmations(None), Ok(6));
+        assert_eq!(parse_spv_min_confirmations(Some(" ")), Ok(6));
+    }
+
+    #[test]
+    fn spv_min_confirmations_accepts_a_positive_number() {
+        assert_eq!(parse_spv_min_confirmations(Some("1")), Ok(1));
+        assert_eq!(parse_spv_min_confirmations(Some(" 12 ")), Ok(12));
+    }
+
+    #[test]
+    fn spv_min_confirmations_rejects_zero_and_garbage() {
+        for v in ["0", "-1", "six", "6.5", "99999999999"] {
+            let err = parse_spv_min_confirmations(Some(v)).unwrap_err();
+            assert!(err.contains("at least 1"), "{v}: {err}");
         }
     }
 

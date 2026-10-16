@@ -1,222 +1,172 @@
-//! The Bridged Fungible Asset (BFA) schema: transition, assignment and
-//! metadata keys, and the mint/burn binding that the enclave reads from a
-//! consignment before it signs.
+//! BFA mint anchors and their binding to EVM locks.
 //!
-//! The keys are schema constants from `rgb-protocol/rgb-schemas`. A unit test
-//! compares them with the crate definitions, so a schema update cannot
-//! change them silently.
+//! Each BFA `mint` leaves an external anchor: its own OpId, the amount it
+//! issues and the EVM block its lock must follow. Consensus cannot confirm an
+//! anchor. The enclave confirms one only against a lock that a binder bound
+//! to that exact `(OpId, amount)`: a receipt-verified lock for the mint being
+//! signed, a derived deposit id for every other one.
+//!
+//! The binder lives in `server/bfa.rs`, because it reads the pins and the EVM
+//! RPC. This module holds the shapes it works on and the consensus resolver.
 
-#[cfg(feature = "bfa-validation")]
-use std::io::Cursor;
+use std::collections::BTreeSet;
 
-#[cfg(feature = "bfa-validation")]
-use rgbstd::containers::{FileContent, Transfer};
+use amplify::ByteArray;
+use rgbstd::containers::{AnchorResolverError, PendingConsignment, ResolveAnchor};
+use rgbstd::stl::{BridgeLocation, EvmAddress, EvmContract};
+use rgbstd::validation::ExternalAnchor;
+use rgbstd::{Genesis, OpId};
+use schemata::BridgedFungibleAsset;
 
 use crate::error::{EnclaveError, Result};
 
-#[cfg(feature = "bfa-validation")]
-use super::consignment::extract_transition_summary;
-#[cfg(feature = "bfa-validation")]
-use super::types::TransitionSummary;
+/// One EVM deposit behind a BFA mint, verified from a receipt or derived.
+///
+/// `operation_id` / `net_amount` are the `BridgeFundsIn` record that the
+/// settlement module stored. Thus they are the only pair that a
+/// `fundsOut.settlementData` can cite for this deposit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedLock {
+    /// The mint that this lock backs.
+    pub mint_opid: [u8; 32],
+    pub minted: u64,
+    pub operation_id: [u8; 32],
+    pub net_amount: u64,
+}
 
-/// BFA transition that moves an asset allocation to a new owner. The
-/// send/receive flow uses it as the settling transition.
-pub const TS_TRANSFER: u16 = 10000;
-/// BFA transition that mints units against an EVM lock. The enclave reads
-/// its OpIds for the spec section 6 OpId binding.
-pub const TS_BRIDGE: u16 = 8014;
-/// BFA transition that destroys asset units. In the mint/burn unlock flow it
-/// is the settling transition. The amount is in its [`MS_BURNED_ASSET`] metadata.
-pub const TS_BURN: u16 = 8010;
+/// One mint anchor that phase 1 of consensus left open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MintAnchor {
+    /// The mint's own OpId.
+    pub opid: [u8; 32],
+    /// The mint's `issuedSupply`, which consensus made equal to its
+    /// `assetOwner` outputs.
+    pub amount: u64,
+    /// The mint's `afterBlock`: its lock must be in a later EVM block.
+    pub after_block: u64,
+    /// The mint is in the last bundle: the one a mint PSBT signs.
+    pub in_last_bundle: bool,
+}
 
-/// BFA burn metadata key for the destroyed `OS_ASSET` amount. The value is a
-/// strict-encoded `rgbstd::Amount` (u64).
-pub const MS_BURNED_ASSET: u16 = 1001;
-/// BFA burn metadata key for the EVM-side redemption recipient: 32 opaque
-/// bytes, mandatory on each `TS_BURN`. Consensus does not validate them.
-/// They are inside the burn operation, so its OpId covers them and the
-/// spender of the burned units signs them. Thus a release can trust them.
-pub const MS_BURN_RECIPIENT: u16 = 1003;
+/// The bridge contract that a BFA genesis commits to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BfaBridge {
+    pub chain_id: u64,
+    pub address: [u8; 20],
+}
 
-/// BFA fungible assignment type for asset ownership (`assetOwner`). Only
-/// these allocations carry asset units.
-pub const OS_ASSET: u16 = 4000;
-/// BFA declarative assignment type for the mint right (`bridgeRight`). It has
-/// no amount, so it cannot add to a minted total.
-pub const OS_BRIDGE: u16 = 4014;
+impl BfaBridge {
+    /// Reads `bridgeLocation` from a genesis that phase 1 validated.
+    pub(super) fn from_genesis(genesis: &Genesis) -> Result<Self> {
+        let location = BridgedFungibleAsset::bridge_location(genesis)
+            .map_err(|e| EnclaveError::CrossCheck(format!("BFA genesis bridge location: {e}")))?;
+        let BridgeLocation::Evm(EvmContract { chain_id, address }) = location;
+        Ok(Self {
+            chain_id,
+            address: address.to_byte_array(),
+        })
+    }
 
-/// Decodes one OpId hex string from the parser into 32 bytes.
+    fn location(&self) -> BridgeLocation {
+        BridgeLocation::Evm(EvmContract {
+            chain_id: self.chain_id,
+            address: EvmAddress::from(amplify::Bytes20::from_byte_array(self.address)),
+        })
+    }
+}
+
+/// The locks a binder bound the anchors to, and the chain id its EVM source
+/// reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundAnchors {
+    pub evm_chain_id: u64,
+    pub locks: Vec<VerifiedLock>,
+}
+
+/// Binds every mint anchor of a consignment to a lock, or refuses.
+pub type AnchorBinder<'a> = &'a dyn Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors>;
+
+/// The anchors phase 1 left open. `last_bundle` holds the OpIds of the
+/// bundle a mint PSBT signs.
+pub(super) fn mint_anchors<'a>(
+    unresolved: impl Iterator<Item = &'a ExternalAnchor>,
+    last_bundle: &BTreeSet<OpId>,
+) -> Vec<MintAnchor> {
+    unresolved
+        .map(|anchor| {
+            let ExternalAnchor::MintEvent {
+                opid,
+                amount,
+                after_block,
+            } = anchor;
+            MintAnchor {
+                opid: opid.to_byte_array(),
+                amount: *amount,
+                after_block: *after_block,
+                in_last_bundle: last_bundle.contains(opid),
+            }
+        })
+        .collect()
+}
+
+/// The locks must be the anchors, one for one: an extra lock would be cited in
+/// settlement, a missing one would leave a mint unbacked.
+pub(super) fn check_bijection(anchors: &[MintAnchor], locks: &[VerifiedLock]) -> Result<()> {
+    let wanted: BTreeSet<([u8; 32], u64)> = anchors.iter().map(|a| (a.opid, a.amount)).collect();
+    let bound: BTreeSet<([u8; 32], u64)> = locks.iter().map(|l| (l.mint_opid, l.minted)).collect();
+    if wanted.len() != anchors.len() || bound.len() != locks.len() || wanted != bound {
+        return Err(EnclaveError::CrossCheck(format!(
+            "the consignment carries {} mint anchor(s) but {} lock(s) were bound to them - every \
+             mint needs exactly its own lock",
+            anchors.len(),
+            locks.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Confirms an anchor only when a bound lock carries its exact
+/// `(OpId, amount)`. The binder has checked the bridge pins.
+struct BoundLocks<'a>(&'a BoundAnchors);
+
+impl ResolveAnchor for BoundLocks<'_> {
+    fn evm_chain_id(&self) -> std::result::Result<u64, AnchorResolverError> {
+        Ok(self.0.evm_chain_id)
+    }
+
+    fn is_confirmed(
+        &self,
+        _location: &BridgeLocation,
+        anchor: &ExternalAnchor,
+    ) -> std::result::Result<bool, AnchorResolverError> {
+        let ExternalAnchor::MintEvent { opid, amount, .. } = anchor;
+        let opid = opid.to_byte_array();
+        Ok(self
+            .0
+            .locks
+            .iter()
+            .any(|lock| lock.mint_opid == opid && lock.minted == *amount))
+    }
+}
+
+/// Phase 2 for the anchors: the checked resolver compares the bound chain id
+/// with the genesis one, then each anchor must match a bound lock.
+pub(super) fn resolve_anchors(
+    pending: &mut PendingConsignment<true>,
+    bridge: &BfaBridge,
+    bound: &BoundAnchors,
+) -> Result<()> {
+    pending
+        .resolve_all_anchors(bridge.location(), &BoundLocks(bound))
+        .map_err(|e| EnclaveError::CrossCheck(format!("BFA mint anchor not confirmed: {e}")))
+}
+
+/// Decodes one OpId hex string from the flat parser into 32 bytes.
 pub(super) fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
-    let hex_opid = hex_opid.strip_prefix("0x").unwrap_or(hex_opid);
     let bytes = hex::decode(hex_opid).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "BFA mint opid hex decode failed: {e} ({hex_opid:?})"
-        ))
+        EnclaveError::CrossCheck(format!("opid hex decode failed: {e} ({hex_opid:?})"))
     })?;
     bytes.try_into().map_err(|v: Vec<u8>| {
-        EnclaveError::CrossCheck(format!("BFA mint opid is not 32 bytes (got {})", v.len()))
+        EnclaveError::CrossCheck(format!("opid is not 32 bytes (got {})", v.len()))
     })
-}
-
-/// What the enclave must verify on-chain before RGB consensus sees a BFA
-/// operation: the `FundsIn` logs to fetch, and the contract that can emit them.
-///
-/// Both directions use it. Consensus runs the script of each transition in the
-/// consignment again. Thus the `cea` of each earlier mint needs its own
-/// verified event, on both paths. A burn contains a full mint ancestry.
-/// The mint direction also needs [`BfaBinding::terminal_opid`].
-#[cfg(feature = "bfa-validation")]
-pub struct BfaBinding {
-    /// Each `TS_BRIDGE` in the consignment, in consignment order.
-    pub mints: Vec<BfaMint>,
-    /// `bridgeLocation` exactly as the asset genesis writes it. It is compared
-    /// with the enclave `funds_in_contract` pin before any log is trusted.
-    pub bridge_location: String,
-    /// The settling transition of the consignment, or `None`. Only the mint
-    /// direction uses it, through [`Self::terminal_opid`].
-    pub(super) last_transition: Option<TransitionSummary>,
-}
-
-#[cfg(feature = "bfa-validation")]
-impl BfaBinding {
-    /// The mint that this request authorizes: the OpId of the settling transition.
-    /// Only it binds to the deposit of this request. Each other entry in
-    /// `mints` is an ancestor with its own deposit.
-    ///
-    /// Mint direction only. Each failure refuses the signature. If the settling
-    /// transition is not a bridge mint, or is not in the transition list, the
-    /// paying deposit is unknown. Do not guess it.
-    pub fn terminal_opid(&self) -> Result<[u8; 32]> {
-        let last = self
-            .last_transition
-            .as_ref()
-            .ok_or_else(|| EnclaveError::CrossCheck("BFA consignment has no transitions".into()))?;
-        if last.transition_type != TS_BRIDGE {
-            return Err(EnclaveError::CrossCheck(format!(
-                "BFA consignment's settling transition is type {}, expected the bridge mint {}",
-                last.transition_type, TS_BRIDGE
-            )));
-        }
-        let terminal_opid = decode_opid(&last.op_id)?;
-        // The terminal transition selects the paying deposit, so it must be in
-        // the consignment.
-        if !self.mints.iter().any(|mint| mint.opid == terminal_opid) {
-            return Err(EnclaveError::CrossCheck(
-                "BFA consignment's settling transition is a bridge mint but is absent from the \
-                 transition list - refusing to guess which mint this request authorises"
-                    .into(),
-            ));
-        }
-        Ok(terminal_opid)
-    }
-}
-
-/// One `TS_BRIDGE` of a consignment and the units it minted.
-#[cfg(feature = "bfa-validation")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BfaMint {
-    pub opid: [u8; 32],
-    /// The mint's `OS_ASSET` outputs.
-    pub minted: u64,
-}
-
-/// Reads the BFA binding from raw consignment bytes, before validation.
-/// Returns `Ok(None)` for all other schemas.
-///
-/// A mint spends the bridge right from the previous mint. Thus mint N contains
-/// mints 1..N-1, and consensus runs `cea` on each. Each needs its own verified
-/// lock.
-#[cfg(feature = "bfa-validation")]
-pub fn bfa_binding(consignment_bytes: &[u8]) -> Result<Option<BfaBinding>> {
-    // Bytes that do not load are not a BFA operation here.
-    // `validate_consignment` reports the parse failure, which keeps the error
-    // order.
-    let Ok(transfer) = Transfer::load(Cursor::new(consignment_bytes)) else {
-        return Ok(None);
-    };
-    if transfer.genesis.schema_id != schemata::BFA_SCHEMA_ID {
-        return Ok(None);
-    }
-
-    // Use the flat parser, not `read_last_transfer_witness`, which needs the
-    // rgbstd validation walk. The OpIds are necessary *before* validation to
-    // select the logs to verify.
-    let (_, mint_op_ids, last_transition, by_witness) =
-        extract_transition_summary(consignment_bytes)?;
-    let mints = mint_op_ids
-        .iter()
-        .map(|hex_opid| {
-            let minted = by_witness
-                .iter()
-                .flat_map(|(_, transitions)| transitions)
-                .find(|t| t.transition_type == TS_BRIDGE && &t.op_id == hex_opid)
-                .map(|t| t.asset_output_amount)
-                .ok_or_else(|| {
-                    EnclaveError::CrossCheck(format!(
-                        "BFA mint {hex_opid} is not among the consignment's transitions"
-                    ))
-                })?;
-            Ok(BfaMint {
-                opid: decode_opid(hex_opid)?,
-                minted,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(Some(BfaBinding {
-        mints,
-        bridge_location: genesis_bridge_location(&transfer)?,
-        last_transition,
-    }))
-}
-
-/// Reads the asset `bridgeLocation` from the genesis global state.
-///
-/// Decoded by hand: `BfaWrapper::bridge_location()` needs a *validated*
-/// contract and panics on bad input, and the enclave uses `panic = "abort"`.
-/// `BridgeLocation::Ethereum(TinyString)` strict-encodes as a one-byte union
-/// tag, a one-byte length, then the address string.
-#[cfg(feature = "bfa-validation")]
-pub(super) fn genesis_bridge_location(transfer: &Transfer) -> Result<String> {
-    let values = transfer
-        .genesis
-        .globals
-        .get(&schemata::GS_BRIDGE_LOCATION)
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck("BFA genesis carries no bridgeLocation global state".into())
-        })?;
-    if values.len() != 1 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BFA genesis carries {} bridgeLocation values, expected exactly one",
-            values.len()
-        )));
-    }
-    decode_bridge_location(values[0].as_slice())
-}
-
-/// Strict-decodes one `BridgeLocation` blob. See [`genesis_bridge_location`].
-#[cfg(feature = "bfa-validation")]
-pub(super) fn decode_bridge_location(raw: &[u8]) -> Result<String> {
-    /// `tags = order` on a single-variant union, so `Ethereum` is tag 0.
-    const ETHEREUM_TAG: u8 = 0;
-
-    let (&tag, rest) = raw
-        .split_first()
-        .ok_or_else(|| EnclaveError::CrossCheck("BFA bridgeLocation blob is empty".into()))?;
-    if tag != ETHEREUM_TAG {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BFA bridgeLocation union tag {tag} is not the Ethereum variant"
-        )));
-    }
-    let (&len, addr) = rest.split_first().ok_or_else(|| {
-        EnclaveError::CrossCheck("BFA bridgeLocation blob has no length byte".into())
-    })?;
-    if addr.len() != usize::from(len) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "BFA bridgeLocation declares {len} bytes but carries {}",
-            addr.len()
-        )));
-    }
-    String::from_utf8(addr.to_vec())
-        .map_err(|e| EnclaveError::CrossCheck(format!("BFA bridgeLocation is not utf-8: {e}")))
 }

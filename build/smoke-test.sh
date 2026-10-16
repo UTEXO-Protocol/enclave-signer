@@ -305,22 +305,15 @@ else
     fail "SignEvm amount mismatch" "expected rejection, got: $BAD_AMOUNT_OUTPUT"
 fi
 
-# ---------------------------------------------
-# 7. ProxyFederation (should return NOT_READY)
-# ---------------------------------------------
-log "7. ProxyFederation (stub — should return NOT_READY)"
-# No CLI subcommand for federation yet, so we skip if not available
-skip "ProxyFederation" "no CLI subcommand yet — test via integration tests"
-
 # =============================================================================
 # SPV header chain read.
 # =============================================================================
 # The parent's header sync is the one writer, so the CLI only reads the tip.
 
 # ---------------------------------------------
-# 8. GetLastSavedBlock baseline
+# 7. GetLastSavedBlock baseline
 # ---------------------------------------------
-log "8. GetLastSavedBlock — chain initialised at boot"
+log "7. GetLastSavedBlock - chain initialised at boot"
 LAST_BLOCK_OUTPUT=$(run_parent get-last-saved-block) && RC=$? || RC=$?
 
 if [ $RC -eq 0 ] && echo "$LAST_BLOCK_OUTPUT" | grep -q "Block hash"; then

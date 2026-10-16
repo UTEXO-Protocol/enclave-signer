@@ -3,8 +3,13 @@
 //! The chain starts at a compile-time `Checkpoint` (height, hash, bits, time).
 //! It grows as the parent sends batches of contiguous 80-byte headers to
 //! `submit_headers`. Each header must pass the linkage check against its
-//! predecessor before it is appended. Mainnet and testnet3 also check PoW and
-//! nBits.
+//! predecessor, and be at most 2 hours ahead of the enclave clock, before it
+//! is appended. Mainnet and the testnets also check PoW and nBits.
+//!
+//! On the testnets a block more than 20 minutes after its parent may use the
+//! minimum difficulty. Such blocks count toward confirmations and freshness
+//! like any other: testnets carry no production value. The clock bound keeps
+//! a host from dating them ahead to retarget its fork down.
 //!
 //! ## Three submission cases
 //!
@@ -32,7 +37,7 @@ use bitcoin::pow::Work;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
 use crate::networks::rgb::spv::validation::{
-    expected_bits, is_retarget_height, validate_header_full, RETARGET_INTERVAL,
+    expected_bits, is_retarget_height, validate_header_full, BitsInput, RETARGET_INTERVAL,
 };
 
 /// Maximum reorg depth. Real reorgs are almost always <= 2 blocks. 100 bounds
@@ -89,7 +94,7 @@ pub struct HeaderChain {
     /// Checkpoint `nBits`: the predecessor difficulty for `headers[0]`.
     base_bits: u32,
     /// Checkpoint `time`. It is also the epoch-start time when a retarget
-    /// block refers back to `base_height`.
+    /// block refers back to `base_height`, and `base_bits` its bits.
     base_time: u32,
     /// Validated headers, in ascending height. Index `i` is the header at
     /// height `base_height + 1 + i`.
@@ -146,15 +151,23 @@ impl HeaderChain {
         }
     }
 
-    /// Timestamp of the last validated header, or the checkpoint `time`. The
-    /// SPV staleness check uses it to find a source that sends real but old
-    /// headers.
+    /// Timestamp of the last validated header, or the checkpoint `time`.
     pub fn tip_time(&self) -> u32 {
         if let Some(last) = self.headers.last() {
             last.time
         } else {
             self.checkpoint.time
         }
+    }
+
+    /// Headers from `height` to the tip, counted up to `cap`. `0` when no
+    /// header is at `height`.
+    pub fn confirmations(&self, height: BlockHeight, cap: u32) -> u32 {
+        if self.header_at(height).is_none() {
+            return 0;
+        }
+        let depth = self.tip_height() - height + 1;
+        depth.min(cap)
     }
 
     /// Number of stored headers, without the checkpoint.
@@ -190,13 +203,15 @@ impl HeaderChain {
     }
 
     /// Submits contiguous 80-byte headers from `start_height` (see module docs).
+    /// `now_unix` is the enclave clock.
     ///
-    /// All-or-nothing: one failure (parse, linkage, PoW, weaker chain) stops
-    /// the batch and leaves the chain unchanged.
+    /// All-or-nothing: one failure (parse, linkage, time, PoW, weaker chain)
+    /// stops the batch and leaves the chain unchanged.
     pub fn submit_headers(
         &mut self,
         start_height: BlockHeight,
         raw_headers: &[Vec<u8>],
+        now_unix: u64,
     ) -> Result<SubmitOutcome> {
         let tip = self.tip_height();
 
@@ -285,21 +300,27 @@ impl HeaderChain {
                 (pred_hash, pred_bits, pred_time)
             };
 
-            let epoch_start_time = if self.network.enforces_pow() {
-                self.epoch_start_time(height, start_height, &staged)?
+            let expected_bits_value = if self.network.enforces_pow() {
+                let input = self.bits_input(
+                    height,
+                    header.time,
+                    (prev_bits, prev_time),
+                    start_height,
+                    &staged,
+                )?;
+                expected_bits(&input, self.network)
             } else {
-                0
+                None
             };
-
-            let expected_bits_value =
-                expected_bits(height, prev_bits, prev_time, epoch_start_time, self.network)?;
 
             validate_header_full(
                 &header,
                 height,
                 &prev_hash,
+                prev_time,
                 expected_bits_value,
                 self.network,
+                now_unix,
             )?;
 
             let hash: [u8; 32] = *bitcoin::hashes::Hash::as_byte_array(&header.block_hash());
@@ -336,48 +357,57 @@ impl HeaderChain {
         })
     }
 
-    /// Timestamp of the block at `height - RETARGET_INTERVAL`. Looks in the
-    /// staged batch (first entry at `batch_start_height`), then the committed
-    /// chain, then the checkpoint.
-    ///
-    /// Used only at retarget boundaries. Other heights return 0.
-    fn epoch_start_time(
+    /// The chain data the `nBits` rule of the header at `height` reads. Only
+    /// the blocks the rule needs are looked up.
+    fn bits_input(
+        &self,
+        height: BlockHeight,
+        header_time: u32,
+        (prev_bits, prev_time): (u32, u32),
+        batch_start_height: BlockHeight,
+        staged: &[(Header, BlockHash)],
+    ) -> Result<BitsInput> {
+        let mut input = BitsInput {
+            height,
+            header_time,
+            prev_bits,
+            prev_time,
+            ..BitsInput::default()
+        };
+        if is_retarget_height(height) {
+            let first = height
+                .checked_sub(RETARGET_INTERVAL)
+                .ok_or(SpvError::HeaderNotFound(0))?;
+            (input.epoch_first_time, input.epoch_first_bits) =
+                self.block_at(first, batch_start_height, staged)?;
+        } else if self.network.allows_min_difficulty() {
+            let period_start = height - height % RETARGET_INTERVAL;
+            input.period_bits = self.block_at(period_start, batch_start_height, staged)?.1;
+        }
+        Ok(input)
+    }
+
+    /// `(time, bits)` of the block at `height`. Looks in the staged batch
+    /// (first entry at `batch_start_height`), then the committed chain, then
+    /// the checkpoint. The staged batch comes first: on a reorg it replaces
+    /// the committed range.
+    fn block_at(
         &self,
         height: BlockHeight,
         batch_start_height: BlockHeight,
         staged: &[(Header, BlockHash)],
-    ) -> Result<u32> {
-        if !is_retarget_height(height) {
-            // The caller ignores this value.
-            return Ok(0);
+    ) -> Result<(u32, u32)> {
+        let staged_header = height
+            .checked_sub(batch_start_height)
+            .and_then(|i| staged.get(i as usize))
+            .map(|(h, _)| h);
+        if let Some(h) = staged_header.or_else(|| self.header_at(height)) {
+            return Ok((h.time, h.bits.to_consensus()));
         }
-
-        if height < RETARGET_INTERVAL {
-            // Genesis epoch boundary (height 0).
-            return Ok(0);
+        if height == self.base_height {
+            return Ok((self.base_time, self.base_bits));
         }
-        let target_height = height - RETARGET_INTERVAL;
-
-        // The staged batch comes first. On a reorg it replaces the committed
-        // range.
-        if target_height >= batch_start_height {
-            let staged_idx = (target_height - batch_start_height) as usize;
-            if let Some((h, _)) = staged.get(staged_idx) {
-                return Ok(h.time);
-            }
-        }
-
-        // Committed chain, above the checkpoint.
-        if let Some(h) = self.header_at(target_height) {
-            return Ok(h.time);
-        }
-
-        // The checkpoint: its time is kept as base metadata.
-        if target_height == self.base_height {
-            return Ok(self.base_time);
-        }
-
-        Err(SpvError::HeaderNotFound(target_height))
+        Err(SpvError::HeaderNotFound(height))
     }
 }
 

@@ -2,11 +2,11 @@ use std::io::{Cursor, Read, Write};
 
 use sha3::{Digest, Keccak256};
 
-use crate::config::{BridgeConfig, EvmRpcConfig};
+use crate::config::BridgeConfig;
 use crate::framing;
 use crate::networks::evm::events::{LogEntry, ReceiptData};
 use crate::networks::rgb::validation::{
-    bfa, OutputSeal, RgbValidator, TransitionOutput, TransitionSummary, ValidatedConsignment,
+    OutputSeal, RgbValidator, TransitionOutput, TransitionSummary, ValidatedConsignment,
 };
 use crate::policy::{BuildContext, EvmDataSource, SecurityPolicy};
 use crate::proto::enclave_request::Request;
@@ -15,7 +15,7 @@ use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use crate::proto::*;
 use crate::server::{handle_connection, ServerContext};
 use crate::state::EnclaveState;
-use crate::test_support::{bridge_funds_in_data, regtest_header_chain, FakeEvm};
+use crate::test_support::{bfa_ids, bridge_funds_in_data, regtest_header_chain, FakeEvm};
 
 /// Fixed seed, so all derived keys and txids are the same on each run.
 const SEED: [u8; 64] = [0x21; 64];
@@ -65,6 +65,7 @@ fn stub_deposit() -> FakeEvm {
         receipt: Some(ReceiptData {
             status_success: true,
             block_number: DEPOSIT_BLOCK,
+            block_hash: [0x42; 32],
             logs: vec![LogEntry {
                 address: FUNDS_IN_CONTRACT,
                 topics: vec![
@@ -74,7 +75,7 @@ fn stub_deposit() -> FakeEvm {
                 data: bridge_funds_in_data(GROSS, NET, COMMISSION, INVOICE),
             }],
         }),
-        head: DEPOSIT_BLOCK + EvmRpcConfig::default().min_confirmations,
+        ..FakeEvm::default()
     }
 }
 
@@ -166,35 +167,44 @@ fn deposit_psbt(state: &EnclaveState) -> Vec<u8> {
     psbt.serialize()
 }
 
-/// One BFA transfer paying the deposit's invoice, anchored to `txid`.
-fn validated_consignment(txid: bitcoin::Txid) -> ValidatedConsignment {
+/// One BFA transfer paying the deposit's invoice, committed by `psbt`'s tx.
+/// The transfer closes the seal on the tx's one input.
+fn validated_consignment(psbt: &bitcoin::psbt::Psbt) -> ValidatedConsignment {
+    let txid = psbt.unsigned_tx.compute_txid();
+    let prevouts: Vec<_> = psbt
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect();
     let transition = TransitionSummary {
         op_id: "11".repeat(32),
-        transition_type: bfa::TS_TRANSFER,
+        transition_type: bfa_ids::TS_TRANSFER,
         total_output_amount: NET,
         asset_output_amount: NET,
         outputs: vec![TransitionOutput {
-            assignment_type: bfa::OS_ASSET,
+            assignment_type: bfa_ids::OS_ASSET,
             amount: NET,
             seal: OutputSeal::Confidential {
                 secret_seal: RECIPIENT_SEAL.into(),
             },
         }],
         burned_asset_amount: None,
-        burn_recipient: None,
+        burn_reason: None,
     };
     ValidatedConsignment {
         contract_id: ASSET_ID.into(),
         chain_net: "bc".into(),
         witness_txids: vec![],
-        all_op_ids: vec![transition.op_id.clone()],
-        mint_op_ids: vec![],
         last_transition: Some(transition.clone()),
         last_witness_txid: Some(txid),
-        last_transfer_witness_prevouts: None,
+        last_transfer_witness_prevouts: prevouts.clone(),
+        last_closed_seals: prevouts,
+        last_bundle_fully_disclosed: true,
         last_transfer_op_id: None,
         non_mined_witness_txids: vec![],
         transitions_by_witness: vec![(txid, vec![transition])],
+        ..Default::default()
     }
 }
 
@@ -219,6 +229,7 @@ fn deposit_request(psbt_bytes: Vec<u8>) -> EnclaveRequest {
                 asset_id: ASSET_ID.into(),
                 consignment_hash: Keccak256::digest(&consignment).to_vec(),
                 consignment,
+                parent_psbt: Vec::new(),
             })),
         })),
     }
@@ -258,21 +269,17 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         EvmDataSource::Disabled,
         None,
         "",
-        0,
     );
     let state = EnclaveState::new(bitcoin::Network::Bitcoin);
     state.initialize_from_seed(SEED).expect("initialize keys");
 
     let psbt_bytes = deposit_psbt(&state);
-    let txid = bitcoin::psbt::Psbt::deserialize(&psbt_bytes)
-        .expect("psbt")
-        .unsigned_tx
-        .compute_txid();
+    let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).expect("psbt");
 
     let mut ctx = ServerContext::new(state, bridge_config, regtest_header_chain());
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    launch.rgb_validator = Some(RgbValidator::canned(validated_consignment(txid)));
+    launch.rgb_validator = Some(RgbValidator::canned(validated_consignment(&psbt)));
     launch.evm_rpc_client = Some(Box::new(stub_deposit()));
 
     let request = deposit_request(psbt_bytes);

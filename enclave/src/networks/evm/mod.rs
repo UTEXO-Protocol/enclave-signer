@@ -1,11 +1,17 @@
 // The `fundsOut` release checks, its EIP-712 digest and its gas tx belong to
 // the RGB -> EVM direction only.
+#[cfg(all(feature = "rgb-mint-burn", rgb_to_evm))]
+pub mod burn_destination;
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub mod crosscheck;
 #[cfg(feature = "evm-rpc")]
 pub mod events;
 #[cfg(rgb_to_evm)]
 pub mod gas_tx;
+#[cfg(rgb_to_evm)]
+pub mod lz_options;
+#[cfg(feature = "bfa-validation")]
+pub mod reject_list;
 #[cfg(rgb_to_evm)]
 pub mod signing;
 pub mod validation;

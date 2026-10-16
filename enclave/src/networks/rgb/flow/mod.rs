@@ -7,8 +7,8 @@
 //!     A deposit pays the user with a BFA `Transfer`. A withdrawal is a
 //!     `Transfer` back to the bridge.
 //!   * **mint/burn** (`rgb-mint-burn`, production) - the bridge owns the mint
-//!     right of the contract. A deposit mints with a BFA `Bridge`. A
-//!     withdrawal destroys units with a BFA `Burn`.
+//!     right of the contract. A deposit mints with a BFA `mint`. A
+//!     withdrawal destroys units with a BFA `burn`.
 //!
 //! The flows differ only in the accepted transition types and the amount
 //! binds. These are the checks that authorize value to move. Thus each flow
@@ -16,8 +16,10 @@
 //! no mint rule, so a mint-shaped consignment has no code path that signs it.
 //!
 //! Exactly one of the two features must be on (see the `compile_error!` pair
-//! in `lib.rs`). Both files export the same item names, so callers use
-//! `flow::...` without a `cfg`.
+//! in `lib.rs`). Both files export the same item names for the paths both
+//! flows run, so callers use `flow::...` without a `cfg`. The mint signer
+//! reads its mint from the PSBT (`psbt_validation::mint_facts`), so the swap
+//! flow's consignment binds have no mint twin.
 //!
 //! Shared code that is not flow-specific: consignment parsing
 //! ([`super::validation`]), SPV anchoring, and the PSBT mechanics in

@@ -12,7 +12,7 @@ use super::ccd;
 use super::{evm, rgb};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
 use crate::networks::rgb::validation::RgbValidator;
 use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 
@@ -28,7 +28,8 @@ pub struct RouteProof {
 
 pub struct ValidationContext<'a> {
     pub bridge_config: &'a BridgeConfig,
-    #[cfg(feature = "rgb-validation")]
+    /// Consignment validation. The mint signer validates no consignment.
+    #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
     pub rgb_validator: Option<&'a RgbValidator>,
     #[cfg(feature = "rgb-validation")]
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
@@ -37,26 +38,34 @@ pub struct ValidationContext<'a> {
     /// instead of signing old chain state (F05-NEW-AF-08).
     #[cfg(feature = "rgb-validation")]
     pub chain_pins: &'a crate::networks::rgb::spv_crosscheck::ChainPins,
-    /// Tells if a Bitcoin outpoint pays back to this enclave. The send-RGB
+    /// Tells if a Bitcoin outpoint pays back to this enclave. The swap-flow
     /// recipient bind uses it to tell bridge change from a third-party payout.
     /// The outpoint can be on the PSBT or on an earlier transaction. See
     /// [`crate::networks::rgb::psbt_validation::SelfOwnedOutpoint`].
     ///
     /// It is a callback, so the key lock is not held across the network
     /// round-trips of consignment validation. `None` fails the bind closed.
-    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
     pub self_owned_psbt_outputs:
         Option<crate::networks::rgb::psbt_validation::SelfOwnedOutpoint<'a>>,
-    /// Selects owned key-path inputs for fee sizing without holding keys across I/O.
-    /// Without a resolver, disclosed scripts keep conservative script-path sizing.
+    /// Selects the colored key-path inputs the enclave signs, without holding
+    /// keys across I/O. Fee sizing and the input binds use them. `None`
+    /// fails the destination bind closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
-    /// EVM lock events that the enclave verified. RGB consensus gets them so
-    /// the ether extension can check BFA mint amounts again. Empty when no
-    /// side has a BFA consignment, and on builds without `bfa-validation`. A
-    /// BFA consignment with an empty set is refused.
-    #[cfg(feature = "rgb-validation")]
-    pub bridge_events: &'a [rgbstd::vm::ether_extension::Event],
+    /// Binds the mint a PSBT commits to the request's EVM deposit (M6).
+    /// `None` fails the mint closed.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
+    /// Binds each BFA mint anchor of a consignment to an EVM lock. `None` on
+    /// builds without `bfa-validation`: a consignment with a mint anchor is
+    /// then refused.
+    #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+    pub anchor_binder: Option<crate::networks::rgb::validation::AnchorBinder<'a>>,
+    /// Reads the asset's reject list. `None` on builds without
+    /// `bfa-validation`: an asset with a list is then refused.
+    #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+    pub reject_list_reader: Option<crate::networks::rgb::validation::RejectListReader<'a>>,
 }
 
 /// Result of source validation: the route proof and, for an RGB source on an

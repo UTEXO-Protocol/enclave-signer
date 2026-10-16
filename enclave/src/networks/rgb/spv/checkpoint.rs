@@ -16,6 +16,8 @@
 //! - Signet challenge, magic, block time: real UTEXO custom signet values
 //!   (3-of-3 multisig, 30s blocks). They are in PCR0, but BIP-325 signatures
 //!   are not verified.
+//! - Testnet4: block 155_232 (2026-10-05), a retarget boundary
+//!   (155_232 = 77 x 2016). Chainwork is not set yet.
 //! - Regtest: standard regtest constants.
 
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
@@ -92,6 +94,25 @@ pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
     chain_work: None,
 };
 
+/// Testnet4 checkpoint: block 155_232 (2026-10-05), on a retarget boundary
+/// (`155_232 = 77 x 2016`). Height, hash, bits and time come from a public
+/// explorer; the tests replay the next 30 real headers on top of it.
+/// hash (display): 0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b
+pub const TESTNET4_CHECKPOINT: Checkpoint = Checkpoint {
+    height: 155_232,
+    hash: [
+        0x5b, 0x34, 0x40, 0x2d, 0x57, 0x0e, 0xb4, 0x29, 0x96, 0x97, 0x99, 0xfe, 0x0d, 0xc8, 0xd2,
+        0x22, 0x8b, 0x40, 0x75, 0x01, 0xb9, 0xc5, 0x4d, 0x31, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ],
+    bits: 0x1903_7e43,
+    time: 1_791_203_299,
+    is_real: true,
+    // Unknown: set it to the `getblockheader` chainwork from a trusted
+    // testnet4 node. Until then, testnet4 `fundsOut` fails.
+    chain_work: None,
+};
+
 /// Regtest checkpoint: the regtest genesis block (height 0). Headers start at
 /// height 1 and chain to this hash.
 /// hash (display): 0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206
@@ -131,7 +152,7 @@ impl Checkpoint {
     }
 
     /// Fails if a PoW network checkpoint is not on a retarget boundary.
-    /// `HeaderChain::epoch_start_time` needs the block at `height - 2016` for
+    /// `HeaderChain::bits_input` needs the block at `height - 2016` for
     /// the first boundary. If not aligned, that block is below the checkpoint,
     /// is not stored, and the chain stops.
     ///
@@ -157,8 +178,9 @@ impl Checkpoint {
 pub fn checkpoint_for(network: Network) -> Checkpoint {
     match network {
         Network::Mainnet => MAINNET_CHECKPOINT,
-        Network::Signet => SIGNET_CHECKPOINT,
+        Network::Signet | Network::SignetCustom => SIGNET_CHECKPOINT,
         Network::Testnet3 => TESTNET3_CHECKPOINT,
+        Network::Testnet4 => TESTNET4_CHECKPOINT,
         Network::Regtest => REGTEST_CHECKPOINT,
     }
 }
@@ -180,7 +202,7 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 /// and then every `fundsOut` fails.
 ///
 /// The two-field form takes `bits`/`time` from the compiled-in checkpoint. That
-/// is safe only where `nBits` is not checked. PoW networks (mainnet, testnet3)
+/// is safe only where `nBits` is not checked. PoW networks (mainnet, testnets)
 /// must give all four.
 pub const CHECKPOINT_ENV: &str = "SPV_CHECKPOINT";
 

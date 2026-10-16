@@ -22,7 +22,9 @@ class VerifySignerTests(unittest.TestCase):
                           'else echo "[${SIGNERS:-}]"; fi')
         self.stub('attest-verify', f'printf "%s\\n" "$@" > {self.argv}\n'
                                    '[ "${VERIFY_OK:-1}" = 1 ] || exit 1\n'
-                                   f'echo OK; echo "  EVM address           : {SIGNER}"')
+                                   f'echo OK; if [ -n "${{LEGACY:-}}" ]; then echo "  EVM address           : {SIGNER}"; '
+                                   f'else echo "  public_keys.evm_address: {SIGNER}"; fi\n'
+                                   '[ -z "${EXTRA:-}" ] || echo "  EVM address : $EXTRA"')
         pcrs = self.base / 'PCR.json'
         pcrs.write_text('{"PCR0": "%s", "PCR1": "%s", "PCR2": "%s"}' % ('11' * 48, '22' * 48, '33' * 48))
         self.bundle = self.base / 'attestation-16.json'
@@ -51,6 +53,16 @@ class VerifySignerTests(unittest.TestCase):
         self.assertIn('--pcr0 ' + '11' * 48, joined)
         self.assertIn('--expect-signer-role burn', joined)
 
+    def test_the_older_attest_verify_output_still_passes(self):
+        result = self.run_script(LEGACY='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'OK: {SIGNER}', result.stdout)
+
+    def test_two_printed_addresses_fail(self):
+        result = self.run_script(EXTRA='0x' + '01' * 20)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('more than one EVM address', result.stderr)
+
     def test_an_unlisted_signer_fails(self):
         result = self.run_script(SIGNERS='0x' + '01' * 20)
         self.assertEqual(result.returncode, 1)
@@ -72,6 +84,13 @@ class VerifySignerTests(unittest.TestCase):
             result = self.run_script(flag, '1')
             self.assertEqual(result.returncode, 2, flag)
             self.assertIn('set by this script', result.stderr)
+        self.assertFalse(self.argv.exists())
+
+    def test_mock_is_refused(self):
+        for flag in ('--mock', '--mock=true'):
+            result = self.run_script(flag)
+            self.assertEqual(result.returncode, 2, flag)
+            self.assertIn('refused', result.stderr)
         self.assertFalse(self.argv.exists())
 
 

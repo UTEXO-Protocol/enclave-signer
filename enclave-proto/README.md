@@ -3,9 +3,10 @@
 This crate contains the enclave wire protocol. Its local copy of the schema
 requires no credentials or private dependencies.
 
-Current caveat: the root `Cargo.toml` pins the RGB crates to private BFA
-mirrors over SSH, so an enclave build does need those deploy keys today. That
-is a separate dependency; this crate stays credential-free.
+Current caveat: the enclave takes rgb-lib from the private
+`UTEXO-Protocol/rgb-lib-bfa` mirror over HTTPS, so an enclave build needs a
+token with read access to it. That is a separate dependency; this crate stays
+credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
@@ -41,12 +42,14 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | --- | --- |
 | `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
 | `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
+| `InitializeKeyResponse.account_xpub_colored`, `PublicKeysResponse.account_xpub_colored` | The comment says `m/86'/827167'/0'`. The enclave derives `m/86'/827166'/0'` on mainnet and `m/86'/827167'/0'` on other networks. |
 | `EvmSignatureResponse.call_data` | The enclave returns the input calldata unchanged. It signs decoded typed fields, not a hash of raw calldata. |
 | `SignBtcRequest` | The enclave derives output ownership and applies value budgets. There is no `BTC_ALLOWED_SCRIPTS` setting. |
 | `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
 | `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
+| `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
 
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.
@@ -56,8 +59,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `2b81a2eaadb99daa68c4428ea38f80ae3f40805d` (merge of PR #35, "chore(proto): drop mint_ancestors") |
-| Commit date | 2026-10-08T12:17:24Z |
+| Commit | `e402c2aed0c2b097bd1f86392d12e8a6ac415e36` (branch `feat/rights-refill`, "feat(proto): carry the parent PSBT for the mint signer") |
+| Commit date | 2026-10-15T16:21:38Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -71,7 +74,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=2b81a2eaadb99daa68c4428ea38f80ae3f40805d
+REV=e402c2aed0c2b097bd1f86392d12e8a6ac415e36
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -86,8 +89,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `e8f2ac3d051518c2f0d3605601adfd6eb788a681` |
-| `proto/enclave/enclave.proto` | `03c6966a2998785d0d92af35384b21631f11c5e5` |
+| `rust-gen/src/enclave/enclave.rs` | `864e73a0237ed7e33dc048ec6c7c23a8194b9beb` |
+| `proto/enclave/enclave.proto` | `afa4ae192bf45df5bd5a7d5792543676b67bbf49` |
 
 ## Why only `prost`
 

@@ -11,12 +11,17 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V8`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V1`] instead.
 
 /// Version tag at the start of every policy commitment. A verifier rejects a
-/// different encoding version instead of computing a wrong hash. Bump it on
-/// every layout change.
-pub const POLICY_COMMITMENT_V8: u8 = 8;
+/// different policy version instead of accepting different security semantics.
+/// Bump it on every layout change or change to a fixed policy requirement.
+/// V1 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
+/// Every accepted FundsIn receipt must belong to the canonical chain at or
+/// below that tagged head. The selected tag is attested so verifiers can
+/// reject a weaker policy, including `latest` when they require `safe`.
+/// It also commits the clone-peer PCR3 of a cloning role.
+pub const POLICY_COMMITMENT_V1: u8 = 1;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -31,6 +36,14 @@ pub enum SignerRole {
     /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
     /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
     Burn = 2,
+}
+
+impl SignerRole {
+    /// True for a role that clones its seed. The mint signer persists its
+    /// seed with KMS and refuses cloning; the other roles clone.
+    pub fn clones(self) -> bool {
+        self != SignerRole::Mint
+    }
 }
 
 /// Source of the EVM `FundsIn` deposit evidence that the enclave verifies
@@ -51,6 +64,72 @@ pub enum EvmDataSource {
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
     PinnedTlsRpc = 3,
+}
+
+/// RPC head that must cover an EVM FundsIn receipt. The discriminants are
+/// stable values in the attested policy, independent of the tag's spelling.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EvmFinalityTag {
+    Latest = 0,
+    #[default]
+    Safe = 1,
+    Finalized = 2,
+}
+
+impl EvmFinalityTag {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Safe => "safe",
+            Self::Finalized => "finalized",
+        }
+    }
+}
+
+impl std::fmt::Display for EvmFinalityTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EvmFinalityTag {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "latest" => Ok(Self::Latest),
+            "safe" => Ok(Self::Safe),
+            "finalized" => Ok(Self::Finalized),
+            _ => Err(format!(
+                "invalid EVM finality tag {value:?}; expected latest, safe or finalized"
+            )),
+        }
+    }
+}
+
+/// Bitcoin network of the image (`BITCOIN_NETWORK`). The consignment network
+/// and the SPV header chain follow it. The discriminants are wire values.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitcoinNetwork {
+    Mainnet = 0,
+    Testnet3 = 1,
+    Signet = 2,
+    Regtest = 3,
+}
+
+impl BitcoinNetwork {
+    /// Parses a `BITCOIN_NETWORK` value, with the names the enclave accepts.
+    pub fn from_env_str(s: &str) -> Option<Self> {
+        match s {
+            "bitcoin" | "mainnet" => Some(Self::Mainnet),
+            "testnet" | "testnet3" => Some(Self::Testnet3),
+            "signet" => Some(Self::Signet),
+            "regtest" => Some(Self::Regtest),
+            _ => None,
+        }
+    }
 }
 
 /// TLS pin of the EVM RPC endpoint. `host` is the name the certificate must
@@ -112,12 +191,16 @@ pub enum AttestedPolicy {
         evm_source: EvmDataSource,
         btc_source: BtcDataSource,
         chain_id: u64,
+        /// Bitcoin network of the burns and mints this image accepts.
+        bitcoin_network: BitcoinNetwork,
         bridge_contract: [u8; 20],
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
-        /// Minimum EVM receipt depth before a deposit can authorize signing.
-        evm_min_confirmations: u64,
+        /// Required RPC head tag, selected at boot (default `safe`).
+        evm_finality_tag: EvmFinalityTag,
+        /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
+        spv_min_confirmations: u32,
         /// Host of the Electrum server the operator set at launch.
         electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
@@ -141,6 +224,11 @@ pub enum AttestedPolicy {
         token_contract: [u8; 20],
         /// KMS pin set at launch.
         kms: Option<KmsPin>,
+        /// PCR3 that a cloning peer must have: the enclave's own PCR3, the
+        /// measurement of the parent instance IAM role. It binds clone peers
+        /// to the operator's role. `Some` exactly for a role that clones (not
+        /// [`SignerRole::Mint`]), and never all zero there.
+        clone_peer_pcr3: Option<[u8; 48]>,
     },
     Development,
 }
@@ -150,12 +238,14 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V8]
+    /// [POLICY_COMMITMENT_V1]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
-    ///              [btc_source u8][chain_id u64 BE][bridge_contract 20]
+    ///              [btc_source u8][chain_id u64 BE][bitcoin_network u8]
+    ///              [bridge_contract 20]
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
-    ///              [evm_min_confirmations u64 BE]
+    ///              [evm_finality_tag u8: 0 latest | 1 safe | 2 finalized]
+    ///              [spv_min_confirmations u32 BE]
     ///              [len(electrum_host) u32 BE][electrum_host bytes]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
@@ -167,11 +257,12 @@ impl AttestedPolicy {
     ///              [kms: 0x00 | 0x01 ++ len(arn) u32 BE ++ arn
     ///               ++ len(region) u32 BE ++ region ++ len(seed_id) u32 BE
     ///               ++ seed_id ++ (0x00 | 0x01 ++ address 20)]
+    ///              [clone_peer_pcr3: 0x00 | 0x01 ++ pcr3 48]
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V8);
+        out.push(POLICY_COMMITMENT_V1);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -180,10 +271,12 @@ impl AttestedPolicy {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
-                evm_min_confirmations,
+                evm_finality_tag,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
@@ -193,6 +286,7 @@ impl AttestedPolicy {
                 gas_tx_allowed_selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             } => {
                 out.push(0x01);
                 out.push(*allow_vanilla_psbt as u8);
@@ -201,11 +295,13 @@ impl AttestedPolicy {
                 out.push(*evm_source as u8);
                 out.push(*btc_source as u8);
                 out.extend_from_slice(&chain_id.to_be_bytes());
+                out.push(*bitcoin_network as u8);
                 out.extend_from_slice(bridge_contract);
                 out.extend_from_slice(&(rgb_asset_id.len() as u32).to_be_bytes());
                 out.extend_from_slice(rgb_asset_id.as_bytes());
                 out.extend_from_slice(funds_in_contract);
-                out.extend_from_slice(&evm_min_confirmations.to_be_bytes());
+                out.push(*evm_finality_tag as u8);
+                out.extend_from_slice(&spv_min_confirmations.to_be_bytes());
                 out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
                 out.extend_from_slice(electrum_host.as_bytes());
                 match evm_rpc_tls {
@@ -250,6 +346,13 @@ impl AttestedPolicy {
                     }
                     None => out.push(0x00),
                 }
+                match clone_peer_pcr3 {
+                    Some(pcr3) => {
+                        out.push(0x01);
+                        out.extend_from_slice(pcr3);
+                    }
+                    None => out.push(0x00),
+                }
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
@@ -263,7 +366,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V8 {
+        if r.u8()? != POLICY_COMMITMENT_V1 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
@@ -292,10 +395,23 @@ impl AttestedPolicy {
                     _ => return Err(PolicyDecodeError("unknown BTC data source")),
                 };
                 let chain_id = u64::from_be_bytes(r.array()?);
+                let bitcoin_network = match r.u8()? {
+                    0 => BitcoinNetwork::Mainnet,
+                    1 => BitcoinNetwork::Testnet3,
+                    2 => BitcoinNetwork::Signet,
+                    3 => BitcoinNetwork::Regtest,
+                    _ => return Err(PolicyDecodeError("unknown Bitcoin network")),
+                };
                 let bridge_contract = r.array()?;
                 let rgb_asset_id = r.string()?;
                 let funds_in_contract = r.array()?;
-                let evm_min_confirmations = u64::from_be_bytes(r.array()?);
+                let evm_finality_tag = match r.u8()? {
+                    0 => EvmFinalityTag::Latest,
+                    1 => EvmFinalityTag::Safe,
+                    2 => EvmFinalityTag::Finalized,
+                    _ => return Err(PolicyDecodeError("unknown EVM finality tag")),
+                };
+                let spv_min_confirmations = u32::from_be_bytes(r.array()?);
                 let electrum_host = r.string()?;
                 let evm_rpc_tls = r
                     .flag()?
@@ -331,6 +447,7 @@ impl AttestedPolicy {
                         })
                     })
                     .transpose()?;
+                let clone_peer_pcr3 = r.flag()?.then(|| r.array()).transpose()?;
                 AttestedPolicy::Production {
                     allow_vanilla_psbt,
                     signer_role,
@@ -338,10 +455,12 @@ impl AttestedPolicy {
                     evm_source,
                     btc_source,
                     chain_id,
+                    bitcoin_network,
                     bridge_contract,
                     rgb_asset_id,
                     funds_in_contract,
-                    evm_min_confirmations,
+                    evm_finality_tag,
+                    spv_min_confirmations,
                     electrum_host,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
@@ -351,6 +470,7 @@ impl AttestedPolicy {
                     gas_tx_allowed_selectors,
                     token_contract,
                     kms,
+                    clone_peer_pcr3,
                 }
             }
             _ => return Err(PolicyDecodeError("unknown policy kind")),
@@ -436,10 +556,12 @@ mod tests {
             evm_source: evm,
             btc_source: BtcDataSource::SpvVerified,
             chain_id,
+            bitcoin_network: BitcoinNetwork::Mainnet,
             bridge_contract: [contract; 20],
             rgb_asset_id: asset.into(),
             funds_in_contract: [0x44; 20],
-            evm_min_confirmations: 12,
+            evm_finality_tag: EvmFinalityTag::Safe,
+            spv_min_confirmations: 6,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             gas_tx_allowed_to: [0xAA; 20],
@@ -449,11 +571,69 @@ mod tests {
             gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
             token_contract: [0x77; 20],
             kms: None,
+            clone_peer_pcr3: None,
         }
     }
 
     fn base() -> AttestedPolicy {
         prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
+    }
+
+    #[test]
+    fn finality_tags_are_strict_and_default_to_safe() {
+        assert_eq!(EvmFinalityTag::default(), EvmFinalityTag::Safe);
+        for (text, tag, wire) in [
+            ("latest", EvmFinalityTag::Latest, 0),
+            ("safe", EvmFinalityTag::Safe, 1),
+            ("finalized", EvmFinalityTag::Finalized, 2),
+        ] {
+            assert_eq!(text.parse::<EvmFinalityTag>(), Ok(tag));
+            assert_eq!(tag.as_str(), text);
+            assert_eq!(tag.to_string(), text);
+            assert_eq!(tag as u8, wire);
+        }
+        for invalid in ["", "SAFE", "Safe", " safe", "safe ", "pending", "12"] {
+            assert!(invalid.parse::<EvmFinalityTag>().is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn finality_tag_is_committed_and_round_trips() {
+        let mut encodings = Vec::new();
+        for tag in [
+            EvmFinalityTag::Latest,
+            EvmFinalityTag::Safe,
+            EvmFinalityTag::Finalized,
+        ] {
+            let mut policy = base();
+            if let AttestedPolicy::Production {
+                evm_finality_tag, ..
+            } = &mut policy
+            {
+                *evm_finality_tag = tag;
+            }
+            let bytes = policy.to_bytes();
+            assert_eq!(AttestedPolicy::from_bytes(&bytes), Ok(policy));
+            encodings.push(bytes);
+        }
+        assert_ne!(encodings[0], encodings[1]);
+        assert_ne!(encodings[0], encodings[2]);
+        assert_ne!(encodings[1], encodings[2]);
+    }
+
+    #[test]
+    fn unknown_finality_tag_refuses_to_decode() {
+        let mut bytes = base().to_bytes();
+        // The tag immediately follows the fixed FundsIn emitter in this fixture.
+        let tag_at = bytes.windows(20).position(|b| b == [0x44; 20]).unwrap() + 20;
+        assert_eq!(bytes[tag_at], EvmFinalityTag::Safe as u8);
+        for invalid in [3, 255] {
+            bytes[tag_at] = invalid;
+            assert_eq!(
+                AttestedPolicy::from_bytes(&bytes),
+                Err(PolicyDecodeError("unknown EVM finality tag"))
+            );
+        }
     }
 
     /// `base()` with the gas-tx fields overridden, for the gas tests.
@@ -472,14 +652,17 @@ mod tests {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
-                evm_min_confirmations,
+                evm_finality_tag,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
                 ..
             } => AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -488,10 +671,12 @@ mod tests {
                 evm_source,
                 btc_source,
                 chain_id,
+                bitcoin_network,
                 bridge_contract,
                 rgb_asset_id,
                 funds_in_contract,
-                evm_min_confirmations,
+                evm_finality_tag,
+                spv_min_confirmations,
                 electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to: to,
@@ -501,6 +686,7 @@ mod tests {
                 gas_tx_allowed_selectors: selectors,
                 token_contract,
                 kms,
+                clone_peer_pcr3,
             },
             AttestedPolicy::Development => unreachable!(),
         }
@@ -508,11 +694,27 @@ mod tests {
 
     #[test]
     fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V8);
+        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
         assert_eq!(
             AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V8
+            POLICY_COMMITMENT_V1
         );
+    }
+
+    #[test]
+    fn rejects_every_version_other_than_v1() {
+        for policy in [base(), AttestedPolicy::Development] {
+            let current = policy.to_bytes();
+            for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V1) {
+                let mut other = current.clone();
+                other[0] = version;
+                assert_eq!(
+                    AttestedPolicy::from_bytes(&other).unwrap_err(),
+                    PolicyDecodeError("unknown policy version")
+                );
+                assert_ne!(policy_commitment(&other), policy_commitment(&current));
+            }
+        }
     }
 
     #[test]
@@ -555,8 +757,53 @@ mod tests {
         assert_ne!(encodings[1], encodings[2]);
     }
 
+    /// A signet image with the production EVM pins attests a different policy.
     #[test]
-    fn deposit_authorization_fields_change_the_bytes() {
+    fn bitcoin_network_changes_the_bytes() {
+        let encodings: Vec<Vec<u8>> = [
+            BitcoinNetwork::Mainnet,
+            BitcoinNetwork::Testnet3,
+            BitcoinNetwork::Signet,
+            BitcoinNetwork::Regtest,
+        ]
+        .into_iter()
+        .map(|network| {
+            let mut p = base();
+            if let AttestedPolicy::Production {
+                bitcoin_network, ..
+            } = &mut p
+            {
+                *bitcoin_network = network;
+            }
+            assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p.clone()));
+            p.to_bytes()
+        })
+        .collect();
+        for (i, a) in encodings.iter().enumerate() {
+            for b in &encodings[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn bitcoin_network_parses_the_enclave_names() {
+        for (name, want) in [
+            ("bitcoin", BitcoinNetwork::Mainnet),
+            ("mainnet", BitcoinNetwork::Mainnet),
+            ("testnet", BitcoinNetwork::Testnet3),
+            ("testnet3", BitcoinNetwork::Testnet3),
+            ("signet", BitcoinNetwork::Signet),
+            ("regtest", BitcoinNetwork::Regtest),
+        ] {
+            assert_eq!(BitcoinNetwork::from_env_str(name), Some(want), "{name}");
+        }
+        assert_eq!(BitcoinNetwork::from_env_str("testnet4"), None);
+        assert_eq!(BitcoinNetwork::from_env_str(""), None);
+    }
+
+    #[test]
+    fn deposit_emitter_changes_the_bytes() {
         let mut emitter = base();
         if let AttestedPolicy::Production {
             funds_in_contract, ..
@@ -564,16 +811,21 @@ mod tests {
         {
             *funds_in_contract = [0x55; 20];
         }
-        let mut confirmations = base();
-        if let AttestedPolicy::Production {
-            evm_min_confirmations,
-            ..
-        } = &mut confirmations
-        {
-            *evm_min_confirmations = 13;
-        }
         assert_ne!(base().to_bytes(), emitter.to_bytes());
-        assert_ne!(base().to_bytes(), confirmations.to_bytes());
+    }
+
+    #[test]
+    fn spv_min_confirmations_changes_the_bytes() {
+        let mut deeper = base();
+        if let AttestedPolicy::Production {
+            spv_min_confirmations,
+            ..
+        } = &mut deeper
+        {
+            *spv_min_confirmations = 7;
+        }
+        assert_ne!(base().to_bytes(), deeper.to_bytes());
+        assert_eq!(AttestedPolicy::from_bytes(&deeper.to_bytes()), Ok(deeper));
     }
 
     #[test]
@@ -584,11 +836,12 @@ mod tests {
             *token_contract = [0x78; 20];
         }
         assert_ne!(base().to_bytes(), other.to_bytes());
-        // Only the token bytes change. The KMS presence byte follows them.
+        // Only the token bytes change. The KMS and the PCR3 presence bytes
+        // follow them.
         let a = base().to_bytes();
         let b = other.to_bytes();
-        assert_eq!(a[..a.len() - 21], b[..b.len() - 21]);
-        assert_eq!(&a[a.len() - 21..a.len() - 1], &[0x77; 20]);
+        assert_eq!(a[..a.len() - 22], b[..b.len() - 22]);
+        assert_eq!(&a[a.len() - 22..a.len() - 2], &[0x77; 20]);
     }
 
     #[test]
@@ -654,6 +907,30 @@ mod tests {
         }
     }
 
+    /// `base()` as a burn signer with the given clone-peer PCR3.
+    fn with_clone_peer_pcr3(pcr3: Option<[u8; 48]>) -> AttestedPolicy {
+        let mut p = base();
+        if let AttestedPolicy::Production {
+            signer_role,
+            clone_peer_pcr3,
+            ..
+        } = &mut p
+        {
+            *signer_role = SignerRole::Burn;
+            *clone_peer_pcr3 = pcr3;
+        }
+        p
+    }
+
+    /// Two enclaves under different IAM roles attest different policies, so a
+    /// verifier sees which role the clone peers are bound to.
+    #[test]
+    fn clone_peer_pcr3_changes_the_bytes() {
+        let role_a = with_clone_peer_pcr3(Some([0x33; 48])).to_bytes();
+        assert_ne!(role_a, with_clone_peer_pcr3(Some([0x34; 48])).to_bytes());
+        assert_ne!(role_a, with_clone_peer_pcr3(None).to_bytes());
+    }
+
     #[test]
     fn from_bytes_inverts_to_bytes() {
         let mut policies = vec![AttestedPolicy::Development, base()];
@@ -673,6 +950,7 @@ mod tests {
             *kms = Some(a_kms_pin());
         }
         policies.push(full);
+        policies.push(with_clone_peer_pcr3(Some([0x33; 48])));
         for p in policies {
             assert_eq!(AttestedPolicy::from_bytes(&p.to_bytes()), Ok(p));
         }
@@ -685,15 +963,23 @@ mod tests {
             assert!(AttestedPolicy::from_bytes(&good[..n]).is_err(), "{n}");
         }
         let mut bad = vec![[&good[..], &[0]].concat()];
-        let mut v7 = good.clone();
-        v7[0] = 7;
-        bad.push(v7);
+        let mut version = good.clone();
+        version[0] = 2;
+        bad.push(version);
+        // The last byte is the PCR3 presence flag. Only 0 and 1 are valid.
+        let mut flag = good.clone();
+        *flag.last_mut().unwrap() = 2;
+        bad.push(flag);
         let mut kind = good.clone();
         kind[1] = 2;
         bad.push(kind);
         let mut role = good.clone();
         role[3] = 3;
         bad.push(role);
+        // Byte 15 is the Bitcoin network, after the 8-byte chain id.
+        let mut network = good.clone();
+        network[15] = 4;
+        bad.push(network);
         // EVM source 2 (retired) is no longer valid.
         let mut evm = good.clone();
         evm[5] = 2;

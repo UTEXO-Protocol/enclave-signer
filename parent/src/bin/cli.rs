@@ -121,6 +121,9 @@ enum Command {
         /// Hex-encoded RGB consignment bytes
         #[arg(long, default_value = "")]
         consignment: String,
+        /// Hex-encoded PSBT of the tx that made the spent mint right
+        #[arg(long, default_value = "")]
+        parent_psbt: String,
     },
     /// Get the enclave SPV chain tip (height and hash).
     /// The parent header sync reads it to find where to continue.
@@ -508,6 +511,7 @@ fn main() {
             evm_event_finalized,
             rgb_asset_id,
             consignment,
+            parent_psbt,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
@@ -532,6 +536,13 @@ fn main() {
             } else {
                 use sha3::{Digest, Keccak256};
                 Keccak256::digest(&consignment_bytes).to_vec()
+            };
+            let parent_psbt = match hex::decode(&parent_psbt) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex parent PSBT: {}", e);
+                    process::exit(1);
+                }
             };
             let tx_hash = if evm_tx_hash.is_empty() {
                 vec![]
@@ -577,6 +588,7 @@ fn main() {
                 rgb_asset_id,
                 consignment: consignment_bytes,
                 consignment_hash,
+                parent_psbt,
             };
             match client.sign_psbt(req) {
                 Ok(r) => {
@@ -821,6 +833,7 @@ fn export_attestation(
     std::fs::rename(&tmp, out).with_context(|| format!("cannot write {}", out.display()))?;
     println!("OK: wrote {}", out.display());
     println!("  EVM address: {}", bundle.public_keys.evm_address);
+    println!("  Verification mode: {}", bundle.verification_mode.as_str());
     Ok(())
 }
 

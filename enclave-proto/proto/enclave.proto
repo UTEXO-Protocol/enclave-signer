@@ -9,14 +9,14 @@ package enclave;
 option go_package = "github.com/UTEXO-Protocol/federated-signer-proto/go-gen/enclave;enclavepb";
 
 message EnclaveRequest {
-  reserved 4;
+  reserved 4, 6;
+  reserved "proxy_federation";
 
   oneof request {
     InitializeKeyRequest initialize_key = 1;
     GetPublicKeyRequest get_public_key = 2;
     SignRequest sign = 3;
     SignRawMessageRequest sign_raw_message = 5;
-    ProxyFederationRequest proxy_federation = 6;
     InitiateCloningRequest initiate_cloning = 7;
     GetCloneRequest get_clone = 8;
     SetCloneRequest set_clone = 9;
@@ -28,17 +28,20 @@ message EnclaveRequest {
     SignCcdRequest sign_ccd = 15;
     HealthRequest health = 16;
     SetEndpointsRequest set_endpoints = 17;
+    SignRightsRefillRequest sign_rights_refill = 18;
   }
 }
 
 message EnclaveResponse {
+  reserved 6;
+  reserved "federation_sig";
+
   oneof response {
     InitializeKeyResponse initialize_key = 1;
     PublicKeysResponse public_keys = 2;
     EvmSignatureResponse evm_signature = 3;
     SignedPsbtResponse signed_psbt = 4;
     RawSignatureResponse raw_signature = 5;
-    FederationSignatureResponse federation_sig = 6;
     InitiateCloningResponse initiate_cloning = 7;
     GetCloneResponse get_clone = 8;
     SetCloneResponse set_clone = 9;
@@ -173,6 +176,25 @@ message EvmDestination {
   // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
   // crosscheck. Absent for direct fundsOutCall releases.
   optional LzReleaseParams lz_release = 8;
+  // burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
+  // Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
+  // holds the EVM address itself. Transport only: the enclave hashes the
+  // typed fields, never these protobuf bytes.
+  optional BurnDestination burn_destination = 9;
+}
+
+// BurnDestination carries the fields of a versioned burn destination record.
+// The hash rules per version are in enclave-signer docs/burn-destination.md.
+// A new version adds new fields; existing field numbers never change.
+message BurnDestination {
+  // version selects the record type. 1 = UtexoBurnDestinationV1.
+  uint32 version = 1;
+  // destination_chain_id is the Bridge route chain id (fundsOut destinationChainId).
+  uint64 destination_chain_id = 2;
+  // dst_eid is the LayerZero endpoint id. 0 means a direct fundsOut.
+  uint32 dst_eid = 3;
+  // recipient is the chain-native payee address, 1 to 32 bytes.
+  bytes recipient = 4;
 }
 
 // LzReleaseParams carries the LayerZero-specific crosscheck fields for an
@@ -197,6 +219,8 @@ message RgbDestination {
   // 7 was mint_ancestors, dropped: deposit ids are derived from the mint.
   reserved 7;
   reserved "mint_ancestors";
+  // PSBT of the tx that created the right a mint spends; it pins that UTXO.
+  bytes parent_psbt = 8;
 }
 
 message MerkleProofEntry {
@@ -235,6 +259,19 @@ message SignBtcRequest {
   bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
 }
 
+// BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
+// 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
+// source and no EVM deposit, so only the mint signer handles it, by shape alone, from
+// the PSBT's own RGB data. Response is a SignedPsbtResponse.
+message SignRightsRefillRequest {
+  reserved 2, 3;
+  reserved "consignment", "consignment_hash";
+  bytes psbt_bytes = 1;
+  string asset_id = 4;
+  // PSBT of the tx that created the right the refill spends; it pins that UTXO.
+  bytes parent_psbt = 5;
+}
+
 message SignRawMessageRequest {
   bytes message = 1; // Arbitrary message wrapped and hashed using EIP-191 before signing.
 }
@@ -267,14 +304,6 @@ message CcdSignatureResponse {
   // the governance account. Derived in the same operation as the signature, so
   // the two cannot disagree.
   bytes public_key = 2;
-}
-
-message ProxyFederationRequest {
-  bytes message_hash = 1; // 32-byte hash passed to the federation signer.
-}
-
-message FederationSignatureResponse {
-  bytes signature = 1; // 65-byte federation ECDSA signature.
 }
 
 message InitiateCloningRequest {

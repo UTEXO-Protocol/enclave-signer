@@ -102,6 +102,20 @@ fn start_mock_enclave() -> u16 {
                         },
                     )),
                 },
+                // Echo every field, so the test sees what the enclave got.
+                Some(enclave_request::Request::SignRightsRefill(req)) => EnclaveResponse {
+                    response: Some(enclave_response::Response::SignedPsbt(
+                        enclave_proto::SignedPsbtResponse {
+                            signed_psbt: [
+                                req.psbt_bytes,
+                                req.parent_psbt,
+                                req.asset_id.into_bytes(),
+                            ]
+                            .concat(),
+                            inputs_signed: 1,
+                        },
+                    )),
+                },
                 Some(enclave_request::Request::InitializeKey(_)) => EnclaveResponse {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
@@ -481,6 +495,7 @@ async fn grpc_sign_evm_roundtrip() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(rgb_source(0, 0, vec![], vec![], String::new()), payload);
@@ -516,6 +531,7 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         calldata_commission: 0,
         unsigned_tx: vec![0x02; 10],
         lz_release: None,
+        burn_destination: None,
     };
     let req = SignRequest {
         common: Some(common(0, 84, DataType::EvmGasTx)),
@@ -550,6 +566,7 @@ async fn grpc_sign_psbt_roundtrip() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
+        parent_psbt: vec![],
     };
 
     let req = sign_rgb_request(evm_source(0, 0), payload);
@@ -561,22 +578,72 @@ async fn grpc_sign_psbt_roundtrip() {
     );
 }
 
-/// Start a mock enclave that answers every Sign request with `resp`.
-fn start_sign_reply_mock(resp: EnclaveResponse) -> u16 {
+/// Start a mock enclave that answers every Sign request with `resp`. The
+/// receiver gets each request it answered.
+fn start_sign_reply_mock(
+    resp: EnclaveResponse,
+) -> (u16, std::sync::mpsc::Receiver<enclave_proto::SignRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
-            if let Some(enclave_request::Request::Sign(_)) = req.request {
+            if let Some(enclave_request::Request::Sign(sign_req)) = req.request {
+                // A test that does not read the requests drops the receiver.
+                let _ = tx.send(sign_req);
                 let _ = framing::write_message(&mut stream, &resp);
             }
         }
     });
 
-    port
+    (port, rx)
+}
+
+#[tokio::test]
+async fn grpc_rgb_destination_forwards_the_parent_psbt() {
+    let signed = EnclaveResponse {
+        response: Some(enclave_response::Response::SignedPsbt(
+            enclave_proto::SignedPsbtResponse {
+                signed_psbt: vec![0xDD; 10],
+                inputs_signed: 1,
+            },
+        )),
+    };
+    let (enclave_port, received) = start_sign_reply_mock(signed);
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let payload = enriched::EnrichedRgbPayload {
+        operation_idx: 5,
+        psbt_bytes: vec![0xFF; 32],
+        psbt_output_amount: 0,
+        rgb_asset_id: "rgb:asset".into(),
+        consignment: vec![0x02; 4],
+        consignment_hash: vec![0x03; 32],
+        parent_psbt: vec![0x04; 8],
+    };
+    client
+        .sign(sign_rgb_request(evm_source(0, 0), payload))
+        .await
+        .unwrap();
+
+    let request = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let Some(enclave_proto::sign_request::DestinationNetwork::RgbDestination(destination)) =
+        request.destination_network
+    else {
+        panic!("expected an RGB destination");
+    };
+    assert_eq!(destination.psbt_bytes, vec![0xFF; 32]);
+    assert_eq!(destination.parent_psbt, vec![0x04; 8]);
+    assert_eq!(destination.consignment, vec![0x02; 4]);
+    assert_eq!(destination.asset_id, "rgb:asset");
 }
 
 #[tokio::test]
@@ -591,6 +658,7 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
     let rgb_payload = enriched::EnrichedRgbPayload {
         operation_idx: 5,
@@ -599,6 +667,7 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
+        parent_psbt: vec![],
     };
 
     let cases = [
@@ -629,7 +698,7 @@ async fn grpc_sign_refuses_crossed_reply_type() {
     ];
 
     for (mock_reply, req, expected_message) in cases {
-        let enclave_port = start_sign_reply_mock(mock_reply);
+        let (enclave_port, _) = start_sign_reply_mock(mock_reply);
         let grpc_port = start_grpc_server(enclave_port).await;
         let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
             .await
@@ -690,6 +759,77 @@ async fn grpc_btc_utxo_rejects_missing_payload() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
+/// A refill as the listener sends it: RgbData and no source.
+fn rights_refill_request() -> SignRequest {
+    SignRequest {
+        common: Some(common(0, 0, DataType::RgbRightsRefill)),
+        source: None,
+        data: Some(sign_request::Data::RgbData(enriched::EnrichedRgbPayload {
+            operation_idx: 0,
+            psbt_bytes: vec![0x01; 3],
+            psbt_output_amount: 0,
+            rgb_asset_id: "rgb:asset".into(),
+            // The enclave reads no consignment for a refill.
+            consignment: vec![0x02; 4],
+            consignment_hash: vec![0x03; 32],
+            parent_psbt: vec![0x04; 5],
+        })),
+    }
+}
+
+#[tokio::test]
+async fn grpc_rights_refill_forwards_its_payload_and_returns_the_signed_psbt() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let resp = client
+        .sign(rights_refill_request())
+        .await
+        .unwrap()
+        .into_inner();
+    let echoed = [vec![0x01; 3], vec![0x04; 5], b"rgb:asset".to_vec()].concat();
+    assert_eq!(resp.signature, echoed);
+    assert!(resp.public_key.is_empty() && resp.call_data.is_empty());
+}
+
+#[tokio::test]
+async fn grpc_rights_refill_refuses_a_source() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let mut req = rights_refill_request();
+    req.source = Some(evm_source(0, 0));
+    let status = client.sign(req).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("no source proof"), "{status}");
+}
+
+#[tokio::test]
+async fn grpc_rights_refill_refuses_a_request_without_rgb_data() {
+    let enclave_port = start_mock_enclave();
+    let grpc_port = start_grpc_server(enclave_port).await;
+    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+        .await
+        .unwrap();
+
+    let btc = sign_request::Data::BtcData(enriched::EnrichedBtcPayload {
+        psbt_bytes: vec![0x70],
+    });
+    for data in [None, Some(btc)] {
+        let mut req = rights_refill_request();
+        req.data = data;
+        let status = client.sign(req).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("requires RgbData"), "{status}");
+    }
+}
+
 #[tokio::test]
 async fn grpc_evm_passes_enriched_fields_through() {
     // The Parent Adapter must decode EnrichedEvmPayload and pass its fields
@@ -737,6 +877,7 @@ async fn grpc_evm_passes_enriched_fields_through() {
         calldata_commission: 5,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(
@@ -825,6 +966,7 @@ async fn grpc_evm_forwards_raw_consignment_bytes() {
         calldata_commission: 0,
         unsigned_tx: Vec::new(),
         lz_release: None,
+        burn_destination: None,
     };
 
     let req = sign_evm_request(
@@ -876,6 +1018,7 @@ async fn grpc_sign_rejects_unknown_data_type() {
             calldata_commission: 0,
             unsigned_tx: Vec::new(),
             lz_release: None,
+            burn_destination: None,
         };
 
         // Change only the type so missing payload fields cannot cause the rejection.

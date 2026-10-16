@@ -247,21 +247,50 @@ pub(crate) mod tests {
             ChildNumber::Normal { index: chain },
             ChildNumber::Normal { index },
         ];
+        our_key_at(keys, account, &child)
+    }
+
+    /// Our derived key at m/86'/<coin>'/0'/`child` on `account`, for any
+    /// child path (testnet coin types).
+    pub(crate) fn our_key_at(
+        keys: &KeyManager,
+        account: AccountType,
+        child: &[ChildNumber],
+    ) -> (XOnlyPublicKey, DerivationPath) {
         let secp = Secp256k1::new();
-        let sk = keys.derive_btc_child(account, &child).unwrap();
+        let sk = keys.derive_btc_child(account, child).unwrap();
         let xonly = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0;
         let coin = match account {
             AccountType::Vanilla => 1,
             AccountType::Colored => 827167,
         };
-        let path = DerivationPath::from(vec![
+        let account_path = [
             ChildNumber::from_hardened_idx(86).unwrap(),
             ChildNumber::from_hardened_idx(coin).unwrap(),
             ChildNumber::from_hardened_idx(0).unwrap(),
-            child[0],
-            child[1],
-        ]);
+        ];
+        let path = DerivationPath::from([&account_path[..], child].concat());
         (xonly, path)
+    }
+
+    /// Gives output `index` our key-path script at `child` below `account`,
+    /// with the rule (C) metadata that names it.
+    #[cfg(feature = "bfa-mint")]
+    pub(crate) fn claim_output(
+        psbt: &mut Psbt,
+        index: usize,
+        keys: &KeyManager,
+        account: AccountType,
+        child: &[ChildNumber],
+    ) {
+        let (key, path) = our_key_at(keys, account, child);
+        psbt.unsigned_tx.output[index].script_pubkey =
+            ScriptBuf::new_p2tr(&Secp256k1::new(), key, None);
+        let output = &mut psbt.outputs[index];
+        output.tap_internal_key = Some(key);
+        output
+            .tap_key_origins
+            .insert(key, (vec![], (*keys.master_fingerprint(), path)));
     }
 
     /// Our derived key at m/86'/1'/0'/`chain`/`index` (testnet coin type).

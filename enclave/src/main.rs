@@ -19,8 +19,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     utexo_bridge_enclave::clocksync::spawn();
 
-    let bitcoin_network_str = bootstrap::bitcoin_network_str();
-    let state = EnclaveState::new(bootstrap::resolve_bitcoin_network(&bitcoin_network_str));
+    let network = bootstrap::resolve_network(&bootstrap::bitcoin_network_str());
+    #[cfg(feature = "rgb-validation")]
+    bootstrap::load_schema_rules();
+    let state = EnclaveState::new(network.bitcoin_network());
 
     // Pinned bridge config. Committed in attestation `user_data` and checked on
     // every signing request.
@@ -30,11 +32,6 @@ fn main() {
     // Fail closed: a release rgb-validation build without a valid Production
     // policy does not start. Debug, test and non-bridge builds are exempt.
     // `SetEndpoints` checks the full policy later.
-    #[cfg(feature = "evm-rpc")]
-    let evm_min_confirmations =
-        utexo_bridge_enclave::config::EvmRpcConfig::from_env().min_confirmations;
-    #[cfg(not(feature = "evm-rpc"))]
-    let evm_min_confirmations = 0;
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,
@@ -42,7 +39,6 @@ fn main() {
         utexo_bridge_enclave::policy::EvmDataSource::Disabled,
         None,
         "",
-        evm_min_confirmations,
     );
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");
@@ -58,7 +54,7 @@ fn main() {
         state,
         bridge_config,
         #[cfg(feature = "rgb-validation")]
-        bootstrap::build_header_chain(&bitcoin_network_str),
+        bootstrap::build_header_chain(network),
         build_ctx,
     );
 

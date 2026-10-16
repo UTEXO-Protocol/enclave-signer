@@ -135,7 +135,9 @@ pass `--expect-chain-id`, `--expect-bridge-contract` and/or
 `--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
 exactly those pins, so onboarding can reject a valid attestation of the *wrong*
 chain, contract or RGB asset. When omitted, the pins are authenticated but not
-compared (legacy behaviour) — the caller must then compare them out of band.
+compared. A successful run prints each pin, and every other verified field, as
+one `name: value` line. The names are the paths of the exported bundle. Compare
+the values in that output or in the bundle.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
@@ -154,7 +156,7 @@ both the enclave and every verifier share so the bytes are identical.
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V8 = 8)                    // version tag
+    u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
     // Production (release, fully-pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
@@ -162,10 +164,13 @@ policy_commitment =
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
-    chain_id_be8 || bridge_contract(20)
+    chain_id_be8
+    u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest
+    bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
-    evm_min_confirmations_be8                       // required receipt depth
+    u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
+    spv_min_confirmations_be4                       // required Bitcoin witness depth
     u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
@@ -175,16 +180,42 @@ policy_commitment =
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
-    token_contract(20)                              // released ERC-20 (burnId preimage input), V5
-    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch, V7):
+    token_contract(20)                              // released ERC-20 (burnId preimage input)
+    u8(kms_present)                                 // 0 absent; 1 followed by (set at launch):
       u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
       || u32_be(len(seed_id)) || seed_id
       || u8(address_present) [|| expected_evm_address(20)]
+    u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
+      [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
     // Development (debug/test/dev-feature/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
-The tuple omits the Bitcoin network, concrete sats budgets, the Electrum/Esplora
+V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
+and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
+in the mint image).
+Every EVM `FundsIn` receipt must be at or below the selected head, with its
+block hash matching the canonical block at that height. The enclave
+revalidates the selected head snapshot to detect a reorg. The enclave trusts
+the pinned RPC for the correctness of these responses. Production verification
+requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
+value; a production enclave refuses `latest` at boot, and so does the verifier.
+
+`clone_peer_pcr3` binds clone peers to the parent instance IAM role (#270). A
+verifier does not configure it: it takes PCR3 from the verified document (the
+NSM signs it), requires it to be present and not all zero for a cloning role,
+and expects no value for the mint signer. An enclave on an instance without an
+IAM role therefore fails verification, and does not start.
+
+Use enclave images and verifiers from the same release with approved EIF
+measurements. Clone peers must have matching policy commitments.
+
+`bitcoin_network` is `BITCOIN_NETWORK`, the network of the SPV header chain and
+of the accepted consignments. A verifier declares it (`--expect-bitcoin-network`,
+default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
+`42161`) with another Bitcoin network does not boot.
+
+The tuple omits concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
 release image accepts only `ssl://` or `https://` for the Electrum/Esplora
 URL, so PCR0 covers it. Only a dev build (and thus a development policy)
@@ -291,8 +322,9 @@ attest-verify \
     --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-evm-finality-tag safe \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    --expect-evm-min-confirmations 12 \
+    --expect-spv-min-confirmations 6 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
@@ -318,12 +350,14 @@ attest-verify \
 # compared). Verification fails on any mismatch:
 # --expect-chain-id <u64> --expect-bridge-contract <hex20> \
 # --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
+# --expect-bitcoin-network <bitcoin|testnet3|signet|regtest>   # default bitcoin
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-min-confirmations 12 \
+    --expect-evm-finality-tag safe \
+    --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
@@ -357,7 +391,9 @@ against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,
 the expected value and the attested value. The enclave is then terminated,
-all enclaves stop, and the deploy exits 1 before a parent starts.
+all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
+inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
+verified document, as described above.
 
 `ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
 

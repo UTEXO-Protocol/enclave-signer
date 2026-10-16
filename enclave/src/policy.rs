@@ -17,8 +17,13 @@
 use crate::config::{BridgeConfig, BtcRelayMode};
 
 pub use attestation_verify::{
-    AttestationMode, AttestedPolicy, BtcDataSource, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole,
+    AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource, EvmDataSource, EvmFinalityTag,
+    EvmRpcTlsPin, KmsPin, SignerRole,
 };
+
+/// EVM mainnets the bridge is deployed on: Ethereum and Arbitrum One. A
+/// production policy pinned to one of them must use Bitcoin mainnet.
+pub const MAINNET_EVM_CHAIN_IDS: [u64; 2] = [1, 42161];
 
 /// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,17 +44,21 @@ pub enum SecurityPolicy {
 pub struct ProductionPolicy {
     /// Pinned EVM chain id (`EVM_CHAIN_ID`).
     pub chain_id: u64,
+    /// Bitcoin network (`BITCOIN_NETWORK`).
+    pub bitcoin_network: BitcoinNetwork,
     /// Pinned MultisigProxy contract (`EVM_PROXY_CONTRACT_ADDRESS`).
     pub bridge_contract: [u8; 20],
     /// Pinned RGB asset id (`RGB_ASSET_ID`).
     pub rgb_asset_id: String,
     /// Only this contract's FundsIn events may authorize bridge signing.
     pub funds_in_contract: [u8; 20],
+    /// RPC block tag required for deposit inclusion (`EVM_FINALITY_TAG`).
+    pub evm_finality_tag: EvmFinalityTag,
     /// The ERC-20 that the Bridge releases (`TOKEN_CONTRACT`), a `burnId`
     /// preimage input.
     pub token_contract: [u8; 20],
-    /// Min receipt depth of an accepted FundsIn deposit.
-    pub evm_min_confirmations: u64,
+    /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
+    pub spv_min_confirmations: u32,
     /// `fundsOut` proofs must carry BtcRelay commitments (`BTC_RELAY_MODE=required`).
     /// [`check_invariants`](Self::check_invariants) refuses `false`, so
     /// [`AttestedPolicy`] has no field for it.
@@ -87,6 +96,12 @@ pub struct ProductionPolicy {
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
     /// The KMS pin set at launch. See [`SecurityPolicy::with_kms`].
     pub kms: Option<KmsPin>,
+    /// PCR3 that a clone peer must have: this enclave's own PCR3, read at
+    /// launch ([`SecurityPolicy::with_clone_peer_pcr3`]). `Some` for a role
+    /// that clones (not [`SignerRole::Mint`]).
+    /// [`check_invariants`](Self::check_invariants) refuses `None` or all zero
+    /// there: the parent instance must have an IAM role.
+    pub clone_peer_pcr3: Option<[u8; 48]>,
 }
 
 /// Why the policy is [`SecurityPolicy::Development`].
@@ -150,7 +165,6 @@ impl SecurityPolicy {
         evm_source: EvmDataSource,
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
-        evm_min_confirmations: u64,
     ) -> Self {
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
@@ -176,11 +190,13 @@ impl SecurityPolicy {
         let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
         Self::Production(ProductionPolicy {
             chain_id: bridge.chain_id,
+            bitcoin_network: bridge.bitcoin_network,
             bridge_contract: bridge.bridge_contract,
             rgb_asset_id: bridge.rgb_asset_id.clone(),
             funds_in_contract: bridge.funds_in_contract,
+            evm_finality_tag: bridge.evm_finality_tag,
             token_contract: bridge.token_contract,
-            evm_min_confirmations,
+            spv_min_confirmations: bridge.spv_min_confirmations,
             btc_relay_required: bridge.btc_relay_mode == BtcRelayMode::Required,
             allow_vanilla_psbt: signs_plain_btc && bridge.allows_vanilla_btc(),
             signer_role: ctx.signer_role,
@@ -210,7 +226,24 @@ impl SecurityPolicy {
                 Vec::new()
             },
             kms: None,
+            clone_peer_pcr3: None,
         })
+    }
+
+    /// Set the clone-peer PCR3 of a production policy whose role clones.
+    /// `read_pcr3` reads this enclave's own PCR3 (NSM); it runs only for such a
+    /// policy. A development policy, or a mint signer (cloning is off), does
+    /// not change.
+    pub fn with_clone_peer_pcr3(
+        mut self,
+        read_pcr3: impl FnOnce() -> crate::error::Result<[u8; 48]>,
+    ) -> crate::error::Result<Self> {
+        if let Self::Production(p) = &mut self {
+            if p.signer_role.clones() {
+                p.clone_peer_pcr3 = Some(read_pcr3()?);
+            }
+        }
+        Ok(self)
     }
 
     /// Set the KMS pin of a production policy. A development policy does not
@@ -236,11 +269,13 @@ impl SecurityPolicy {
                 evm_source: p.evm_source,
                 btc_source: p.btc_source,
                 chain_id: p.chain_id,
+                bitcoin_network: p.bitcoin_network,
                 bridge_contract: p.bridge_contract,
                 rgb_asset_id: p.rgb_asset_id.clone(),
                 funds_in_contract: p.funds_in_contract,
+                evm_finality_tag: p.evm_finality_tag,
                 token_contract: p.token_contract,
-                evm_min_confirmations: p.evm_min_confirmations,
+                spv_min_confirmations: p.spv_min_confirmations,
                 electrum_host: p.electrum_host.clone(),
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // Unset commits as all-zero, which the gas path never accepts.
@@ -251,6 +286,7 @@ impl SecurityPolicy {
                 gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
                 kms: p.kms.clone(),
+                clone_peer_pcr3: p.clone_peer_pcr3,
             },
             Self::Development { .. } => AttestedPolicy::Development,
         }
@@ -318,6 +354,23 @@ impl ProductionPolicy {
                     .into(),
             );
         }
+        // Clone peers are bound to the parent IAM role through PCR3. An
+        // instance without a role has an all-zero PCR3, and then nothing binds
+        // a clone peer to the operator account.
+        match (self.signer_role.clones(), self.clone_peer_pcr3) {
+            (true, Some(pcr3)) if pcr3.iter().any(|&b| b != 0) => {}
+            (true, _) => {
+                return Err(
+                    "production policy has no clone-peer PCR3: the parent instance has no IAM \
+                     role (PCR3 is all zero). Attach the IAM role to the instance before launch."
+                        .into(),
+                );
+            }
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err("production policy of a role that does not clone has a PCR3".into());
+            }
+        }
         Ok(())
     }
 
@@ -328,6 +381,17 @@ impl ProductionPolicy {
                 "production policy is missing one or more of the chain/contract/asset pins".into(),
             );
         }
+        // A test-network image with mainnet EVM pins would sign real releases
+        // for test-network burns.
+        if MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id)
+            && self.bitcoin_network != BitcoinNetwork::Mainnet
+        {
+            return Err(format!(
+                "production policy pins mainnet EVM chain {} with Bitcoin {:?}; a mainnet EVM \
+                 chain requires BITCOIN_NETWORK=bitcoin",
+                self.chain_id, self.bitcoin_network
+            ));
+        }
         if self.funds_in_contract == [0u8; 20] {
             return Err("production policy must pin a non-zero FundsIn contract".into());
         }
@@ -337,8 +401,19 @@ impl ProductionPolicy {
                     .into(),
             );
         }
-        if self.evm_min_confirmations == 0 {
-            return Err("production policy must require at least one EVM confirmation".into());
+        // `latest` is the L2 tip, the zero-confirmation rule that production refused before.
+        if self.evm_finality_tag == EvmFinalityTag::Latest {
+            return Err(
+                "production policy must not accept EVM_FINALITY_TAG=latest; use safe or finalized"
+                    .into(),
+            );
+        }
+        if self.spv_min_confirmations == 0 {
+            return Err(
+                "production policy must require at least one Bitcoin confirmation \
+                 (SPV_MIN_CONFIRMATIONS)"
+                    .into(),
+            );
         }
         if !self.btc_relay_required {
             return Err(format!(

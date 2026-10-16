@@ -39,15 +39,25 @@ alloy-sol-types = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# RGB consignment validation (optional, behind rgb-validation feature)
-rgb-ops = { version = "0.11.1-rc.7", features = ["esplora_blocking", "electrum_blocking"], optional = true }
-rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "a6c2e4913bfe3b682270bc747311a2cf7160982b", default-features = false, optional = true }
-rgb-schemas = { version = "=0.11.1-rc.10", default-features = false, optional = true }
-# Invoice parsing for the send-RGB recipient bind. Same repo and rev as
-# `rgb-ops`, so it adds no new third-party code. Pinned to rc.10 like
-# `rgb-schemas`: the BFA mirrors in the workspace `[patch]` are cut from rc.10.
-# An rc.11 requirement makes cargo ignore the patch.
-rgb-invoicing = { version = "=0.11.1-rc.10", default-features = false, optional = true }
+# RGB consignment validation (optional, behind rgb-validation feature). The
+# RGB-Tools BFA release, from crates.io. Exact pins: a caret requirement
+# moves onto the next prerelease, and an rc bump can change the BFA schema id.
+rgb-ops = { version = "=0.11.2-rc.1", default-features = false, features = ["esplora_blocking", "electrum_blocking"], optional = true }
+rgb-schemas = { version = "=0.11.2-rc.1", default-features = false, optional = true }
+# Invoice parsing for the legacy send-RGB recipient bind.
+rgb-invoicing = { version = "=0.11.2-rc.1", default-features = false, optional = true }
+# Not used directly: pins the consensus and VM crates that rgb-ops pulls with a
+# caret requirement.
+rgb-consensus = { version = "=0.11.2-rc.1", default-features = false, optional = true }
+rgb-aluvm = { version = "=0.11.2-rc.1", default-features = false, optional = true }
+# Byte views of RGB ids. The version rgb-ops pins.
+amplify = { version = "=4.8.1", optional = true }
+# Reads the RGB transitions and MPC entropy rgb-lib stores in a mint or refill
+# PSBT. The mint signer validates those from the PSBT, with no consignment.
+rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false, optional = true }
+# Reads the validated consignment with rgb-lib's wallet-free inspection. Our
+# private mirror of the RGB-Tools release, until it is public.
+rgb-lib = { git = "ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git", rev = "3f571ac58909400046d69143ebb535f4da1f4d42", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -120,7 +130,7 @@ ccd = []
 # with BFA `Transfer` in both directions. Retired flow: production is mint/burn.
 rgb-swap = ["rgb"]
 # `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
-# with BFA `Bridge`, withdrawals destroy with BFA `Burn`.
+# with BFA `mint`, withdrawals destroy with BFA `burn`.
 rgb-mint-burn = ["rgb"]
 
 # Seed custody is a separate capability, enabled only by the mint signer.
@@ -144,11 +154,11 @@ kms-persistence = [
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# In-enclave RGB consignment validation via rgbstd + Electrum or Esplora. REQUIRES `spv`
-# (a `compile_error!` in lib.rs). Without SPV, the host-controlled indexer is the
-# only anchor for witness txs. A malicious host can then fake a Bitcoin anchor.
+# In-enclave RGB consignment validation via rgbstd. REQUIRES `spv` (a
+# `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
+# Bitcoin. A malicious host can then fake a Bitcoin anchor.
 # `spv` is not in this list because that makes a feature cycle.
-rgb-validation = ["rgb-ops", "rgb-consignment", "rgb-schemas", "rgb-invoicing", "dep:rustls-pki-types"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
 # When OFF, handle_sign_evm refuses every `fundsOut` release (fail-closed).
@@ -162,21 +172,21 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # In-enclave EVM `FundsIn` event verification for an EVM -> RGB `Sign`.
 # Default OFF. The enclave fetches the deposit receipt with an in-enclave alloy
 # JSON-RPC client.
-# It fails closed on a missing or invalid receipt or too few confirmations.
+# It fails closed on a missing or invalid receipt, or an unsafe/noncanonical block.
 # TLS to the pinned RPC host and CA ends inside the enclave. The host relays
 # only ciphertext through the vsock forwarder.
 # Implies `rgb-validation`: the bridge path and amount/asset context are there.
 evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
-# Ether-extension validation of BFA mints, in either RGB flow. BFA is the only
-# schema the enclave admits. A BFA mint script ends in `cea`, which the default
-# validator decodes as `Fail`. Without this feature, every mint and every
-# consignment with mint ancestry fails on that opcode.
-# Needs `evm-rpc`: the opcode checks events from the enclave's own `FundsIn` read.
+# Binds BFA mint anchors to EVM locks, in either RGB flow. BFA is the only
+# schema the enclave admits. Each BFA `mint` leaves an external anchor that
+# RGB consensus cannot finalize alone. Without this feature, every mint and
+# every consignment with mint ancestry is refused.
+# Needs `evm-rpc`: the mint signer binds the anchor to its own `FundsIn` read.
 bfa-validation = ["evm-rpc"]
-# `rgb-mint-burn`, not plain `rgb`: a BFA `Bridge` transition is a mint, so
+# `rgb-mint-burn`, not plain `rgb`: a BFA `mint` transition is a mint, so
 # its rules belong to that flow only. lib.rs rejects both flows at once, so
 # `--features bfa-mint` on the default set does not compile.
-bfa-mint = ["rgb-mint-burn", "bfa-validation"]
+bfa-mint = ["rgb-mint-burn", "bfa-validation", "dep:rgb-psbt-utils"]
 
 # Mint/burn signer role. EXACTLY ONE is required when `rgb-mint-burn` is on
 # (lib.rs `compile_error!`). Each role ships as its own image with its own PCR0
@@ -198,9 +208,10 @@ aws-smithy-http-client = { version = "1.4", default-features = false, features =
 http = "1"
 # The in-test TLS server of `tests/test_evm_rpc_tls.rs`. Already in the lock.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-# JSON-RPC of the stub Electrum server (`src/test_support/electrum_stub.rs`).
-# Already in the lock.
+# Reads the shared vectors `docs/burn-destination-vectors.json`. Already in the lock.
 serde_json = "1"
-# `StrictDumb`, for the synthetic burn transition in the consensus tests of
-# `networks/rgb/validation/tests.rs`. Already in the lock.
-strict_encoding = { package = "rgb-strict-encoding", version = "1.0.2" }
+# The in-process BFA consignment generator (`src/test_support/bfa_consignment.rs`)
+# builds strict types. Already in the lock.
+strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.5" }
+# The generator commits its PSBTs with psbtu's `rgb_commit`, as rgb-lib does.
+rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false }

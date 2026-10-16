@@ -4,9 +4,10 @@
 use crate::config::BridgeConfig;
 #[cfg(feature = "evm-rpc")]
 use crate::config::EvmRpcTls;
+use crate::networks::rgb::spv::Network;
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::spv::{
-    resolve_checkpoint, CheckpointSource, HeaderChain, Network, CHECKPOINT_ENV,
+    resolve_checkpoint, CheckpointSource, HeaderChain, CHECKPOINT_ENV,
 };
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
@@ -53,27 +54,23 @@ pub fn pin_hosts(
     std::fs::rename(&tmp, path)
 }
 
-/// The raw `BITCOIN_NETWORK` value, default `bitcoin`. A string, because the
-/// SPV chain parses it with its own network enum.
+/// The raw `BITCOIN_NETWORK` value, default `bitcoin`. [`resolve_network`]
+/// parses it.
 pub fn bitcoin_network_str() -> String {
     std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into())
 }
 
-/// Map `BITCOIN_NETWORK` to a `bitcoin::Network`. An unknown value logs a
-/// warning and gives mainnet.
-pub fn resolve_bitcoin_network(bitcoin_network_str: &str) -> bitcoin::Network {
-    let bitcoin_network = match bitcoin_network_str {
-        "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
-        "testnet" | "testnet3" => bitcoin::Network::Testnet,
-        "signet" => bitcoin::Network::Signet,
-        "regtest" => bitcoin::Network::Regtest,
-        other => {
-            tracing::warn!("unknown BITCOIN_NETWORK '{other}', defaulting to mainnet");
-            bitcoin::Network::Bitcoin
-        }
-    };
-    tracing::info!(%bitcoin_network_str, "bitcoin network configured");
-    bitcoin_network
+/// Parse `BITCOIN_NETWORK`. An unknown value is fatal: a fallback would put
+/// the keys, the SPV rules and the RGB chain-network on another network.
+pub fn resolve_network(bitcoin_network_str: &str) -> Network {
+    let network = Network::from_env_str(bitcoin_network_str).unwrap_or_else(|e| {
+        panic!(
+            "BITCOIN_NETWORK '{bitcoin_network_str}' is not valid ({e}): use bitcoin, signet, \
+             signetcustom, testnet3, testnet4 or regtest"
+        )
+    });
+    tracing::info!(%bitcoin_network_str, ?network, "bitcoin network configured");
+    network
 }
 
 /// Log the pinned bridge config, as an error when it is partially set.
@@ -96,6 +93,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
             bridge_contract = %hex::encode(bridge_config.bridge_contract),
             rgb_asset_id = %bridge_config.rgb_asset_id,
             btc_relay_mode = ?bridge_config.btc_relay_mode,
+            evm_finality_tag = %bridge_config.evm_finality_tag,
             "bridge config pinned from env"
         );
     } else if bridge_config.is_partially_configured() {
@@ -138,7 +136,8 @@ pub fn log_policy(policy: &SecurityPolicy) {
             evm_rpc_tls = ?p.evm_rpc_tls,
             funds_in_contract = %hex::encode(p.funds_in_contract),
             token_contract = %hex::encode(p.token_contract),
-            evm_min_confirmations = p.evm_min_confirmations,
+            evm_finality_tag = %p.evm_finality_tag,
+            spv_min_confirmations = p.spv_min_confirmations,
             btc_source = ?p.btc_source,
             "resolved PRODUCTION security policy (committed into attestation user_data)"
         ),
@@ -169,12 +168,18 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
+/// Build the BFA schema rules now, so an inconsistent built-in schema stops
+/// the boot (the build panics) and not a request.
+#[cfg(feature = "rgb-validation")]
+pub fn load_schema_rules() {
+    std::sync::LazyLock::force(&crate::networks::rgb::validation::BFA_RULES);
+}
+
 /// Build the RGB consignment validator for the Electrum URL set at launch.
 /// `None` makes the launch fail.
 #[cfg(feature = "rgb-validation")]
 pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
-    let network = std::env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "bitcoin".into());
-    match RgbValidator::new(indexer_url, &network) {
+    match RgbValidator::new(indexer_url, &bitcoin_network_str()) {
         Ok(v) => {
             tracing::info!("RGB validator initialized");
             Some(v)
@@ -193,13 +198,7 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
 /// retarget boundary on a PoW network, or a malformed `SPV_CHECKPOINT` override. Such a chain
 /// cannot advance.
 #[cfg(feature = "rgb-validation")]
-pub fn build_header_chain(bitcoin_network_str: &str) -> std::sync::Mutex<HeaderChain> {
-    let spv_network = Network::from_env_str(bitcoin_network_str).unwrap_or_else(|e| {
-        tracing::warn!(
-            "spv: unknown BITCOIN_NETWORK '{bitcoin_network_str}' ({e}); defaulting to mainnet"
-        );
-        Network::Mainnet
-    });
+pub fn build_header_chain(spv_network: Network) -> std::sync::Mutex<HeaderChain> {
     // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
     // production build does not boot with that var set. A malformed value is fatal.
     let (checkpoint, checkpoint_source) = resolve_checkpoint(spv_network).unwrap_or_else(|msg| {

@@ -4,7 +4,8 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-# Token stays in a BuildKit secret; override with per-repo --secret flags if needed.
+# Private dependencies (the parent's proto, the rgb-lib-bfa mirror of both
+# workspaces): the token stays in a BuildKit secret.
 DOCKER_AUTH_ARGS ?= --secret id=github_token,env=GITHUB_TOKEN
 
 # Pass public values through Docker's environment form, not shell interpolation.

@@ -1,18 +1,18 @@
 """Credential routing and cleanup tests; no private credentials or network needed."""
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Each private dep uses a per-repo SSH Host alias. IdentitiesOnly yes ensures
+# GitHub accepts exactly the right key per connection.
 ALIASES = {
-    'github-rgb-consensus': 'consensus_key',
-    'github-rgb-ops': 'ops_key',
-    'github-rgb-schemas': 'schemas_key',
+    'github-rgb-lib': 'lib_key',
     'github-federated-signer': 'federated_key',
 }
+DEPLOY_KEY = 'fixture-private-key-not-a-real-credential'
 
 
 class PrivateDepsTests(unittest.TestCase):
@@ -37,13 +37,16 @@ class PrivateDepsTests(unittest.TestCase):
                                scope, 'python3', str(probe)], env=self.env,
                               capture_output=True, text=True)
 
-    def keys(self, parent=True):
+    def keys(self):
         for key in ALIASES.values():
-            if key == 'federated_key' and not parent:
-                continue
             path = self.secrets / key
-            path.write_text('fixture-private-key-not-a-real-credential\n')
+            path.write_text(f'{DEPLOY_KEY}\n')
             path.chmod(0o600)
+
+    def lib_key(self):
+        path = self.secrets / 'lib_key'
+        path.write_text(f'{DEPLOY_KEY}\n')
+        path.chmod(0o600)
 
     def test_each_ssh_alias_selects_only_its_repo_key(self):
         self.keys()
@@ -62,44 +65,49 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(Path(result.stdout.strip()).parent.exists())
 
-    def test_enclave_does_not_need_proto_key(self):
-        self.keys(parent=False)
-        result = self.run_auth('enclave', 'print("started")')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        result = self.run_auth('parent', 'print("must not start")')
+    def test_only_the_parent_and_enclave_scopes_exist(self):
+        self.lib_key()
+        result = self.run_auth('tools', 'print("must not start")')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('federated_key', result.stderr)
+        self.assertIn('Invalid dependency scope', result.stderr)
         self.assertEqual(result.stdout, '')
 
-    def test_missing_or_empty_key_refuses_before_build(self):
+    def test_missing_or_empty_lib_key_refuses_before_build(self):
+        for scope in ('parent', 'enclave'):
+            for content in (None, ''):
+                with self.subTest(scope=scope, content=content):
+                    path = self.secrets / 'lib_key'
+                    path.unlink(missing_ok=True)
+                    if content is not None:
+                        path.write_text(content)
+                    result = self.run_auth(scope, 'print("must not start")')
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('lib_key', result.stderr)
+                    self.assertIn('rgb-lib-bfa', result.stderr)
+                    self.assertEqual(result.stdout, '')
+
+    def test_enclave_scope_has_only_rgb_lib_key(self):
         self.keys()
-        (self.secrets / 'ops_key').write_text('')
-        result = self.run_auth('enclave', 'print("must not start")')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ops_key', result.stderr)
-        self.assertEqual(result.stdout, '')
-
-    def test_token_rewrites_actual_manifest_urls_without_embedding_token(self):
-        token = 'fixture-token-not-a-real-credential'
-        (self.secrets / 'github_token').write_text(token)
-        sources = '\n'.join((ROOT / p).read_text() for p in
-                            ['Cargo.toml', 'enclave/Cargo.toml', 'parent/Cargo.toml'])
-        urls = sorted(set(re.findall(r'"(ssh://git@github-[^"]+)"', sources)))
-        self.assertGreaterEqual(len(urls), 4)
-        result = self.run_auth('parent', f'''
-for url in {urls!r}:
-    actual = subprocess.check_output(['git', 'ls-remote', '--get-url', url], text=True).strip()
-    expected = 'https://x-access-token@github.com/UTEXO-Protocol/' + url.split('/UTEXO-Protocol/')[1]
-    assert actual == expected, (actual, expected)
-config = pathlib.Path(os.environ['GIT_CONFIG_GLOBAL'])
-assert {token!r} not in config.read_text()
-password = subprocess.check_output([os.environ['GIT_ASKPASS'], 'Password:'], text=True)
-assert password == {token!r}
-print(str(config))
+        result = self.run_auth('enclave', f'''
+args = shlex.split(os.environ['GIT_SSH_COMMAND']) + ['-G', 'github-rgb-lib']
+config = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+assert 'identityfile ' + os.environ['PRIVATE_DEPS_DIR'] + '/lib_key' in config, config
+args2 = shlex.split(os.environ['GIT_SSH_COMMAND']) + ['-G', 'github-federated-signer']
+config2 = subprocess.check_output(args2, text=True, stderr=subprocess.DEVNULL)
+assert os.environ['PRIVATE_DEPS_DIR'] + '/federated_key' not in config2, config2
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn(token, result.stdout + result.stderr)
-        self.assertFalse(Path(result.stdout.strip()).parent.exists())
+
+    def test_deploy_key_reads_proto_when_both_keys_present(self):
+        self.keys()
+        result = self.run_auth('parent', f'''
+for alias, key in {ALIASES!r}.items():
+    args = shlex.split(os.environ['GIT_SSH_COMMAND']) + ['-G', alias]
+    config = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+    assert os.environ['PRIVATE_DEPS_DIR'] + '/' + key in config, (alias, config)
+assert 'GIT_SSH_COMMAND' in os.environ
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_failed_command_preserves_status_and_cleans_config(self):
         self.keys()
@@ -108,41 +116,65 @@ print(str(config))
         self.assertFalse(Path(result.stdout.strip()).parent.exists())
 
     def test_prepare_keys_preserves_multiline_values_and_restricts_permissions(self):
-        mapping = {
-            'RGB_CONSENSUS_BFA_DEPLOY_KEY': 'consensus_key',
-            'RGB_OPS_BFA_DEPLOY_KEY': 'ops_key',
-            'RGB_SCHEMAS_BFA_DEPLOY_KEY': 'schemas_key',
-            'FEDERATED_SIGNER_PROTO_DEPLOY_KEY': 'federated_key',
-        }
         value = "fixture first line\nfixture second line"
-        env = dict(self.env, **{name: value for name in mapping})
+        env = dict(self.env, FEDERATED_SIGNER_PROTO_DEPLOY_KEY=value,
+                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY)
         script = ['sh', str(ROOT / 'build/prepare-private-deps.sh')]
         result = subprocess.run(script, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, '')
         self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o700)
-        for key in mapping.values():
+        for key, content in (('federated_key', value + '\n'), ('lib_key', DEPLOY_KEY + '\n')):
             path = self.secrets / key
-            self.assertEqual(path.read_text(), value + '\n')
+            self.assertEqual(path.read_text(), content)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        env['RGB_OPS_BFA_DEPLOY_KEY'] = ''
-        result = subprocess.run(script, env=env, capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Missing RGB_OPS_BFA_DEPLOY_KEY', result.stderr)
-        self.assertNotIn(value, result.stdout + result.stderr)
+        for name in ('FEDERATED_SIGNER_PROTO_DEPLOY_KEY', 'RGB_LIB_BFA_DEPLOY_KEY'):
+            with self.subTest(missing=name):
+                result = subprocess.run(script, env=dict(env, **{name: ''}),
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'Missing {name}', result.stderr)
+                self.assertNotIn(value, result.stdout + result.stderr)
+                self.assertNotIn(DEPLOY_KEY, result.stdout + result.stderr)
 
-    def test_all_dockerfiles_mount_the_required_keys(self):
+    def test_ci_access_adds_deploy_key_to_ssh(self):
+        home = self.base / 'home'
+        home.mkdir()
+        env = dict(self.env, HOME=str(home),
+                   GIT_CONFIG_GLOBAL=str(home / '.gitconfig'), GIT_CONFIG_NOSYSTEM='1',
+                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY)
+        script = ['sh', str(ROOT / 'build/ci-rgb-lib-access.sh')]
+        result = subprocess.run(script, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, '')
+        ssh_dir = home / '.ssh'
+        key_file = ssh_dir / 'key_lib'
+        self.assertTrue(key_file.exists())
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(key_file.read_text(), DEPLOY_KEY + '\n')
+        ssh_config = (ssh_dir / 'config').read_text()
+        self.assertIn('Host github-rgb-lib', ssh_config)
+        self.assertIn('IdentityFile', ssh_config)
+        self.assertIn('key_lib', ssh_config)
+        result = subprocess.run(script, env=dict(env, RGB_LIB_BFA_DEPLOY_KEY=''),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing RGB_LIB_BFA_DEPLOY_KEY', result.stderr)
+
+    def test_every_dockerfile_builds_through_its_secret_scope(self):
         for path in (ROOT / 'build').glob('Dockerfile*'):
             with self.subTest(dockerfile=path.name):
                 data = path.read_text()
-                scope = 'parent' if path.name == 'Dockerfile.parent' else 'enclave'
-                self.assertIn(f'sh /build/build/with-private-deps.sh {scope} cargo build', data)
-                self.assertIn('--mount=type=secret,id=github_token', data)
-                for key in ALIASES.values():
-                    if key == 'federated_key' and scope == 'enclave':
-                        continue
-                    self.assertIn('--mount=type=secret,id=' + key, data)
-                self.assertIn('openssh-client', data.split('COPY . /build/')[0])
+                self.assertIn('--mount=type=secret,id=lib_key', data)
+                self.assertNotIn('RUN cargo build', data)
+                self.assertIn('git ca-certificates', data.split('COPY . /build/')[0])
+                if path.name == 'Dockerfile.parent':
+                    self.assertIn('sh /build/build/with-private-deps.sh parent cargo build', data)
+                    self.assertIn('--mount=type=secret,id=federated_key', data)
+                    self.assertIn('openssh-client', data.split('COPY . /build/')[0])
+                else:
+                    self.assertIn('sh /build/build/with-private-deps.sh enclave cargo build', data)
+                    self.assertNotIn('federated_key', data)
 
 
 if __name__ == '__main__':

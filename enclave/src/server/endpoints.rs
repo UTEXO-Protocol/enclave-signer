@@ -36,20 +36,19 @@ pub(super) fn handle_set_endpoints(
         .ok_or_else(|| EnclaveError::InvalidRequest("the EVM RPC endpoint is not set".into()))?;
     #[cfg(feature = "evm-rpc")]
     let (evm_source, evm_rpc_tls) = crate::bootstrap::resolve_evm_data_source(tls);
-    #[cfg(feature = "evm-rpc")]
-    let evm_min_confirmations = ctx.evm_rpc_config.min_confirmations;
     #[cfg(not(feature = "evm-rpc"))]
-    let (evm_source, evm_rpc_tls, evm_min_confirmations) =
-        (crate::policy::EvmDataSource::Disabled, None, 0);
+    let (evm_source, evm_rpc_tls) = (crate::policy::EvmDataSource::Disabled, None);
     let policy = SecurityPolicy::resolve(
         &ctx.build_ctx,
         &ctx.bridge_config,
         evm_source,
         evm_rpc_tls,
         &endpoints.electrum_host,
-        evm_min_confirmations,
     )
-    .with_kms(endpoints.kms.clone());
+    .with_kms(endpoints.kms.clone())
+    // A production policy of a cloning role reads its own PCR3 (the parent
+    // IAM role) here. The gate below refuses an all-zero PCR3.
+    .with_clone_peer_pcr3(crate::attestation::get_own_pcr3)?;
     policy
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
@@ -275,6 +274,7 @@ mod tests {
         for request in [
             Request::Sign(SignRequest::default()),
             Request::SignBtc(SignBtcRequest::default()),
+            Request::SignRightsRefill(SignRightsRefillRequest::default()),
             Request::SignRawDigest(SignRawDigestRequest::default()),
             Request::SignCcd(SignCcdRequest::default()),
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
@@ -288,6 +288,11 @@ mod tests {
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
         ] {
             assert!(not_ready(call(&ctx, request)));
+        }
+        // The mint signer serves the refill, so it waits for the set too.
+        if cfg!(all(feature = "bfa-mint", evm_to_rgb)) {
+            let refill = Request::SignRightsRefill(SignRightsRefillRequest::default());
+            assert!(not_ready(call(&ctx, refill)));
         }
         let h = health(&ctx);
         assert!(!h.endpoints_set && !h.ready && h.key_loaded);

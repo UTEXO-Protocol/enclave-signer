@@ -6,8 +6,59 @@ bridge on Arbitrum One.
 
 The operator publishes one attestation bundle per burn enclave:
 `attestation-<CID>.json`. `deploy/verify-identity.sh` writes it after the
-enclave has its key. It fails and writes nothing if the attestation does not
-verify.
+enclave has its key and the operator supplies the complete approved identity
+map. An attestation failure returns nonzero; other CIDs may already have exported
+bundles. Do not treat individual files as approval of the whole deployment.
+
+## Operator: approve every signer before routing
+
+Obtain the expected main EVM address for **every CID** from the approved deployment
+record and confirm its on-chain registration. Do not generate this map from the
+live keys returned by the nodes you are checking.
+
+Run on each enclave host, replacing the paths and all three addresses:
+
+```bash
+CLUSTER_DIR=/path/to/release \
+ENCLAVE_ENV=/etc/utexo/enclave.env \
+CIDS="16 18 20" \
+EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
+bash deploy/verify-identity.sh
+```
+
+`CIDS` must list every signer that will receive traffic on this host.
+`EXPECTED_EVM` must contain exactly one address for each listed CID. Empty or
+partial maps, duplicate or extra CIDs, and malformed addresses return exit 2
+before any enclave is queried or bundle exported. An explicitly empty `CIDS`
+is also an error; only an unset `CIDS` defaults to `16 18 20`.
+
+For burn/combined signers in normal mode, configure `SIGNER_ROLE`, `PCR_FILE` and
+`IMAGE_ENV` in `ENCLAVE_ENV`, along with the release's launch values. Each export
+receives its approved address through `--expect-evm-address`. Mint or debug mode
+checks the main address with `get-keys`; this is a structural identity check,
+not an attestation. The script compares supplied approvals, not on-chain state.
+
+Routing automation must invoke the default identity mode and require exit 0
+for the full CID list, along with the deployment's other readiness checks.
+Any node failure or identity mismatch returns exit 1; configuration errors
+return exit 2. Do not continue routing on either error or use a partial bundle
+set as a substitute for the successful gate.
+
+For a diagnostic check of running enclaves and initialized keys only:
+
+```bash
+CLUSTER_DIR=/path/to/release CIDS="16 18 20" \
+bash deploy/verify-identity.sh --liveness
+```
+
+This explicit mode needs no identity map or release PCRs, exports no bundles,
+and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
+routing. Omitting the map in the default mode no longer falls back to liveness.
+
+The bundle format is `utexo-signer-attestation/2`. The `verification_mode`
+field tells how the exporter checked the document (`real` or `mock`).
+`attest-verify` refuses a bundle whose mode is not its own, and refuses an
+older format.
 
 ## What one bundle proves
 
@@ -56,7 +107,8 @@ them, and decide whether you accept each one:
 | `rgb_asset_id` | `--expect-rgb-asset-id` | the BFA asset of the deployment |
 | `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json` |
 | `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json` |
-| `evm_min_confirmations` | `--expect-evm-min-confirmations` | `EVM_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
+| `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json` (`safe` or `finalized`; `latest` is refused) |
+| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 6 for burn, 3 for mint) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
 | `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json` |
 | `electrum_host` | `--expect-electrum-host` | the Electrum server you accept |
 | `evm_rpc_tls.host` | `--expect-evm-rpc-host` | the EVM RPC host you accept |
@@ -64,6 +116,16 @@ them, and decide whether you accept each one:
 
 The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
+
+Policy version 1 commits to the selected finality tag and the Bitcoin witness
+depth. Production verification
+requires `--expect-evm-finality-tag` with the approved value. Receipt checks
+require coverage by that head and canonical block-hash matching. Use the
+verifier and EIF from the same release with approved PCRs.
+
+The `policy` also lists `clone_peer_pcr3`, the PCR3 of the parent instance IAM
+role. You set no flag for it. `attest-verify` takes the expected value from the
+signed document, and refuses a burn signer whose PCR3 is missing or all zero.
 
 ## Run the check
 
@@ -77,7 +139,8 @@ bash build/verify-signer.sh https://<published location>/attestation-16.json \
   --expect-rgb-asset-id 'rgb:<BFA contract id>' \
   --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-  --expect-evm-min-confirmations 12 \
+  --expect-evm-finality-tag safe \
+  --expect-spv-min-confirmations 6 \
   --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-electrum-host <electrum host> \
   --expect-evm-rpc-host <rpc host> \
@@ -96,4 +159,5 @@ The script:
    827166 is the bridge's id for the RGB network (`RGB_CHAIN_ID`).
 
 Exit 0 means all checks pass. Exit 1 names the check that failed. Exit 2 is a
-usage error. Run the script once for each published bundle.
+usage error. The script refuses `--mock` with exit 2: a signer is verified in
+real mode only. Run the script once for each published bundle.

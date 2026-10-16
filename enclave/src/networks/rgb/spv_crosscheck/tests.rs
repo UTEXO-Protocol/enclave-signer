@@ -1,7 +1,9 @@
 use super::*;
+use crate::config::DEFAULT_SPV_MIN_CONFIRMATIONS;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
 use crate::networks::rgb::spv::HeaderChain;
 use crate::proto::MerkleProofEntry;
+use crate::test_support::ANY_HEADER_CLOCK;
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;
 use bitcoin::hashes::{sha256d, Hash};
@@ -21,7 +23,9 @@ fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
         },
     );
     let raw_headers: Vec<Vec<u8>> = headers.iter().map(serialize).collect();
-    chain.submit_headers(1, &raw_headers).unwrap();
+    chain
+        .submit_headers(1, &raw_headers, ANY_HEADER_CLOCK)
+        .unwrap();
     chain
 }
 
@@ -142,7 +146,13 @@ fn happy_path_single_tx_block_with_six_confirmations() {
     let chain = chain_burying(target, 5);
     let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
 
-    validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
+    validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap();
 }
 
 /// Regression: an anchor more than 2122 blocks below the tip still verifies.
@@ -165,7 +175,13 @@ fn deep_anchor_below_old_window_still_verifies() {
          (tip={tip}, old_pruned_base={old_pruned_base})"
     );
 
-    validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap();
+    validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -175,8 +191,13 @@ fn rejects_insufficient_confirmations() {
     let chain = chain_burying(target, 2);
     let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
 
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("insufficient confirmations"),
         "got: {err}"
@@ -190,8 +211,13 @@ fn rejects_block_height_beyond_tip() {
     let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
     proof.block_height = chain.tip_height() + 100;
 
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     // "no header at height" (nothing above tip) or "beyond chain tip"
     // (underflow check). Both are valid.
     let msg = err.to_string();
@@ -208,8 +234,13 @@ fn rejects_block_height_at_checkpoint_or_below() {
     let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
     proof.block_height = 0; // checkpoint height: header not stored
 
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("no header at height"),
         "got: {err}"
@@ -236,7 +267,7 @@ fn rejects_extra_proof_for_unknown_txid() {
         &chain,
         &[txid_display],
         &[proof, bogus_proof],
-        SPV_MIN_CONFIRMATIONS,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
     )
     .unwrap_err();
     assert!(err.to_string().contains("does not match any"), "got: {err}");
@@ -254,7 +285,7 @@ fn rejects_missing_proof_for_expected_txid() {
         &chain,
         &[txid_display, extra_txid],
         &[],
-        SPV_MIN_CONFIRMATIONS,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
     )
     .unwrap_err();
     assert!(
@@ -273,7 +304,7 @@ fn rejects_duplicate_proof() {
         &chain,
         &[txid_display],
         &[proof.clone(), proof],
-        SPV_MIN_CONFIRMATIONS,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
     )
     .unwrap_err();
     assert!(
@@ -304,7 +335,7 @@ fn rejects_bad_merkle_path() {
         &chain,
         &[block.txid0_display],
         &[proof],
-        SPV_MIN_CONFIRMATIONS,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
     )
     .unwrap_err();
     assert!(err.to_string().contains("computed root"), "got: {err}");
@@ -336,7 +367,7 @@ fn happy_path_two_tx_block() {
         &chain,
         &[block.txid0_display, block.txid1_display],
         &[proof0, proof1],
-        SPV_MIN_CONFIRMATIONS,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
     )
     .unwrap();
 }
@@ -352,8 +383,13 @@ fn rejects_short_txid_in_proof() {
         merkle_path: vec![],
     };
 
-    let err =
-        validate_spv_proofs(&chain, &[[0u8; 32]], &[bad_proof], SPV_MIN_CONFIRMATIONS).unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[[0u8; 32]],
+        &[bad_proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
 }
 
@@ -370,8 +406,13 @@ fn rejects_short_merkle_path_entry() {
         merkle_path: vec![vec![0u8; 16]], // not 32 bytes
     };
 
-    let err = validate_spv_proofs(&chain, &[txid_display], &[bad_proof], SPV_MIN_CONFIRMATIONS)
-        .unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[bad_proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
 }
 
@@ -390,8 +431,13 @@ fn rejects_overdeep_merkle_path() {
         merkle_path: vec![vec![0u8; 32]; MAX_MERKLE_PATH_DEPTH + 1],
     };
 
-    let err = validate_spv_proofs(&chain, &[txid_display], &[bad_proof], SPV_MIN_CONFIRMATIONS)
-        .unwrap_err();
+    let err = validate_spv_proofs(
+        &chain,
+        &[txid_display],
+        &[bad_proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("too deep"), "got: {err}");
 }
 
@@ -402,7 +448,67 @@ fn assert_chain_net_accepts_matching_pair() {
     assert_chain_net("bc", Network::Mainnet).unwrap();
     assert_chain_net("sb", Network::Signet).unwrap();
     assert_chain_net("tb3", Network::Testnet3).unwrap();
+    assert_chain_net("tb4", Network::Testnet4).unwrap();
+    assert_chain_net("sbc", Network::SignetCustom).unwrap();
     assert_chain_net("bcrt", Network::Regtest).unwrap();
+}
+
+#[test]
+fn assert_chain_net_tells_the_custom_signet_apart() {
+    assert!(assert_chain_net("sb", Network::SignetCustom).is_err());
+    assert!(assert_chain_net("sbc", Network::Signet).is_err());
+}
+
+/// Real testnet4 headers 155_233..=155_262 on the compiled checkpoint.
+fn testnet4_chain() -> HeaderChain {
+    let raws: Vec<Vec<u8>> = include_str!("../spv/chain/testnet4_155233_155262.hex")
+        .lines()
+        .map(|line| hex::decode(line).unwrap())
+        .collect();
+    let mut chain = HeaderChain::new(
+        Network::Testnet4,
+        crate::networks::rgb::spv::checkpoint::TESTNET4_CHECKPOINT,
+    );
+    chain
+        .submit_headers(155_233, &raws, ANY_HEADER_CLOCK)
+        .unwrap();
+    chain
+}
+
+/// Min-difficulty blocks count on the testnets. The tip (155_262) is one, so
+/// 155_257 is exactly six deep and 155_258 is five.
+#[test]
+fn min_difficulty_blocks_make_a_witness_deep() {
+    let chain = testnet4_chain();
+    let (txid, proof) = single_tx_proof(chain.header_at(155_257).unwrap(), 155_257);
+    validate_spv_proofs(&chain, &[txid], &[proof], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap();
+
+    let (txid, proof) = single_tx_proof(chain.header_at(155_258).unwrap(), 155_258);
+    let err =
+        validate_spv_proofs(&chain, &[txid], &[proof], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap_err();
+    assert!(
+        err.to_string().contains("insufficient confirmations"),
+        "got: {err}"
+    );
+}
+
+/// A fresh min-difficulty tip keeps the chain fresh on the testnets.
+#[test]
+fn a_min_difficulty_tip_keeps_the_chain_fresh() {
+    let chain = testnet4_chain();
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
+    assert_chain_fresh(&chain, now).unwrap();
+}
+
+/// The depth is a parameter: the same proof passes at 1 and fails at 2.
+#[test]
+fn min_confirmations_is_a_parameter() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 0);
+    let (txid, proof) = single_tx_proof(&target, 1);
+    validate_spv_proofs(&chain, &[txid], std::slice::from_ref(&proof), 1).unwrap();
+    let err = validate_spv_proofs(&chain, &[txid], &[proof], 2).unwrap_err();
+    assert!(err.to_string().contains("(1 < 2)"), "got: {err}");
 }
 
 #[test]
@@ -424,7 +530,7 @@ fn empty_expected_and_empty_proofs_is_ok() {
     // No witness bundles and no proofs: nothing to verify, and no panic.
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 5);
-    validate_spv_proofs(&chain, &[], &[], SPV_MIN_CONFIRMATIONS).unwrap();
+    validate_spv_proofs(&chain, &[], &[], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap();
 }
 
 // ===== Staleness tests =====
@@ -555,4 +661,59 @@ fn staleness_thresholds_are_what_we_documented() {
     // tradeoff, so a change must also change this test.
     assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
     assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
+}
+
+// ===== proven witnesses (what consensus sees as mined) =====
+
+#[test]
+fn proven_witnesses_carry_their_block_height_and_time() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 5);
+    let (mut txid, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+    let proven = proven_witnesses(&chain, &[proof], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap();
+
+    txid.reverse();
+    let pos = proven[&bitcoin::Txid::from_byte_array(txid)];
+    assert_eq!(pos.height().get(), 1);
+    assert_eq!(pos.timestamp(), i64::from(target.time));
+}
+
+#[test]
+fn proven_witnesses_refuse_a_proof_short_of_min_confirmations() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 4);
+    let (_, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+    let err = proven_witnesses(&chain, &[proof], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap_err();
+    assert!(
+        err.to_string().contains("insufficient confirmations"),
+        "{err}"
+    );
+}
+
+#[test]
+fn proven_witnesses_refuse_a_tx_the_block_does_not_commit() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 5);
+    let (_, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+    proof.txid = vec![0x42; 32];
+
+    let err = proven_witnesses(&chain, &[proof], DEFAULT_SPV_MIN_CONFIRMATIONS).unwrap_err();
+    assert!(err.to_string().contains("computed root"), "{err}");
+}
+
+#[test]
+fn proven_witnesses_refuse_a_duplicate_proof() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 5);
+    let (_, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
+
+    let err = proven_witnesses(
+        &chain,
+        &[proof.clone(), proof],
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("duplicate merkle proof"), "{err}");
 }

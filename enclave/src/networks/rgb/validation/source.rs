@@ -4,7 +4,11 @@
 #[cfg(rgb_to_evm)]
 use super::asset_bind::{assert_asset_binding, AssetBindMode};
 #[cfg(rgb_to_evm)]
+use super::reject_list::{assert_not_rejected, RejectCheck};
+#[cfg(rgb_to_evm)]
 use super::types::ValidatedConsignment;
+#[cfg(rgb_to_evm)]
+use super::witness::WitnessCheck;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
@@ -24,11 +28,16 @@ use std::time::SystemTime;
 /// It does not examine the destination network. The source-chain proof is:
 ///
 /// 1. raw consignment bytes are present, hash-bound, and pass full
-///    in-enclave RGB validation;
+///    in-enclave RGB validation. Consensus sees a witness mined only if its
+///    Merkle proof verified against the in-enclave header chain at
+///    `SPV_MIN_CONFIRMATIONS` depth, so an unmined witness anywhere in the
+///    history fails it;
 /// 2. the validated asset matches the listener-declared `asset_id` and, if
 ///    configured, the operator-pinned `RGB_ASSET_ID`;
-/// 3. each witness tx has a Merkle proof against the in-enclave header chain
-///    with enough confirmations (`rgb-validation` requires `spv`).
+/// 3. the proofs cover exactly the witness txs, and the blocks they use are
+///    pinned until signing (`rgb-validation` requires `spv`);
+/// 4. no input of the settling transition descends from an opout the asset's
+///    reject list rejects.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -42,10 +51,23 @@ pub fn validate_source(
         )
     })?;
 
-    // A burn consignment contains its full mint ancestry. Each mint transition
-    // ends in `cea`, and consensus runs them again. Thus it needs the EVM locks
-    // that the enclave verified.
-    let validated = validator.validate_consignment(&source.consignment, ctx.bridge_events)?;
+    let proven = {
+        let chain = lock_chain(ctx)?;
+        spv_crosscheck::proven_witnesses(
+            &chain,
+            &source.merkle_proofs,
+            ctx.bridge_config.spv_min_confirmations,
+        )?
+    };
+    let witnesses = WitnessCheck {
+        chain: &proven,
+        allow_unbroadcast_last: false,
+        infer_spent_ancestors: false,
+    };
+    // A burn consignment contains its full mint ancestry. Each mint leaves an
+    // anchor that only a bound lock confirms.
+    let validated =
+        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &witnesses)?;
 
     assert_asset_binding(
         &validated.contract_id,
@@ -55,20 +77,34 @@ pub fn validate_source(
     )?;
 
     {
-        let chain = ctx
-            .header_chain
-            .lock()
-            .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))?;
+        let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(
             &chain,
             Some(&validated),
             &source.merkle_proofs,
             SystemTime::now(),
             ctx.chain_pins,
+            ctx.bridge_config.spv_min_confirmations,
         )?;
     }
 
+    // Last: it reads the EVM RPC, and only after the asset bind.
+    assert_not_rejected(
+        &validated,
+        ctx.reject_list_reader,
+        RejectCheck::SettlingInputs,
+    )?;
+
     Ok(validated)
+}
+
+#[cfg(rgb_to_evm)]
+fn lock_chain<'a>(
+    ctx: &'a ValidationContext<'_>,
+) -> Result<std::sync::MutexGuard<'a, crate::networks::rgb::spv::HeaderChain>> {
+    ctx.header_chain
+        .lock()
+        .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))
 }
 
 /// Total size cap (`MAX_CONSIGNMENT_BYTES`, set by the operator). It runs

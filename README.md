@@ -51,7 +51,11 @@ Reference material:
    only when the configured URL uses `ssl://`.
 5. The parent sends Bitcoin block headers to the enclave. On mainnet, the
    enclave checks proof of work and maintains its own header chain.
-   Signet and regtest use weaker checks. See the specification.
+   On testnet4 it also applies the 20-minute rule and BIP94. On the testnets
+   min-difficulty blocks count as confirmations and freshness, for testing
+   convenience: testnets carry no production value. On every network it
+   refuses a header more than 2 hours ahead of its clock. Signet
+   and regtest use weaker checks. See the specification.
 
 See the [component diagram](docs/diagrams/01-components.md) and the
 [deployment diagram](docs/diagrams/02-deployment.md).
@@ -77,24 +81,34 @@ the user. The mint signer signs the Bitcoin transaction that does the mint.
 
 Before it signs, the mint signer:
 
-1. Gets the EVM deposit receipt itself. The receipt must be a success and at
-   least `EVM_MIN_CONFIRMATIONS` blocks deep (default 12).
+1. Gets the EVM deposit receipt itself. The receipt must be a success, be at
+   or below the RPC head selected by `EVM_FINALITY_TAG` (default `safe`), and
+   have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
-3. Validates the RGB consignment (full RGB consensus). The asset must be the
-   pinned `RGB_ASSET_ID`. Each BFA `Bridge` (mint) transition must have a
-   verified `FundsIn` lock behind it.
-4. Binds the PSBT to the consignment. The txid, the inputs and the sighash
-   types must match. The minted units must equal `amount - commission`
-   exactly.
-5. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
+3. Reads the mint from the PSBT rgb-lib committed, with no consignment. The
+   first `OP_RETURN` must commit exactly the bundles the PSBT discloses: one
+   bundle of the pinned `RGB_ASSET_ID`, holding one mint whose id is
+   recomputed. The txid and the sighash types cannot change. The mint
+   consumes one `mintRight`, passes no right on, and pays exactly
+   `amount - commission` units to one blinded seal.
+4. Checks the parent PSBT: the tx that made the spent right was a transfer
+   that put that right alone on its own output, and the PSBT spends that
+   output, its only input. So every signature for this mint spends the same
+   UTXO.
+5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
+   derives, after its `afterBlock` and covered by the `EVM_FINALITY_TAG` head,
+   read from a node on the pinned chain.
+6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
-   the one blinded seal in the consignment must equal that invoice.
-6. Checks the Bitcoin fee and the sats that leave the bridge.
-7. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
+   the mint's one blinded seal must equal that invoice.
+7. Checks the Bitcoin fee. No sat may leave the bridge's own outputs.
+8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
    A Tapret or script-tree root can be part of the output-key tweak.
 
-Full detail: [`docs/mint-flow.md`](docs/mint-flow.md).
+The mint signer validates no RGB history. A bad history makes the mint
+invalid for every receiver, so it is liveness only. Full detail:
+[`docs/mint-flow.md`](docs/mint-flow.md).
 
 ## Burn flow (RGB -> EVM)
 
@@ -104,18 +118,26 @@ N signatures.
 
 Before it signs, the burn signer:
 
-1. Verifies each EVM deposit behind the burned units (the mint ancestry).
-2. Validates the RGB consignment. The last transition must be a BFA `Burn`.
-3. Checks that each Bitcoin transaction of the consignment is in its own
-   header chain, at least 6 blocks deep. The chain tip must be less than
-   2 hours old.
-4. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
+1. Validates the RGB consignment (full RGB consensus over the whole history).
+   Each mint in the history is confirmed only against the deposit it
+   derives. The last transition must be a BFA `burn`.
+2. Checks that each Bitcoin transaction of the consignment is in its own
+   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
+   The chain tip must be less than 2 hours old.
+   If the genesis names a reject list (an `IRgbRejectList` contract on
+   `EVM_CHAIN_ID`), it reads the list over the pinned EVM RPC and refuses a
+   burn whose inputs descend from a rejected output. The mint signer checks
+   the mint's inputs and outputs the same way. Any read failure refuses, so
+   burn hosts need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
+3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
-5. Checks `sourceChainId`, `sourceAddress` and `burnId`.
-6. Checks the BtcRelay finality proof against its own header chain.
-7. Binds the release to the burn: amount, `sourceBurnTxId`, recipient and
-   `settlementData`.
-8. Signs the EIP-712 `TeeFundsOut` (or `TeeLzFundsOut`) digest over the
+4. Checks `sourceChainId`, `sourceAddress` and `burnId`.
+5. Checks the BtcRelay finality proof against its own header chain.
+6. Binds the release to the burn: amount (`burnedAsset`), `sourceBurnTxId`,
+   destination (`burnReason`: a left-padded EVM address, or the hash of a
+   destination record, see [docs/burn-destination.md](docs/burn-destination.md))
+   and `settlementData` (exactly the deposits of the history's mints).
+7. Signs the EIP-712 `TeeFundsOut` (or `TeeLzFundsOut`) digest over the
    decoded fields.
 
 The burn signer also signs the gas transaction that sends the release to EVM
@@ -178,13 +200,17 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   (`listener`, `clone-operator`, `observer`). See
   [`docs/parent-mtls.md`](docs/parent-mtls.md).
 - `Sign` routes by `data_type`: `TRANSACTION` -> enclave `Sign`,
-  `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`.
+  `EVM_GAS_TX` -> `SignRawDigest`, `BTC_UTXO` -> `SignBtc`,
+  `RGB_RIGHTS_REFILL` -> `SignRightsRefill` (no source proof).
 - `SubmitHeaders` answers `PERMISSION_DENIED` to every caller. The parent's
   header sync writes headers through the direct enclave protocol. Other direct
   enclave clients can also submit headers. The sync reads headers from
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
 - The parent opens one new TCP or vsock connection per enclave RPC, with a
   30 s timeout.
+- `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
+  clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
+  the enclave.
 - `GET /health` on a loopback port tells if the enclave can sign now. See
   [Readiness endpoint](#readiness-endpoint).
 
@@ -202,6 +228,7 @@ request per connection. Frame cap 24 MiB. Schema:
 | `GetAttestedPublicKey` | Active | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. |
 | `Sign` | Active | mint, burn | Bridge signing. Mint signer: EVM -> RGB only. Burn signer: RGB -> EVM only. |
 | `SignBtc` | Active | mint | Plain-BTC PSBT on the vanilla account. Off unless the attested policy turns it on. |
+| `SignRightsRefill` | Active | mint | The mint wallet sends one `mintRight` to 2..255 of its own Colored outputs. No units move. At most 12 per hour pass the PSBT gate. See [`docs/mint-flow.md`](docs/mint-flow.md#8-rights-refill-signrightsrefill). |
 | `SignRawDigest` | Active | burn | Gas transaction under the attested allowlist. |
 | `SignCcd` | Active | `ccd` builds | Ed25519 over a 32-byte hash. |
 | `SubmitHeaders` | any | RGB builds | Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). The parent denies this gRPC method to clients. Direct enclave callers can still submit headers. |
@@ -211,7 +238,6 @@ request per connection. Frame cap 24 MiB. Schema:
 | `SetClone` | Cloning | burn | Requester installs the sealed seed and goes `Active`. |
 | `SignRawMessage` | - | - | Removed. Always refused. |
 | `Health` | any | all | Readiness: endpoints set and key loaded. Builds with the RGB -> EVM path also require a ready header chain. |
-| `ProxyFederation` | - | - | Not implemented. Always refused (code `1`). |
 
 The "Signer" column is for the mint/burn images. Other builds (combined,
 CCD) keep both directions where their features allow it.
@@ -231,16 +257,15 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
 
 - **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
   matters for reproducible PCR0.
-- **SSH deploy keys** - the workspace currently pins the RGB crates to private
-  BFA mirrors (`rgb-consensus-s-bfa`, `rgb-ops-s-bfa`, `rgb-schemas-s-bfa`)
-  through the `github-rgb-*` SSH host aliases in `Cargo.toml`. Every build,
-  including the enclave, needs read access to them. `consignment-utils` is
-  public and is fetched over HTTPS without a key.
-  The parent additionally needs `federated-signer-proto`. CI wires the aliases
-  in `.github/workflows/ci.yml`; copy that `~/.ssh/config` shape locally.
-  External users cannot build without read access to all three private repos.
-  Public source builds require public access to their pinned revisions.
-  Access alone does not prove that a build reproduces the approved PCR0.
+- **Read access to `UTEXO-Protocol/rgb-lib-bfa`.** The RGB crates come from
+  crates.io (`0.11.2-rc.1`, exact pins). rgb-lib, which reads consignments,
+  comes from our private mirror of the RGB-Tools release until that release
+  is public. Both workspaces fetch it over HTTPS, so Git needs a GitHub token
+  with read access to it. The parent also needs read access to
+  `federated-signer-proto` through the `github-federated-signer` SSH alias.
+  CI wires both in `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_TOKEN` and
+  `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). Repository access alone does not
+  prove that a build reproduces the approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
@@ -294,6 +319,12 @@ profile. CI asserts every guard fires.
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
+Every enclave image needs a GitHub token with read access to
+`UTEXO-Protocol/rgb-lib-bfa` at build time: `GITHUB_TOKEN`, or a
+`github_token` file in `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes it as the
+BuildKit secret `github_token`, and `build/with-private-deps.sh enclave` reads
+it for the cargo build only. The token is never in a layer, the image or PCR0.
+
 ```bash
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn ./build/build-enclave.sh   # burn signer
@@ -331,33 +362,28 @@ Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
-All Dockerfiles resolve private dependencies. Supply either a GitHub token
-with read access to those repositories, or the same per-repository deploy keys
-used by Rust CI. Credentials are mounted as BuildKit secrets during Cargo's
-build step; they are not copied into image layers.
+Every image resolves the private rgb-lib mirror: supply a GitHub token with
+read access to `UTEXO-Protocol/rgb-lib-bfa` as the `github_token` secret.
+`Dockerfile.parent` also resolves `federated-signer-proto`: the same token
+(if it can read it) or its deploy key as `federated_key`. Credentials are
+mounted as BuildKit secrets during Cargo's build step; they are not copied
+into image layers.
 
 ```bash
-# GITHUB_TOKEN must already be exported; the value is not a build argument.
 docker build --secret id=github_token,env=GITHUB_TOKEN \
   -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
+RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh
 
-# EIF: uses GITHUB_TOKEN, or PRIVATE_DEPS_DIR if no token is set.
-RGB_ASSET_ID="rgb:<approved-swap-contract-id>" \
-  PRIVATE_DEPS_DIR=/absolute/path/to/private-deps ./build/build-enclave.sh
+# GITHUB_TOKEN must already be exported; the value is not a build argument.
+docker build --secret id=github_token,env=GITHUB_TOKEN \
+  -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-The key directory contains `consensus_key`, `ops_key`, and `schemas_key`;
-parent builds also need `federated_key`. Keep it outside the
-checkout, with directory mode `700` and key files `600`. For a direct Docker
-build with keys, pass each file as `--secret id=<name>,src=<absolute-path>`.
-`make build_*` uses the token option by default; `DOCKER_AUTH_ARGS` can override
-it with those key-file arguments.
-
-CD and EIF workflows reuse the four deploy-key secrets configured for Rust CI:
-`RGB_CONSENSUS_BFA_DEPLOY_KEY`,
-`RGB_OPS_BFA_DEPLOY_KEY`, `RGB_SCHEMAS_BFA_DEPLOY_KEY`, and
-`FEDERATED_SIGNER_PROTO_DEPLOY_KEY`. The workflow's automatic `GITHUB_TOKEN`
-is used for image publishing, not cross-repository dependency access.
+`make build_parent*` and `make build_enclave*` use the token option by
+default. A `DOCKER_AUTH_ARGS` value replaces that default, so to pass the
+parent's deploy key set both: `--secret id=github_token,env=GITHUB_TOKEN --secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the `RGB_LIB_BFA_TOKEN` and
+`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The workflow's automatic `GITHUB_TOKEN` is used for image publishing,
+not cross-repository dependency access.
 
 The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
@@ -395,8 +421,8 @@ The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
 `TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
 measured into PCR0. The cloning secret is never baked. The chain endpoints and
-the KMS values are not in the image: anyone can rebuild the EIF and get the
-same PCR0 without knowing them.
+the KMS values are not in the image: a rebuild of the EIF gets the same PCR0
+without knowing them (build access: see Building).
 
 ## Running
 
@@ -432,6 +458,10 @@ Initialize once: use `cli init --cloning-secret-file <file>` instead of
 `cli init` to configure a donor. Use a fresh requester for `cli clone`; initialization
 and cloning are alternative ways to enter `Active`. Signing subcommands require
 complete proofs and configured pins; see their `--help` and the spec.
+
+A successful clone retains the verified session's cloning secret and can act
+as a donor for a replacement without another `init`. The export cap applies
+per enclave; it does not limit the total number of replicas across a cluster.
 
 ### Production (Nitro)
 
@@ -533,12 +563,31 @@ Data sources and transport:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet`, `signet`, `regtest`. Selects the SPV checkpoint, coin types and xpub prefix. Baked into the image. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum resolver. |
+| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it; the mint image still pins it. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
-| `EVM_MIN_CONFIRMATIONS` | `12` | Attested minimum depth of a `FundsIn` receipt; zero is rejected at production boot. |
+| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
+| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
+
+EVM deposit receipts must be at or below the head returned by
+`eth_getBlockByNumber(EVM_FINALITY_TAG, false)` and match the canonical block
+hash at their height. The enclave revalidates the selected head snapshot to
+detect a reorg during verification.
+
+| Tag | Arbitrum acceptance |
+|-----|---------------------|
+| `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. Development builds only: a production policy refuses it at boot. |
+| `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. Default. |
+| `finalized` | Batch covered by L1's finalized head. |
+
+Values must use the exact lowercase spelling. See
+[Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).
+The enclave refuses signing until the deposit meets the selected tag and
+whenever required RPC data is unavailable or invalid. Retry a pending deposit
+after the selected head covers it. Production verification requires
+`--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 (`SetEndpoints`), never in the image. The attested policy commits the Electrum
@@ -560,7 +609,7 @@ Limits and dev knobs:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONSIGNMENT_BYTES` | 8 MiB | Consignment size cap. Sized for a history of 10,000 transitions. |
+| `MAX_CONSIGNMENT_BYTES` | 12 MiB | Consignment size cap. Sized for a history of 10,000 transitions, each with an SPV proof. |
 | `MAX_MERKLE_PROOFS` | `16384` | Proof-count cap per request. A burn needs one proof for each witness tx in its history. |
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
@@ -578,6 +627,8 @@ Limits and dev knobs:
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
 | `HEALTH_PORT` | `5001` | Port for `GET /health` |
+| `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, `1..=10000`. Out of range stops the parent at boot. |
+| `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, `1..=10000`. Each call makes one NSM attestation in the enclave. Out of range stops the parent at boot. |
 | `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked), or `tcp://` to a loopback IP. The parent's header sync reads Bitcoin headers here. Unset: `header_sync.state` is `unconfigured`. Malformed: the parent still serves, `header_sync.state` is `unconfigured` and `last_error` says why. Deploy passes it through; it does not copy `ELECTRUM_URL`, whose enclave-side rules differ. |
 | `HEADER_SYNC_INTERVAL_SECS` | `10` | Seconds between header sync steps, `1..=600`. A malformed value stops the parent at boot. |
 | `RUST_LOG` | unset | Log filter. |
@@ -652,11 +703,11 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
 | `rgb-swap` | `rgb` | Retired RGB flow: send/receive with BFA `Transfer`. In the default set. Not in production. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
-| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `Bridge`, withdrawals `Burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `bfa-validation` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. |
-| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`). Exactly one role per mint/burn build. |
+| `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `rgb-psbt-utils` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the PSBT. |
+| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
-| `bfa-validation` | `evm-rpc` | Runs BFA consensus with verified mint ancestry. Implied by `bfa-mint`. |
+| `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over JSON-RPC, TLS to a pinned host and CA. Without it the enclave refuses every bridge PSBT. |
@@ -686,14 +737,20 @@ Re-syncing changes PCR0. Procedure in
 ## Security model
 
 - **Untrusted host.** Requests from the parent, listener and backend are checked
-  inside the enclave. For RGB-source requests, Bitcoin witness inclusion is
-  checked against its header chain. Concordium source validation still trusts
-  the listener; see the spec for network-specific limits.
+  inside the enclave. Concordium source validation still trusts the listener;
+  see the spec for network-specific limits.
+- **On-chain RGB witnesses.** RGB consensus counts a witness tx as valid only
+  if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
+  transfer in the history fails validation. The burn signer proves this with
+  the request's Merkle proofs against its own header chain. The mint signer
+  checks no witness: it reads the mint from the PSBT, and a bad history makes
+  the mint invalid for every receiver.
 - **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
   authenticates the configured RPC hostname against the pinned CA. The host
   relay cannot alter authenticated responses without detection. The enclave
   checks successful receipts, unique expected events from the pinned contract,
-  operation IDs, amounts and depth relative to the provider-reported chain head.
+  operation IDs, amounts, coverage by the selected finality head and canonical
+  block hashes.
   These checks do not prove EVM consensus: an approved provider can return a
   self-consistent false deposit history. Trust in the provider's data is an
   explicit design assumption. Verifiers must compare the attested host and CA
@@ -706,9 +763,10 @@ Re-syncing changes PCR0. Procedure in
   committed. See the [policy scope](docs/tee-spec.md#4-security-policy).
 - **Fail closed.** Missing feature, missing pin, missing receipt, missing
   proof, zero inputs signed: refuse, never sign with less verification.
-- **Limits.** Bitcoin confirmation depth, freshness, reorg/retention caps and
-  connection limits are compiled in. `EVM_MIN_CONFIRMATIONS` and request-size
-  caps are read from environment; image-baked values are measured with the EIF.
+- **Limits.** Bitcoin freshness, reorg/retention caps and connection limits
+  are compiled in. `SPV_MIN_CONFIRMATIONS`, `EVM_FINALITY_TAG` and
+  request-size caps are read from environment; image-baked values are measured
+  with the EIF.
 - **Key custody.** Seed and keys in `SecretBox`, zeroized on drop.
   `#![deny(unsafe_code)]`. With `kms-persistence`, seeds persist as KMS ciphertext
   in S3. The parent receives no plaintext seed. KMS handles the seed during

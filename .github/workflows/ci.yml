@@ -10,8 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Cargo.toml uses ssh:// URLs for private deps; force Cargo to use the
-  # system git so it honours SSH_AUTH_SOCK set by the SSH setup step.
+  # parent/Cargo.toml uses an ssh:// URL for its private dep; force Cargo to use
+  # the system git so it honours the SSH setup step and the rgb-lib credential.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test private dependency build wiring
+      - name: Test build and deployment scripts
         run: python3 -m unittest discover -s build/tests -v
 
       - name: Install Rust 1.96.1
@@ -33,40 +33,27 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # Each private dep uses a per-repo SSH Host alias (e.g. github-rgb-consensus).
-      # The alias maps to github.com with IdentityFile + IdentitiesOnly yes, so
-      # SSH offers exactly ONE key per connection. Without this, the agent offers
-      # all keys in order; GitHub authenticates with the first accepted key and
-      # then refuses access to any repo that key is not authorised for.
+      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
+      # loads every git source of the lock, so every build here fetches it.
+      - name: Set up access to the rgb-lib mirror
+        env:
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+        run: sh build/ci-rgb-lib-access.sh
+
+      # The parent's private proto dep uses the SSH Host alias
+      # github-federated-signer. The alias maps to github.com with IdentityFile
+      # + IdentitiesOnly yes, so SSH offers exactly ONE key per connection.
       - name: Set up SSH for private deps
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
-          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
-          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
-          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
           Host github-federated-signer
             HostName github.com
             User git
             IdentityFile ~/.ssh/key_federated
-            IdentitiesOnly yes
-          Host github-rgb-consensus
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consensus
-            IdentitiesOnly yes
-          Host github-rgb-ops
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_ops
-            IdentitiesOnly yes
-          Host github-rgb-schemas
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_schemas
             IdentitiesOnly yes
           SSHCONF
           chmod 600 ~/.ssh/config
@@ -167,7 +154,7 @@ jobs:
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
-      # stack (no rgb-ops/rgb-consignment/rgb-schemas/spv). Mirrors
+      # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors
       # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
       # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
       - name: Build (ccd-only)
@@ -181,8 +168,7 @@ jobs:
       # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the
       # guard that a no-spv build refuses to sign `fundsOut`
       # (test_no_spv_build_refuses_funds_out_even_without_merkle_proofs).
-      # Skips the rgb-consignment dep entirely. Like every enclave build here it
-      # still resolves the workspace's private RGB git sources using the keys above.
+      # Compiles no RGB dep.
       - name: Build (minimal — no default features)
         run: cargo build -p utexo-bridge-enclave --no-default-features
 
@@ -238,35 +224,24 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
+      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
+      # loads every git source of the lock, so every build here fetches it.
+      - name: Set up access to the rgb-lib mirror
+        env:
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+        run: sh build/ci-rgb-lib-access.sh
+
       - name: Set up SSH for private deps
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts
           printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
-          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
-          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
-          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
           chmod 600 ~/.ssh/key_*
           cat >> ~/.ssh/config << 'SSHCONF'
           Host github-federated-signer
             HostName github.com
             User git
             IdentityFile ~/.ssh/key_federated
-            IdentitiesOnly yes
-          Host github-rgb-consensus
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consensus
-            IdentitiesOnly yes
-          Host github-rgb-ops
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_ops
-            IdentitiesOnly yes
-          Host github-rgb-schemas
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_schemas
             IdentitiesOnly yes
           SSHCONF
           chmod 600 ~/.ssh/config
@@ -315,32 +290,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Set up SSH for private BFA deps
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          printf '%s\n' "${{ secrets.RGB_CONSENSUS_BFA_DEPLOY_KEY }}"       > ~/.ssh/key_consensus
-          printf '%s\n' "${{ secrets.RGB_OPS_BFA_DEPLOY_KEY }}"             > ~/.ssh/key_ops
-          printf '%s\n' "${{ secrets.RGB_SCHEMAS_BFA_DEPLOY_KEY }}"         > ~/.ssh/key_schemas
-          chmod 600 ~/.ssh/key_*
-          cat >> ~/.ssh/config << 'SSHCONF'
-          Host github-rgb-consensus
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_consensus
-            IdentitiesOnly yes
-          Host github-rgb-ops
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_ops
-            IdentitiesOnly yes
-          Host github-rgb-schemas
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_schemas
-            IdentitiesOnly yes
-          SSHCONF
-          chmod 600 ~/.ssh/config
+      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
+      # loads every git source of the lock, so every build here fetches it.
+      - name: Set up access to the rgb-lib mirror
+        env:
+          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+        run: sh build/ci-rgb-lib-access.sh
 
       - name: Cache cargo registry
         uses: actions/cache@v4

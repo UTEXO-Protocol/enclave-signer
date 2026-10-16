@@ -1,36 +1,48 @@
-//! In-enclave RGB consignment validation using rgbstd plus a witness resolver.
+//! In-enclave RGB consignment validation using rgbstd.
 //!
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the Electrum client that `RgbValidator` uses.
+//! - `indexer.rs`: the indexer client, and the mint path's witness source.
+//! - `witness.rs`: the on-chain witness resolver consensus runs with.
 //! - `consensus.rs`: run rgbstd validation over the consignment bytes.
 //! - `consignment.rs`: decode the resulting `Transfer` into plain shapes.
+//! - `transition.rs`: read one transition's globals and seals, for both paths.
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
-//! - `bfa.rs`: the BFA schema keys and its mint/burn binding.
-//! - `schema.rs`: the trusted type system that a consignment is pinned to.
+//! - `bfa.rs`: the BFA mint anchors and their binding to EVM locks.
+//! - `schema.rs`: the schema rules a consignment is validated under.
+//! - `reject_list.rs`: the issuer's reject list and its graph walk.
 //!
 //! The enclave does not trust the listener `consignment_valid` boolean.
 
 mod asset_bind;
-pub mod bfa;
+mod bfa;
 mod consensus;
 mod consignment;
 mod indexer;
+mod reject_list;
 mod schema;
 mod source;
+mod transition;
 mod types;
+mod witness;
 
 #[cfg(test)]
 mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
-#[cfg(feature = "bfa-validation")]
-pub use bfa::{bfa_binding, BfaBinding, BfaMint};
+pub use bfa::{AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
-pub use indexer::RgbValidator;
+pub use indexer::{IndexerWitnesses, RgbValidator};
+pub use reject_list::{
+    assert_not_rejected, decisions, Decisions, OpoutKey, RejectCheck, RejectListContract,
+    RejectListEntry, RejectListReader, RejectScope,
+};
+pub(crate) use schema::BFA_RULES;
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
 pub use source::validate_source;
+pub use transition::{output_seal, single_global};
 pub use types::{OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment};
+pub use witness::{ConfirmedWitnesses, WitnessCheck};

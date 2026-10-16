@@ -27,9 +27,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use attestation_verify::{AttestedPolicy, EvmDataSource, EvmRpcTlsPin, KmsPin, SignerRole};
+use attestation_verify::{
+    BitcoinNetwork, EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, SignerRole,
+};
 use utexo_bridge_parent::attest_verify::{
-    verify_attested_pubkey, verify_bundle, AttestedPubkeyResult, ExpectedPolicy, VerifyMode,
+    verified_report, verify_attested_pubkey, verify_bundle, ExpectedPolicy, VerifyMode,
 };
 
 #[derive(Parser)]
@@ -103,6 +105,11 @@ struct Cli {
     #[arg(long)]
     expect_chain_id: Option<u64>,
 
+    /// Require this Bitcoin network: bitcoin (mainnet), testnet3, signet or
+    /// regtest. Ignored with --mock.
+    #[arg(long, default_value = "bitcoin")]
+    expect_bitcoin_network: String,
+
     /// Require this bridge or MultisigProxy address (20-byte 0x-hex). Omit to
     /// accept the authenticated value. Ignored with --mock.
     #[arg(long)]
@@ -118,16 +125,21 @@ struct Cli {
     #[arg(long)]
     expect_funds_in_contract: Option<String>,
 
+    /// Expected EVM RPC head tag: safe or finalized. Required for production
+    /// verification, which refuses latest. Ignored with --mock.
+    #[arg(long, required_unless_present = "mock")]
+    expect_evm_finality_tag: Option<EvmFinalityTag>,
+
     /// Expected ERC-20 that the Bridge releases (`TOKEN_CONTRACT`), as 0x-hex.
     /// It is an input to the `burnId` preimage. Required for production
     /// verification.
     #[arg(long)]
     expect_token_contract: Option<String>,
 
-    /// Expected minimum receipt confirmations. Required and not zero for
-    /// production verification.
+    /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
+    /// Default: the shipped image value, 3 for mint and 6 otherwise.
     #[arg(long)]
-    expect_evm_min_confirmations: Option<u64>,
+    expect_spv_min_confirmations: Option<u32>,
 
     /// Expected gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`), as
     /// 0x-hex. Omit if the gas path is not pinned. The enclave then commits an
@@ -284,10 +296,29 @@ fn parse_expect_token_contract(s: &Option<String>) -> Result<[u8; 20]> {
     parse_hex20(s, "--expect-token-contract")
 }
 
-fn parse_expect_evm_min_confirmations(value: Option<u64>) -> Result<u64> {
-    value
+/// A production enclave refuses `latest` at boot, so no verifier expects it.
+fn parse_expect_evm_finality_tag(value: Option<EvmFinalityTag>) -> Result<EvmFinalityTag> {
+    match value.context("--expect-evm-finality-tag required (or pass --mock)")? {
+        EvmFinalityTag::Latest => {
+            anyhow::bail!("--expect-evm-finality-tag latest is not a production policy")
+        }
+        tag => Ok(tag),
+    }
+}
+
+/// The `SPV_MIN_CONFIRMATIONS` of the shipped image of `role` (a test reads the Dockerfiles).
+fn default_spv_min_confirmations(role: SignerRole) -> u32 {
+    if role == SignerRole::Mint {
+        3
+    } else {
+        6
+    }
+}
+
+fn parse_expect_spv_min_confirmations(value: Option<u32>, role: SignerRole) -> Result<u32> {
+    Some(value.unwrap_or(default_spv_min_confirmations(role)))
         .filter(|n| *n > 0)
-        .context("--expect-evm-min-confirmations must be specified and greater than zero")
+        .context("--expect-spv-min-confirmations must be greater than zero")
 }
 
 /// Parse `--expect-gas-selectors` (comma-separated 4-byte hex) into selectors.
@@ -369,12 +400,21 @@ async fn run(cli: Cli) -> Result<()> {
             electrum_host,
             evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,
+            bitcoin_network: BitcoinNetwork::from_env_str(&cli.expect_bitcoin_network)
+                .with_context(|| {
+                    format!(
+                        "--expect-bitcoin-network {:?} is not bitcoin, testnet3, signet or regtest",
+                        cli.expect_bitcoin_network
+                    )
+                })?,
             expected_bridge_contract,
             expected_rgb_asset_id: cli.expect_rgb_asset_id.clone(),
             funds_in_contract: parse_expect_funds_in_contract(&cli.expect_funds_in_contract)?,
+            evm_finality_tag: parse_expect_evm_finality_tag(cli.expect_evm_finality_tag)?,
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
-            evm_min_confirmations: parse_expect_evm_min_confirmations(
-                cli.expect_evm_min_confirmations,
+            spv_min_confirmations: parse_expect_spv_min_confirmations(
+                cli.expect_spv_min_confirmations,
+                signer_role,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
@@ -395,69 +435,85 @@ async fn run(cli: Cli) -> Result<()> {
         }
         None => verify_attested_pubkey(&cli.endpoint, expected_pcrs, mode, expected_policy).await?,
     };
-    print_ok(&result);
+    print!("{}", verified_report(&result));
     Ok(())
-}
-
-fn print_ok(result: &AttestedPubkeyResult) {
-    let r = &result.response;
-    let v = &result.verified;
-    println!("OK");
-    println!(
-        "  EVM address           : 0x{}",
-        hex::encode(&r.evm_address)
-    );
-    println!(
-        "  EVM uncompressed pub  : 0x{}",
-        hex::encode(&r.evm_uncompressed_pub)
-    );
-    println!(
-        "  BTC compressed pub    : 0x{}",
-        hex::encode(&r.btc_compressed_pub)
-    );
-    println!("  BTC xpub              : {}", r.btc_xpub);
-    println!(
-        "  Master fingerprint    : 0x{}",
-        hex::encode(&r.master_fingerprint)
-    );
-    println!("  Account xpub (vanilla): {}", r.account_xpub_vanilla);
-    println!("  Account xpub (colored): {}", r.account_xpub_colored);
-    println!(
-        "  Bundle commitment     : 0x{}",
-        hex::encode(result.bundle_commitment)
-    );
-    if let AttestedPolicy::Production { kms: Some(k), .. } = &result.policy {
-        println!("  KMS key ARN           : {}", k.key_arn);
-        println!("  KMS region            : {}", k.region);
-        println!("  KMS seed id           : {}", k.seed_id);
-        println!(
-            "  KMS expected address  : {}",
-            k.expected_evm_address
-                .map_or("none".into(), |a| format!("0x{}", hex::encode(a)))
-        );
-    }
-    println!(
-        "  PCR0                  : 0x{}",
-        hex::encode(v.pcrs.get(&0).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!(
-        "  PCR1                  : 0x{}",
-        hex::encode(v.pcrs.get(&1).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!(
-        "  PCR2                  : 0x{}",
-        hex::encode(v.pcrs.get(&2).map(|v| v.as_slice()).unwrap_or(&[]))
-    );
-    println!("  Attestation timestamp : {}", v.timestamp);
-    println!(
-        "  Nonce echoed          : 0x{}",
-        hex::encode(v.nonce.clone())
-    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finality_tag_is_explicit_in_production_and_strictly_parsed() {
+        let missing = Cli::try_parse_from(["attest-verify"]).err().unwrap();
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(missing.to_string().contains("--expect-evm-finality-tag"));
+        assert!(Cli::try_parse_from(["attest-verify", "--mock"]).is_ok());
+        for (value, tag) in [
+            ("latest", EvmFinalityTag::Latest),
+            ("safe", EvmFinalityTag::Safe),
+            ("finalized", EvmFinalityTag::Finalized),
+        ] {
+            let cli =
+                Cli::try_parse_from(["attest-verify", "--expect-evm-finality-tag", value]).unwrap();
+            assert_eq!(cli.expect_evm_finality_tag, Some(tag));
+        }
+        for invalid in ["", "SAFE", "pending"] {
+            assert!(
+                Cli::try_parse_from(["attest-verify", "--expect-evm-finality-tag", invalid])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn production_refuses_an_expected_latest_tag() {
+        let err = parse_expect_evm_finality_tag(Some(EvmFinalityTag::Latest)).unwrap_err();
+        assert!(format!("{err:#}").contains("latest"), "{err:#}");
+        assert!(parse_expect_evm_finality_tag(None).is_err());
+        for tag in [EvmFinalityTag::Safe, EvmFinalityTag::Finalized] {
+            assert_eq!(parse_expect_evm_finality_tag(Some(tag)).unwrap(), tag);
+        }
+    }
+
+    fn image_spv_depth(dockerfile: &str) -> u32 {
+        dockerfile
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("SPV_MIN_CONFIRMATIONS="))
+            .and_then(|v| v.trim_end_matches('\\').trim().parse().ok())
+            .expect("image sets SPV_MIN_CONFIRMATIONS")
+    }
+
+    #[test]
+    fn spv_depth_defaults_to_the_image_value_of_the_role() {
+        for (role, dockerfile) in [
+            (
+                SignerRole::Mint,
+                include_str!("../../../build/Dockerfile.enclave.mint"),
+            ),
+            (
+                SignerRole::Burn,
+                include_str!("../../../build/Dockerfile.enclave.burn"),
+            ),
+            (
+                SignerRole::Combined,
+                include_str!("../../../build/Dockerfile.enclave"),
+            ),
+        ] {
+            assert_eq!(
+                parse_expect_spv_min_confirmations(None, role).unwrap(),
+                image_spv_depth(dockerfile)
+            );
+        }
+        assert_eq!(
+            parse_expect_spv_min_confirmations(Some(6), SignerRole::Mint).unwrap(),
+            6
+        );
+        assert!(parse_expect_spv_min_confirmations(Some(0), SignerRole::Mint).is_err());
+    }
 
     #[test]
     fn parse_signer_role_accepts_the_three_roles() {

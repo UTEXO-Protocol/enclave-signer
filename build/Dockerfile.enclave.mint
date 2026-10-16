@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
-# Private Cargo dependencies require BuildKit secrets (see README, Building).
-# Supply github_token, or one deploy key per repo; keys never enter image layers.
-# Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" \
-#   --secret id=github_token,env=GITHUB_TOKEN -f build/Dockerfile.enclave.mint .
+# rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
+# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
+# never in a layer, the image or PCR0.
+# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+#   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
@@ -43,10 +44,7 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-RUN --mount=type=secret,id=github_token \
-    --mount=type=secret,id=consensus_key \
-    --mount=type=secret,id=ops_key \
-    --mount=type=secret,id=schemas_key \
+RUN --mount=type=secret,id=lib_key \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
 
 
@@ -108,6 +106,9 @@ ENV EVM_CHAIN_ID=42161 \
 # In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
+# Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
+# Production accepts safe or finalized and refuses latest at boot; missing tag
+# support refuses signing.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
@@ -116,7 +117,12 @@ ENV EVM_CHAIN_ID=42161 \
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
 # image. The operator sets them at launch (SetEndpoints), and the attestation
 # commits them. See docs/tee-spec.md.
-ENV EVM_MIN_CONFIRMATIONS=12 \
+# SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
+# In practice that is the rights send that made the right; 3 matches the bridge's
+# INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
+# The connector must pass mint_begin min_confirmations of at least this value.
+ENV EVM_FINALITY_TAG=safe \
+    SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     BTC_MAX_TOTAL_SATS=1000000

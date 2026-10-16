@@ -43,6 +43,12 @@ pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 #[cfg(rgb_to_evm)]
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 96 * 1024;
 
+/// Latest `deadline` the enclave signs, in seconds after now. Same value as
+/// `MultisigProxy.MAX_TEE_DEADLINE`, which the contract checks only at
+/// execution. Here it makes every signature expire 1 day after signing.
+#[cfg(rgb_to_evm)]
+pub const MAX_TEE_DEADLINE_SECS: u64 = 24 * 60 * 60;
+
 #[cfg(rgb_to_evm)]
 const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
 
@@ -135,6 +141,10 @@ pub struct ReleaseIdentity {
     /// Final payee as 32 bytes. `fundsOut`: `recipient`, left-padded.
     /// `lzFundsOut`: the LayerZero `recipient`.
     pub recipient: [u8; 32],
+    /// Calldata `destinationChainId`.
+    pub destination_chain_id: alloy_primitives::U256,
+    /// Calldata `dstEid`. `None` on the direct `fundsOut` route.
+    pub dst_eid: Option<u32>,
     /// Calldata `proof`.
     pub proof: Vec<u8>,
 }
@@ -152,6 +162,8 @@ impl ReleaseIdentity {
             settlement_data: params.settlementData.to_vec(),
             source_burn_tx_id: params.sourceBurnTxId.0,
             recipient,
+            destination_chain_id: params.destinationChainId,
+            dst_eid: None,
             proof: params.proof.to_vec(),
         }
     }
@@ -166,6 +178,8 @@ impl ReleaseIdentity {
             settlement_data: call.settlementData.to_vec(),
             source_burn_tx_id: call.sourceBurnTxId.0,
             recipient: call.recipient.0,
+            destination_chain_id: call.destinationChainId,
+            dst_eid: Some(call.dstEid),
             proof: call.proof.to_vec(),
         }
     }
@@ -323,6 +337,8 @@ pub fn validate_destination(
     }
     let (proof, params, calldata_destination_chain_id, release) = if is_entrypoint_route {
         let decoded = decode_lz_funds_out_params(&destination.call_data)?;
+        validate_min_amount_ld(&decoded)?;
+        super::lz_options::validate_extra_options(&decoded.extraOptions)?;
         let proof = lz_route_proof_from_params(&decoded)?;
         let chain_id = decoded.destinationChainId;
         let release = ReleaseIdentity::from_lz_funds_out(&decoded);
@@ -413,8 +429,33 @@ pub fn validate_destination(
     if destination.deadline <= now {
         return Err(EnclaveError::CrossCheck("request deadline expired".into()));
     }
+    if destination.deadline > now.saturating_add(MAX_TEE_DEADLINE_SECS) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "request deadline {} is more than {MAX_TEE_DEADLINE_SECS}s after now ({now})",
+            destination.deadline
+        )));
+    }
 
     Ok((proof, params, release))
+}
+
+/// Bounds the LayerZero remote floor. Zero would accept any delivered amount,
+/// and a floor above `amount` can never be met. The backend sets it from the
+/// net quoted at signing.
+#[cfg(rgb_to_evm)]
+fn validate_min_amount_ld(decoded: &lzFundsOutCall) -> Result<()> {
+    if decoded.minAmountLD.is_zero() {
+        return Err(EnclaveError::CrossCheck(
+            "lzFundsOut minAmountLD must be > 0".into(),
+        ));
+    }
+    if decoded.minAmountLD > decoded.amount {
+        return Err(EnclaveError::CrossCheck(format!(
+            "lzFundsOut minAmountLD {} exceeds amount {}",
+            decoded.minAmountLD, decoded.amount
+        )));
+    }
+    Ok(())
 }
 
 /// Maps a decoded release into the route-neutral proof.

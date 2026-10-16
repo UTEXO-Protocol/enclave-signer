@@ -4,14 +4,14 @@ Step-by-step text: [burn flow](../burn-flow.md).
 
 ```mermaid
 flowchart TD
-    start([After role, endpoint, and ancestry checks<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
+    start([After role, endpoint and key checks<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
 
     subgraph P1 ["P1 — RGB source (validate_source)"]
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1a["Transfer::load + typesystem pinned<br/>per schema_id"]
-        p1a --> p1b[rgb-ops validate against the resolver<br/>Electrum 15 s timeout]
+        p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>reject list EVM-only"]
+        p1a --> p1b["phase 1: validate_deterministic(BFA rules)<br/>mint anchors bound to derived locks<br/>(pinned bridge, no RPC); phase 2 confirms each<br/>against its own lock; each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS), else refuse"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
         p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
@@ -24,7 +24,7 @@ flowchart TD
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
         p3stale -->|yes| p3net{consignment chain_net == enclave network?}
         p3net -->|no| p3nr[REFUSE — cross-network replay]:::refuse
-        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ 6"]
+        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS (default 6)"]
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
@@ -46,7 +46,7 @@ flowchart TD
         p2dc -->|yes| p2d{deadline strictly in the future?}
         p2d -->|no| p2dr[REFUSE — expired]:::refuse
     end
-    p3q -->|yes| p1e{"settling transition == TS_BURN?<br/>source amount = MS_BURNED_ASSET<br/>(host rgb_amount NOT used)"}
+    p3q -->|yes| p1e{"settling transition == TS_BURN?<br/>source amount = burnedAsset<br/>(host rgb_amount NOT used)"}
     p1e -->|no| p1er[REFUSE - not a burn]:::refuse
     p1e -->|yes| p2len
 
@@ -65,7 +65,7 @@ flowchart TD
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero)?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
-        p4id -->|yes| p4rc{"MS_BURN_RECIPIENT == calldata recipient<br/>(LZ: LayerZero recipient)?"}
+        p4id -->|yes| p4rc{"burnReason == calldata recipient<br/>(LZ: LayerZero recipient)?"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
         p4rc -->|yes| p4st{"settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
@@ -91,10 +91,13 @@ flowchart TD
   `sourceChainId` and `sourceAddress`, `burnId` (`validate_burn_id`),
   `sourceBurnTxId` to the burn OpId, amount and recipient to the burn
   metadata, `settlementData` to the verified mint ancestry.
-- LayerZero route: the recipient is the LayerZero `recipient`. `dstEid` is
-  not bound to the burn.
-- The burn signer verifies the mint ancestry locks through the pinned TLS EVM
-  RPC before RGB validation. This diagram starts after that step.
+- LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
+  burn can use it: its record binds `dstEid` and `destinationChainId`.
+- The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
+  an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
+  the asset bind. It derives the lock of each mint in the history inside RGB
+  validation (P1), and never confirms an anchor or calls plain `validate()`
+  without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
   release builds. A release bridge build refuses to boot, and `SetEndpoints`
   refuses, without a valid `Production` policy.

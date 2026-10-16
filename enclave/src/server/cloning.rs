@@ -3,6 +3,8 @@
 //!
 //! See `enclave-proto/proto/enclave.proto` for the full protocol.
 
+use secrecy::{ExposeSecret, SecretBox};
+
 use super::context::ServerContext;
 use super::keys::{build_public_keys_response, clone_commitment, verify_clone_commitment};
 use crate::attestation;
@@ -27,8 +29,11 @@ pub(super) fn handle_initiate_cloning(
     state: &EnclaveState,
     req: InitiateCloningRequest,
 ) -> Result<EnclaveResponse> {
+    // Protect the request credential even on refusal. Keep it with this
+    // session so only verified completion can install it for the donor role.
+    let cloning_secret = SecretBox::new(Box::new(req.cloning_secret));
     // Refuse weak cloning secrets before use. (F03-AF-26)
-    cloning::validate_cloning_secret(&req.cloning_secret)?;
+    cloning::validate_cloning_secret(cloning_secret.expose_secret())?;
     let cluster_public_key: [u8; 20] =
         req.cluster_public_key.as_slice().try_into().map_err(|_| {
             EnclaveError::InvalidRequest(format!(
@@ -42,15 +47,22 @@ pub(super) fn handle_initiate_cloning(
 
     let nonce = fresh_nonce()?;
     // Bind the digest to the intended donor EVM address. (F03-AF-07)
-    let cloning_digest =
-        cloning::make_cloning_digest(&req.cloning_secret, &encryption_pubkey, &cluster_public_key);
+    let cloning_digest = cloning::make_cloning_digest(
+        cloning_secret.expose_secret(),
+        &encryption_pubkey,
+        &cluster_public_key,
+    );
 
     // The NSM signature binds the X25519 pubkey and the digest.
     // The parent cannot change either without breaking the attestation.
     let attestation =
         attestation::get_attestation(&nonce, Some(&encryption_pubkey), Some(&cloning_digest))?;
 
-    state.enter_cloning(CloningSession::new(session, cluster_public_key))?;
+    state.enter_cloning(CloningSession::new(
+        session,
+        cluster_public_key,
+        cloning_secret,
+    )?)?;
 
     tracing::info!(
         cluster_pk = %hex::encode(cluster_public_key),
@@ -126,6 +138,9 @@ pub(super) fn handle_get_clone(
         attestation::get_own_pcrs().map_err(|e| EnclaveError::Internal(e.to_string()))?;
     let verified =
         attestation::verify_peer_attestation(&req.requester_attestation, &expected_pcrs, None)?;
+    // 3b. The requester must run under the same IAM role (PCR3). PCR0/1/2 are
+    //     the same for each instance of the image, in any AWS account.
+    attestation::check_clone_peer_pcr3(&attestation::get_own_pcr3()?, &verified)?;
 
     // 4. The attested `public_key` must equal the wire key. If not, the
     //    parent could replace it with a key that it controls.
@@ -198,8 +213,8 @@ pub(super) fn handle_get_clone(
 
 /// Requester side: `Cloning -> Active`.
 /// Verifies the donor attestation and unseals the ciphertext. Commits the
-/// derived keys only if the EVM target and the signed identity, policy and
-/// transcript match.
+/// derived keys and the pending donor credential only if the EVM target and
+/// the signed identity, policy and transcript match.
 pub(super) fn handle_set_clone(
     ctx: &ServerContext,
     req: SetCloneRequest,
@@ -217,6 +232,8 @@ pub(super) fn handle_set_clone(
     let expected_pcrs = attestation::get_own_pcrs()?;
     let verified =
         attestation::verify_peer_attestation(&req.donor_attestation, &expected_pcrs, None)?;
+    // 1b. The donor must run under the same IAM role (PCR3).
+    attestation::check_clone_peer_pcr3(&attestation::get_own_pcr3()?, &verified)?;
 
     // 2. The wire donor pubkey must equal the attested pubkey.
     if verified.enclave_pubkey.as_slice() != donor_pubkey {

@@ -15,6 +15,12 @@ mod health;
 mod keys;
 #[cfg(feature = "rgb-validation")]
 mod rate_limit;
+// Only a build that validates consignments reads the reject list.
+#[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+mod reject_list;
+// The mint signer's own rights send. No other role holds mint rights.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+mod rights_refill;
 mod sign;
 mod signers;
 #[cfg(feature = "rgb-validation")]

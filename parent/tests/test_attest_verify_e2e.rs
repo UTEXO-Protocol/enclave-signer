@@ -95,6 +95,7 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
     )
     .await
     .expect("end-to-end verification succeeds");
+    assert_eq!(result.mode, VerifyMode::Mock);
 
     // Check the structure only. The test does not hardcode key bytes.
     assert_eq!(result.response.evm_address.len(), 20);
@@ -189,14 +190,10 @@ async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
 }
 
 #[tokio::test]
-async fn e2e_attest_verify_fails_on_policy_mismatch() {
-    // The in-process mock enclave attests the `Development` posture. A
-    // verifier that expects production must reject the committed policy.
-    let enclave_port = start_real_enclave();
-    let grpc_port = start_real_parent_grpc(enclave_port).await;
-
+async fn e2e_attest_verify_refuses_mock_with_production() {
+    // Nothing listens here. The refusal comes before the connect.
     let err = verify_attested_pubkey(
-        &format!("http://127.0.0.1:{grpc_port}"),
+        "http://127.0.0.1:1",
         attestation_verify::ExpectedPcrs::zero(),
         VerifyMode::Mock,
         ExpectedPolicy::Production {
@@ -206,11 +203,13 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,
+            bitcoin_network: attestation_verify::BitcoinNetwork::Mainnet,
             expected_bridge_contract: None,
             expected_rgb_asset_id: None,
             funds_in_contract: [0x11; 20],
+            evm_finality_tag: attestation_verify::EvmFinalityTag::Safe,
             token_contract: [0x22; 20],
-            evm_min_confirmations: 12,
+            spv_min_confirmations: 6,
             gas_tx_allowed_to: [0u8; 20],
             gas_tx_max_gas_limit: 0,
             gas_tx_max_fee_per_gas: 0,
@@ -220,12 +219,12 @@ async fn e2e_attest_verify_fails_on_policy_mismatch() {
         },
     )
     .await
-    .expect_err("expecting a production policy against a dev enclave must fail");
+    .expect_err("mock mode with a production expectation must fail");
 
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("user_data") || msg.contains("security posture") || msg.contains("policy"),
-        "expected a policy/user_data mismatch error, got: {msg}"
+        msg.starts_with("mock mode refuses a Production expectation"),
+        "{msg}"
     );
 }
 
@@ -368,7 +367,8 @@ async fn attest_verify_cli_file_error_exits_one() {
 
 #[tokio::test]
 async fn attest_verify_cli_missing_pcr_exits_one_not_parse_error() {
-    let out = run_attest_verify(&[]).await;
+    // The finality tag is a required flag; give it so only the PCR is missing.
+    let out = run_attest_verify(&["--expect-evm-finality-tag", "safe"]).await;
     assert_cli_failure(&out, 1, "FAIL: --pcr0 required (or pass --mock)");
     assert_eq!(out.stderr, b"FAIL: --pcr0 required (or pass --mock)\n");
 }
@@ -389,7 +389,7 @@ fn key_lines(out: &std::process::Output) -> Vec<String> {
     assert!(stdout.starts_with("OK\n"), "{stdout}");
     stdout
         .lines()
-        .filter(|l| !l.contains("Nonce echoed") && !l.contains("Attestation timestamp"))
+        .filter(|l| !l.starts_with("  nonce:") && !l.starts_with("  timestamp_ms:"))
         .map(String::from)
         .collect()
 }
@@ -414,9 +414,20 @@ async fn exported_bundle_round_trips_through_the_binaries() {
         ],
     );
     assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("  Verification mode: mock"),
+        "{out:?}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(bundle).unwrap()).unwrap();
+    assert_eq!(json["format"], "utexo-signer-attestation/2");
+    assert_eq!(json["verification_mode"], "mock");
 
     // No parent runs yet, so the check is offline.
     let offline = run_attest_verify(&["--from-file", bundle, "--mock"]).await;
+    assert!(
+        String::from_utf8_lossy(&offline.stdout).contains("  mode: Mock"),
+        "{offline:?}"
+    );
 
     let grpc_port = start_real_parent_grpc(enclave[10..].parse().unwrap()).await;
     let endpoint = format!("http://127.0.0.1:{grpc_port}");
@@ -533,14 +544,17 @@ exec {} "${{args[@]}}"
     let burn = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n";
     let bundle = |cid: u16| dir.join(format!("attestation-{cid}.json"));
 
-    let (code, log) = gate(burn, "");
-    assert_eq!(code, Some(0), "{log}");
-    let json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle(16)).unwrap()).unwrap();
-    let evm = json["public_keys"]["evm_address"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Approve the identity from the fixed test fixture, not the live export.
+    let expected = EnclaveState::new(bitcoin::Network::Bitcoin);
+    expected.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
+    let evm = format!("0x{}", hex::encode(expected.evm_address().unwrap()));
+
+    for incomplete in [String::new(), format!("16={evm}")] {
+        let (code, log) = gate(burn, &incomplete);
+        assert_eq!(code, Some(2), "{log}");
+        assert!(!bundle(16).exists() && !bundle(18).exists());
+        assert!(!log.contains("PASS:"), "{log}");
+    }
 
     let (code, log) = gate(burn, &format!("16={evm} 18={evm}"));
     assert_eq!(code, Some(0), "{log}");
@@ -565,7 +579,10 @@ exec {} "${{args[@]}}"
     );
     assert!(bundle(16).exists() && !bundle(18).exists());
 
-    let (code, log) = gate("IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n", "");
+    let (code, log) = gate(
+        "IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n",
+        &format!("16={evm} 18={evm}"),
+    );
     assert_eq!(code, Some(2), "{log}");
 
     std::fs::remove_file(bundle(16)).unwrap();

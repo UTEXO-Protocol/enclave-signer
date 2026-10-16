@@ -11,17 +11,15 @@
 #   DOCKERFILE       recipe name (default: Dockerfile.enclave)
 #   EIF_NAME         output name (default: utexo-bridge-enclave.eif)
 #   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
-#   GITHUB_TOKEN     token with read access to the private RGB dependencies
-#   PRIVATE_DEPS_DIR alternatively, directory of per-repository key files
-#                    (consignment_key, consensus_key, ops_key, schemas_key)
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
 #                    (combined, rgb, mint, burn)
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
+#   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
+#   PRIVATE_DEPS_DIR        or a directory with that key in a lib_key file
 #
-# Every variant resolves private RGB dependencies. Supply GITHUB_TOKEN with
-# read access, or PRIVATE_DEPS_DIR containing the per-repository deploy keys.
-# Credentials enter the build only through BuildKit secret mounts.
+# rgb-lib comes from the private rgb-lib-bfa mirror. The deploy key goes in a
+# BuildKit secret: never in a build arg, a layer, the image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -42,12 +40,9 @@
 #   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
 #                          declares ARG RGB_ASSET_ID (combined, rgb, mint, burn)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
-#   GITHUB_TOKEN           token with read access to the private RGB dependencies
-#   PRIVATE_DEPS_DIR       alternatively, directory of per-repository key files
-#                          (consensus_key, ops_key, schemas_key)
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
-# keeping the build secret-free and the PCRs reproducible.
+# keeping it out of the image and the PCRs reproducible.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,23 +71,6 @@ command -v docker   &>/dev/null || { echo "Error: docker not found"; exit 1; }
 command -v nitro-cli &>/dev/null || { echo "Error: nitro-cli not found (install + pin to the host version)"; exit 1; }
 command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 
-# The same credential setup applies to every enclave Dockerfile.
-SECRET_ARGS=()
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-    SECRET_ARGS=(--secret "id=github_token,env=GITHUB_TOKEN")
-elif [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    for key in consensus_key ops_key schemas_key; do
-        [ -s "$PRIVATE_DEPS_DIR/$key" ] || {
-            echo "Error: missing private dependency key file: $key" >&2
-            exit 1
-        }
-        SECRET_ARGS+=(--secret "id=$key,src=$PRIVATE_DEPS_DIR/$key")
-    done
-else
-    echo "Error: set GITHUB_TOKEN or PRIVATE_DEPS_DIR for the private RGB dependencies" >&2
-    exit 1
-fi
-
 mkdir -p "$OUT_DIR"
 
 # Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
@@ -107,6 +85,20 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     fi
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
     echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
+    [ -s "$PRIVATE_DEPS_DIR/lib_key" ] || {
+        echo "Error: $PRIVATE_DEPS_DIR/lib_key is missing or empty." >&2
+        exit 1
+    }
+    SECRET_ARGS=(--secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key")
+elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ]; then
+    SECRET_ARGS=(--secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY)
+else
+    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa." >&2
+    echo "       Set RGB_LIB_BFA_DEPLOY_KEY, or PRIVATE_DEPS_DIR with a lib_key file." >&2
+    exit 1
 fi
 
 # Forward debug features only when set. (F03-AF-12)
@@ -128,7 +120,7 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
-    ${SECRET_ARGS[@]+"${SECRET_ARGS[@]}"} \
+    "${SECRET_ARGS[@]}" \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
     --output "type=docker,rewrite-timestamp=true" \

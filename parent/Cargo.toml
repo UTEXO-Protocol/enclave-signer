@@ -3,8 +3,8 @@
 # every enclave build need that credential and breaks public PCR0 reproduction.
 #
 # Build the parent from this directory (`cd parent && cargo build`).
-# This workspace has its own Cargo.lock. The `[patch.crates-io]` and
-# `[profile.release]` blocks copy the root blocks. Keep them in sync.
+# This workspace has its own Cargo.lock. The `[profile.release]` block copies
+# the root block. Keep them in sync.
 [workspace]
 
 [profile.release]
@@ -13,19 +13,6 @@ lto = true
 strip = true
 panic = "abort"
 codegen-units = 1
-
-# Must match the root workspace exactly. The dev-dependency on
-# `utexo-bridge-enclave` pulls its default features (`rgb` -> `spv` -> `rgb-validation`),
-# so the RGB crates are in this graph too. Pin by rev, not branch, so both
-# workspaces compile against the same rgb-ops. Bump both together.
-[patch.crates-io]
-# rgb-consensus is patched too: the `s/bfa` rgb-ops uses the ether extension,
-# which the crates.io rgb-consensus does not have.
-rgb-consensus = { git = "ssh://git@github-rgb-consensus/UTEXO-Protocol/rgb-consensus-s-bfa", rev = "68a1470e22ae4bb6a38205404e484b264b4139ee" }
-rgb-ops = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
-rgb-invoicing = { git = "ssh://git@github-rgb-ops/UTEXO-Protocol/rgb-ops-s-bfa", rev = "3bcc7d98d759a8b71bf94ad4a36371dcb7bf392b" }
-rgb-schemas = { git = "ssh://git@github-rgb-schemas/UTEXO-Protocol/rgb-schemas-s-bfa", rev = "af4f91e6807a9680ab195c28719197b7811ac5d6" }
-rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "7698a5e96a2a27d5bfa4cd3560da0e8af8e4a18a" }
 
 [package]
 name = "utexo-bridge-parent"
@@ -53,6 +40,8 @@ http = "1"
 tower = { version = "0.5", features = ["limit"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+# Enclave connect with a timeout on TCP and vsock. Tokio already builds it.
+socket2 = { version = "0.6", features = ["all"] }
 # The optional seed storage bridge uses the AWS role provider and S3 client.
 # The EC2 parent does not need SSO, credential subprocesses or SigV4a.
 aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
@@ -64,7 +53,7 @@ zeroize = "1"
 # Full schema from the shared upstream repo. The parent runs on the untrusted
 # host, so a private build credential is acceptable here. Keep this rev equal
 # to the vendored slice in `enclave-proto/` (see its README).
-federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "2b81a2eaadb99daa68c4428ea38f80ae3f40805d", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "e402c2aed0c2b097bd1f86392d12e8a6ac415e36", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive", "env"] }
 # `GET /health` readiness probe. Keep the axum version equal to tonic's axum.
 axum = "0.8"

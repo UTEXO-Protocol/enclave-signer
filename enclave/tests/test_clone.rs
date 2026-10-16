@@ -6,8 +6,8 @@
 //! KMS persistence disables cloning. Mock attestation skips NSM, COSE, and
 //! cert-chain validation. It still checks the pubkey, digest, nonce, and PCR
 //! bindings. `allow-seed-import` only gives the donor a known seed. The cloning
-//! path does not need it, because `Phase::Cloning` guards
-//! `initialize_from_cloned_seed`.
+//! path does not need it, because `complete_cloning` verifies the session
+//! before installing its keys and donor secret together.
 
 #![cfg(all(feature = "mock-attestation", feature = "allow-seed-import"))]
 
@@ -79,13 +79,8 @@ fn start_donor() -> (u16, PublicKeysResponse) {
 }
 
 fn start_requester() -> u16 {
-    // The requester gets the secret in InitiateCloningRequest. The test also
-    // sets a donor secret, as in a deployment that can take both roles.
-    start_test_server_with(|state| {
-        state
-            .set_donor_cloning_secret(CLONING_SECRET.into())
-            .expect("set_donor_cloning_secret");
-    })
+    // Supply the secret only through InitiateCloningRequest, as the CLI does.
+    start_test_server_with(|_| {})
 }
 
 fn initiate_cloning(
@@ -604,4 +599,77 @@ fn clone_rejections_carry_their_codes() {
         let err = request_get_clone(port, target, req).expect_err(name);
         assert_eq!(err.code, code, "{name}: {}", err.message);
     }
+}
+
+/// Issue #270. A peer with the right image (PCR0/1/2) but another IAM role
+/// (PCR3) runs under another AWS account. The donor must not seal its seed to
+/// it. A peer with the same role passes in the same run.
+#[test]
+fn clone_donor_refuses_a_requester_under_another_iam_role() {
+    let (donor_port, donor_keys) = start_donor();
+
+    let bad_requester_port = start_requester();
+    let bad_init = initiate_cloning(bad_requester_port, CLONING_SECRET, &donor_keys.evm_address);
+    // Same image PCRs, valid pubkey and digest; only PCR3 differs.
+    for (pcr3, want) in [(Some([0x44u8; 48]), "PCR3"), (None, "no PCR3")] {
+        let mut tampered = bad_init.clone();
+        tampered.requester_attestation = attestation_verify::build_mock_document_with_pcr3(
+            &[0x98u8; 32],
+            Some(&bad_init.encryption_pubkey),
+            Some(&bad_init.cloning_digest),
+            pcr3.as_ref(),
+        )
+        .expect("build mock doc");
+        let err = request_get_clone(donor_port, &donor_keys.evm_address, &tampered)
+            .expect_err("donor must refuse a peer under another IAM role");
+        assert!(err.message.contains(want), "{pcr3:?}: {}", err.message);
+    }
+
+    // The same requester, with its real attestation (the mock role), clones.
+    let clone = request_get_clone(donor_port, &donor_keys.evm_address, &bad_init)
+        .expect("donor must seal to a peer under the same IAM role");
+    request_set_clone(bad_requester_port, &clone).expect("SetClone should succeed");
+    assert_eq!(
+        get_public_keys(bad_requester_port).evm_address,
+        donor_keys.evm_address
+    );
+}
+
+/// Issue #270, requester side: a donor document under another IAM role is
+/// refused before the seed is unsealed. The real donor document then works,
+/// so the refusal used no state.
+#[test]
+fn clone_requester_refuses_a_donor_under_another_iam_role() {
+    let (donor_port, donor_keys) = start_donor();
+    let requester_port = start_requester();
+    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
+    let clone = request_get_clone(donor_port, &donor_keys.evm_address, &init)
+        .expect("donor seals to the requester");
+
+    // The donor document with only PCR3 changed: same key, data and nonce.
+    let donor = attestation_verify::verify_mock_attestation(
+        &clone.donor_attestation,
+        &attestation_verify::ExpectedPcrs::zero(),
+        None,
+    )
+    .expect("decode the donor document");
+    let nonce: [u8; 32] = donor.nonce.as_slice().try_into().expect("32-byte nonce");
+    let mut other_role = clone.clone();
+    other_role.donor_attestation = attestation_verify::build_mock_document_with_pcr3(
+        &nonce,
+        Some(&donor.enclave_pubkey),
+        donor.user_data.as_deref(),
+        Some(&[0x44u8; 48]),
+    )
+    .expect("build mock doc");
+
+    let err = request_set_clone(requester_port, &other_role)
+        .expect_err("requester must refuse a donor under another IAM role");
+    assert!(err.message.contains("PCR3"), "{}", err.message);
+
+    request_set_clone(requester_port, &clone).expect("the real donor document clones");
+    assert_eq!(
+        get_public_keys(requester_port).evm_address,
+        donor_keys.evm_address
+    );
 }
