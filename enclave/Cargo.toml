@@ -52,6 +52,9 @@ rgb-consensus = { version = "=0.11.2-rc.1", default-features = false, optional =
 rgb-aluvm = { version = "=0.11.2-rc.1", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
+# Reads the RGB transitions and MPC entropy rgb-lib stores in a mint or refill
+# PSBT. The mint signer validates those from the PSBT, with no consignment.
+rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false, optional = true }
 # The flat V1 parser the bridge also uses. It turns on rgb-ops `serde`.
 rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "7c1bfb7023ff5b734c9bc3249820d2e5cce4ad5f", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
@@ -182,7 +185,7 @@ bfa-validation = ["evm-rpc"]
 # `rgb-mint-burn`, not plain `rgb`: a BFA `mint` transition is a mint, so
 # its rules belong to that flow only. lib.rs rejects both flows at once, so
 # `--features bfa-mint` on the default set does not compile.
-bfa-mint = ["rgb-mint-burn", "bfa-validation"]
+bfa-mint = ["rgb-mint-burn", "bfa-validation", "dep:rgb-psbt-utils"]
 
 # Mint/burn signer role. EXACTLY ONE is required when `rgb-mint-burn` is on
 # (lib.rs `compile_error!`). Each role ships as its own image with its own PCR0
@@ -209,3 +212,5 @@ serde_json = "1"
 # The in-process BFA consignment generator (`src/test_support/bfa_consignment.rs`)
 # builds strict types. Already in the lock.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.5" }
+# The generator commits its PSBTs with psbtu's `rgb_commit`, as rgb-lib does.
+rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false }

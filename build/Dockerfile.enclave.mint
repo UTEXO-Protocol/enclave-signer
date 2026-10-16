@@ -115,7 +115,7 @@ ENV EVM_CHAIN_ID=42161 \
 # image. The operator sets them at launch (SetEndpoints), and the attestation
 # commits them. See docs/tee-spec.md.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
-# In practice that is the lane's previous mint; 3 matches the bridge's
+# In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
 # The connector must pass mint_begin min_confirmations of at least this value.
 ENV EVM_FINALITY_TAG=safe \

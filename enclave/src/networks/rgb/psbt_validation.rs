@@ -1,10 +1,21 @@
 use bitcoin::psbt::Psbt;
 
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 use super::flow;
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 use super::validation::ValidatedConsignment;
 use crate::error::{EnclaveError, Result};
+
+// The mint signer's rules, on the transition its PSBT commits. Only it holds
+// mint rights to mint with or refill.
+#[cfg(feature = "bfa-mint")]
+mod mint;
+#[cfg(feature = "bfa-mint")]
+mod refill;
+#[cfg(feature = "bfa-mint")]
+pub use mint::*;
+#[cfg(feature = "bfa-mint")]
+pub use refill::*;
 
 /// Soft-dedup key for an EVM->RGB bridge PSBT operation.
 ///
@@ -71,7 +82,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
     parse_psbt_shape(psbt_bytes).map(|_| ())
 }
 
-/// Binds a PSBT to the RGB consignment it claims to finalize.
+/// Binds a PSBT to the RGB consignment it claims to finalize. The retired
+/// swap flow only: the mint signer reads its PSBT alone (`mint_facts`).
 ///
 /// The PSBT is the witness transaction of the RGB transfer. It spends the
 /// bridge UTXOs with the RGB allocation and carries the tapret/opret DBC
@@ -82,9 +94,8 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 /// [`crate::networks::rgb::validation::RgbValidator::validate_consignment`],
 /// which proves the commitment is anchored.
 ///
-/// The build's RGB flow ([`crate::networks::rgb::flow`]) owns the type and
-/// amount rules (1, 5, 6). A `rgb-swap` enclave accepts only BFA `transfer`, a
-/// `rgb-mint-burn` enclave exactly one BFA `mint`. The rest is shared PSBT logic.
+/// The swap flow ([`crate::networks::rgb::flow`]) owns the type and amount
+/// rules (1, 5, 6): BFA `transfer` only. The rest is shared PSBT logic.
 ///
 /// Checks, fail-closed:
 ///   1. The settling transition of the consignment is the type this flow signs.
@@ -115,9 +126,6 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///      The outpoint can be off the signed tx: with no BTC change, rgb-lib puts
 ///      the RGB change on an existing wallet UTXO. That needs an indexer call,
 ///      capped at [`MAX_OFF_TX_CHANGE_OUTPOINTS`] per PSBT.
-///   8. Mint right (mint flow): the mint passes exactly one `mintRight` on, to
-///      a revealed seal that `self_owned` proves is ours and this tx does not
-///      spend.
 ///
 /// `self_owned` resolves whether an outpoint pays back to this enclave. It is a
 /// callback, not a `&KeyManager`, so the key lock is not held across the
@@ -125,7 +133,7 @@ pub fn validate_psbt_bytes(psbt_bytes: &[u8]) -> Result<()> {
 ///
 /// Returns the classified [`AssetLegs`]. The route-level amount cross-check
 /// uses its recipient amount, not the wire `psbt_output_amount`.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 pub fn validate_psbt_anchors_transition(
     psbt: &Psbt,
     validated: &ValidatedConsignment,
@@ -133,14 +141,60 @@ pub fn validate_psbt_anchors_transition(
     source_commission: u64,
     self_owned: SelfOwnedOutpoint<'_>,
 ) -> Result<AssetLegs> {
-    use std::collections::BTreeSet;
+    let last = settling_transition(validated)?;
+    flow::assert_signing_transition(last)?;
+    let psbt_txid = bind_psbt_to_witness(psbt, validated)?;
+    let committed = disclosed_group(validated, psbt_txid, last)?;
+    flow::assert_committed_group(&committed)?;
 
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    // The sum covers the whole group, so a sibling transition cannot move
+    // value outside the bind.
+    let committed_asset_output: u64 = committed
+        .iter()
+        .try_fold(0u64, |acc, t| acc.checked_add(t.asset_output_amount))
+        .ok_or_else(|| {
+            EnclaveError::CrossCheck(
+                "send-RGB committed asset_output_amount total overflows u64".into(),
+            )
+        })?;
+
+    let net_credited = source_amount.saturating_sub(source_commission);
+    flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
+
+    // Per-output recipient bind. It runs last because only it uses the
+    // enclave keys.
+    let legs = split_asset_legs(psbt, psbt_txid, &committed, self_owned)?;
+    if legs.recipient != net_credited {
+        return Err(EnclaveError::CrossCheck(format!(
+            "send-RGB recipient amount mismatch: consignment pays {} asset units to \
+             confidential (recipient) seals, but the source credited {net_credited} \
+             (source_amount {source_amount} - source_commission {source_commission}); \
+             {} units return to bridge-owned change seals",
+            legs.recipient, legs.change
+        )));
+    }
+
+    Ok(legs)
+}
+
+/// The settling transition, which every PSBT bind needs.
+#[cfg(feature = "rgb-swap")]
+fn settling_transition(
+    validated: &ValidatedConsignment,
+) -> Result<&super::validation::TransitionSummary> {
+    validated.last_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "send-RGB PSBT requires a consignment with at least one transition".into(),
         )
-    })?;
-    flow::assert_signing_transition(last)?;
+    })
+}
+
+/// Checks 2-4 of [`validate_psbt_anchors_transition`]: the PSBT is the last
+/// witness tx, its txid cannot change, and its sighashes cannot be spliced.
+/// Returns the txid.
+#[cfg(feature = "rgb-swap")]
+fn bind_psbt_to_witness(psbt: &Psbt, validated: &ValidatedConsignment) -> Result<bitcoin::Txid> {
+    use std::collections::BTreeSet;
 
     // Use the txid of `unsigned_tx`, never a finalized tx. The input check
     // below makes the two equal.
@@ -159,21 +213,7 @@ pub fn validate_psbt_anchors_transition(
         )));
     }
 
-    for (i, input) in psbt.inputs.iter().enumerate() {
-        let Some(utxo) = input.witness_utxo.as_ref() else {
-            return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
-                 without a scriptSig"
-            )));
-        };
-        if !utxo.script_pubkey.is_witness_program() {
-            return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT input {i} spends a non-native-SegWit output; its finalized \
-                 scriptSig would change the txid the consignment binds ({psbt_txid}) - \
-                 refusing to sign"
-            )));
-        }
-    }
+    assert_native_segwit_inputs(psbt)?;
 
     let expected_set: BTreeSet<bitcoin::OutPoint> = validated
         .last_transfer_witness_prevouts
@@ -194,7 +234,43 @@ pub fn validate_psbt_anchors_transition(
         ));
     }
 
-    // 0x00 = taproot SIGHASH_DEFAULT, 0x01 = SIGHASH_ALL. Others are spliceable.
+    assert_sighash_all(psbt)?;
+    Ok(psbt_txid)
+}
+
+/// F2: the txid the enclave signs is the txid that confirms, and no signature
+/// can be spliced into another tx.
+#[cfg(feature = "rgb-validation")]
+pub fn assert_txid_and_sighash_fixed(psbt: &Psbt) -> Result<()> {
+    assert_native_segwit_inputs(psbt)?;
+    assert_sighash_all(psbt)
+}
+
+/// Every input finalizes with an empty `scriptSig`, so the unsigned txid is
+/// the final txid. A P2SH-wrapped or legacy input would change it.
+#[cfg(feature = "rgb-validation")]
+fn assert_native_segwit_inputs(psbt: &Psbt) -> Result<()> {
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        let Some(utxo) = input.witness_utxo.as_ref() else {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
+                 without a scriptSig"
+            )));
+        };
+        if !utxo.script_pubkey.is_witness_program() {
+            return Err(EnclaveError::CrossCheck(format!(
+                "send-RGB PSBT input {i} spends a non-native-SegWit output; its finalized \
+                 scriptSig would change the txid ({}) - refusing to sign",
+                psbt.unsigned_tx.compute_txid()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 0x00 = taproot SIGHASH_DEFAULT, 0x01 = SIGHASH_ALL. Others are spliceable.
+#[cfg(feature = "rgb-validation")]
+fn assert_sighash_all(psbt: &Psbt) -> Result<()> {
     for (i, input) in psbt.inputs.iter().enumerate() {
         if let Some(sht) = input.sighash_type {
             let raw = sht.to_u32();
@@ -206,7 +282,17 @@ pub fn validate_psbt_anchors_transition(
             }
         }
     }
+    Ok(())
+}
 
+/// The transitions the signed tx commits: not empty, holding the settling
+/// transition `last`, and hiding none. The flow rule checks their types.
+#[cfg(feature = "rgb-swap")]
+fn disclosed_group<'a>(
+    validated: &'a ValidatedConsignment,
+    psbt_txid: bitcoin::Txid,
+    last: &super::validation::TransitionSummary,
+) -> Result<Vec<&'a super::validation::TransitionSummary>> {
     // A Bitcoin tx commits a bundle, which can hold several transitions.
     let committed = validated.transitions_committed_by(psbt_txid);
     if committed.is_empty() {
@@ -232,38 +318,7 @@ pub fn validate_psbt_anchors_transition(
              ({psbt_txid}) commits - refusing to sign state moves the enclave cannot see"
         )));
     }
-    flow::assert_committed_group(&committed)?;
-
-    // The sum covers the whole group, so a sibling transition cannot move
-    // value outside the bind.
-    let committed_asset_output: u64 = committed
-        .iter()
-        .try_fold(0u64, |acc, t| acc.checked_add(t.asset_output_amount))
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "send-RGB committed asset_output_amount total overflows u64".into(),
-            )
-        })?;
-
-    let net_credited = source_amount.saturating_sub(source_commission);
-    flow::assert_group_amount(committed_asset_output, source_amount, source_commission)?;
-
-    // Per-output recipient bind. It runs last because only it and the mint
-    // right bind use the enclave keys.
-    let legs = split_asset_legs(psbt, psbt_txid, &committed, self_owned)?;
-    #[cfg(feature = "rgb-mint-burn")]
-    assert_mint_right_kept(psbt, psbt_txid, &validated.last_mint_rights, self_owned)?;
-    if legs.recipient != net_credited {
-        return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB recipient amount mismatch: consignment pays {} asset units to \
-             confidential (recipient) seals, but the source credited {net_credited} \
-             (source_amount {source_amount} - source_commission {source_commission}); \
-             {} units return to bridge-owned change seals",
-            legs.recipient, legs.change
-        )));
-    }
-
-    Ok(legs)
+    Ok(committed)
 }
 
 /// Resolves whether a Bitcoin outpoint pays back to this enclave.
@@ -278,17 +333,17 @@ pub fn validate_psbt_anchors_transition(
 ///     then its `script_pubkey` must be in
 ///     [`crate::networks::rgb::btc_ownership::asset_change_scripts`], and the
 ///     indexer must show the outpoint mined and unspent.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 pub type SelfOwnedOutpoint<'a> = &'a dyn Fn(&Psbt, bitcoin::OutPoint) -> Result<bool>;
 
 /// Cap on distinct off-transaction outpoints per PSBT. Each one costs an
 /// indexer call, so no cap lets one request cause many egress calls. A real
 /// transfer uses one. The rest is for bundles.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 pub const MAX_OFF_TX_CHANGE_OUTPOINTS: usize = 4;
 
 /// The two legs an `OS_ASSET` output assignment can belong to, in asset units.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 #[derive(Debug)]
 pub struct AssetLegs {
     /// Paid to confidential (blinded) seals: the recipient.
@@ -307,7 +362,7 @@ pub struct AssetLegs {
 ///
 /// It takes the whole committed group, so a sibling transition cannot move
 /// value outside the bind.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 fn split_asset_legs(
     psbt: &Psbt,
     psbt_txid: bitcoin::Txid,
@@ -408,63 +463,10 @@ fn split_asset_legs(
     Ok(legs)
 }
 
-/// The mint passes the right to mint on to exactly one seal this enclave
-/// owns. Off the tx (no BTC change), `self_owned` also needs it mined, unspent.
-#[cfg(feature = "rgb-mint-burn")]
-fn assert_mint_right_kept(
-    psbt: &Psbt,
-    psbt_txid: bitcoin::Txid,
-    rights: &[super::validation::OutputSeal],
-    self_owned: SelfOwnedOutpoint<'_>,
-) -> Result<()> {
-    use super::validation::OutputSeal;
-    use bitcoin::hashes::Hash;
-
-    let [OutputSeal::Revealed { txid, vout }] = rights else {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes {} mintRight output(s) on, or hides its seal - the mint signer keeps \
-             exactly one, on a revealed seal it owns",
-            rights.len()
-        )));
-    };
-    let txid = txid.map_or(psbt_txid, |bytes| {
-        let mut internal = bytes;
-        internal.reverse();
-        bitcoin::Txid::from_byte_array(internal)
-    });
-    let outpoint = bitcoin::OutPoint { txid, vout: *vout };
-    // The tx closes each outpoint it spends, so a right sealed there is lost.
-    if psbt
-        .unsigned_tx
-        .input
-        .iter()
-        .any(|txin| txin.previous_output == outpoint)
-    {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to {outpoint}, which this transaction spends - the right \
-             would be lost"
-        )));
-    }
-    let outputs = psbt.unsigned_tx.output.len();
-    if txid == psbt_txid && *vout as usize >= outputs {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to output {vout}, but the transaction being signed has \
-             only {outputs} outputs - the right would be lost"
-        )));
-    }
-    if !self_owned(psbt, outpoint)? {
-        return Err(EnclaveError::CrossCheck(format!(
-            "mint passes the mintRight to {outpoint}, which this enclave cannot prove it owns \
-             - refusing to give the right to mint away"
-        )));
-    }
-    Ok(())
-}
-
 /// Each colored input the enclave signs must spend a seal the signed bundle
 /// closes. Spending any other colored output would destroy the RGB state on
 /// it, such as another mint right.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "rgb-swap")]
 pub fn assert_colored_inputs_close_seals(
     psbt: &Psbt,
     colored_inputs: &[usize],
@@ -487,6 +489,40 @@ pub fn assert_colored_inputs_close_seals(
         }
     }
     Ok(())
+}
+
+/// F7 and RR10: every input is one of `colored`, our Colored key-path inputs.
+/// The sats rules see only our inputs' value.
+#[cfg(feature = "bfa-mint")]
+pub fn assert_only_colored_inputs(psbt: &Psbt, colored: &[usize], path: &str) -> Result<()> {
+    if let Some(i) = (0..psbt.inputs.len()).find(|i| !colored.contains(i)) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT input {i} is not a Colored key-path input of this enclave - it spends \
+             only the mint wallet's own coins"
+        )));
+    }
+    Ok(())
+}
+
+/// M8 and RR12: no sat leaves. With no rule A exemption, each output must be a
+/// rule C output of ours or carry 0 sat, as the OP_RETURN must.
+#[cfg(feature = "bfa-mint")]
+pub fn assert_keeps_all_sats(
+    psbt: &Psbt,
+    keys: &crate::keys::KeyManager,
+    path: &str,
+) -> Result<()> {
+    let no_inputs = std::collections::HashSet::new();
+    match super::btc_ownership::unowned_output_sats(psbt, &no_inputs, keys) {
+        Some(0) => Ok(()),
+        Some(sats) => Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT pays {sats} sat to outputs this enclave does not derive - it keeps \
+             every sat on its own outputs"
+        ))),
+        None => Err(EnclaveError::CrossCheck(format!(
+            "{path} PSBT output total overflows u64"
+        ))),
+    }
 }
 
 /// Pinned maximum fee rate (sat/vB) for every PSBT this enclave signs

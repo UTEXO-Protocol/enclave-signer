@@ -12,12 +12,11 @@ use rgb_consignment::{
     ConsignmentInfo, FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo,
 };
 use rgbstd::containers::{Transfer, WitnessBundle};
-use rgbstd::txout::TxoSeal;
 use rgbstd::{
-    Assign, Assignments, BuilderSeal, GlobalStateType, GraphSeal, KnownTransition, OpId, Operation,
-    Opout, TransitionType,
+    Assign, Assignments, GraphSeal, KnownTransition, OpId, Operation, Opout, TransitionType,
 };
 
+use super::transition::{output_seal, single_global};
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
 use crate::error::{EnclaveError, Result};
 
@@ -108,48 +107,6 @@ fn settling_facts(known: &KnownTransition) -> Result<SettlingFacts> {
     })
 }
 
-/// The one value of a global, as exactly `N` raw bytes. `Ok(None)` when the
-/// transition does not declare it.
-///
-/// The bytes are the strict encoding: an `Amount` is a little-endian `u64`, a
-/// `BurnReason` its 32 bytes. Decoded by hand to keep the strict-encoding
-/// crate out of the enclave's own code.
-fn single_global<const N: usize>(
-    globals: &rgbstd::GlobalState,
-    ty: GlobalStateType,
-    name: &str,
-) -> Result<Option<[u8; N]>> {
-    let Some(values) = globals.get(&ty) else {
-        return Ok(None);
-    };
-    let [value] = values.as_slice() else {
-        return Err(EnclaveError::CrossCheck(format!(
-            "settling transition carries {} {name} values, expected one",
-            values.len()
-        )));
-    };
-    let bytes: [u8; N] = value.as_slice().try_into().map_err(|_| {
-        EnclaveError::CrossCheck(format!(
-            "{name} is {} bytes, expected {N}",
-            value.as_slice().len()
-        ))
-    })?;
-    Ok(Some(bytes))
-}
-
-/// The seal of an output as the flat parser shows it.
-fn output_seal(seal: &BuilderSeal<GraphSeal>) -> OutputSeal {
-    match seal {
-        BuilderSeal::Revealed(seal) => OutputSeal::Revealed {
-            txid: seal.txid().map(display_bytes),
-            vout: seal.vout().into_u32(),
-        },
-        BuilderSeal::Concealed(secret) => OutputSeal::Confidential {
-            secret_seal: secret.to_string(),
-        },
-    }
-}
-
 /// Every transition the bundle commits to is in the consignment.
 fn fully_disclosed(bundle: &WitnessBundle) -> bool {
     let committed: BTreeSet<OpId> = bundle.bundle.input_map.values().copied().collect();
@@ -207,13 +164,6 @@ fn revealed_seal(
         .ok()
         .and_then(Assign::into_revealed)?;
     Some(seal.to_outpoint())
-}
-
-/// Display-order (big-endian) bytes of a txid, as the wire carries it.
-fn display_bytes(txid: bitcoin::Txid) -> [u8; 32] {
-    let mut bytes = txid.to_byte_array();
-    bytes.reverse();
-    bytes
 }
 
 /// The flat transition summary of a consignment that consensus validated:
