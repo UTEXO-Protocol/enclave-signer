@@ -1,6 +1,6 @@
 //! The flat transition summary over every consignment shape the generator
-//! makes. A reference reading of the rgbstd `Transfer` pins each field to the
-//! shape consignment-utils gave, which rgb-lib's inspection matched.
+//! makes. A reference reading of the rgbstd `Transfer` pins each field, and
+//! rgb-lib's inspection must match it.
 
 use amplify::Wrapper;
 use rgbstd::containers::Transfer;
@@ -281,8 +281,8 @@ fn reference_of(bytes: &[u8]) -> Summary {
     reference_summary(&Transfer::load(std::io::Cursor::new(bytes)).unwrap())
 }
 
-/// rgb-lib's inspection, mapped back, equals the reading consignment-utils
-/// gave on every shape.
+/// rgb-lib's inspection, mapped back, equals the rgbstd reading on every
+/// shape.
 #[test]
 fn the_summary_matches_the_rgbstd_reading_on_every_generated_shape() {
     for (name, bytes) in generated_shapes() {
