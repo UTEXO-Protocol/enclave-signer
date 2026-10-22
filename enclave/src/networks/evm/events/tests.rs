@@ -1054,6 +1054,27 @@ fn verify_rgb_funds_in_refuses_a_lock_at_or_before_after_block() {
     assert!(verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 99).is_ok());
 }
 
+/// rgb-lib looks for a mint's lock only [`MAX_MINT_SCAN_BLOCKS`] blocks after `afterBlock`.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_refuses_a_lock_past_the_mint_scan_window() {
+    let p = FakeEvm {
+        receipt: Some(receipt_with(
+            vec![
+                rgb_companion_log(0xab, 100),
+                bridge_log(op_id(7), 1000, 950, 50),
+            ],
+            100 + MAX_MINT_SCAN_BLOCKS,
+        )),
+        chain_id: 42161,
+    };
+    assert!(verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 100).is_ok());
+    let e = verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 99)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("past the mint's scan window"), "got: {e}");
+}
+
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn node_chain_id_must_be_the_pinned_one() {

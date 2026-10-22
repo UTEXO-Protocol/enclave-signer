@@ -242,12 +242,14 @@ signed or not: only its unsigned tx and its RGB keys are read.
   derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
   burn-flow B2.3). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
   RPC. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`). The receipt
-  block must be after `afterBlock`, at or below the RPC's `EVM_FINALITY_TAG`
-  block (`safe` by default), and its `blockHash` must match the canonical
-  block at its height. The tagged head is read again afterwards to detect a
-  reorg. A receiving rgb-lib wallet confirms the mint only once the lock is
-  `finalized`, so with `safe` the user sees the mint later than the enclave
-  signs it. A production policy refuses `latest`.
+  block must be after `afterBlock` and at most 500 000 blocks past it
+  (rgb-lib's `MAX_MINT_SCAN_BLOCKS`: receivers look no further), at or below
+  the RPC's `EVM_FINALITY_TAG` block (`safe` by default), and its
+  `blockHash` must match the canonical block at its height. The tagged head
+  is read again afterwards to detect a reorg. A receiving rgb-lib wallet
+  confirms the mint only once the lock is `finalized`, so with `safe` the
+  user sees the mint later than the enclave signs it. A production policy
+  refuses `latest`.
 - **S6.1** The amount must cover the minted units plus the commission.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal.
