@@ -25,7 +25,7 @@ pub const MAX_REFILL_FEE_INPUTS: usize = 1;
 /// hostile fee input.
 pub const MIN_REFILL_RIGHTS: usize = 2;
 
-/// rgb-lib counts rights in a u8. Mirrors it only: RR9, RR12 and RR13 carry
+/// Our own cap: rgb-lib has no limit since ae85958. RR9, RR12 and RR13 carry
 /// the security.
 pub const MAX_REFILL_RIGHTS: usize = 255;
 

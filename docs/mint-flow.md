@@ -382,8 +382,8 @@ What is not checked, and why that is safe:
 - Each signature can burn at most the Stage 3 fee. RR15 bounds how many.
 
 The limits are compiled in, so they are part of PCR0: at least 2 rights, at
-most 255 (rgb-lib counts rights in a u8), at most 1 fee input, at most 12
-refills per hour.
+most 255 (our own cap; rgb-lib has no limit since ae85958), at most 1 fee
+input, at most 12 refills per hour.
 
 ## 9. What the mint signer refuses
 

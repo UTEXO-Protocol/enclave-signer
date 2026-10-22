@@ -639,7 +639,7 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
 /// the same bytes.
 #[test]
 fn burn_facts_agree_with_rgb_lib_inspection() {
-    use rgb_lib::inspect::TransitionGlobal;
+    use rgb_lib::no_wallet::TransitionGlobal;
     let bytes = burn_bytes();
     let last = validate(&bytes).unwrap().last_transition.unwrap();
 
@@ -1124,12 +1124,12 @@ fn scratch(name: &str) -> std::path::PathBuf {
 fn inspected_output(
     assignment: rgb_lib::Assignment,
     seal: OutputSeal,
-) -> rgb_lib::inspect::RgbOutputInfo {
+) -> rgb_lib::no_wallet::RgbOutputInfo {
     let (txid, vout, recipient_id) = match seal {
         OutputSeal::Revealed { txid, vout } => (txid.map(hex::encode), Some(vout), None),
         OutputSeal::Confidential { secret_seal } => (None, None, Some(secret_seal)),
     };
-    rgb_lib::inspect::RgbOutputInfo {
+    rgb_lib::no_wallet::RgbOutputInfo {
         txid,
         vout,
         assignment,
@@ -1142,9 +1142,9 @@ fn inspected_output(
 
 fn inspected_transition(
     r#type: rgb_lib::TypeOfTransition,
-    outputs: Vec<rgb_lib::inspect::RgbOutputInfo>,
-) -> rgb_lib::inspect::RgbTransitionInfo {
-    rgb_lib::inspect::RgbTransitionInfo {
+    outputs: Vec<rgb_lib::no_wallet::RgbOutputInfo>,
+) -> rgb_lib::no_wallet::RgbTransitionInfo {
+    rgb_lib::no_wallet::RgbTransitionInfo {
         r#type,
         opid: "mint-op".into(),
         inputs: vec![],

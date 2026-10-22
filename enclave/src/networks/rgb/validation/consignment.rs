@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::hashes::Hash;
-use rgb_lib::inspect::{
+use rgb_lib::no_wallet::{
     inspect_consignment, BundleFilter, ConsignmentInspection, RgbOutputInfo, RgbTransitionInfo,
 };
 use rgb_lib::{Assignment, TypeOfTransition};
