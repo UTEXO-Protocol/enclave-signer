@@ -236,7 +236,11 @@ pub(super) fn dispatch(
 }
 
 fn error_response(code: u32, e: &EnclaveError) -> EnclaveResponse {
-    tracing::warn!("handler error: {}", e);
+    if matches!(e, EnclaveError::EvmFinalityPending { .. }) {
+        tracing::debug!("waiting for EVM finality: {}", e);
+    } else {
+        tracing::warn!("handler error: {}", e);
+    }
     EnclaveResponse {
         response: Some(Response::Error(ErrorResponse {
             code,

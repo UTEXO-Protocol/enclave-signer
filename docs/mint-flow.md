@@ -38,6 +38,14 @@ It checks deposits through the pinned EVM RPC. It trusts that provider for
 receipt, canonical block and selected finality head data. It does not verify EVM
 consensus. It checks that the node reports the pinned chain id.
 
+If the receipt is above the `safe` or `finalized` head, the enclave refuses to
+sign with wire error code **8** (EVM finality pending). The parent translates
+that code to `FailedPrecondition` with the stable `evm event pending finality:`
+prefix, which the bridge already treats as a wait with retry backoff. The
+diagnostic text is not used to identify this state. The enclave and listener
+log this wait at debug level. Other validation failures keep code 3; a receipt
+above the `latest` head also remains a validation failure.
+
 The mint signer validates no RGB consignment. It reads the mint from the
 PSBT that rgb-lib returns: rgb-lib stores each transition, the input map and
 the MPC entropy in the PSBT as proprietary keys. Each step from the signed

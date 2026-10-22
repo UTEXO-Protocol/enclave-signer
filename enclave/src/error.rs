@@ -56,6 +56,15 @@ pub enum EnclaveError {
     #[error("cross-check failed: {0}")]
     CrossCheck(String),
 
+    /// A deposit may be signed only after the selected finality head covers it.
+    /// Wire code 8, not this diagnostic wording, identifies the retryable state.
+    #[error("FundsIn receipt block {receipt_block} is above RPC {tag} block {finality_block} - refusing to sign")]
+    EvmFinalityPending {
+        receipt_block: u64,
+        tag: attestation_verify::EvmFinalityTag,
+        finality_block: u64,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -115,6 +124,7 @@ impl EnclaveError {
             EnclaveError::CrossCheck(_) => 3,   // validation failed
             EnclaveError::Spv(_) => 3,          // validation failed
             EnclaveError::NotReady { .. } => 2, // not ready
+            EnclaveError::EvmFinalityPending { .. } => 8, // retryable EVM finality wait
             _ => 1,
         }
     }
@@ -169,6 +179,15 @@ mod tests {
             (Internal(String::new()), 1, 1),
             (CrossCheck(String::new()), 3, 3),
             (Spv(String::new()), 3, 3),
+            (
+                EvmFinalityPending {
+                    receipt_block: 100,
+                    tag: attestation_verify::EvmFinalityTag::Safe,
+                    finality_block: 99,
+                },
+                8,
+                8,
+            ),
         ];
         for (e, rpc, clone) in rows {
             assert_eq!(e.error_code(), rpc, "{e:?}");
