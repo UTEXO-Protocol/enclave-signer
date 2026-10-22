@@ -4716,7 +4716,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.7"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib-bfa.git?rev=3f571ac58909400046d69143ebb535f4da1f4d42#3f571ac58909400046d69143ebb535f4da1f4d42"
+source = "git+ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git?rev=668151e290ddf859858cb74024e6b148535ebec9#668151e290ddf859858cb74024e6b148535ebec9"
 dependencies = [
  "amplify",
  "hex",
