@@ -190,6 +190,12 @@ impl ParentAdapterService {
             5 => Status::permission_denied(err.message.clone()),
             6 => Status::already_exists(err.message.clone()),
             7 => Status::resource_exhausted(err.message.clone()),
+            // Stable wire prefix already understood by the bridge's finality
+            // backoff. The enclave's human diagnostic may change independently.
+            8 => Status::failed_precondition(format!(
+                "evm event pending finality: 1 signer node(s) have not seen the deposit finalized yet ({})",
+                err.message
+            )),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message
@@ -929,6 +935,42 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::thread;
     use tonic::Code;
+
+    #[test]
+    fn finality_wire_code_survives_changed_diagnostic_wording() {
+        for diagnostic in [
+            "FundsIn receipt block 100 is above RPC safe block 99 - refusing to sign",
+            "The finality head has not reached the deposit yet",
+        ] {
+            let status =
+                ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+                    code: 8,
+                    message: diagnostic.into(),
+                });
+            assert_eq!(status.code(), Code::FailedPrecondition);
+            assert!(status
+                .message()
+                .starts_with("evm event pending finality: 1 signer node(s)"));
+            assert!(status.message().contains(diagnostic));
+        }
+    }
+
+    #[test]
+    fn validation_errors_do_not_become_finality_waits() {
+        // Even a familiar diagnostic is not retryable without wire code 8.
+        for diagnostic in [
+            "cross-check failed: BridgeFundsIn amount mismatch",
+            "FundsIn receipt block 100 is above RPC safe block 99 - refusing to sign",
+        ] {
+            let status =
+                ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+                    code: 3,
+                    message: diagnostic.into(),
+                });
+            assert_eq!(status.code(), Code::FailedPrecondition);
+            assert_eq!(status.message(), diagnostic);
+        }
+    }
 
     #[test]
     fn evm_destination_forwards_burn_destination() {

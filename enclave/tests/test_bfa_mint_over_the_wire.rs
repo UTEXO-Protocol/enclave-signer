@@ -816,7 +816,12 @@ fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
 /// The lock is real but above the `EVM_FINALITY_TAG` head: retry later.
 #[test]
 fn refuses_a_lock_above_the_finality_head() {
-    let refusal = refusal(&drive_with(&build(None), LOCK_BLOCK, LOCK_BLOCK - 1));
+    let response = drive_with(&build(None), LOCK_BLOCK, LOCK_BLOCK - 1);
+    let Some(Response::Error(error)) = &response.response else {
+        panic!("an unsafe deposit must not be signed");
+    };
+    assert_eq!(error.code, 8, "the caller must recognize a finality wait");
+    let refusal = refusal(&response);
     assert!(refusal.contains("above RPC safe block"), "{refusal}");
 }
 
