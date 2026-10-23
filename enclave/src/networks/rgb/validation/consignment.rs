@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::hashes::Hash;
-use rgb_lib::inspect::{
+use rgb_lib::no_wallet::{
     inspect_consignment, BundleFilter, ConsignmentInspection, RgbOutputInfo, RgbTransitionInfo,
 };
 use rgb_lib::{Assignment, TypeOfTransition};
@@ -173,7 +173,7 @@ fn revealed_seal(
 
 /// The flat transition summary of a consignment that consensus validated:
 /// all transitions grouped by witness tx. rgb-lib's wallet-free inspection
-/// reads it, mapped back to the shape the consignment-utils parser gave.
+/// reads it, mapped to our `TransitionSummary`.
 pub(super) fn extract_transition_summary(
     consignment_bytes: &[u8],
 ) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
@@ -300,8 +300,8 @@ fn transition_type_id(t: TypeOfTransition) -> u16 {
     .to_inner()
 }
 
-/// Only fungible units are outputs: consignment-utils listed fungible
-/// allocations only, and `OS_ASSET` is the one fungible type rgb-lib reads.
+/// Only fungible units are outputs: `OS_ASSET` is the one fungible type
+/// rgb-lib reads.
 fn inspected_output(
     o: &RgbOutputInfo,
     witness_txid: &str,

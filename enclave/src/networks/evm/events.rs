@@ -634,6 +634,10 @@ pub fn derived_lock(
     })
 }
 
+/// rgb-lib's MAX_MINT_SCAN_BLOCKS (no_wallet/validation.rs): receivers look no further for a lock.
+#[cfg(feature = "bfa-validation")]
+pub const MAX_MINT_SCAN_BLOCKS: u64 = 500_000;
+
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,
@@ -644,8 +648,8 @@ pub fn derived_lock(
 /// must exist.
 ///
 /// The lock must also follow the RGB rule for a mint anchor: a block after
-/// `after_block`. An RGB receiver refuses any other lock, so a signed mint
-/// would strand the user's deposit.
+/// `after_block` and at most [`MAX_MINT_SCAN_BLOCKS`] past it. An RGB receiver
+/// refuses any other lock, so a signed mint would strand the user's deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
 /// contract. A later `fundsOut` must cite its `(operationId, netAmount)` in
@@ -695,6 +699,13 @@ pub fn verify_rgb_funds_in(
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn block {} is not after the mint's afterBlock {after_block} - an RGB \
              receiver refuses this lock, refusing to sign",
+            receipt.block_number
+        )));
+    }
+    if receipt.block_number > after_block.saturating_add(MAX_MINT_SCAN_BLOCKS) {
+        return Err(EnclaveError::CrossCheck(format!(
+            "FundsIn block {} is past the mint's scan window ({MAX_MINT_SCAN_BLOCKS} blocks after \
+             afterBlock {after_block}) - an RGB receiver refuses this lock, refusing to sign",
             receipt.block_number
         )));
     }
