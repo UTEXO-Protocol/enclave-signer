@@ -779,3 +779,6 @@ Re-syncing changes PCR0. Procedure in
 
 Known limitations are listed in
 [`docs/tee-spec.md`](docs/tee-spec.md#13-implementation-status).
+
+
+
