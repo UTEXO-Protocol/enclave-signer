@@ -382,11 +382,11 @@ contract/backend fixtures. These tests do not inspect the deployed contract.
 The response returns the calldata unchanged.
 
 **Settlement bind (`bfa-mint`).** `settlementData` is
-`abi.encode(bytes32[] operationIds, uint256[] netAmounts)`, the deposits the
-release settles. For each mint in the burn's ancestry, the enclave derives
-the `operationId` of the one deposit that can back it (burn-flow B2.3). It
-reads nothing from the chain. It then requires the cited pairs to equal those
-derived locks exactly: set equality, canonical encoding,
+`abi.encode(bytes32[] operationIds)`, the deposits the release settles. Each
+id hashes its deposit's netAmount, so no amounts are cited. For each mint in
+the burn's ancestry, the enclave derives the `operationId` of the one deposit
+that can back it (burn-flow B2.3). It reads nothing from the chain. It then
+requires the cited ids to equal those derived locks exactly: set equality, canonical encoding,
 strictly ascending `operationId` order (so no duplicates), and at least one
 verified lock. `burnId` does not hash `settlementData`, so these rules decide
 what backs a release, not its replay key (F05-NEW-AF-04).
@@ -834,7 +834,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P3 | Exact amount | `burnedAsset` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`, V1 record). A V0 burn: direct route only. |
-| P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement pairs. |
+| P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement ids. |
 | P7 | Accepted Bitcoin history | Each witness must belong to the retained chain. |
 | P8 | Inclusion and relay agreement | Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. |
 | P9 | Ancestry deposits | Derive each deposit id from its mint; no chain read. `RgbSettlementModule.beforeFundsOut` enforces that each cited deposit exists. |
@@ -843,7 +843,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 
 P6 applies to both release routes. `sourceBurnTxId` must equal the non-zero
 OpId of the settling burn. Settlement data must contain the exact verified
-`(operationId, netAmount)` pairs. The list must be non-empty and canonically
+`operationId`s. The list must be non-empty and canonically
 encoded. Operation IDs must be strictly ascending, without duplicates.
 
 P8 requires a 128-byte proof with source and latest height/commitment pairs.

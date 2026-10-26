@@ -67,7 +67,7 @@ flowchart TD
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
         p4id -->|yes| p4rc{"burnReason == calldata recipient<br/>(LZ: LayerZero recipient)?"}
         p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
-        p4rc -->|yes| p4st{"settlementData pairs == verified<br/>ancestry BridgeFundsIn records?"}
+        p4rc -->|yes| p4st{"settlementData operationIds == verified<br/>ancestry BridgeFundsIn records?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
     end
     p2d -->|yes| p4r

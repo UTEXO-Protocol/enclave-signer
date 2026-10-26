@@ -648,7 +648,7 @@ pub fn derived_lock(
 /// would strand the user's deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
-/// contract. A later `fundsOut` must cite its `(operationId, netAmount)` in
+/// contract. A later `fundsOut` must cite its `operationId` in
 /// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
 #[cfg(feature = "bfa-validation")]
 pub fn verify_rgb_funds_in(

@@ -145,7 +145,7 @@ the first step that reads the keys. It refuses an enclave without keys.
   lock, one for one. The Bridge holds a record under that id only if a
   deposit of exactly the minted units was made for that mint, and the release
   checks each cited record, so a mint with no deposit fails on chain.
-- **B2.5** The result is a list of locks: `(operationId, netAmount)`. One burn
+- **B2.5** The result is a list of locks: deposit `operationId`s. One burn
   has one list, so one `settlementData`; `burnId` does not hash it. Stage 5
   uses this list.
 - **B2.6** The contract id must equal the declared `asset_id` and the pinned
@@ -269,9 +269,8 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
     means the LayerZero route: the calldata `dstEid` must equal it, and the
     left-padded record `recipient` must equal the LayerZero `recipient`.
 - **B5.9** Settlement: `settlementData` is
-  `abi.encode(bytes32[] operationIds, uint256[] netAmounts)`. It must be
-  canonical. The two arrays must have the same length. The ids must be in
-  strictly ascending order, so no id repeats. The pairs must equal, as a set,
+  `abi.encode(bytes32[] operationIds)`. It must be canonical. The ids must be
+  in strictly ascending order, so no id repeats. They must equal, as a set,
   the locks consensus confirmed in Stage 2. An empty list is refused.
 
 > **Note - LayerZero route.** Only a V1 burn can leave via LayerZero, because
