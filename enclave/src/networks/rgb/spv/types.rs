@@ -67,6 +67,20 @@ impl Network {
         }
     }
 
+    /// The attested policy value. The match is exhaustive, so a new network
+    /// needs its own wire value.
+    pub fn attested(self) -> attestation_verify::BitcoinNetwork {
+        use attestation_verify::BitcoinNetwork;
+        match self {
+            Self::Mainnet => BitcoinNetwork::Mainnet,
+            Self::Signet => BitcoinNetwork::Signet,
+            Self::SignetCustom => BitcoinNetwork::SignetCustom,
+            Self::Testnet3 => BitcoinNetwork::Testnet3,
+            Self::Testnet4 => BitcoinNetwork::Testnet4,
+            Self::Regtest => BitcoinNetwork::Regtest,
+        }
+    }
+
     /// Maps to the `bitcoin` crate's network parameters.
     pub fn as_bitcoin_params(self) -> &'static bitcoin::consensus::params::Params {
         match self {
