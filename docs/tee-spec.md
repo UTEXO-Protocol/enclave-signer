@@ -149,10 +149,24 @@ enables `kms-persistence`. Production images are built with
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
-protobuf, 24 MiB frame cap, no version field (`framing.rs`). The Bitcoin
+protobuf, 24 MiB frame cap, no version field (`framing.rs`). Before the
+decode, `check_request_shape` counts the field occurrences on the wire and
+refuses a request with more than 2^19 (`MAX_WIRE_ELEMENTS`). The Bitcoin
 indexer and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.
+
+**Request memory model** (`memory.rs`). The enclave has a fixed amount of
+memory and no swap. The burn key lives only in memory. So the heap one request
+can use has a bound that depends only on its size. The bound is
+`REQUEST_MEMORY_FACTOR` (20) times the frame, plus 64 MiB for the decoded
+protobuf elements. Each parser with a large input has a test. The test runs
+the largest input and fails above the factor. The measured values are 3 for
+reading a frame, about 15.5 for consignment validation and under 2 for the gas
+transaction and PSBT parsers. Four workers, the bound for a 24 MiB frame and a
+512 MiB baseline give the minimum enclave memory (2688 MiB). A release build
+reads `/proc/meminfo` at boot and refuses to start with less. The deploy
+scripts use 3072 MiB.
 
 **Launch endpoints.** The endpoints are not in the image, so a rebuild of the
 EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
@@ -613,7 +627,9 @@ The enclave no longer signs an opaque digest. The request MUST carry the
 unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
-creation -- and computes the digest itself.
+creation -- and computes the digest itself. The preimage is at most 1 MiB
+(`MAX_GAS_TX_BYTES`). It decodes to at most 1024 RLP items (`MAX_RLP_ITEMS`)
+with a nesting depth of at most 8. So the input bounds the decoder's heap.
 
 Two further bounds, each fail-closed when unset:
 

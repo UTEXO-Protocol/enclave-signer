@@ -2511,6 +2511,35 @@ fn validates_a_history_of_200_transfers() {
     assert_eq!(last.burned_asset_amount, Some(MINTED));
 }
 
+/// The request memory model (`memory.rs`): validating a consignment stays
+/// within the memory factor. A history of 2_000 transfers is about 1 MiB.
+#[test]
+fn consignment_validation_stays_within_the_request_memory_factor() {
+    use crate::memory::peak;
+
+    let (consignment, validated, peak) = peak::measure(
+        || long_history(2_000).consignment(vec![]),
+        |consignment| validate(consignment),
+    );
+    assert_eq!(validated.unwrap().witness_txids.len(), 2_002);
+    peak::assert_within_factor("consignment validation", consignment.len(), peak);
+}
+
+/// The same measurement at the largest history the request caps allow.
+/// Ignored by default because it is slow in a debug build.
+#[test]
+#[ignore = "measures a history of 10_000 transfers; run it on request"]
+fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
+    use crate::memory::peak;
+
+    let (consignment, validated, peak) = peak::measure(
+        || long_history(10_000).consignment(vec![]),
+        |consignment| validate(consignment),
+    );
+    assert_eq!(validated.unwrap().witness_txids.len(), 10_002);
+    peak::assert_within_factor("consignment validation", consignment.len(), peak);
+}
+
 /// A burn with a history of 10_000 transfers and an SPV proof on every bundle
 /// passes with the default limits: consensus, the request caps
 /// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`) and
