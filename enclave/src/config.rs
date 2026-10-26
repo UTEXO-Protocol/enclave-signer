@@ -295,11 +295,16 @@ impl BridgeConfig {
         let btc_relay_mode = BtcRelayMode::from_env_value(std::env::var(BTC_RELAY_MODE_ENV).ok());
 
         // The SPV parser, so the attested network is the one the chain runs.
-        let bitcoin_network = crate::networks::rgb::spv::Network::from_env_str(
-            &crate::bootstrap::bitcoin_network_str(),
-        )
-        .expect("BITCOIN_NETWORK must be a known network")
-        .attested();
+        let bitcoin_network_str = crate::bootstrap::bitcoin_network_str();
+        let bitcoin_network =
+            crate::networks::rgb::spv::Network::from_env_str(&bitcoin_network_str)
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "BITCOIN_NETWORK {bitcoin_network_str:?} is not bitcoin (or mainnet), \
+                         testnet3 (or testnet), testnet4, signet, signetcustom or regtest"
+                    )
+                })
+                .attested();
 
         // Without both caps every gas tx fails. Show this at boot.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)

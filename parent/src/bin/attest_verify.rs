@@ -105,8 +105,8 @@ struct Cli {
     #[arg(long)]
     expect_chain_id: Option<u64>,
 
-    /// Require this Bitcoin network: bitcoin (mainnet), testnet3, testnet4,
-    /// signet, signetcustom or regtest. Ignored with --mock.
+    /// Require this Bitcoin network: bitcoin (or mainnet), testnet3 (or
+    /// testnet), testnet4, signet, signetcustom or regtest. Ignored with --mock.
     #[arg(long, default_value = "bitcoin")]
     expect_bitcoin_network: String,
 
@@ -403,8 +403,8 @@ async fn run(cli: Cli) -> Result<()> {
             bitcoin_network: BitcoinNetwork::from_env_str(&cli.expect_bitcoin_network)
                 .with_context(|| {
                     format!(
-                        "--expect-bitcoin-network {:?} is not bitcoin, testnet3, testnet4, signet, \
-                         signetcustom or regtest",
+                        "--expect-bitcoin-network {:?} is not bitcoin (or mainnet), testnet3 \
+                         (or testnet), testnet4, signet, signetcustom or regtest",
                         cli.expect_bitcoin_network
                     )
                 })?,

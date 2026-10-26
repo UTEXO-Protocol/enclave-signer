@@ -857,7 +857,9 @@ fn a_mainnet_evm_chain_requires_bitcoin_mainnet() {
             .is_ok());
         for network in [
             BitcoinNetwork::Testnet3,
+            BitcoinNetwork::Testnet4,
             BitcoinNetwork::Signet,
+            BitcoinNetwork::SignetCustom,
             BitcoinNetwork::Regtest,
         ] {
             let err = boot_policy(chain_id, network)
