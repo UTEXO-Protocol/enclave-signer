@@ -884,6 +884,9 @@ fn gas_tx_decoding_stays_within_the_request_memory_factor() {
 
     let frame = crate::framing::MAX_MESSAGE_SIZE as usize - 64;
     let shapes: [(&str, Vec<u8>); 4] = [
+        // The byte cap refuses this one before any decode. The item cap
+        // refuses the next two after 1024 items. Only the calldata shape
+        // decodes in full.
         (
             "frame of empty lists",
             eip1559_with_empty_access_list_entries(frame),

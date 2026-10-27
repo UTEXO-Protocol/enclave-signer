@@ -54,6 +54,11 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.
 
+After a re-sync, run the enclave tests. The test
+`framing::tests::the_shape_walk_knows_every_repeated_field_of_the_proto` fails
+when a request message gets a new `repeated` field that the wire shape check in
+`enclave/src/framing.rs` does not count.
+
 ## Provenance
 
 | | |

@@ -16,11 +16,14 @@ pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
 /// Maximum protobuf field occurrences in one request. The shape check counts
 /// them on the wire before the decode. A decoded element costs far more
-/// memory than its wire form. An empty `MerkleProofEntry` is 4 bytes on the
-/// wire and about 80 bytes in memory. A 24 MiB frame of them decoded into
-/// more than 1 GiB. The largest real request is a burn with 16 384 proofs of
-/// 13 path elements each. It has about 280 000 occurrences. The memory model
-/// (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
+/// memory than its wire form. A field occurrence can be 2 bytes on the wire
+/// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
+/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decoded
+/// into more than 1 GiB. The largest real request is a burn with 16 384
+/// proofs of 13 path elements each. It has about 280 000 occurrences. The
+/// memory model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
+/// A packed repeated scalar would be one occurrence for many values. The
+/// request proto has none, and a test refuses one until the model covers it.
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
 
 /// Read a length-prefixed frame from a stream and return its bytes.
@@ -115,29 +118,23 @@ fn walk(mut buf: &[u8], schema: Schema, left: &mut usize) -> Result<()> {
                 "request has more than {MAX_WIRE_ELEMENTS} elements"
             ))
         })?;
-        match (schema.child(tag), wire_type) {
-            (Schema::Leaf, _) => {
-                skip_field(wire_type, tag, &mut buf, DecodeContext::default())
-                    .map_err(shape_error)?;
-            }
-            (child, WireType::LengthDelimited) => {
-                let len = decode_varint(&mut buf).map_err(shape_error)?;
-                let len = usize::try_from(len)
-                    .ok()
-                    .filter(|len| *len <= buf.remaining())
-                    .ok_or_else(|| {
-                        EnclaveError::Framing("request shape: nested message truncated".into())
-                    })?;
-                walk(&buf[..len], child, left)?;
-                buf.advance(len);
-            }
-            (_, _) => {
-                // A nested message sent with another wire type: not a message.
-                // The decode refuses it.
-                skip_field(wire_type, tag, &mut buf, DecodeContext::default())
-                    .map_err(shape_error)?;
-            }
+        let child = schema.child(tag);
+        if child == Schema::Leaf || wire_type != WireType::LengthDelimited {
+            // A scalar, string or bytes field, a message the walk does not
+            // enter, or a message field sent with another wire type. The
+            // decode refuses the last one.
+            skip_field(wire_type, tag, &mut buf, DecodeContext::default()).map_err(shape_error)?;
+            continue;
         }
+        let len = decode_varint(&mut buf).map_err(shape_error)?;
+        let len = usize::try_from(len)
+            .ok()
+            .filter(|len| *len <= buf.remaining())
+            .ok_or_else(|| {
+                EnclaveError::Framing("request shape: nested message truncated".into())
+            })?;
+        walk(&buf[..len], child, left)?;
+        buf.advance(len);
     }
     Ok(())
 }
@@ -156,6 +153,7 @@ pub fn write_message<M: Message>(stream: &mut impl Write, msg: &M) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::Cursor;
 
     use crate::proto::{enclave_request, EnclaveRequest, GetPublicKeyRequest};
@@ -368,8 +366,290 @@ mod tests {
         assert_eq!(decoded, req);
     }
 
-    /// Handle each fixed test frame without a panic.
-    /// Inputs stay below the frame limit.
+    /// A message field sent with another wire type. The walk skips it, and
+    /// the decode refuses it.
+    #[test]
+    fn a_message_field_with_another_wire_type_is_refused_by_the_decode() {
+        // `EnclaveRequest.sign` (field 3) as a varint, then as a group.
+        for body in [vec![0x18, 0x05], vec![0x1b, 0x1c]] {
+            check_request_shape(&body).unwrap();
+            let mut wire = (body.len() as u32).to_le_bytes().to_vec();
+            wire.extend_from_slice(&body);
+            let err = read_request(&mut Cursor::new(&wire)).unwrap_err();
+            assert!(matches!(err, EnclaveError::ProtobufDecode(_)), "{err}");
+        }
+        // An end-group key with no open group: the shape check refuses it.
+        let err = check_request_shape(&[0x1c]).unwrap_err();
+        assert!(matches!(err, EnclaveError::Framing(_)), "{err}");
+    }
+
+    /// The proto the enclave decodes, verbatim from upstream
+    /// (`enclave-proto/README.md`).
+    const ENCLAVE_PROTO: &str = include_str!("../../enclave-proto/proto/enclave.proto");
+
+    /// A field of a proto message.
+    struct ProtoField {
+        name: String,
+        type_name: String,
+        tag: u32,
+        repeated: bool,
+    }
+
+    /// The proto3 scalar types. Every other field type must be a message or
+    /// an enum of the same file.
+    const PROTO_SCALARS: [&str; 15] = [
+        "double", "float", "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32",
+        "fixed64", "sfixed32", "sfixed64", "bool", "string", "bytes",
+    ];
+
+    /// The scalar types that proto3 packs: one key for all values.
+    fn is_packable_scalar(type_name: &str) -> bool {
+        PROTO_SCALARS.contains(&type_name) && !["string", "bytes"].contains(&type_name)
+    }
+
+    /// Parses the messages of a proto3 file with no imports and no nested
+    /// definitions. It accepts `syntax`, `package` and `option` lines,
+    /// `message`, `oneof` and `enum` blocks, field lines with a bare type
+    /// name, `reserved` lines and `//` comments. It panics on any other
+    /// construct, so a new construct fails the test instead of hiding a
+    /// field.
+    fn parse_proto_messages(proto: &str) -> BTreeMap<String, Vec<ProtoField>> {
+        let mut messages: BTreeMap<String, Vec<ProtoField>> = BTreeMap::new();
+        let mut enums: BTreeSet<String> = BTreeSet::new();
+        let mut current: Option<String> = None;
+        let mut in_oneof = false;
+        let mut in_enum = false;
+        let block_name = |rest: &str, raw: &str| -> (String, bool) {
+            match rest.strip_suffix("{}") {
+                Some(name) => (name.trim().to_string(), true),
+                None => {
+                    let name = rest
+                        .strip_suffix('{')
+                        .unwrap_or_else(|| panic!("block line: {raw:?}"));
+                    (name.trim().to_string(), false)
+                }
+            }
+        };
+        for raw in proto.lines() {
+            let line = raw.split("//").next().unwrap_or_default().trim();
+            if line.is_empty() {
+                continue;
+            }
+            if in_enum {
+                in_enum = line != "}";
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("message ") {
+                assert!(current.is_none(), "nested message: {raw:?}");
+                let (name, empty) = block_name(rest, raw);
+                let fresh = messages.insert(name.clone(), Vec::new()).is_none();
+                assert!(fresh, "duplicate message {name}");
+                if !empty {
+                    current = Some(name);
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("enum ") {
+                let (name, empty) = block_name(rest, raw);
+                assert!(enums.insert(name.clone()), "duplicate enum {name}");
+                in_enum = !empty;
+                continue;
+            }
+            if line.starts_with("oneof ") {
+                in_oneof = true;
+                continue;
+            }
+            if line == "}" {
+                if in_oneof {
+                    in_oneof = false;
+                } else {
+                    assert!(current.take().is_some(), "stray brace: {raw:?}");
+                }
+                continue;
+            }
+            if ["syntax ", "package ", "option ", "reserved "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            {
+                continue;
+            }
+            let message = current
+                .as_deref()
+                .unwrap_or_else(|| panic!("field outside a message: {raw:?}"));
+            // `[repeated|optional] type name = tag [options];`
+            let decl = line
+                .strip_suffix(';')
+                .unwrap_or_else(|| panic!("unknown line: {raw:?}"));
+            let decl = decl.split('[').next().unwrap_or_default().trim();
+            let mut words = decl.split_whitespace();
+            let mut word = words.next().unwrap_or_default();
+            let repeated = word == "repeated";
+            if repeated || word == "optional" {
+                word = words.next().unwrap_or_default();
+            }
+            assert!(
+                !word.starts_with("map<"),
+                "map field, count it as repeated: {raw:?}"
+            );
+            let type_name = word.to_string();
+            let name = words.next().unwrap_or_default().to_string();
+            assert_eq!(words.next(), Some("="), "unknown line: {raw:?}");
+            let tag = words
+                .next()
+                .and_then(|tag| tag.parse().ok())
+                .unwrap_or_else(|| panic!("tag: {raw:?}"));
+            assert!(words.next().is_none(), "unknown line: {raw:?}");
+            messages.get_mut(message).unwrap().push(ProtoField {
+                name,
+                type_name,
+                tag,
+                repeated,
+            });
+        }
+        assert!(current.is_none() && !in_oneof && !in_enum, "unclosed block");
+        // A qualified or imported type name would pass as a scalar below.
+        for (message, fields) in &messages {
+            for field in fields {
+                let known = PROTO_SCALARS.contains(&field.type_name.as_str())
+                    || messages.contains_key(&field.type_name)
+                    || enums.contains(&field.type_name);
+                assert!(
+                    known,
+                    "{message}.{}: unknown type {:?}; use a bare message, enum or scalar name",
+                    field.name, field.type_name
+                );
+            }
+        }
+        messages
+    }
+
+    /// The proto message each schema variant walks.
+    fn schema_message(schema: Schema) -> Option<&'static str> {
+        match schema {
+            Schema::Request => Some("EnclaveRequest"),
+            Schema::Sign => Some("SignRequest"),
+            Schema::RgbSource => Some("RgbSource"),
+            Schema::MerkleProofEntry => Some("MerkleProofEntry"),
+            Schema::SubmitHeaders => Some("SubmitHeadersRequest"),
+            Schema::Leaf => None,
+        }
+    }
+
+    const WALKED: [Schema; 5] = [
+        Schema::Request,
+        Schema::Sign,
+        Schema::RgbSource,
+        Schema::MerkleProofEntry,
+        Schema::SubmitHeaders,
+    ];
+
+    fn schema_of(message: &str) -> Schema {
+        WALKED
+            .into_iter()
+            .find(|schema| schema_message(*schema) == Some(message))
+            .unwrap_or(Schema::Leaf)
+    }
+
+    /// True when `message`, or a message it holds at any depth, has a
+    /// repeated field.
+    fn holds_repeated_fields(
+        message: &str,
+        messages: &BTreeMap<String, Vec<ProtoField>>,
+        depth: usize,
+    ) -> bool {
+        assert!(depth < 16, "message cycle at {message}");
+        messages[message].iter().any(|field| {
+            field.repeated
+                || (messages.contains_key(&field.type_name)
+                    && holds_repeated_fields(&field.type_name, messages, depth + 1))
+        })
+    }
+
+    /// The schema walk matches the proto. From `EnclaveRequest`, every message
+    /// field that holds a repeated field at any depth leads to the schema the
+    /// walk enters, and every other message field is a leaf. A new repeated
+    /// field in a message the walk does not enter fails this test until
+    /// `Schema::child` names its path. Without that, the decode could again
+    /// expand a small frame into many elements.
+    #[test]
+    fn the_shape_walk_knows_every_repeated_field_of_the_proto() {
+        let messages = parse_proto_messages(ENCLAVE_PROTO);
+        assert!(messages.len() > 30, "{} messages parsed", messages.len());
+
+        let mut repeated = 0;
+        let mut todo = vec!["EnclaveRequest"];
+        let mut seen = BTreeSet::new();
+        while let Some(name) = todo.pop() {
+            if !seen.insert(name) {
+                continue;
+            }
+            let schema = schema_of(name);
+            for field in &messages[name] {
+                repeated += usize::from(field.repeated);
+                let at = format!(
+                    "{name}.{} (tag {}, {})",
+                    field.name, field.tag, field.type_name
+                );
+                let child = schema.child(field.tag);
+                if !messages.contains_key(&field.type_name) {
+                    // A scalar, enum, string or bytes field: the walk skips it.
+                    assert_eq!(child, Schema::Leaf, "{at} is not a message");
+                    assert!(
+                        !(field.repeated && is_packable_scalar(&field.type_name)),
+                        "{at} is a packed repeated scalar: one occurrence for many values. \
+                         Extend the request memory model before adding it."
+                    );
+                    continue;
+                }
+                todo.push(&field.type_name);
+                if holds_repeated_fields(&field.type_name, &messages, 0) {
+                    assert_ne!(
+                        schema,
+                        Schema::Leaf,
+                        "{at} holds repeated fields, but the walk does not enter {name}: \
+                         add a Schema variant for it"
+                    );
+                    assert_eq!(
+                        schema_message(child),
+                        Some(field.type_name.as_str()),
+                        "{at} holds repeated fields, and Schema::child gives {child:?}: \
+                         add the path to Schema::child"
+                    );
+                } else {
+                    assert_eq!(
+                        child,
+                        Schema::Leaf,
+                        "{at} holds no repeated field, so Schema::child need not enter it"
+                    );
+                }
+            }
+        }
+        assert!(
+            repeated >= 3,
+            "{repeated} repeated fields reachable from EnclaveRequest"
+        );
+        for schema in WALKED {
+            let name = schema_message(schema).unwrap();
+            assert!(
+                seen.contains(name),
+                "{schema:?} ({name}) is not reachable from EnclaveRequest"
+            );
+            assert!(
+                holds_repeated_fields(name, &messages, 0),
+                "{schema:?} ({name}) holds no repeated field, so the walk need not enter it"
+            );
+        }
+    }
+
+    /// Bytes that look like protobuf keys and lengths. Drawn at random, they
+    /// make nested messages, groups, truncated varints and lengths past the
+    /// frame.
+    const KEY_LIKE_BYTES: [u8; 12] = [
+        0x18, 0x1a, 0x1b, 0x1c, 0x32, 0x22, 0x5a, 0x00, 0x01, 0x02, 0x7f, 0xff,
+    ];
+
+    /// Handle each fixed test frame without a panic, through the plain read
+    /// and through the shape check. Inputs stay below the frame limit.
     #[test]
     fn framed_garbage_corpus_never_panics() {
         let mut state = 0xD1B5_4A32_D192_ED03u64;
@@ -379,12 +659,20 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             (state >> 33) as u8
         };
-        for len in [1usize, 2, 5, 13, 64, 255, 1024] {
+        let frame = |body: &[u8]| {
+            let mut buf = (body.len() as u32).to_le_bytes().to_vec();
+            buf.extend_from_slice(body);
+            buf
+        };
+        for len in [1usize, 2, 5, 13, 64, 255, 1024, 4096, 65536] {
             let body: Vec<u8> = (0..len).map(|_| next()).collect();
-            let mut buf = (len as u32).to_le_bytes().to_vec();
-            buf.extend_from_slice(&body);
-            let mut cursor = Cursor::new(buf);
-            let _res: Result<EnclaveRequest> = read_message(&mut cursor);
+            let _res: Result<EnclaveRequest> = read_message(&mut Cursor::new(frame(&body)));
+            let _res = read_request(&mut Cursor::new(frame(&body)));
+            let keys: Vec<u8> = body
+                .iter()
+                .map(|b| KEY_LIKE_BYTES[usize::from(*b) % KEY_LIKE_BYTES.len()])
+                .collect();
+            let _res = read_request(&mut Cursor::new(frame(&keys)));
         }
     }
 }
