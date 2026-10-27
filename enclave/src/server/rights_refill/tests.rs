@@ -192,6 +192,45 @@ fn signs(shape: Shape) {
     }
 }
 
+/// The request memory model (`memory.rs`): a refill through `dispatch`, with
+/// the decoded request alive while both PSBTs parse and the inputs sign,
+/// stays within the request bound and within the model.
+#[test]
+fn a_refill_through_dispatch_stays_within_the_request_bound() {
+    use crate::memory::peak;
+    use crate::proto::enclave_request::Request;
+    use crate::proto::EnclaveRequest;
+    use std::io::Cursor;
+
+    let keys = fx::km();
+    let (history, psbt, seed) = build(&keys, &Shape::rights(3));
+    let ((wire, _ctx), response, peak) = peak::measure(
+        || {
+            let ctx = context(&history.contract_id.to_string());
+            let request = EnclaveRequest {
+                request: Some(Request::SignRightsRefill(request(&history, &psbt, &seed))),
+            };
+            let mut wire = Vec::new();
+            crate::framing::write_message(&mut wire, &request).unwrap();
+            (wire, ctx)
+        },
+        |(wire, ctx)| {
+            let request = crate::framing::read_request(&mut Cursor::new(wire)).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            super::super::dispatch::dispatch(request, ctx, deadline).0
+        },
+    );
+    let Some(Response::SignedPsbt(signed)) = response.response else {
+        panic!("expected a signed PSBT, got {response:?}");
+    };
+    let signed_psbt = Psbt::deserialize(&signed.signed_psbt).unwrap();
+    assert_eq!(signed.inputs_signed as usize, signed_psbt.inputs.len());
+    let frame = wire.len() - 4;
+    let elements = crate::framing::count_request_elements(&wire[4..]).unwrap();
+    peak::assert_within_request_bound("rights refill through dispatch", frame, peak);
+    peak::assert_within_model("rights refill through dispatch", frame, elements, peak);
+}
+
 fn refusal(shape: Shape) -> String {
     let keys = fx::km();
     let (history, psbt, seed) = build(&keys, &shape);

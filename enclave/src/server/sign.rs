@@ -946,6 +946,11 @@ mod key_not_ready {
 #[cfg(all(test, feature = "bfa-validation", rgb_to_evm))]
 mod reject_list_wiring;
 
+/// The request memory model, measured on a whole burn request through
+/// `dispatch`. Only the mint/burn flow accepts a burn.
+#[cfg(all(test, feature = "bfa-mint", rgb_to_evm))]
+mod request_memory;
+
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
 #[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod funds_out_depth {

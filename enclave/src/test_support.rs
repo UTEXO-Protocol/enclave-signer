@@ -241,8 +241,8 @@ pub(crate) fn regtest_header_chain() -> std::sync::Mutex<crate::networks::rgb::s
 }
 
 /// A fresh regtest chain: one single-tx block per witness (display order)
-/// from height 1, then `depth_above` empty blocks. Returns the chain and a
-/// Merkle proof per witness.
+/// from height 1, then `depth_above` empty blocks, submitted in batches of
+/// the per-submit cap. Returns the chain and a Merkle proof per witness.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub(crate) fn chain_with_witnesses(
     witness_txids: &[[u8; 32]],
@@ -259,7 +259,10 @@ pub(crate) fn chain_with_witnesses(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as u32;
-    let start = now - 1_000;
+    // The chain ends about 1_000 s ago: inside the signing tip age, and never
+    // past the future-skew limit, however many blocks there are.
+    let blocks = witness_txids.len() as u32 + depth_above;
+    let start = now - 1_000 - blocks;
     let mut chain = HeaderChain::new(
         Network::Regtest,
         Checkpoint {
@@ -295,7 +298,15 @@ pub(crate) fn chain_with_witnesses(
         prev = header.block_hash();
         raw.push(bitcoin::consensus::serialize(&header));
     }
-    chain.submit_headers(1, &raw, ANY_HEADER_CLOCK).unwrap();
+    // `submit_headers` takes at most `MAX_HEADERS_PER_SUBMIT` headers per
+    // call, so a long history goes in batches.
+    use crate::networks::rgb::spv::chain::MAX_HEADERS_PER_SUBMIT;
+    for (batch, headers) in raw.chunks(MAX_HEADERS_PER_SUBMIT).enumerate() {
+        let start_height = 1 + (batch * MAX_HEADERS_PER_SUBMIT) as u32;
+        chain
+            .submit_headers(start_height, headers, ANY_HEADER_CLOCK)
+            .unwrap();
+    }
 
     let proofs = witness_txids
         .iter()
@@ -308,4 +319,37 @@ pub(crate) fn chain_with_witnesses(
         })
         .collect();
     (std::sync::Mutex::new(chain), proofs)
+}
+
+/// The fixtures are test code too, and this is their test.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+mod tests {
+    use super::chain_with_witnesses;
+    use crate::networks::rgb::spv::chain::MAX_HEADERS_PER_SUBMIT;
+
+    /// A chain longer than one submit goes in batches, and every block of it
+    /// is there: the witness blocks and the tip.
+    #[test]
+    fn a_long_witness_chain_is_submitted_in_batches() {
+        let witnesses: Vec<[u8; 32]> = (0..MAX_HEADERS_PER_SUBMIT as u32 - 4)
+            .map(|i| {
+                let mut txid = [0x77u8; 32];
+                txid[..4].copy_from_slice(&i.to_le_bytes());
+                txid
+            })
+            .collect();
+        let depth_above = 5;
+        let (chain, proofs) = chain_with_witnesses(&witnesses, depth_above);
+        let chain = chain.lock().unwrap();
+        let last_witness = witnesses.len() as u32;
+        let tip = last_witness + depth_above;
+        assert_eq!(tip, MAX_HEADERS_PER_SUBMIT as u32 + 1);
+        assert_eq!(chain.tip_height(), tip);
+        assert_eq!(proofs.len(), witnesses.len());
+        assert!(chain.hash_at(1).is_some());
+        assert!(chain.hash_at(last_witness).is_some());
+        assert!(chain.hash_at(tip).is_some());
+        // The last witness has the empty blocks above it.
+        assert_eq!(chain.confirmations(last_witness, 6), 6);
+    }
 }

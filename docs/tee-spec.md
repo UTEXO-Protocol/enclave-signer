@@ -165,7 +165,9 @@ only on its size. The bound is
 protobuf elements. Each parser with a large input has a test. The test runs
 the largest input and fails above the factor. The measured values are 3 for
 reading a frame, about 15 for consignment validation and under 2 for the gas
-transaction and PSBT parsers. Four workers, the bound for a 24 MiB frame and a
+transaction and PSBT parsers. A whole burn request through `dispatch`, with
+the decoded request held during validation, peaks at about 15 times its frame,
+or 14.5 beyond the element term. Four workers, the bound for a 24 MiB frame and a
 512 MiB baseline give the minimum usable memory (2688 MiB). A release build
 reads `MemTotal` from `/proc/meminfo` at boot and refuses to start with less,
 or with no readable total. `MemTotal` leaves out the memory the kernel keeps
