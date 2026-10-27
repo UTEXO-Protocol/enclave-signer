@@ -171,7 +171,7 @@ or 14.5 beyond the element term. Four workers, the bound for a 24 MiB frame and 
 512 MiB baseline give the minimum usable memory (2688 MiB). A release build
 reads `MemTotal` from `/proc/meminfo` at boot and refuses to start with less,
 or with no readable total. `MemTotal` leaves out the memory the kernel keeps
-for itself, so `run-enclave --memory` must give at least 3072 MiB. The deploy
+for itself, so `run-enclave --memory` must give at least 3584 MiB. The deploy
 scripts use that value and refuse a smaller `ENCLAVE_MEMORY`.
 
 **Launch endpoints.** The endpoints are not in the image, so a rebuild of the

@@ -34,16 +34,16 @@ DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>
 EIF="$DIR/utexo-bridge-enclave.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
-ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
+ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3584}"
 # A release enclave refuses to start below 2688 MiB of usable memory
 # (enclave/src/memory.rs). The kernel keeps part of the launch value for
-# itself, so the launch value must be at least 3072 MiB. Refuse here, where
+# itself, so the launch value must be at least 3584 MiB. Refuse here, where
 # the message is read, instead of on the enclave console.
 case "$ENCLAVE_MEMORY" in
   ''|*[!0-9]*|????????*) echo "ENCLAVE_MEMORY must be a whole number of MiB with at most 7 digits, got '$ENCLAVE_MEMORY'" >&2; exit 1 ;;
 esac
-if [ "$ENCLAVE_MEMORY" -lt 3072 ]; then
-  echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is below the 3072 MiB minimum (enclave/src/memory.rs)" >&2
+if [ "$ENCLAVE_MEMORY" -lt 3584 ]; then
+  echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is below the 3584 MiB minimum (enclave/src/memory.rs)" >&2
   exit 1
 fi
 # DEBUG-MODE (op13 crash hunt): when set to 1, enclaves run with --debug-mode so
@@ -161,7 +161,7 @@ ACTION="${1:?usage: utexo-enclave-ctl.sh start|stop <cid>}"
 CID="${2:?cid required}"
 NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
-MEM="${ENCLAVE_MEMORY:-3072}"
+MEM="${ENCLAVE_MEMORY:-3584}"
 LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
 enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
@@ -209,12 +209,12 @@ case "$ACTION" in
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # The enclave refuses to start below 2688 MiB of usable memory
     # (enclave/src/memory.rs), and the kernel keeps part of the launch value.
-    # Refuse a value under 3072 MiB here, where the message is read.
+    # Refuse a value under 3584 MiB here, where the message is read.
     case "$MEM" in
       ''|*[!0-9]*|????????*) echo "ENCLAVE_MEMORY must be a whole number of MiB with at most 7 digits, got '$MEM'" >&2; exit 1 ;;
     esac
-    if [ "$MEM" -lt 3072 ]; then
-      echo "ENCLAVE_MEMORY=$MEM MiB is below the 3072 MiB minimum (enclave/src/memory.rs)" >&2
+    if [ "$MEM" -lt 3584 ]; then
+      echo "ENCLAVE_MEMORY=$MEM MiB is below the 3584 MiB minimum (enclave/src/memory.rs)" >&2
       exit 1
     fi
     # fd 9 closed in nitro-cli children (9>&-) so an orphaned run-enclave can't

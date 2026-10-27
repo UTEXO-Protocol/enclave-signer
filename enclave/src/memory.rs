@@ -47,6 +47,9 @@ use crate::policy::BuildContext;
 /// and PSBT parsers stay under 2. A whole burn request through `dispatch`,
 /// with the decoded request held during validation, peaks at about 15 times
 /// its frame, or 14.5 beyond the element term (`server::sign::request_memory`).
+/// The tests count requested bytes on the calling thread. Allocator overhead
+/// and fragmentation come out of the baseline, and a parser that moves work
+/// to other threads needs its own meter.
 pub const REQUEST_MEMORY_FACTOR: usize = 20;
 
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
@@ -77,21 +80,25 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
     BASELINE_BYTES + WORKER_THREADS * request_bound(MAX_MESSAGE_SIZE as usize);
 
 /// The least `nitro-cli run-enclave --memory` value, in MiB. `MemTotal` in
-/// `/proc/meminfo` leaves out the memory the kernel keeps for itself. So the
-/// launch value is above [`MIN_ENCLAVE_MEMORY_BYTES`]. The deploy scripts,
-/// the README, the spec and `build/deploy-to-ec2.sh` carry this value and the
-/// minimum as literals, and a test pins them to the constants. The deploy
-/// scripts refuse a smaller `ENCLAVE_MEMORY`.
-pub const RUN_ENCLAVE_MEMORY_MIB: usize = 3072;
+/// `/proc/meminfo` leaves out the memory the kernel keeps for itself, and the
+/// root file system of the image sits in RAM too. So the launch value is
+/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 896 MiB to spare. A debug image
+/// at this value must report a `MemTotal` of at least the minimum. Record the
+/// reading here when a deploy measures it. The deploy scripts, the README,
+/// the spec and `build/deploy-to-ec2.sh` carry this value and the minimum as
+/// literals, and a test pins them to the constants. The deploy scripts refuse
+/// a smaller `ENCLAVE_MEMORY`. The host allocator must hold this much for
+/// every enclave it runs.
+pub const RUN_ENCLAVE_MEMORY_MIB: usize = 3584;
 
 // The largest four requests fit in the part above the baseline, and the
-// kernel gets at least 256 MiB of the launch value.
+// kernel and the root file system get at least 512 MiB of the launch value.
 const _: () = assert!(
     MIN_ENCLAVE_MEMORY_BYTES - BASELINE_BYTES == 4 * (24 * 1024 * 1024 * 20 + 64 * 1024 * 1024)
 );
 const _: () = assert!(MIN_ENCLAVE_MEMORY_BYTES == 2688 * 1024 * 1024);
 const _: () =
-    assert!(RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024 - MIN_ENCLAVE_MEMORY_BYTES >= 256 * 1024 * 1024);
+    assert!(RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024 - MIN_ENCLAVE_MEMORY_BYTES >= 512 * 1024 * 1024);
 
 /// Refuses to start a release build with less usable memory than
 /// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. Debug and test
@@ -302,7 +309,7 @@ mod tests {
         assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok());
         let err = check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(false)).unwrap_err();
         assert!(err.contains("2687 MiB of usable memory"), "{err}");
-        assert!(err.contains("--memory at least 3072 MiB"), "{err}");
+        assert!(err.contains("--memory at least 3584 MiB"), "{err}");
         let err = check(None, &build(false)).unwrap_err();
         assert!(err.contains("total memory unknown"), "{err}");
     }
@@ -317,15 +324,16 @@ mod tests {
     }
 
     /// The scripts and documents carry the two memory values as literals.
-    /// This pins the literals to the constants.
+    /// This pins the literals to the constants: the values the scripts use,
+    /// not their comments, and the values the documents state.
     #[test]
     fn the_scripts_and_documents_carry_the_memory_values() {
         let min = MIN_ENCLAVE_MEMORY_BYTES / (1024 * 1024);
         let run = RUN_ENCLAVE_MEMORY_MIB;
         let refusal = [
+            format!("ENCLAVE_MEMORY:-{run}}}"),
             format!("-lt {run} "),
             format!("below the {run} MiB minimum"),
-            format!("below {min} MiB of usable memory"),
         ];
         let checks: [(&str, &str, usize, Vec<String>); 5] = [
             // The host script has the check twice: at the top and in the
@@ -348,6 +356,7 @@ mod tests {
                 1,
                 vec![
                     format!("--memory {run} "),
+                    format!("at least {run} MiB"),
                     format!("needs {min} MiB of usable"),
                 ],
             ),
