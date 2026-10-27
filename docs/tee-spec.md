@@ -944,7 +944,7 @@ absolute maximum, or under the relay floor (both PSBT paths); PSBT not
 anchored to the consignment (swap) or not committing exactly one mint or
 refill of the asset, or without a parent PSBT that pins the spent right
 (mint signer); disallowed output script or value cap exceeded
-(plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, or header batch.
+(plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, repeated-field count, or header batch.
 
 ## 13. Implementation status
 
@@ -952,6 +952,8 @@ The production images are the mint signer (`Dockerfile.enclave.mint`) and the
 burn signer (`Dockerfile.enclave.burn`). The tree also has swap, combined and
 CCD builds. The swap flow is retired. The default feature set still has
 `rgb-swap` and `ccd`. A build choice is not evidence of the deployed image.
+`Dockerfile.enclave.ccd` sets no EVM pins, so its release image refuses every
+EVM signature and every plain-BTC PSBT. CI does not build or publish it.
 
 Known limits. Read them before deployment.
 

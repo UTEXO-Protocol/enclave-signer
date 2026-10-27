@@ -172,6 +172,15 @@ fn resolve_account_and_child_path_works() {
     // m/84'/0'/0'/0/0 -> None (wrong purpose)
     let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
     assert!(km.resolve_account_and_child_path(&path).is_none());
+
+    // Only the 5-step BIP-86 shape resolves.
+    for short_or_long in ["m/86'/1'/0'", "m/86'/1'/0'/0", "m/86'/1'/0'/0/7/0"] {
+        let path = DerivationPath::from_str(short_or_long).unwrap();
+        assert!(
+            km.resolve_account_and_child_path(&path).is_none(),
+            "{short_or_long}"
+        );
+    }
 }
 
 /// RGB coin type is network-scoped: 827166 on mainnet, 827167 elsewhere.
@@ -558,18 +567,38 @@ fn test_sign_taproot_psbt_schnorr_signature_valid() {
 }
 
 #[test]
-fn colored_keychain_path_is_exactly_zero_then_a_normal_index() {
+fn wallet_child_path_is_a_scanned_keychain_then_a_bounded_normal_index() {
     let normal = |i| ChildNumber::from_normal_idx(i).unwrap();
     let hardened = |i| ChildNumber::from_hardened_idx(i).unwrap();
-    assert!(is_colored_keychain_path(&[normal(0), normal(7)]));
-    for refused in [
-        vec![],
-        vec![normal(0)],
-        vec![normal(1), normal(7)],
-        vec![hardened(0), normal(7)],
-        vec![normal(0), hardened(7)],
-        vec![normal(0), normal(7), normal(0)],
-    ] {
-        assert!(!is_colored_keychain_path(&refused), "{refused:?}");
+    for account in [AccountType::Colored, AccountType::Vanilla] {
+        assert!(is_wallet_child_path(account, &[normal(0), normal(7)]));
+        assert!(is_wallet_child_path(
+            account,
+            &[normal(0), normal(MAX_WALLET_CHILD_INDEX - 1)]
+        ));
+        for refused in [
+            vec![],
+            vec![normal(0)],
+            vec![normal(2), normal(7)],
+            vec![hardened(0), normal(7)],
+            vec![normal(0), hardened(7)],
+            vec![normal(0), normal(7), normal(0)],
+            vec![normal(0), normal(MAX_WALLET_CHILD_INDEX)],
+            vec![hardened(9), hardened(13)],
+        ] {
+            assert!(
+                !is_wallet_child_path(account, &refused),
+                "{account:?} {refused:?}"
+            );
+        }
     }
+    // rgb-lib's vanilla keychain is configurable; the colored one is not.
+    assert!(is_wallet_child_path(
+        AccountType::Vanilla,
+        &[normal(1), normal(7)]
+    ));
+    assert!(!is_wallet_child_path(
+        AccountType::Colored,
+        &[normal(1), normal(7)]
+    ));
 }

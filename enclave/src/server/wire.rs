@@ -3,8 +3,11 @@
 
 use std::io::{Read, Write};
 
+use prost::Message;
+
 use super::context::ServerContext;
 use super::dispatch::dispatch;
+use super::wire_caps;
 use crate::error::Result;
 use crate::framing;
 use crate::proto::EnclaveRequest;
@@ -36,7 +39,9 @@ fn process_connection(
     deadline: std::time::Instant,
 ) -> Result<()> {
     tracing::debug!("reading request");
-    let request: EnclaveRequest = framing::read_message(&mut stream)?;
+    let frame = framing::read_frame(&mut stream)?;
+    wire_caps::check_request_caps(&frame, ctx.bridge_config.max_merkle_proofs)?;
+    let request = EnclaveRequest::decode(&frame[..])?;
 
     let (response, reservation) = dispatch(request, ctx, deadline);
 

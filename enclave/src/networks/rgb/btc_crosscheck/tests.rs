@@ -563,3 +563,46 @@ fn fee_policy_holds_without_a_pinned_value_cap() {
     let err = validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap_err();
     assert!(err.to_string().contains("fee rate too high"), "got: {err}");
 }
+
+/// An output on our key at a path the wallet never scans is not
+/// self-owned. The host can compute such a key from the account xpub.
+#[test]
+fn refuses_an_output_on_a_hidden_child_path() {
+    let keys = km();
+    let secp = Secp256k1::new();
+    let hidden = [
+        ChildNumber::Normal { index: 0x1d2c3b4a },
+        ChildNumber::Normal { index: 0x5e6f7081 },
+    ];
+    let sk = keys
+        .derive_btc_child(AccountType::Vanilla, &hidden)
+        .unwrap();
+    let k_h = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0;
+    let hidden_spk = ScriptBuf::new_p2tr(&secp, k_h, None);
+    let mut path = vec![
+        ChildNumber::from_hardened_idx(86).unwrap(),
+        ChildNumber::from_hardened_idx(1).unwrap(),
+        ChildNumber::from_hardened_idx(0).unwrap(),
+    ];
+    path.extend_from_slice(&hidden);
+
+    let cfg = BridgeConfig {
+        btc_max_total_sats: 1_000_000,
+        btc_max_unowned_sats: 1,
+        ..Default::default()
+    };
+    let bytes = psbt_from_our_address(&keys, &[100_000], &[(hidden_spk, 99_000)]);
+    let mut psbt = Psbt::deserialize(&bytes).unwrap();
+    psbt.outputs[0].tap_internal_key = Some(k_h);
+    psbt.outputs[0].tap_key_origins.insert(
+        k_h,
+        (
+            vec![],
+            (*keys.master_fingerprint(), DerivationPath::from(path)),
+        ),
+    );
+    let req = SignBtcRequest {
+        psbt_bytes: psbt.serialize(),
+    };
+    assert!(validate_btc_request(&req, &cfg, &keys).is_err());
+}

@@ -408,7 +408,7 @@ their PCRs before updating attestation allowlists or KMS policies. Existing
 measurements do not apply to these images.
 
 `.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
-`rgb-mint`, `rgb-burn` and `ccd` variants on a plain runner with `nitro-cli 1.4.5`
+`rgb-mint` and `rgb-burn` variants on a plain runner with `nitro-cli 1.4.5`
 and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
 `release-eif.yml` deploys the `combined` EIF only: `deploy/deploy-host.sh`
 fetches `eif/<git_sha>/utexo-bridge-enclave.eif` and runs it on every CID.

@@ -87,6 +87,9 @@ fi
 [ -n "${CLUSTER_DIR:-}" ] || fatal "CLUSTER_DIR required (dir containing utexo-bridge-parent-cli)"
 CLI="$CLUSTER_DIR/utexo-bridge-parent-cli"
 [ -x "$CLI" ] || fatal "CLI not found/executable at $CLI"
+# The CLI is ubuntu-owned; root must not run it.
+RUN_CLI=("$CLI")
+[ "$(id -u)" = 0 ] && RUN_CLI=(runuser -u ubuntu -- "$CLI")
 
 # Liveness never exports an attestation or claims identity approval.
 attested=0
@@ -137,7 +140,7 @@ for CID in "${CID_ARR[@]}"; do
     rm -f "$bundle"
     args=(--pcr-file "$PCR_FILE" --image-env "$IMAGE_ENV" --signer-role "$SIGNER_ROLE" --out "$bundle")
     args+=(--expect-evm-address "$exp")
-    if ! out="$(timeout 45 "$CLI" --addr "vsock://$CID:5000" export-attestation "${args[@]}" 2>&1)"; then
+    if ! out="$(timeout 45 "${RUN_CLI[@]}" --addr "vsock://$CID:5000" export-attestation "${args[@]}" 2>&1)"; then
       log "FAIL: CID $CID attested export failed: $(printf '%s\n' "$out" | tail -1)"; fail=1; continue
     fi
     evm="$(extract_evm "$out")"
@@ -150,7 +153,7 @@ for CID in "${CID_ARR[@]}"; do
     continue
   fi
   [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && log "CID $CID bundle skipped: debug PCRs are zero"
-  if ! out="$(timeout 20 "$CLI" --addr "vsock://$CID:5000" get-keys 2>&1)"; then
+  if ! out="$(timeout 20 "${RUN_CLI[@]}" --addr "vsock://$CID:5000" get-keys 2>&1)"; then
     log "FAIL: CID $CID get-keys failed"; fail=1; continue
   fi
   if printf '%s\n' "$out" | grep -qiE 'not initialized|key not'; then

@@ -4,8 +4,10 @@ name: "Build EIF"
 # publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
-# Builds five variants (matrix): combined (retired swap flow, historical name +
-# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production), and ccd.
+# Builds four variants (matrix): combined (retired swap flow, historical name +
+# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production). The ccd
+# image is not built here: it has no EVM pins, so its release build refuses
+# every Sign. Build it locally with Dockerfile.enclave.ccd.
 # Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
@@ -87,12 +89,6 @@ jobs:
             eif_name: utexo-bridge-enclave-burn.eif
             s3_subpath: "rgb-burn/"
             artifact_suffix: "-burn"
-          # Concordium-only single-network EIF.
-          - variant: ccd
-            dockerfile: Dockerfile.enclave.ccd
-            eif_name: utexo-bridge-enclave-ccd.eif
-            s3_subpath: "ccd/"
-            artifact_suffix: "-ccd"
     steps:
       - uses: actions/checkout@v4
 
@@ -115,18 +111,11 @@ jobs:
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools jq llvm-dev libclang-dev clang
 
-      # Build + cache nitro-cli pinned to the host version. The repo's
-      # blobs/x86_64 (kernel/init) determine PCR0/PCR1, so pinning the tag pins
-      # the PCRs. Cache keyed on the version so we only build once per bump.
-      - name: Cache nitro-cli
-        id: nitro-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/nitro-cli-dist
-          key: nitro-cli-${{ env.NITRO_CLI_VERSION }}
-
+      # Build nitro-cli pinned to the host version. The repo's blobs/x86_64
+      # (kernel/init) determine PCR0/PCR1, so pinning the tag pins the PCRs.
+      # Built on every run, never cached: a poisoned cache entry would go
+      # into the measured EIF.
       - name: Build nitro-cli ${{ env.NITRO_CLI_VERSION }}
-        if: steps.nitro-cache.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch "v${NITRO_CLI_VERSION}" \

@@ -24,21 +24,30 @@ const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 /// The keychain of rgb-lib's colored descriptor (`rgb-lib::utils::KEYCHAIN_RGB`).
 const COLORED_KEYCHAIN: u32 = 0;
 
+/// Keychains rgb-lib's vanilla descriptor may use. The default is
+/// `KEYCHAIN_BTC` (0); the bridge can set 1 (`WALLET_VANILLA_KEYCHAIN`).
+const VANILLA_KEYCHAINS: [u32; 2] = [0, 1];
+
 /// SLIP-44 coin type for Concordium.
 const CONCORDIUM_COIN_TYPE: u32 = 919;
 
-/// True only for a child path `[0, i]`, both steps non-hardened: the addresses
-/// rgb-lib scans. State on any other path of our keys is lost to the wallet.
-pub fn is_colored_keychain_path(child_path: &[ChildNumber]) -> bool {
-    matches!(
-        child_path,
-        [
-            ChildNumber::Normal {
-                index: COLORED_KEYCHAIN
-            },
-            ChildNumber::Normal { .. }
-        ]
-    )
+/// Highest child index a wallet path may use. Far above any real gap limit,
+/// small enough that a wallet scan can find every key.
+pub const MAX_WALLET_CHILD_INDEX: u32 = 1 << 20;
+
+/// True only for a child path `[k, i]`, both steps non-hardened,
+/// `i < MAX_WALLET_CHILD_INDEX`, and `k` a keychain rgb-lib scans on `account`.
+/// Value on any other path of our keys is lost to the wallet.
+pub fn is_wallet_child_path(account: AccountType, child_path: &[ChildNumber]) -> bool {
+    let [ChildNumber::Normal { index: keychain }, ChildNumber::Normal { index }] = child_path
+    else {
+        return false;
+    };
+    let keychain_ok = match account {
+        AccountType::Colored => *keychain == COLORED_KEYCHAIN,
+        AccountType::Vanilla => VANILLA_KEYCHAINS.contains(keychain),
+    };
+    keychain_ok && *index < MAX_WALLET_CHILD_INDEX
 }
 
 type HmacSha512 = Hmac<Sha512>;
@@ -344,9 +353,10 @@ impl KeyManager {
         &self,
         full_path: &DerivationPath,
     ) -> Option<(AccountType, Vec<ChildNumber>)> {
-        let steps: Vec<ChildNumber> = full_path.into_iter().cloned().collect();
-        // At least 86' / coin_type' / 0'.
-        if steps.len() < 3 {
+        let steps: &[ChildNumber] = full_path.as_ref();
+        // Exactly 86' / coin_type' / 0' / keychain / index. Each extra step
+        // costs a derivation under the key lock.
+        if steps.len() != 5 {
             return None;
         }
         if steps[0] != ChildNumber::from_hardened_idx(86).unwrap() {

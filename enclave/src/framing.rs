@@ -14,6 +14,12 @@ pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 /// Read a length-prefixed protobuf message from a stream.
 /// Wire format: [4-byte LE u32 length][protobuf bytes].
 pub fn read_message<M: Message + Default>(stream: &mut impl Read) -> Result<M> {
+    let buf = read_frame(stream)?;
+    Ok(M::decode(&buf[..])?)
+}
+
+/// Read one length-prefixed frame and return its protobuf bytes, not decoded.
+pub fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf);
@@ -30,9 +36,7 @@ pub fn read_message<M: Message + Default>(stream: &mut impl Read) -> Result<M> {
 
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf)?;
-
-    let msg = M::decode(&buf[..])?;
-    Ok(msg)
+    Ok(buf)
 }
 
 /// Write a length-prefixed protobuf message to a stream.

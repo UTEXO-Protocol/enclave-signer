@@ -233,18 +233,20 @@ fn refuses_a_right_on_a_vanilla_output() {
     assert!(err.contains("not a Colored key-path output"), "{err}");
 }
 
+/// Rule C refuses these paths, so the sats gate refuses first.
 #[test]
 fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
     let hardened = ChildNumber::from_hardened_idx(1).unwrap();
     for child in [
         vec![normal(0), hardened],
         vec![normal(0), normal(1), normal(0)],
+        vec![normal(0), normal(crate::keys::MAX_WALLET_CHILD_INDEX)],
     ] {
         let err = refusal(Shape {
             first_right: (AccountType::Colored, child),
             ..Shape::rights(2)
         });
-        assert!(err.contains("child path [0, i]"), "{err}");
+        assert!(err.contains("this enclave does not derive"), "{err}");
     }
 }
 

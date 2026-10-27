@@ -267,8 +267,10 @@ signed or not: only its unsigned tx and its RGB keys are read.
 ### Stage 7 - Sign
 
 - **M8** No sat leaves. Every output is a BIP-86 key-path output the enclave
-  derives, or carries 0 sat, as the `OP_RETURN` must. rgb-lib sends the change
-  to the colored keychain, so an honest mint pays nothing out.
+  derives at a wallet path, or carries 0 sat, as the `OP_RETURN` must. A wallet
+  path is `[k, i]` with `i < 2^20`, and `k` = 0 on Colored, 0 or 1 on Vanilla.
+  rgb-lib sends the change to the colored keychain, so an honest
+  mint pays nothing out.
 - **S7.1** The sats that go to scripts the enclave does not own must not be
   more than `RGB_MAX_UNOWNED_SATS`. M8 makes this redundant.
 - **S7.2** The mint signer signs only inputs of the colored account. It uses
@@ -357,8 +359,8 @@ anchor refusal (section 11).
 **Keys:**
 
 - **RR9** Each right's output is a Colored BIP-86 key-path output of the
-  enclave at child path exactly `[0, i]`, both steps non-hardened: the
-  keychain rgb-lib scans. A right on a host key could mint against a deposit
+  enclave at child path exactly `[0, i]`, both steps non-hardened and
+  `i < 2^20`: the keychain rgb-lib scans. A right on a host key could mint against a deposit
   the bridge also mints. A right on a Vanilla output is invisible to rgb-lib,
   and `SignBtc` could spend it.
 - **RR14** S7.2 - S7.4: the Colored inputs are signed. Zero signed inputs is an

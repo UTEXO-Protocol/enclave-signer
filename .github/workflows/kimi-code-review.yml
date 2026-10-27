@@ -21,6 +21,8 @@ jobs:
       (github.event_name == 'pull_request' && github.event.action == 'synchronize' &&
        contains(github.event.pull_request.labels.*.name, 'ai-review/kimi')) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null &&
+       github.event.issue.state == 'open' &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
        contains(github.event.comment.body, '@kimi'))
     runs-on: ubuntu-latest
     concurrency:
@@ -32,11 +34,26 @@ jobs:
       issues: write
 
     steps:
+      # The action loads skills from the PR head and runs in yolo mode. A
+      # comment must never run it on a fork's code.
+      - name: Refuse closed or fork PRs on comment trigger
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          read -r state head < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
+            --jq '"\(.state) \(.head.repo.full_name)"')
+          if [ "$state" != open ] || [ "$head" != "$GITHUB_REPOSITORY" ]; then
+            echo "refused: PR #$PR is $state, head repo $head"
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Run Kimi Code Review
-        uses: UTEXO-Protocol/kimi-actions@main
+        uses: UTEXO-Protocol/kimi-actions@beccb0a9a5705ea74c3c331af92fd3e76a19d40d # main @ 2026-08-17
         with:
           kimi_api_key: ${{ secrets.KIMI_API_KEY }}
           kimi_base_url: https://api.moonshot.ai/v1
