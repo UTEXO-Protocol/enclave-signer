@@ -52,7 +52,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
 | Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the PSBT (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint launch still pins the URL until the image drops the indexer. |
-| EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption | TLS authenticates the endpoint; it does not prove canonical EVM history (Sec 7.1-7.2) |
+| EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
 
@@ -982,7 +982,12 @@ Known limits. Read them before deployment.
   `finalized`. A release refuses when the burn's inputs descend from a
   rejected opout. The mint signer reads no list: the connector's rgb-lib
   checks it before `mint_begin`. Any read failure
-  refuses, so the burn signer now depends on the EVM RPC for such an asset. A
+  refuses, so the burn signer now depends on the EVM RPC for such an asset.
+  The reads are `eth_call` answers over TLS. The enclave has no EVM light
+  client, so it cannot check them against a block hash: the pinned RPC is
+  trusted for the list contents, as the trust table states. A provider that
+  hides a reject entry lets a rejected lineage release. A provider that
+  invents entries or fails refuses releases. A
   rejected release stays refused until an allow is finalized, and its units
   are already burned. The list appender can halt every release; the owner
   rotates it. The list is read in full on each request, at most 20,000
