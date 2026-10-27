@@ -190,6 +190,8 @@ skip proof-of-work and `nBits` checks.
 Only for an asset whose genesis names a reject list. It runs last in source
 validation, after the asset bind (B2.6), so a foreign genesis cannot make the
 signer read a contract of its choice. The rules are those of rgb-lib 98a8af6.
+The reads trust the pinned EVM RPC for their contents, as the trust table in
+tee-spec.md states: TLS authenticates the endpoint, not the answers.
 
 - **B3.7** The list must be on `EVM_CHAIN_ID`, and the node must report it.
   Another chain is refused: the enclave has no RPC for it.
