@@ -307,7 +307,7 @@ mod tests {
         let pins = ChainPins::new();
         {
             let chain = ctx.header_chain.lock().unwrap();
-            pins.pin(&chain, chain.tip_height()).unwrap();
+            pins.pin(&chain, chain.tip_height(), 1).unwrap();
         }
         (ctx, pins)
     }

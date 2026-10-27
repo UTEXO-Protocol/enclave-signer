@@ -32,7 +32,10 @@ pub struct Checkpoint {
     /// `nBits` until the next retarget boundary.
     pub bits: u32,
     /// Block timestamp. `from_next_work_required()` needs it when the checkpoint
-    /// is on a retarget boundary.
+    /// is on a retarget boundary. The median-time-past rule reads it once, as
+    /// the lowest of the eleven blocks below the eleventh block above the
+    /// checkpoint. A value newer than the real block could refuse an honest
+    /// header there.
     pub time: u32,
     /// True when the values are real, not placeholders. Production builds do
     /// not start otherwise.
@@ -203,7 +206,10 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 ///
 /// The two-field form takes `bits`/`time` from the compiled-in checkpoint. That
 /// is safe only where `nBits` is not checked. PoW networks (mainnet, testnets)
-/// must give all four.
+/// must give all four. The inherited `time` also enters the median-time-past
+/// window once, at the eleventh block above the checkpoint. A move forward
+/// inherits an older time, which never raises that median. Do not move the
+/// checkpoint backward with the two-field form.
 pub const CHECKPOINT_ENV: &str = "SPV_CHECKPOINT";
 
 /// Source of the boot checkpoint. The log shows it, so an operator value is

@@ -734,3 +734,238 @@ fn the_clock_bound_holds_on_every_network() {
         "{err}"
     );
 }
+
+// ===== Core's time-too-old rule: the median time past =====
+
+/// One regtest header on `prev` with the given `time`. Returns the raw header
+/// and its hash.
+fn header_with_time(prev: [u8; 32], time: u32, nonce: u32) -> (Vec<u8>, [u8; 32]) {
+    let header = Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash: bitcoin::BlockHash::from_byte_array(prev),
+        merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+        time,
+        bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+        nonce,
+    };
+    (serialize(&header), header.block_hash().to_byte_array())
+}
+
+/// Twenty regtest headers, then one dated at or before the median time past
+/// of the eleven below it: refused, and the batch with it. One second above
+/// the median passes.
+#[test]
+fn refuses_a_header_at_or_before_the_median_time_past() {
+    let (mut chain, _) = synthetic_regtest_setup();
+    let cp = *chain.checkpoint();
+    // Heights 101..=120, the header at height h dated cp.time + (h - 100).
+    let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, 20);
+    chain.submit_headers(101, &raws, NOW).unwrap();
+    // Below 121 the window is 110..=120: times +10..=+20, median +15.
+    let median = cp.time + 15;
+
+    for too_old in [median, median - 5, cp.time] {
+        let (raw, _) = header_with_time(tip_hash, too_old, 7);
+        let err = chain.submit_headers(121, &[raw], NOW).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SpvError::TimeTooOld {
+                    height: 121,
+                    time,
+                    median_time_past
+                } if time == too_old && median_time_past == median
+            ),
+            "{err}"
+        );
+    }
+    assert_eq!(chain.tip_height(), 120, "the batch is atomic");
+
+    let (raw, _) = header_with_time(tip_hash, median + 1, 7);
+    chain.submit_headers(121, &[raw], NOW).unwrap();
+    assert_eq!(chain.tip_height(), 121);
+}
+
+/// Above a checkpoint that is not genesis, the rule starts at the eleventh
+/// block above it, where the checkpoint is the lowest of the eleven. Below
+/// that the window would need times the chain does not hold, and a median of
+/// fewer blocks could be stricter than Core's. So those headers may carry any
+/// time the clock bound allows.
+#[test]
+fn the_median_rule_starts_eleven_blocks_above_the_checkpoint() {
+    // Ten headers above the checkpoint at 100. Height 111 has eleven blocks
+    // below it, the checkpoint among them: window 100..=110, median +5.
+    let (mut chain, _) = synthetic_regtest_setup();
+    let cp = *chain.checkpoint();
+    let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, 10);
+    chain.submit_headers(101, &raws, NOW).unwrap();
+    let (old, _) = header_with_time(tip_hash, 1, 7);
+    let err = chain.submit_headers(111, &[old], NOW).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SpvError::TimeTooOld {
+                height: 111,
+                time: 1,
+                median_time_past
+            } if median_time_past == cp.time + 5
+        ),
+        "{err}"
+    );
+
+    // Nine headers: height 110 would need the block below the checkpoint.
+    let (mut chain, _) = synthetic_regtest_setup();
+    let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, 9);
+    chain.submit_headers(101, &raws, NOW).unwrap();
+    let (old, _) = header_with_time(tip_hash, 1, 7);
+    chain.submit_headers(110, &[old], NOW).unwrap();
+    assert_eq!(chain.tip_height(), 110);
+}
+
+/// A reorg batch is judged on the chain as it will be: the staged headers
+/// first, then the kept ones below the batch.
+#[test]
+fn a_reorg_takes_the_median_from_the_new_chain() {
+    let (mut chain, _) = synthetic_regtest_setup();
+    let cp = *chain.checkpoint();
+    let (raws, _) = synth_chain_from(cp.hash, cp.time, 1, 20);
+    chain.submit_headers(101, &raws, NOW).unwrap();
+    let pred = chain.hash_at(114).unwrap();
+
+    // A fork from 115 (depth 6) of seven blocks, dated +10..=+15 and then
+    // `last`. Each of the first six is above the median of its own window.
+    // Below the last one the window is the kept 110..=114 (+10..=+14) and
+    // the staged 115..=120 (+10..=+15): median +12. The displaced chain's
+    // window 110..=120 had median +15.
+    let fork = |last: u32| -> Vec<Vec<u8>> {
+        let mut prev = pred;
+        let mut raws = Vec::new();
+        for (i, offset) in (10..=15).chain(std::iter::once(last)).enumerate() {
+            let (raw, hash) = header_with_time(prev, cp.time + offset, 500 + i as u32);
+            raws.push(raw);
+            prev = hash;
+        }
+        raws
+    };
+
+    // At the new median: refused, and the error names that median.
+    let err = chain.submit_headers(115, &fork(12), NOW).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SpvError::TimeTooOld {
+                height: 121,
+                median_time_past,
+                ..
+            } if median_time_past == cp.time + 12
+        ),
+        "{err}"
+    );
+    assert_eq!(chain.tip_height(), 120, "the batch is atomic");
+
+    // Above the new median, though below the displaced chain's: accepted.
+    let outcome = chain.submit_headers(115, &fork(13), NOW).unwrap();
+    assert_eq!(outcome.reorg_depth, 6);
+    assert_eq!(chain.tip_height(), 121);
+}
+
+/// A chain from genesis takes the median of the blocks it has, as Core does.
+/// The first block must be newer than genesis. The fifth must be newer than
+/// the median of the five below it.
+#[test]
+fn a_chain_from_genesis_takes_the_median_of_the_blocks_it_has() {
+    let cp = Checkpoint {
+        height: 0,
+        hash: [0xCC; 32],
+        bits: 0x207fffff,
+        time: 1_700_000_000,
+        is_real: false,
+        chain_work: None,
+    };
+    let mut chain = HeaderChain::new(Network::Regtest, cp);
+
+    // Block 1 at the genesis time: refused.
+    let (raw, _) = header_with_time(cp.hash, cp.time, 1);
+    let err = chain.submit_headers(1, &[raw], NOW).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SpvError::TimeTooOld {
+                height: 1,
+                median_time_past,
+                ..
+            } if median_time_past == cp.time
+        ),
+        "{err}"
+    );
+
+    // Blocks 1..=4 dated +1..=+4. Below 5 the window is 0..=4: median +2.
+    let (raws, tip_hash) = synth_chain_from(cp.hash, cp.time, 1, 4);
+    chain.submit_headers(1, &raws, NOW).unwrap();
+    let (raw, _) = header_with_time(tip_hash, cp.time + 2, 7);
+    let err = chain.submit_headers(5, &[raw], NOW).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SpvError::TimeTooOld {
+                height: 5,
+                median_time_past,
+                ..
+            } if median_time_past == cp.time + 2
+        ),
+        "{err}"
+    );
+    let (raw, _) = header_with_time(tip_hash, cp.time + 3, 7);
+    chain.submit_headers(5, &[raw], NOW).unwrap();
+    assert_eq!(chain.tip_height(), 5);
+}
+
+// ===== real headers above the compiled checkpoints =====
+
+fn fixture_headers(hex_lines: &str) -> Vec<Vec<u8>> {
+    hex_lines
+        .lines()
+        .map(|line| hex::decode(line).unwrap())
+        .collect()
+}
+
+/// Real mainnet headers 951_553..=951_564 (blockstream.info) on the compiled
+/// checkpoint 951_552. They pass linkage, PoW, nBits and the median rule.
+/// Heights 951_563 and 951_564 have the checkpoint in their window.
+#[test]
+fn real_mainnet_headers_above_the_checkpoint_pass() {
+    let mut chain = HeaderChain::new(
+        Network::Mainnet,
+        crate::networks::rgb::spv::checkpoint::MAINNET_CHECKPOINT,
+    );
+    let outcome = chain
+        .submit_headers(
+            951_553,
+            &fixture_headers(include_str!("mainnet_951553_951564.hex")),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(outcome.headers_accepted, 12);
+    assert_eq!(chain.tip_height(), 951_564);
+}
+
+/// Real UTEXO signet headers 334_001..=334_012 (esplora-api.utexo.com) on the
+/// compiled checkpoint 334_000. Signet checks no work. So this test pins the
+/// checkpoint hash and time to the real chain, and it runs the median rule at
+/// heights 334_011 and 334_012 with the checkpoint time in the window.
+#[test]
+fn real_signet_headers_above_the_checkpoint_pass() {
+    let mut chain = HeaderChain::new(
+        Network::Signet,
+        crate::networks::rgb::spv::checkpoint::SIGNET_CHECKPOINT,
+    );
+    let outcome = chain
+        .submit_headers(
+            334_001,
+            &fixture_headers(include_str!("signet_334001_334012.hex")),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(outcome.headers_accepted, 12);
+    assert_eq!(chain.tip_height(), 334_012);
+}

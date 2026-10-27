@@ -3,8 +3,10 @@
 //! The chain starts at a compile-time `Checkpoint` (height, hash, bits, time).
 //! It grows as the parent sends batches of contiguous 80-byte headers to
 //! `submit_headers`. Each header must pass the linkage check against its
-//! predecessor, and be at most 2 hours ahead of the enclave clock, before it
-//! is appended. Mainnet and the testnets also check PoW and nBits.
+//! predecessor and be at most 2 hours ahead of the enclave clock. It must also
+//! be newer than the median time past of the eleven blocks below it, as in
+//! Bitcoin Core. That rule starts at the eleventh block above the checkpoint.
+//! Mainnet and the testnets also check PoW and nBits.
 //!
 //! On the testnets a block more than 20 minutes after its parent may use the
 //! minimum difficulty. Such blocks count toward confirmations and freshness
@@ -17,7 +19,7 @@
 //! 2. **Bounded reorg** (`checkpoint < start_height <= tip`): an alternative
 //!    chain that branches at `start_height - 1`. Accepted only if:
 //!      - the depth (`tip - start_height + 1`) is <= `MAX_REORG_DEPTH`;
-//!      - every header in the batch validates (linkage, PoW, nBits);
+//!      - every header in the batch validates (linkage, time, PoW, nBits);
 //!      - its cumulative work over the rewritten range is **strictly
 //!        greater** than the existing work. Ties go to the existing chain
 //!        (Bitcoin best-chain rule).
@@ -37,7 +39,8 @@ use bitcoin::pow::Work;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network, Result, SpvError};
 use crate::networks::rgb::spv::validation::{
-    expected_bits, is_retarget_height, validate_header_full, BitsInput, RETARGET_INTERVAL,
+    expected_bits, is_retarget_height, median_time_past, validate_header_full, BitsInput,
+    Predecessor, MEDIAN_TIME_SPAN, RETARGET_INTERVAL,
 };
 
 /// Maximum reorg depth. Real reorgs are almost always <= 2 blocks. 100 bounds
@@ -313,11 +316,16 @@ impl HeaderChain {
                 None
             };
 
+            let median_time_past = self.median_time_past_below(height, start_height, &staged)?;
+
             validate_header_full(
                 &header,
                 height,
-                &prev_hash,
-                prev_time,
+                Predecessor {
+                    hash: prev_hash,
+                    time: prev_time,
+                },
+                median_time_past,
                 expected_bits_value,
                 self.network,
                 now_unix,
@@ -385,6 +393,36 @@ impl HeaderChain {
             input.period_bits = self.block_at(period_start, batch_start_height, staged)?.1;
         }
         Ok(input)
+    }
+
+    /// Bitcoin Core's median time past below `height`: the median of the
+    /// times of the [`MEDIAN_TIME_SPAN`] blocks before it, read as
+    /// [`Self::block_at`] does. So a reorg batch is judged on the chain as it
+    /// will be. The checkpoint is one of the eleven when the window reaches
+    /// it. A chain from genesis takes the median of the blocks it has, as
+    /// Core does. Above any other checkpoint the chain has no times below the
+    /// checkpoint, and a median of fewer blocks could be stricter than
+    /// Core's. So there the rule starts at the eleventh block above the
+    /// checkpoint, and `None` skips it below that.
+    fn median_time_past_below(
+        &self,
+        height: BlockHeight,
+        batch_start_height: BlockHeight,
+        staged: &[(Header, BlockHash)],
+    ) -> Result<Option<u32>> {
+        let first = height.saturating_sub(MEDIAN_TIME_SPAN as BlockHeight);
+        let first = if first >= self.base_height {
+            first
+        } else if self.base_height == 0 {
+            0
+        } else {
+            return Ok(None);
+        };
+        let mut times = Vec::with_capacity(MEDIAN_TIME_SPAN);
+        for h in first..height {
+            times.push(self.block_at(h, batch_start_height, staged)?.0);
+        }
+        Ok(Some(median_time_past(&mut times)))
     }
 
     /// `(time, bits)` of the block at `height`. Looks in the staged batch

@@ -777,7 +777,14 @@ For an RGB-source request, the SPV layer enforces these rules:
    header may be at most two hours ahead of the enclave clock (Bitcoin Core
    `time-too-new`). Without it a host could date free min-difficulty blocks
    ahead and lower its fork's difficulty 4x per period for the work of one
-   block.
+   block. A header must also be newer than the median time past of the eleven
+   blocks below it (Bitcoin Core `time-too-old`). The rule starts at the
+   eleventh block above the checkpoint, where the chain holds all eleven
+   times. A chain from genesis takes the median of the blocks it has, as Core
+   does. Without the rule the enclave accepts headers that Core refuses: a
+   host could date the blocks of a fork back without bound. On the testnets
+   that yields free min-difficulty blocks in bulk, each twenty minutes after
+   its parent and all in the past.
    Accept a replacement chain only when its cumulative work is greater.
    Limit reorganization depth to `MAX_REORG_DEPTH = 100`.
 2. Retain all headers above the checkpoint. Do not prune old headers.
@@ -790,6 +797,10 @@ For an RGB-source request, the SPV layer enforces these rules:
    Require at least `SPV_MIN_CONFIRMATIONS` confirmations (default 6). On the
    testnets min-difficulty blocks count, for testing convenience: testnets
    carry no production value.
+   Record the hash and the required depth of each block a check used. Check
+   both again under the signing lock. A changed hash or a shallower block
+   refuses the signature. This is a signing rule, not a consensus rule: the
+   parent retries when the block is deep again.
 5. Reject a chain whose tip (on the testnets, min-difficulty blocks included)
    is more than two hours old or more than two hours in the future. This checks timestamps. It does not prove that the
    provider sent the network tip.

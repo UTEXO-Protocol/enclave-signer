@@ -10,6 +10,8 @@ use bitcoin::hashes::{sha256d, Hash};
 
 /// Synthetic regtest chain on a zero checkpoint. Regtest skips PoW. These
 /// tests cover the SPV cross-check, not header validation (see chain.rs).
+/// The checkpoint time is below every header time these tests use: on a chain
+/// from genesis the median-time-past rule applies from block 1.
 fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
     let mut chain = HeaderChain::new(
         Network::Regtest,
@@ -17,7 +19,7 @@ fn regtest_chain_with(headers: Vec<Header>) -> HeaderChain {
             height: 0,
             hash: [0u8; 32],
             bits: 0x207fffff,
-            time: 1_700_000_000,
+            time: 1_699_999_000,
             is_real: false,
             chain_work: None,
         },
