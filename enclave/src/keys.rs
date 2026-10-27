@@ -24,8 +24,9 @@ const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 /// The keychain of rgb-lib's colored descriptor (`rgb-lib::utils::KEYCHAIN_RGB`).
 const COLORED_KEYCHAIN: u32 = 0;
 
-/// Keychains rgb-lib's vanilla descriptor may use. The default is
-/// `KEYCHAIN_BTC` (0); the bridge can set 1 (`WALLET_VANILLA_KEYCHAIN`).
+/// Keychains the vanilla (BTC) descriptor may use. rgb-lib defaults to
+/// keychain 0 (`KEYCHAIN_BTC`) and lets a wallet pass any u8; our bridges
+/// use 0, and the swap path uses 1. We accept only 0 or 1.
 const VANILLA_KEYCHAINS: [u32; 2] = [0, 1];
 
 /// SLIP-44 coin type for Concordium.
