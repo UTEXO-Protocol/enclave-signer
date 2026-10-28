@@ -1,5 +1,9 @@
-//! Both real-attestation stage roles use the same entropy-only lifecycle.
-#![cfg(feature = "stage-signet")]
+//! Public-signet mint and burn builds use the existing entropy-only lifecycle.
+#![cfg(all(
+    feature = "rgb-validation",
+    not(feature = "spv"),
+    not(feature = "kms-persistence")
+))]
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -24,7 +28,7 @@ fn config() -> BridgeConfig {
         bridge_contract: [1; 20],
         funds_in_contract: [2; 20],
         token_contract: [3; 20],
-        rgb_asset_id: "stage-test-asset".into(),
+        rgb_asset_id: "test-asset".into(),
         ..BridgeConfig::default()
     }
 }
@@ -88,7 +92,7 @@ fn health(port: u16) -> HealthResponse {
 }
 
 #[test]
-fn stage_signet_generates_distinct_keys_and_refuses_reinitialization() {
+fn indexer_only_generates_distinct_keys_and_refuses_reinitialization() {
     let first = start();
     let a = initialize(first);
     let b = initialize(start());
@@ -110,7 +114,7 @@ fn stage_signet_generates_distinct_keys_and_refuses_reinitialization() {
 }
 
 #[test]
-fn stage_signet_refuses_imports_and_cloning_without_installing_keys() {
+fn indexer_only_refuses_imports_without_installing_keys() {
     let port = start();
     for request in [
         Request::InitializeKey(InitializeKeyRequest {
@@ -121,13 +125,6 @@ fn stage_signet_refuses_imports_and_cloning_without_installing_keys() {
             mnemonic: "abandon ".repeat(24),
             ..Default::default()
         }),
-        Request::InitializeKey(InitializeKeyRequest {
-            cloning_secret: "operator-secret-with-sufficient-length".into(),
-            ..Default::default()
-        }),
-        Request::InitiateCloning(InitiateCloningRequest::default()),
-        Request::GetClone(GetCloneRequest::default()),
-        Request::SetClone(SetCloneRequest::default()),
     ] {
         assert!(matches!(send(port, request), Response::Error(_)));
         assert!(!health(port).key_loaded);
@@ -136,7 +133,7 @@ fn stage_signet_refuses_imports_and_cloning_without_installing_keys() {
 }
 
 #[test]
-fn stage_signet_is_ready_without_headers_only_after_keys_and_endpoints() {
+fn indexer_only_is_ready_without_headers_only_after_keys_and_endpoints() {
     let port = start();
     assert!(!health(port).ready);
     initialize(port);
@@ -166,7 +163,7 @@ fn stage_signet_is_ready_without_headers_only_after_keys_and_endpoints() {
 }
 
 #[test]
-fn stage_signet_launch_refuses_kms_fields_for_both_roles() {
+fn indexer_only_launch_refuses_kms_fields_for_both_roles() {
     assert!(Endpoints::parse(&endpoints()).unwrap().kms.is_none());
     for field in 0..4 {
         let mut request = endpoints();
@@ -181,14 +178,14 @@ fn stage_signet_launch_refuses_kms_fields_for_both_roles() {
 }
 
 #[test]
-fn stage_signet_release_policy_never_claims_production_spv() {
+fn indexer_only_release_policy_never_claims_production_spv() {
     let mut build = BuildContext::current();
     build.debug_or_test = false;
     let policy = SecurityPolicy::resolve(&build, &config(), EvmDataSource::Disabled, None, "");
     assert!(matches!(
         policy,
         SecurityPolicy::Development {
-            reason: DevReason::StageSignet
+            reason: DevReason::IndexerTrusted
         }
     ));
     assert_eq!(policy.attested(), AttestedPolicy::Development);
@@ -197,7 +194,7 @@ fn stage_signet_release_policy_never_claims_production_spv() {
 }
 
 #[test]
-fn stage_signet_refuses_other_networks_and_missing_pins_even_in_debug() {
+fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
     let mut invalid = Vec::new();
     for network in [
         BitcoinNetwork::Mainnet,
@@ -224,8 +221,11 @@ fn stage_signet_refuses_other_networks_and_missing_pins_even_in_debug() {
     let mut cfg = config();
     cfg.token_contract = [0; 20];
     invalid.push(cfg);
+    let mut cfg = config();
+    cfg.spv_min_confirmations = 0;
+    invalid.push(cfg);
     for cfg in invalid {
-        assert!(cfg.validate_stage_signet().is_err());
+        assert!(cfg.validate_indexer_only().is_err());
         let build = BuildContext::current();
         let policy = SecurityPolicy::resolve(&build, &cfg, EvmDataSource::Disabled, None, "");
         assert!(policy.assert_valid_at_boot(&build).is_err());

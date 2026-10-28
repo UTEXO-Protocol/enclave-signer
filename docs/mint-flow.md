@@ -1,6 +1,6 @@
 # Mint flow (EVM -> RGB)
 
-**Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
+**Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer,kms-persistence`).
 **Checked against repository code:** 2026-10-15 (plan B: the mint signer reads the PSBT).
 Deployment was not checked.
 

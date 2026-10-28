@@ -17,12 +17,6 @@ pub(super) fn handle_initialize(
     _deadline: std::time::Instant,
 ) -> Result<EnclaveResponse> {
     let state = &ctx.state;
-    #[cfg(feature = "stage-signet")]
-    if !req.cloning_secret.is_empty() {
-        return Err(EnclaveError::InvalidRequest(
-            "cloning_secret is not supported by stage-signet".into(),
-        ));
-    }
     #[cfg(feature = "kms-persistence")]
     if !req.cloning_secret.is_empty() {
         return Err(EnclaveError::InvalidRequest(
@@ -47,7 +41,7 @@ pub(super) fn handle_initialize(
             ));
         }
     } else if req.seed.is_empty() {
-        #[cfg(all(feature = "kms-persistence", not(feature = "stage-signet")))]
+        #[cfg(feature = "kms-persistence")]
         {
             // The KMS values come from the launch, so it must be set.
             ctx.launch()?;
@@ -59,7 +53,7 @@ pub(super) fn handle_initialize(
             state.initialize_from_persistence_until(deadline)?;
             tracing::info!("keys initialized from KMS persistence");
         }
-        #[cfg(any(not(feature = "kms-persistence"), feature = "stage-signet"))]
+        #[cfg(not(feature = "kms-persistence"))]
         {
             if !req.cloning_secret.is_empty() {
                 crate::cloning::validate_cloning_secret(&req.cloning_secret)?;
@@ -210,7 +204,7 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
 /// Bind the v1 identity and policy to this encrypted clone response.
 /// NSM signs the version and commitment in user_data.
 /// The transcript contains only public values.
-#[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn clone_commitment(
     bundle: &PublicKeysResponse,
     policy: &[u8],
@@ -232,7 +226,7 @@ pub(super) fn clone_commitment(
     out
 }
 
-#[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
+#[cfg(not(feature = "kms-persistence"))]
 pub(super) fn verify_clone_commitment(actual: Option<&[u8]>, expected: &[u8; 36]) -> Result<()> {
     if actual != Some(expected.as_slice()) {
         return Err(EnclaveError::Attestation(
@@ -309,7 +303,7 @@ pub(super) fn handle_get_attested_public_key(
     })
 }
 
-#[cfg(all(test, not(feature = "kms-persistence"), not(feature = "stage-signet")))]
+#[cfg(all(test, not(feature = "kms-persistence")))]
 mod tests {
     use super::*;
 

@@ -28,38 +28,38 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// Staging is a real Nitro image with a separate, non-production policy.
+// Omitting SPV is allowed only for real-Nitro mint/burn builds. Policy and
+// bootstrap restrict them to public signet with indexer-trusted confirmations.
 #[cfg(all(
-    feature = "stage-signet",
+    feature = "rgb-validation",
+    not(feature = "spv"),
     any(
         feature = "allow-seed-import",
         feature = "mock-attestation",
         feature = "allow-debug-pcrs"
     )
 ))]
-compile_error!("stage-signet requires real attestation and internally generated keys; seed import and mock/debug attestation features are forbidden");
+compile_error!("rgb-validation without spv requires real attestation; seed import and mock/debug attestation features are forbidden");
 #[cfg(all(
-    feature = "stage-signet",
+    feature = "rgb-validation",
+    not(feature = "spv"),
     not(any(feature = "mint-signer", feature = "burn-signer"))
 ))]
-compile_error!("stage-signet requires mint-signer or burn-signer");
+compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
 
-// Without `spv`, the host-controlled indexer tells if witness txs are mined.
-// A malicious host can then get a `fundsOut` signed against a fake anchor.
-// `spv` checks every witness tx against the enclave's own header chain.
-// This guard is not release-gated (M-01). The separately measured public-
-// signet staging image retains these modules but explicitly replaces SPV
-// verification with indexer trust and attests a Development policy.
-#[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+// Preserve the production mint's custody contract when KMS is selected
+// explicitly instead of being pulled in by the role feature.
+#[cfg(all(
+    feature = "mint-signer",
+    feature = "spv",
+    not(feature = "kms-persistence")
+))]
 compile_error!(
-    "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled indexer - build with `--features spv` (which \
-     pulls in rgb-validation)"
+    "mint-signer with spv requires kms-persistence; enable it to preserve the production mint seed"
 );
 
-// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The guard requires
-// `spv` when `rgb-validation` is selected directly. The stack uses the
-// `rgb-validation` gate; the `rgb` alias itself need not be enabled.
+// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The role features
+// enable validation without SPV; use `rgb` for a production signer.
 
 // Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
 // The modules in `networks/rgb/flow/` export the same item names. These guards
@@ -69,7 +69,7 @@ compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
      ship as separate enclave instances. Build one image per flow - the default feature set \
      carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
-     vsock,rgb,mint-signer` (or `burn-signer`)"
+     vsock,rgb,mint-signer,kms-persistence` (or `vsock,rgb,burn-signer`)"
 );
 #[cfg(all(
     feature = "rgb-validation",
@@ -98,7 +98,7 @@ compile_error!(
 compile_error!(
     "a mint/burn build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
-     vsock,rgb,mint-signer`"
+     vsock,rgb,mint-signer,kms-persistence`"
 );
 
 // The attested role reads the features. The gates read the `build.rs` cfgs.

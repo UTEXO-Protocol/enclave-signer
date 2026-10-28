@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_export_verifies_real_development_policy_and_key_bindings() {
+    fn export_verifies_real_development_policy_and_key_bindings() {
         let nonce = [0x42; 32];
         let (good, root) = signed(&ExpectedPolicy::Development, &nonce);
         let export = |answer, want_nonce, pcrs: &ExpectedPcrs, evm| {
@@ -1495,7 +1495,7 @@ mod tests {
         assert!(export(enclave_answer(good.clone()), [9; 32], &PCRS, None).is_err());
         assert!(export(enclave_answer(good), nonce, &PCRS, Some([9; 20])).is_err());
 
-        // The stage live path always uses AWS-root verification, never raw CBOR.
+        // Real Development verification still requires the AWS root, never raw CBOR.
         let mock = attested_by(&ExpectedPolicy::Development, &nonce);
         assert!(export_bundle(
             enclave_answer(mock),

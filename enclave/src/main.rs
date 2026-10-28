@@ -27,14 +27,15 @@ fn main() {
     // Pinned bridge config. Committed in attestation `user_data` and checked on
     // every signing request.
     let bridge_config = BridgeConfig::from_env();
-    #[cfg(feature = "stage-signet")]
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
     bridge_config
-        .validate_stage_signet()
-        .expect("invalid staging configuration");
+        .validate_indexer_only()
+        .expect("invalid indexer-only configuration");
     bootstrap::log_bridge_config(&bridge_config);
 
     // Fail closed: a release rgb-validation build without a valid Production
-    // policy does not start. Debug, test and non-bridge builds are exempt.
+    // policy does not start. Public signet without SPV uses an indexer-trusted
+    // Development policy. Debug, test and non-bridge SPV builds are exempt.
     // `SetEndpoints` checks the full policy later.
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
@@ -49,7 +50,7 @@ fn main() {
     }
 
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
-    #[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
+    #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
 
     // The policy and chain clients come with `SetEndpoints`. Until then the

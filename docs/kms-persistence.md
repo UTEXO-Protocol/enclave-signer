@@ -1,6 +1,6 @@
 # Mint signer KMS seed persistence
 
-The `mint-signer` feature enables `kms-persistence`, using AWS KMS to generate a
+Production mint images enable `mint-signer,kms-persistence`, using AWS KMS to generate a
 64-byte seed and S3 to persist its encrypted `CiphertextBlob`. On initialization
 the enclave loads the saved blob, decrypts it with KMS recipient attestation,
 and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use

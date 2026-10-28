@@ -12,7 +12,7 @@ use super::witness::WitnessCheck;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
-#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
+#[cfg(all(rgb_to_evm, feature = "spv"))]
 use crate::networks::rgb::spv_crosscheck;
 #[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
@@ -20,7 +20,7 @@ use crate::networks::ValidationContext;
 use crate::proto::RgbSource;
 #[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
-#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
+#[cfg(all(rgb_to_evm, feature = "spv"))]
 use std::time::SystemTime;
 
 /// Validates all fields and source-chain evidence of an RGB source.
@@ -35,13 +35,13 @@ use std::time::SystemTime;
 /// 2. the validated asset matches the listener-declared `asset_id` and, if
 ///    configured, the operator-pinned `RGB_ASSET_ID`;
 /// 3. the proofs cover exactly the witness txs, and the blocks they use are
-///    pinned until signing (`rgb-validation` requires `spv`);
+///    pinned until signing;
 /// 4. no input of the settling transition descends from an opout the asset's
 ///    reject list rejects.
 ///
-/// The explicit `stage-signet` build uses the configured indexer for witness
-/// confirmation at the same depth instead of the enclave header chain. It
-/// trusts that indexer's chain view and does not pin SPV blocks.
+/// Without `spv`, public-signet builds use the configured indexer for witness
+/// confirmation at the same depth instead of the enclave header chain. They
+/// trust that indexer's chain view and do not pin SPV blocks.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -55,7 +55,7 @@ pub fn validate_source(
         )
     })?;
 
-    #[cfg(not(feature = "stage-signet"))]
+    #[cfg(feature = "spv")]
     let proven = {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::proven_witnesses(
@@ -64,7 +64,7 @@ pub fn validate_source(
             ctx.bridge_config.spv_min_confirmations,
         )?
     };
-    #[cfg(feature = "stage-signet")]
+    #[cfg(not(feature = "spv"))]
     let proven = validator.indexer_witnesses(ctx.bridge_config.spv_min_confirmations);
     let witnesses = WitnessCheck {
         chain: &proven,
@@ -83,7 +83,7 @@ pub fn validate_source(
         AssetBindMode::Source,
     )?;
 
-    #[cfg(not(feature = "stage-signet"))]
+    #[cfg(feature = "spv")]
     {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(
@@ -106,7 +106,7 @@ pub fn validate_source(
     Ok(validated)
 }
 
-#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
+#[cfg(all(rgb_to_evm, feature = "spv"))]
 fn lock_chain<'a>(
     ctx: &'a ValidationContext<'_>,
 ) -> Result<std::sync::MutexGuard<'a, crate::networks::rgb::spv::HeaderChain>> {
@@ -183,8 +183,8 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
     Ok(())
 }
 
-#[cfg(all(test, feature = "stage-signet", feature = "burn-signer"))]
-mod stage_signet_source {
+#[cfg(all(test, not(feature = "spv"), feature = "burn-signer"))]
+mod indexer_only_source {
     use super::*;
     use crate::networks::rgb::spv::Network;
     use crate::networks::rgb::validation::{BoundAnchors, RgbValidator, VerifiedLock};
@@ -194,7 +194,7 @@ mod stage_signet_source {
     use std::io::{BufRead, BufReader, Write};
 
     /// Indexer answers can be well-formed without an independently verified
-    /// chain. That is the explicit staging trust assumption this test exercises.
+    /// chain. That is the indexer trust assumption this test exercises.
     fn indexer(history: &History, depth: u32, mined: bool, correct_network: bool) -> String {
         let txids: Vec<_> = history.bundles.iter().map(|b| b.witness_id()).collect();
         let headers: Vec<_> = txids
@@ -225,7 +225,7 @@ mod stage_signet_source {
                         let params = &request["params"];
                         let header_hex = bitcoin::consensus::encode::serialize_hex;
                         let result = match request["method"].as_str().unwrap() {
-                            "server.version" => json!(["stage-test-indexer", "1.4"]),
+                            "server.version" => json!(["test-indexer", "1.4"]),
                             "blockchain.headers.subscribe" => {
                                 json!({"height": tip, "hex": header_hex(headers.last().unwrap())})
                             }

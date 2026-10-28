@@ -96,7 +96,7 @@ aws-nitro-enclaves-nsm-api = "0.5"
 #
 # Single-network EIFs, one flow each:
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
-#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
+#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer,kms-persistence`
 #   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (no
 #                     bridge-signing path).
@@ -131,9 +131,9 @@ ccd = []
 rgb-swap = ["rgb"]
 # `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
 # with BFA `mint`, withdrawals destroy with BFA `burn`.
-rgb-mint-burn = ["rgb"]
+rgb-mint-burn = ["rgb-validation"]
 
-# Seed custody is a separate capability, enabled only by the mint signer.
+# Seed custody is a separate capability, required by an SPV mint signer.
 kms-persistence = [
     "dep:base64",
     "dep:serde_json",
@@ -151,23 +151,16 @@ kms-persistence = [
     "dep:cbc",
 ]
 
-# Explicit public-signet Nitro staging mode. Real attestation and internal,
-# ephemeral entropy only; no SPV synchronization, KMS custody or cloning.
-# The role still pulls in the shared SPV/KMS code, but staging never uses it.
-# lib.rs rejects import/mock features and bootstrap checks the network pins.
-stage-signet = []
-
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# In-enclave RGB consignment validation via rgbstd. REQUIRES `spv` (a
-# `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
-# Bitcoin. A malicious host can then fake a Bitcoin anchor.
-# `spv` is not in this list because that makes a feature cycle.
+# In-enclave RGB consignment validation via rgbstd. Production requires `spv`.
+# A mint/burn build without it is restricted to public signet and trusts the
+# indexer for confirmations. `spv` is separate to permit that configuration.
 rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
-# When OFF, handle_sign_evm refuses every `fundsOut` release (fail-closed).
+# Without it, only public-signet mint/burn builds are allowed (lib.rs/policy.rs).
 spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
@@ -203,7 +196,7 @@ bfa-mint = ["rgb-mint-burn", "bfa-validation", "dep:rgb-psbt-utils"]
 # `build.rs` turns the role into the `evm_to_rgb` / `rgb_to_evm` cfgs.
 #
 # `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
-mint-signer = ["bfa-mint", "kms-persistence"]
+mint-signer = ["bfa-mint"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
 burn-signer = ["bfa-mint"]
 

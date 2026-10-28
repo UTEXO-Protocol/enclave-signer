@@ -323,10 +323,11 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // Stage trusts indexer confirmations and requires BTC_RELAY_MODE=none.
-    // Its caller-supplied proof bytes are signed without Bitcoin header
-    // verification; stage contracts must not treat them as SPV evidence.
-    #[cfg(not(feature = "stage-signet"))]
+    // Without SPV, public signet trusts indexer confirmations and requires
+    // BTC_RELAY_MODE=none.
+    // Caller-supplied proof bytes are signed without Bitcoin header
+    // verification; contracts must not treat them as SPV evidence.
+    #[cfg(feature = "spv")]
     {
         // Fail on a poisoned lock, as `validate_source` does.
         // A poisoned header chain can be in the middle of a reorg.
@@ -344,7 +345,7 @@ fn apply_funds_out_binding(
             ctx.bridge_config.spv_min_confirmations,
         )?;
     }
-    #[cfg(feature = "stage-signet")]
+    #[cfg(not(feature = "spv"))]
     let _ = (ctx, merkle_proofs, pins);
 
     // Consignment-bound release amount for the RGB flow of this build
@@ -952,12 +953,7 @@ mod key_not_ready {
 mod reject_list_wiring;
 
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
-#[cfg(all(
-    test,
-    feature = "rgb-validation",
-    rgb_to_evm,
-    not(feature = "stage-signet")
-))]
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm, feature = "spv"))]
 mod funds_out_depth {
     use super::*;
     use crate::config::{BridgeConfig, BtcRelayMode};
@@ -1033,9 +1029,9 @@ mod funds_out_depth {
     }
 }
 
-/// The staging exception removes the header proof, not the burn authorization.
-#[cfg(all(test, feature = "stage-signet", feature = "burn-signer"))]
-mod stage_signet_bindings {
+/// Indexer validation preserves the burn authorization without header proofs.
+#[cfg(all(test, not(feature = "spv"), feature = "burn-signer"))]
+mod indexer_only_bindings {
     use super::*;
     use crate::config::{BridgeConfig, BtcRelayMode};
     use crate::networks::evm::validation::ReleaseIdentity;

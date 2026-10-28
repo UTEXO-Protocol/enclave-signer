@@ -49,9 +49,7 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.chmod(0o700)
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
-                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
-                    'SIGNER_ROLE', 'EVM_CHAIN_ID', 'EVM_PROXY_CONTRACT_ADDRESS',
-                    'FUNDS_IN_CONTRACT', 'TOKEN_CONTRACT'):
+                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -96,6 +94,21 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(self.captured_build_args(), [
                     'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
                 ])
+
+    def test_signet_overrides_reach_the_existing_recipes(self):
+        pins = dict(BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none',
+                    EVM_CHAIN_ID='11155111', EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
+                    FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
+                    RGB_MAX_UNOWNED_SATS='1000')
+        for role in ('mint', 'burn'):
+            overrides = dict(pins, ENCLAVE_FEATURES=f'vsock,{role}-signer')
+            result = self.invoke(f'Dockerfile.enclave.{role}',
+                                 RGB_ASSET_ID='rgb:test-bfa-asset', **overrides)
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertCountEqual(self.captured_build_args(), [
+                'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                *(f'{key}={value}' for key, value in overrides.items()),
+            ])
 
     def test_combined_forwards_asset_and_explicit_debug_together(self):
         result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
@@ -218,63 +231,9 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
 
-    def stage_pins(self):
-        return dict(RGB_ASSET_ID='rgb:test-signet-asset', SIGNER_ROLE='mint-signer',
-                    EVM_CHAIN_ID='421614', EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
-                    FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20)
-
-    def test_stage_requires_every_deployment_pin_before_docker(self):
-        for missing in self.stage_pins():
-            with self.subTest(missing=missing):
-                pins = self.stage_pins()
-                pins.pop(missing)
-                result = self.invoke('Dockerfile.enclave.stage', **pins)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn(missing, result.stderr)
-                self.assertFalse(self.argv.exists())
-
-    def test_stage_forwards_each_role_and_only_public_pins(self):
-        for role in ('mint-signer', 'burn-signer'):
-            with self.subTest(role=role):
-                pins = dict(self.stage_pins(), SIGNER_ROLE=role)
-                result = self.invoke('Dockerfile.enclave.stage', **pins, **KMS_PINS)
-                self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_build_args(),
-                                 ['SOURCE_DATE_EPOCH=1700000000'] +
-                                 [f'{key}={value}' for key, value in pins.items()])
-
-    def test_stage_rejects_extra_features_and_bad_role(self):
-        for extra in ({'SIGNER_ROLE': 'combined'},
-                      {'ENCLAVE_DEBUG_FEATURES': 'mock-attestation'},
-                      {'ENCLAVE_DEBUG_FEATURES': 'allow-seed-import'}):
-            with self.subTest(extra=extra):
-                result = self.invoke('Dockerfile.enclave.stage',
-                                     **dict(self.stage_pins(), **extra))
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertFalse(self.argv.exists())
-
-    def test_stage_pins_do_not_change_production_build_arguments(self):
-        result = self.invoke('Dockerfile.enclave.mint', **self.stage_pins())
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), [
-            'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-signet-asset',
-        ])
-
 
 class ImageInputsTests(unittest.TestCase):
-    RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd', 'Dockerfile.enclave.stage')
-
-    def test_stage_configures_bounded_bitcoin_signing(self):
-        # Release signing refuses an unset RGB budget even for a mint whose
-        # outputs all belong to the enclave. Exercise the shipped image inputs.
-        text = (ROOT / 'build/Dockerfile.enclave.stage').read_text().replace('\\\n', ' ')
-        env = dict(token.split('=', 1)
-                   for line in text.splitlines() if line.startswith('ENV ')
-                   for token in shlex.split(line[4:]) if '=' in token)
-        self.assertEqual(env['BITCOIN_NETWORK'], 'signet')
-        self.assertGreater(int(env['RGB_MAX_UNOWNED_SATS']), 0)
-        self.assertLessEqual(int(env['RGB_MAX_UNOWNED_SATS']),
-                             int(env['BTC_MAX_TOTAL_SATS']))
+    RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
 
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:

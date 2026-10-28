@@ -140,11 +140,11 @@ jobs:
       # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
       # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer,kms-persistence
       - name: Clippy (rgb mint signer)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer,kms-persistence --all-targets -- -D warnings
       - name: Test (rgb mint signer)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,kms-persistence,mock-attestation,allow-seed-import
 
       - name: Build (rgb burn signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
@@ -158,18 +158,18 @@ jobs:
       - name: Check release (public-signet stage, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo check --release -p utexo-bridge-enclave --no-default-features --features vsock,stage-signet,$role
+            cargo check --release -p utexo-bridge-enclave --no-default-features --features vsock,$role
           done
       - name: Test (public-signet stage, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo test -p utexo-bridge-enclave --no-default-features --features stage-signet,$role --lib stage_signet
-            cargo test -p utexo-bridge-enclave --no-default-features --features stage-signet,$role --test test_stage_signet
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only
           done
       - name: Clippy (public-signet stage, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,stage-signet,$role --lib --bins --test test_stage_signet -- -D warnings
+            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only -- -D warnings
           done
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
@@ -289,12 +289,8 @@ jobs:
           fi
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
-  # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs. Without SPV, a consignment's
-  # witness txs are anchored only through the host-controlled indexer,
-  # so the enclave must never be built that way. Runs separately from `ci`
-  # because the build is expected to fail. Unlike `release-guards` this is not
-  # release-specific — the combination is unsafe in every profile.
+  # Unsupported feature combinations must fail at compile time. Public-Signet
+  # mint/burn builds may omit SPV, but cannot enable mock attestation/imports.
   feature-guards:
     runs-on: ubuntu-latest
 
@@ -327,27 +323,35 @@ jobs:
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 
-      - name: Assert stage cannot import seeds or mock attestation
+      - name: Assert indexer-only builds cannot import seeds or mock attestation
         run: |
           for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
-            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "stage-signet,mint-signer,$forbidden" 2>build.log; then
+            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "mint-signer,$forbidden" 2>build.log; then
               echo "::error::stage unexpectedly compiled with $forbidden"
               exit 1
             fi
-            if ! grep -q "stage-signet requires real attestation and internally generated keys" build.log; then
+            if ! grep -q "rgb-validation without spv requires real attestation" build.log; then
               cat build.log
               exit 1
             fi
           done
 
-      - name: Assert rgb-validation without spv is rejected
+      - name: Assert SPV mint cannot silently omit KMS persistence
+        run: |
+          if cargo check --locked -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer 2>build.log; then
+            echo "::error::SPV mint unexpectedly compiled without KMS persistence"
+            exit 1
+          fi
+          grep -q "mint-signer with spv requires kms-persistence" build.log
+
+      - name: Assert bare rgb-validation without a signer role is rejected
         run: |
           if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
             echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no spv — the compile_error guard is missing or not firing"
             exit 1
           fi
-          if ! grep -q "rgb-validation requires spv" build.log; then
-            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires spv)"
+          if ! grep -q "rgb-validation without spv requires mint-signer or burn-signer" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation without spv requires mint-signer or burn-signer)"
             cat build.log
             exit 1
           fi
@@ -387,7 +391,7 @@ jobs:
       # rules in one binary, neither would leave the role unstated.
       - name: Assert both signer roles at once is rejected
         run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,burn-signer 2>build.log; then
+          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,kms-persistence,burn-signer 2>build.log; then
             echo "::error::build unexpectedly SUCCEEDED with both mint-signer and burn-signer - the compile_error guard is missing or not firing"
             exit 1
           fi

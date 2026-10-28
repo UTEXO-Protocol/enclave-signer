@@ -202,24 +202,32 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
-    /// Pins required by the explicit public-signet staging image. These are
-    /// baked into its EIF. Staging trusts the indexer for Bitcoin finality.
-    pub fn validate_stage_signet(&self) -> std::result::Result<(), String> {
+    /// Pins required when RGB validation trusts the indexer for Bitcoin
+    /// finality instead of using SPV. These are baked into the signet EIF.
+    pub fn validate_indexer_only(&self) -> std::result::Result<(), String> {
         if self.bitcoin_network != BitcoinNetwork::Signet {
-            return Err("stage-signet requires BITCOIN_NETWORK=signet (public signet)".into());
+            return Err(
+                "RGB validation without SPV requires BITCOIN_NETWORK=signet (public signet)".into(),
+            );
         }
         if self.btc_relay_mode != BtcRelayMode::None {
-            return Err("stage-signet requires BTC_RELAY_MODE=none".into());
+            return Err("RGB validation without SPV requires BTC_RELAY_MODE=none".into());
+        }
+        if self.spv_min_confirmations == 0 {
+            return Err(
+                "indexer-trusted validation requires at least one Bitcoin confirmation".into(),
+            );
         }
         if !self.is_configured()
             || self.funds_in_contract == [0; 20]
             || self.token_contract == [0; 20]
         {
-            return Err("stage-signet requires EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID, FUNDS_IN_CONTRACT and TOKEN_CONTRACT pins".into());
+            return Err("RGB validation without SPV requires EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID, FUNDS_IN_CONTRACT and TOKEN_CONTRACT pins".into());
         }
         if crate::policy::MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id) {
             return Err(
-                "stage-signet refuses the production Ethereum and Arbitrum chain IDs".into(),
+                "RGB validation without SPV refuses the production Ethereum and Arbitrum chain IDs"
+                    .into(),
             );
         }
         Ok(())
@@ -520,7 +528,7 @@ impl Endpoints {
             ("kms_seed_id", &req.kms_seed_id),
             ("kms_expected_evm_address", &req.kms_expected_evm_address),
         ];
-        #[cfg(all(feature = "kms-persistence", not(feature = "stage-signet")))]
+        #[cfg(feature = "kms-persistence")]
         let kms = if cfg!(feature = "allow-seed-import")
             && kms_values.iter().all(|(_, v)| v.is_empty())
         {
@@ -555,7 +563,7 @@ impl Endpoints {
                 expected_evm_address,
             })
         };
-        #[cfg(any(not(feature = "kms-persistence"), feature = "stage-signet"))]
+        #[cfg(not(feature = "kms-persistence"))]
         let kms = {
             for (name, value) in kms_values {
                 unused(name, value.is_empty())?;
@@ -573,10 +581,7 @@ impl Endpoints {
     }
 }
 
-#[cfg(any(
-    feature = "stage-signet",
-    not(all(feature = "evm-rpc", feature = "kms-persistence"))
-))]
+#[cfg(not(all(feature = "evm-rpc", feature = "kms-persistence")))]
 fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
     if empty {
         Ok(())

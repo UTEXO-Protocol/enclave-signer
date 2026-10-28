@@ -9,7 +9,7 @@ use crate::proto::*;
 
 /// SPV part of the readiness answer:
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
-#[cfg(all(feature = "rgb-validation", not(feature = "stage-signet")))]
+#[cfg(feature = "spv")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     use crate::networks::rgb::spv_crosscheck::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,10 +39,10 @@ fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     )
 }
 
-/// A `ccd`-only or signet staging build has nothing to sync. Zero diagnostics
+/// A build without SPV has nothing to sync. Zero diagnostics
 /// mean "not applicable" and tell the parent's header-sync worker to stop.
 /// `synced` is true only in the readiness sense: no SPV work is pending.
-#[cfg(any(not(feature = "rgb-validation"), feature = "stage-signet"))]
+#[cfg(not(feature = "spv"))]
 fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     (true, 0, 0, 0, 0)
 }

@@ -17,7 +17,7 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
-`mint-signer` enables `kms-persistence`: initialization uses attested KMS seed
+Production mint images enable `kms-persistence`: initialization uses attested KMS seed
 generation/recovery and encrypted S3 storage; peer cloning is disabled. Burn
 signers and other builds without this capability retain the entropy/cloning
 lifecycle below. See [KMS seed persistence](kms-persistence.md).
@@ -143,8 +143,8 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
-or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
-enables `kms-persistence`. Production images are built with
+or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. SPV mint images also require
+`kms-persistence`. Production images are built with
 `--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
@@ -244,8 +244,8 @@ SecurityPolicy = Production {
   an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
-  build with debug assertions off); `rgb-validation` without `spv` is a
-  `compile_error!` in every profile, as is `rgb-validation` with both RGB flows
+  build with debug assertions off); `rgb-validation` without `spv` is restricted to public-Signet mint/burn
+  builds with real attestation and a Development policy. A build fails with both RGB flows
   (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
   both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
