@@ -21,8 +21,7 @@ assumptions. Known gaps are collected in Sec 13.
 generation/recovery and encrypted S3 storage; peer cloning is disabled. Burn
 signers and other builds without this capability retain the entropy/cloning
 lifecycle below. Public-Signet staging without SPV uses these same custody
-paths. See [KMS seed persistence](kms-persistence.md) and
-[staging deployment](stage-signet.md).
+paths. See [KMS seed persistence](kms-persistence.md).
 
 ## 1. Purpose
 

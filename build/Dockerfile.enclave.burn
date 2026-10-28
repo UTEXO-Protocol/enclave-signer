@@ -134,7 +134,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # path is not compiled in.
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
 # image. The operator sets them at launch (SetEndpoints). Production policy
-# commits them; Development policy does not. See docs/stage-signet.md.
+# commits them; Development policy does not.
 # SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1), attested.
 ENV BTC_RELAY_MODE=${BTC_RELAY_MODE} \
     EVM_FINALITY_TAG=safe \

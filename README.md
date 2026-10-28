@@ -162,7 +162,7 @@ never exports the plaintext seed. For mint signers, KMS also handles the
 plaintext seed during generation and decryption. Mnemonic or raw-seed import
 exists only with
 `allow-seed-import` (dev builds). The same custody rules apply to
-[public-Signet staging](docs/stage-signet.md): mint uses KMS/S3 recovery, burn
+public-Signet staging: mint uses KMS/S3 recovery, burn
 uses authenticated cloning, and only Bitcoin SPV is omitted. Arbitrum One
 (`42161`) may remain the EVM network.
 
@@ -312,7 +312,7 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 ```
 
 Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
-real-attestation mint/burn builds for [public Signet](docs/stage-signet.md);
+real-attestation mint/burn builds for public Signet;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 `kms-persistence` requires `mint-signer`;
@@ -600,9 +600,8 @@ Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. The
 Development policy used without SPV does not separately commit these fields;
 those images enforce a measured `ENDPOINTS_SHA256` digest of the network inputs,
-while KMS values remain runtime inputs. Approve them as described in
-[staging](docs/stage-signet.md). A build
-requires the values it uses and refuses the others:
+while KMS values remain runtime inputs. Operators must approve these deployment
+inputs. A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|

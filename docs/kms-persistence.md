@@ -10,7 +10,7 @@ The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
-cloning lifecycle. [Public-Signet staging](stage-signet.md) uses this same
+cloning lifecycle. Public-Signet staging uses this same
 `PersistentSeed` lifecycle even when Bitcoin SPV is omitted. It does not
 replace mint recovery with fresh entropy or peer cloning.
 

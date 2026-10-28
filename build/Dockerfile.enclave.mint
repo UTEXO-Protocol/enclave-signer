@@ -130,7 +130,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
 # image. The operator sets them at launch (SetEndpoints). Production policy
-# commits them; Development policy does not. See docs/stage-signet.md.
+# commits them; Development policy does not.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
