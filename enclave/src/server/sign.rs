@@ -323,9 +323,9 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // The signet staging image instead trusts the indexer's confirmations.
-    // Its launch gate requires BTC_RELAY_MODE=none; it cannot bind an EVM
-    // proof to an independently verified Bitcoin header chain.
+    // Stage trusts indexer confirmations and requires BTC_RELAY_MODE=none.
+    // Its caller-supplied proof bytes are signed without Bitcoin header
+    // verification; stage contracts must not treat them as SPV evidence.
     #[cfg(not(feature = "stage-signet"))]
     {
         // Fail on a poisoned lock, as `validate_source` does.

@@ -11,9 +11,12 @@ wallet setup after every restart.
 This profile disables SPV synchronization and the enclave's BtcRelay checks.
 Burn consignments still undergo RGB validation, asset/amount/operation and
 burn-destination binding, EVM mint-ancestry verification and reject-list checks.
-Witness confirmations come from the TLS indexer, which is trusted for Bitcoin
+Burn witness confirmations come from the TLS indexer, which is trusted for Bitcoin
 chain status in this profile. `SPV_MIN_CONFIRMATIONS=3` remains the required
-indexer confirmation depth. An unconfirmed witness is still rejected.
+burn indexer confirmation depth. An unconfirmed burn witness is still rejected.
+The existing mint path verifies the supplied parent PSBT and the EVM deposit,
+without reading Bitcoin history; its connector remains responsible for waiting
+for mint-right confirmations, as described in [mint-flow.md](mint-flow.md).
 
 The profile accepts only `BITCOIN_NETWORK=signet` and `BTC_RELAY_MODE=none`,
 with explicit bridge, asset and token pins. Ethereum mainnet and Arbitrum One
@@ -145,7 +148,11 @@ configure its wallet descriptors. On subsequent checks, also pass
 `--expect-evm-address 0x<approved address>` to detect a changed identity.
 The approved PCRs select the stage role and baked configuration. Development
 policy does not separately commit the launch endpoint hosts or RPC CA; approve
-those as deployment inputs before initialization.
+those as deployment inputs before initialization. The operator controlling
+`SetEndpoints` is trusted: a real stage attestation proves the measured code
+and public keys, not which chain endpoints were installed. Registration and
+on-chain consumers must pin the approved stage PCRs as well; accepting the
+Development policy alone does not distinguish this image from another dev build.
 
 Each enclave has a distinct identity; repeated `init`
 does not replace an already initialized seed. Keep the enclave's vsock
@@ -157,7 +164,9 @@ Health becomes ready after endpoints and keys are set. Its SPV diagnostics
 are zero, causing the parent header-sync loop to report `Off`; no
 `HEADER_ELECTRUM_URL` is needed. This does not remove the indexer requirement
 for RGB validation and confirmation checks. The stage caller need not supply
-Merkle proofs. If the EVM deployment itself requires BtcRelay proofs, configure
+Merkle proofs. Any calldata `proof` bytes are caller supplied and are not
+validated against Bitcoin headers in this profile. If the EVM deployment
+itself requires BtcRelay proofs, configure
 its stage deployment consistently: the signer does not disable checks in the
 on-chain contract.
 
