@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy the matching EIF, Parent, and CLI from S3 for one git_sha.
 # Verify checksums and PCRs before starting the services.
-# Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
+# Start one enclave on CID 16 and Parent port 50051 by default.
+# ENCLAVE_CIDS="16 18 20" opts into the three-CID deployment.
 #
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
@@ -69,7 +70,28 @@ if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
   exit 1
 fi
-CIDS=(16 18 20)
+# Deploy one enclave by default. Operators can explicitly request the existing
+# three-CID deployment with ENCLAVE_CIDS="16 18 20".
+ENCLAVE_CIDS="${ENCLAVE_CIDS:-16}"
+read -r -a CIDS <<< "$ENCLAVE_CIDS"
+if [ "${#CIDS[@]}" -eq 0 ]; then
+  echo "ENCLAVE_CIDS must contain at least one CID" >&2
+  exit 1
+fi
+CID_SEEN=" "
+for CID in "${CIDS[@]}"; do
+  case "$CID" in
+    16|18|20) ;;
+    *) echo "ENCLAVE_CIDS must list unique CIDs from 16, 18 and 20, got '$CID'" >&2; exit 1 ;;
+  esac
+  case "$CID_SEEN" in
+    *" $CID "*)
+      echo "ENCLAVE_CIDS must not repeat CID $CID" >&2
+      exit 1
+      ;;
+  esac
+  CID_SEEN="$CID_SEEN$CID "
+done
 # The hugepage pool must hold every enclave at the launch value. The start
 # below runs all of them. A later restart runs a new enclave while the others
 # keep theirs. Refuse here, before the script downloads or stops anything.
@@ -263,7 +285,7 @@ if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
     '') echo "cannot read $ENV_FILE. systemd gives start the values in this file. Run check as root or as a user that can read the file." >&2; exit 1 ;;
     *) echo "line $bad of $ENV_FILE is not a plain line. Write the file again with plain KEY=value lines, comment lines and blank lines only (README)." >&2; exit 1 ;;
   esac
-  for key in ENCLAVE_MEMORY ENCLAVE_COUNT NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
+  for key in ENCLAVE_MEMORY ENCLAVE_CIDS NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
     value="$(awk -v k="$key" -v q="'" '
       { l = $0; sub(/^[ \t\r]+/, "", l); n = index(l, "=") }
       n > 0 && substr(l, 1, n - 1) ~ ("^" k "[ \t]*$") {
@@ -375,10 +397,27 @@ case "$ACTION" in
       echo "ENCLAVE_MEMORY=$MEM MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
       exit 1
     fi
-    COUNT="${ENCLAVE_COUNT:-3}"
-    case "$COUNT" in
-      ''|0*|*[!0-9]*|???*) echo "ENCLAVE_COUNT must be a whole number from 1 to 99, got '$COUNT'" >&2; exit 1 ;;
-    esac
+    # One enclave is the default. The operator opts into more with an explicit
+    # CID list; no separate count can disagree with the deployment.
+    read -r -a CIDS <<< "${ENCLAVE_CIDS:-16}"
+    COUNT="${#CIDS[@]}"
+    if [ "$COUNT" -eq 0 ]; then
+      echo "ENCLAVE_CIDS must contain at least one CID" >&2
+      exit 1
+    fi
+    SEEN=" "
+    for CONFIGURED_CID in "${CIDS[@]}"; do
+      case "$CONFIGURED_CID" in
+        16|18|20) ;;
+        *) echo "ENCLAVE_CIDS must list unique CIDs from 16, 18 and 20, got '$CONFIGURED_CID'" >&2; exit 1 ;;
+      esac
+      case "$SEEN" in
+        *" $CONFIGURED_CID "*) echo "ENCLAVE_CIDS must not repeat CID $CONFIGURED_CID" >&2; exit 1 ;;
+      esac
+      SEEN="$SEEN$CONFIGURED_CID "
+    done
+    LABEL=enclaves
+    [ "$COUNT" -eq 1 ] && LABEL=enclave
     if [ "$ACTION" = check ]; then
       # The pool must hold every enclave of the host at this value. The
       # allocator applies the file at its next start, and the kernel holds
@@ -391,15 +430,15 @@ case "$ACTION" in
         ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $POOL_FILE, got '$file'" >&2; exit 1 ;;
       esac
       if [ "$file" -lt "$need" ]; then
-        echo "memory_mib in $POOL_FILE is $file MiB, and $COUNT enclaves (ENCLAVE_COUNT) of $MEM MiB need $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "memory_mib in $POOL_FILE is $file MiB, and $COUNT $LABEL (ENCLAVE_CIDS) of $MEM MiB need $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
         exit 1
       fi
       held="$(pages_mib nr_hugepages)"
       if [ "$held" -lt "$need" ]; then
-        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and $COUNT enclaves (ENCLAVE_COUNT) of $MEM MiB need $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and $COUNT $LABEL (ENCLAVE_CIDS) of $MEM MiB need $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
         exit 1
       fi
-      echo "CID $CID: $COUNT enclaves of $MEM MiB fit: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
+      echo "CID $CID: $COUNT $LABEL of $MEM MiB fit: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
       exit 0
     fi
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
@@ -508,7 +547,7 @@ cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
-ENCLAVE_COUNT=${#CIDS[@]}
+ENCLAVE_CIDS="${CIDS[*]}"
 NITRO_ALLOCATOR_CONFIG=$NITRO_ALLOCATOR_CONFIG
 NITRO_HUGEPAGES_DIR=$NITRO_HUGEPAGES_DIR
 ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE

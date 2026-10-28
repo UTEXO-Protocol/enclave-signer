@@ -172,14 +172,15 @@ os.execvp(args[0], args)
                         self.assert_refused(
                             result, f'ENCLAVE_MEMORY={memory} MiB is not a whole number of GiB')
 
-    def test_a_count_that_is_not_a_number_is_refused(self):
-        # Unset or empty means the default of three, as for ENCLAVE_MEMORY.
+    def test_an_invalid_cid_list_is_refused(self):
+        # Unset or empty means one enclave on CID 16. Multiple enclaves require
+        # an explicit, unique list; there is no independent count setting.
         for script in self.scripts():
             for action in ('start', 'check'):
-                for count in ('0', '03', 'three', '100'):
-                    with self.subTest(script=script.name, action=action, count=count):
-                        result = self.run_ctl(script, None, action, ENCLAVE_COUNT=count)
-                        self.assert_refused(result, 'ENCLAVE_COUNT must be a whole number')
+                for cids in ('0', '03', 'three', '100', '16 16', '16 22', ' '):
+                    with self.subTest(script=script.name, action=action, cids=cids):
+                        result = self.run_ctl(script, None, action, ENCLAVE_CIDS=cids)
+                        self.assert_refused(result, 'ENCLAVE_CIDS must')
 
     def test_the_default_and_a_larger_value_reach_run_enclave(self):
         if not bash_expands_empty_arrays():
@@ -228,7 +229,7 @@ os.execvp(args[0], args)
             with self.subTest(script=script.name):
                 result = self.run_ctl(script, None, 'check')
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('3 enclaves of 4096 MiB fit: memory_mib 12288 MiB, hugepages '
+                self.assertIn('1 enclave of 4096 MiB fit: memory_mib 12288 MiB, hugepages '
                               '12288 MiB, values from the environment', result.stdout)
                 self.assertFalse(self.calls.exists(), 'nitro-cli ran')
 
@@ -237,10 +238,10 @@ os.execvp(args[0], args)
             for pool in (10752, 9216):
                 with self.subTest(script=script.name, pool=pool):
                     self.write_pool(pool)
-                    result = self.run_ctl(script, None, 'check')
+                    result = self.run_ctl(script, None, 'check', ENCLAVE_CIDS='16 18 20')
                     self.assert_refused(
                         result, f'memory_mib in {self.pool} is {pool} MiB, and 3 enclaves '
-                        '(ENCLAVE_COUNT) of 4096 MiB need 12288 MiB')
+                        '(ENCLAVE_CIDS) of 4096 MiB need 12288 MiB')
                     self.assertNotIn('restart nitro-enclaves-allocator', result.stderr)
                     self.assertIn('restarts every enclave of this host', result.stderr)
 
@@ -248,7 +249,7 @@ os.execvp(args[0], args)
         self.write_pages(gib=9)
         for script in self.scripts():
             with self.subTest(script=script.name):
-                result = self.run_ctl(script, None, 'check')
+                result = self.run_ctl(script, None, 'check', ENCLAVE_CIDS='16 18 20')
                 self.assert_refused(result, 'the kernel holds 9216 MiB of hugepages')
                 self.assertIn('restarts every enclave of this host', result.stderr)
 
@@ -266,7 +267,7 @@ os.execvp(args[0], args)
             for value, ok in (('"12288"', True), ('"12287"', False)):
                 with self.subTest(script=script.name, value=value):
                     self.write_pool(value)
-                    result = self.run_ctl(script, None, 'check')
+                    result = self.run_ctl(script, None, 'check', ENCLAVE_CIDS='16 18 20')
                     if ok:
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     else:
@@ -295,7 +296,7 @@ os.execvp(args[0], args)
                     'cannot read memory_mib from')
 
     def test_check_reads_the_unit_env_file(self):
-        self.write_env(b'ENCLAVE_MEMORY=8192\nENCLAVE_COUNT=3\n')
+        self.write_env(b'ENCLAVE_MEMORY=8192\nENCLAVE_CIDS=16 18 20\n')
         for script in self.scripts():
             with self.subTest(script=script.name):
                 result = self.run_ctl(script, None, 'check', ENCLAVE_ENV=str(self.env_file))
@@ -315,7 +316,7 @@ os.execvp(args[0], args)
         # comment line. The last line of a key wins. An empty value gives the
         # default.
         for text, refusal in ((b'ENCLAVE_MEMORY=4096 # note\n', "got '4096 # note'"),
-                              (b'ENCLAVE_COUNT=3 # replicas\n', "got '3 # replicas'"),
+                              (b'ENCLAVE_CIDS=3 # replicas\n', "got '3'"),
                               (b'ENCLAVE_MEMORY=8192;\n', "got '8192;'"),
                               (b'ENCLAVE_MEMORY = 8192\n', 'of 8192 MiB need 24576 MiB'),
                               (b"ENCLAVE_MEMORY='8192'\n", 'of 8192 MiB need 24576 MiB'),
@@ -324,9 +325,9 @@ os.execvp(args[0], args)
                               (b'# ENCLAVE_MEMORY=8192\n', None),
                               (b'ENCLAVE_MEMORY=8192\nENCLAVE_MEMORY=4096\n', None),
                               (b'ENCLAVE_MEMORY=8192\nENCLAVE_MEMORY=\n', None),
-                              (b'ENCLAVE_MEMORY=4096\r\nENCLAVE_COUNT=3\r\n', None),
+                              (b'ENCLAVE_MEMORY=4096\r\nENCLAVE_CIDS=16 18 20\r\n', None),
                               (b'\nENCLAVE_MEMORY=8192\n \t\n\r\n', 'of 8192 MiB need 24576 MiB')):
-            self.write_env(text)
+            self.write_env(b'ENCLAVE_CIDS=16 18 20\n' + text)
             for script in self.scripts():
                 with self.subTest(script=script.name, text=text):
                     result = self.run_ctl(script, None, 'check', ENCLAVE_ENV=str(self.env_file))
@@ -395,9 +396,9 @@ os.execvp(args[0], args)
         for script in self.scripts():
             with self.subTest(script=script.name):
                 result = self.run_ctl(script, '8192', 'check', ENCLAVE_ENV=str(self.env_file),
-                                      ENCLAVE_COUNT='1')
+                                      ENCLAVE_CIDS='16 18 20')
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('3 enclaves of 4096 MiB fit', result.stdout)
+                self.assertIn('1 enclave of 4096 MiB fit', result.stdout)
         # systemd does not start the unit when the file is missing. check also
         # cannot see the values in a file that it cannot read.
         unreadable = self.base / 'unreadable.env'
@@ -441,7 +442,7 @@ os.execvp(args[0], args)
                 with self.subTest(script=script.name, empty=empty):
                     # The environment gives other values. check takes the ones in the file.
                     result = self.run_ctl(script, '4096', 'check', ENCLAVE_ENV=str(self.env_file),
-                                          ENCLAVE_COUNT='1',
+                                          ENCLAVE_CIDS='16',
                                           NITRO_ALLOCATOR_CONFIG=str(self.base / 'absent.yaml'),
                                           NITRO_HUGEPAGES_DIR=str(self.base / 'absent'))
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -456,6 +457,9 @@ os.execvp(args[0], args)
                 self.assert_refused(result, 'cannot read memory_mib from')
 
     def test_deploy_host_refuses_before_any_step(self):
+        for cids in ('16 16', '16 22', ' '):
+            with self.subTest(cids=cids):
+                self.assert_refused(self.run_host(ENCLAVE_CIDS=cids), 'ENCLAVE_CIDS must')
         for memory, text in (('3584', 'is below the 4096 MiB minimum'),
                              ('4g', 'must be a whole number of MiB'),
                              ('010000', 'must be a whole number of MiB'),
@@ -471,14 +475,14 @@ os.execvp(args[0], args)
                 else:
                     self.write_pool(pool)
                 self.write_pages(gib=gib)
-                self.assert_refused(self.run_host(), text)
-        # A pool that holds every enclave passes. The script then stops at the
-        # mTLS files, the first step after the checks. It declares associative
-        # arrays before that, which bash 3 does not have.
+                self.assert_refused(self.run_host(ENCLAVE_CIDS='16 18 20'), text)
+        # The default one-enclave deployment needs only its own pool. The script
+        # then stops at the mTLS files, the first step after the checks. It
+        # declares associative arrays before that, which bash 3 does not have.
         if not bash_expands_empty_arrays():
             return
-        self.write_pool(12288)
-        self.write_pages(gib=12)
+        self.write_pool(4096)
+        self.write_pages(gib=4)
         result = self.run_host(GRPC_HOST='10.0.0.1', PARENT_TLS_DIR=str(self.base / 'tls'))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('provision readable mTLS file', result.stdout + result.stderr)
