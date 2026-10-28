@@ -5,7 +5,7 @@ use crate::config::BridgeConfig;
 #[cfg(feature = "evm-rpc")]
 use crate::config::EvmRpcTls;
 use crate::networks::rgb::spv::Network;
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "stage-signet")))]
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, CHECKPOINT_ENV,
 };
@@ -78,7 +78,9 @@ pub fn resolve_network(bitcoin_network_str: &str) -> Network {
 /// An `rgb-validation` build refuses a `fundsOut` `Sign` without a full config,
 /// and the boot gate in `main` stops a release bridge build on it.
 pub fn log_bridge_config(bridge_config: &BridgeConfig) {
-    if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
+    if cfg!(feature = "stage-signet") {
+        tracing::warn!("public-signet staging: Bitcoin finality is trusted from the indexer; SPV and BtcRelay agreement checks are disabled");
+    } else if bridge_config.btc_relay_mode == crate::config::BtcRelayMode::None {
         tracing::warn!(
             "{}=none: fundsOut relay commitments are NOT verified (local stand without a \
              BtcRelay); heights, anchor and freshness are still bound",
@@ -197,7 +199,7 @@ pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
 /// Panics on a bad checkpoint: a placeholder in a release build, one not on a
 /// retarget boundary on a PoW network, or a malformed `SPV_CHECKPOINT` override. Such a chain
 /// cannot advance.
-#[cfg(feature = "rgb-validation")]
+#[cfg(all(feature = "rgb-validation", not(feature = "stage-signet")))]
 pub fn build_header_chain(spv_network: Network) -> std::sync::Mutex<HeaderChain> {
     // Compiled-in anchor, or the dev-only `SPV_CHECKPOINT` override. A
     // production build does not boot with that var set. A malformed value is fatal.
@@ -236,6 +238,35 @@ pub fn build_header_chain(spv_network: Network) -> std::sync::Mutex<HeaderChain>
         );
     }
     std::sync::Mutex::new(HeaderChain::new(spv_network, checkpoint))
+}
+
+/// Shared context storage only: staging never verifies or accepts headers.
+/// Anchor the unused empty chain at public signet genesis, not the custom
+/// signet checkpoint. No SPV_CHECKPOINT is read in this mode.
+#[cfg(feature = "stage-signet")]
+pub fn build_header_chain(
+    network: Network,
+) -> std::sync::Mutex<crate::networks::rgb::spv::HeaderChain> {
+    use crate::networks::rgb::spv::{Checkpoint, HeaderChain};
+    use bitcoin::hashes::Hash;
+    assert_eq!(
+        network,
+        Network::Signet,
+        "stage-signet requires public signet"
+    );
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Signet);
+    tracing::warn!("public-signet staging: SPV disabled; Bitcoin confirmations are trusted from the indexer; keys are ephemeral");
+    std::sync::Mutex::new(HeaderChain::new(
+        network,
+        Checkpoint {
+            height: 0,
+            hash: genesis.block_hash().to_byte_array(),
+            bits: genesis.header.bits.to_consensus(),
+            time: genesis.header.time,
+            is_real: true,
+            chain_work: None,
+        },
+    ))
 }
 
 /// Build the in-enclave EVM RPC client for independent `FundsIn` verification.

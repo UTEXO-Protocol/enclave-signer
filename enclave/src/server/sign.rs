@@ -323,7 +323,10 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // rgb-validation always has the SPV header chain (lib.rs M-01 compile_error).
+    // The signet staging image instead trusts the indexer's confirmations.
+    // Its launch gate requires BTC_RELAY_MODE=none; it cannot bind an EVM
+    // proof to an independently verified Bitcoin header chain.
+    #[cfg(not(feature = "stage-signet"))]
     {
         // Fail on a poisoned lock, as `validate_source` does.
         // A poisoned header chain can be in the middle of a reorg.
@@ -341,6 +344,8 @@ fn apply_funds_out_binding(
             ctx.bridge_config.spv_min_confirmations,
         )?;
     }
+    #[cfg(feature = "stage-signet")]
+    let _ = (ctx, merkle_proofs, pins);
 
     // Consignment-bound release amount for the RGB flow of this build
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
@@ -947,7 +952,12 @@ mod key_not_ready {
 mod reject_list_wiring;
 
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
-#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
+#[cfg(all(
+    test,
+    feature = "rgb-validation",
+    rgb_to_evm,
+    not(feature = "stage-signet")
+))]
 mod funds_out_depth {
     use super::*;
     use crate::config::{BridgeConfig, BtcRelayMode};
@@ -1020,5 +1030,96 @@ mod funds_out_depth {
     fn a_config_depth_above_the_anchor_refuses() {
         let err = bind_at(3);
         assert!(err.contains("insufficient confirmations"), "{err}");
+    }
+}
+
+/// The staging exception removes the header proof, not the burn authorization.
+#[cfg(all(test, feature = "stage-signet", feature = "burn-signer"))]
+mod stage_signet_bindings {
+    use super::*;
+    use crate::config::{BridgeConfig, BtcRelayMode};
+    use crate::networks::evm::validation::ReleaseIdentity;
+    use crate::networks::rgb::spv_crosscheck::ChainPins;
+    use crate::networks::rgb::validation::{TransitionSummary, ValidatedConsignment, VerifiedLock};
+    use crate::state::EnclaveState;
+    use alloy_primitives::{B256, U256};
+    use alloy_sol_types::SolValue;
+
+    fn fixture() -> (ReleaseIdentity, ValidatedConsignment) {
+        let mut recipient = [0u8; 32];
+        recipient[12..].fill(0x42);
+        let lock = VerifiedLock {
+            mint_opid: [0x61; 32],
+            minted: 1_000,
+            operation_id: [0xa1; 32],
+            net_amount: 1_000,
+        };
+        let release = ReleaseIdentity {
+            burn_id: U256::ZERO,
+            amount: U256::from(1_000),
+            source_chain_id: U256::from(crate::networks::evm::RGB_CHAIN_ID),
+            source_address: String::new(),
+            settlement_data: (
+                vec![B256::from(lock.operation_id)],
+                vec![U256::from(lock.net_amount)],
+            )
+                .abi_encode_params(),
+            source_burn_tx_id: [0x5a; 32],
+            recipient,
+            destination_chain_id: U256::from(11_155_111),
+            dst_eid: None,
+            proof: vec![],
+        };
+        let validated = ValidatedConsignment {
+            last_transition: Some(TransitionSummary {
+                op_id: hex::encode(release.source_burn_tx_id),
+                transition_type: crate::test_support::bfa_ids::TS_BURN,
+                burned_asset_amount: Some(1_000),
+                burn_reason: Some(recipient),
+                ..Default::default()
+            }),
+            last_transfer_op_id: Some(release.source_burn_tx_id),
+            mint_locks: vec![lock],
+            ..Default::default()
+        };
+        (release, validated)
+    }
+
+    fn bind(release: &ReleaseIdentity, validated: &ValidatedConsignment) -> Result<()> {
+        let ctx = ServerContext::new(
+            EnclaveState::new(bitcoin::Network::Signet),
+            BridgeConfig {
+                bitcoin_network: crate::policy::BitcoinNetwork::Signet,
+                btc_relay_mode: BtcRelayMode::None,
+                ..Default::default()
+            },
+            crate::test_support::regtest_header_chain(),
+        );
+        apply_funds_out_binding(&ctx, release, Some(validated), &[], &ChainPins::new(), None)
+    }
+
+    #[test]
+    fn accepts_a_bound_burn_without_headers_or_merkle_proofs() {
+        let (release, validated) = fixture();
+        bind(&release, &validated).unwrap();
+    }
+
+    #[test]
+    fn still_refuses_unconfirmed_witnesses_and_changed_release_fields() {
+        let (release, validated) = fixture();
+        let mut unconfirmed = validated.clone();
+        unconfirmed.non_mined_witness_txids.push([0x11; 32]);
+        assert!(bind(&release, &unconfirmed).is_err());
+
+        for mutate in [
+            |r: &mut ReleaseIdentity| r.amount += U256::from(1),
+            |r: &mut ReleaseIdentity| r.source_burn_tx_id[0] ^= 1,
+            |r: &mut ReleaseIdentity| r.recipient[31] ^= 1,
+            |r: &mut ReleaseIdentity| r.settlement_data.clear(),
+        ] {
+            let mut altered = release.clone();
+            mutate(&mut altered);
+            assert!(bind(&altered, &validated).is_err());
+        }
     }
 }

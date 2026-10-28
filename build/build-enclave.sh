@@ -13,6 +13,9 @@
 #   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
 #                    (combined, rgb, mint, burn)
+#   SIGNER_ROLE      required for Dockerfile.enclave.stage: mint-signer | burn-signer
+#   EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, FUNDS_IN_CONTRACT, TOKEN_CONTRACT
+#                    required public deployment pins for Dockerfile.enclave.stage
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
@@ -85,6 +88,28 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     fi
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
     echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# Staging is a separate measured image, never a switch on a production EIF.
+# Require public deployment pins before doing any Docker or credential work.
+if [ "$DOCKERFILE" = "Dockerfile.enclave.stage" ]; then
+    case "${SIGNER_ROLE:-}" in
+        mint-signer|burn-signer) ;;
+        *) echo "Error: Dockerfile.enclave.stage requires SIGNER_ROLE=mint-signer or burn-signer." >&2; exit 1 ;;
+    esac
+    if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
+        echo "Error: Dockerfile.enclave.stage does not accept ENCLAVE_DEBUG_FEATURES." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "SIGNER_ROLE=$SIGNER_ROLE")
+    for pin in EVM_CHAIN_ID EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT; do
+        value="${!pin:-}"
+        if [ -z "$value" ]; then
+            echo "Error: Dockerfile.enclave.stage requires $pin." >&2
+            exit 1
+        fi
+        BUILD_ARGS+=(--build-arg "$pin=$value")
+    done
 fi
 
 if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then

@@ -6,7 +6,8 @@ name: "Build EIF"
 #
 # Builds five variants (matrix): combined (retired swap flow, historical name +
 # S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production), and ccd.
-# Deploy whichever the target host needs.
+# A manual public-signet-stage profile instead builds the stage mint and burn
+# EIFs under separate artifact paths. Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the
 # nitro-cli kernel/init blobs — NOT just our code. We therefore pin nitro-cli to
@@ -33,6 +34,12 @@ name: "Build EIF"
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: "EIF profile (public-signet stage uses real Nitro with ephemeral keys and no SPV)"
+        type: choice
+        options: [production, public-signet-stage]
+        required: true
+        default: production
       debug_features:
         description: >-
           DANGER, debug EIFs only (F03-AF-12): extra cargo features to append,
@@ -55,44 +62,32 @@ env:
   AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
 
 jobs:
+  select-profile:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select EIF profile
+        id: select
+        env:
+          PROFILE: ${{ inputs.profile || 'production' }}
+          DEBUG_FEATURES: ${{ inputs.debug_features || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$PROFILE" = public-signet-stage ] && [ -n "$DEBUG_FEATURES" ]; then
+            echo "::error::public-signet stage does not accept debug features"
+            exit 1
+          fi
+          matrix_json="$(python3 build/eif-matrix.py "$PROFILE")"
+          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+
   build-eif:
+    needs: select-profile
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Combined (rgb + rgb-swap + ccd), retired swap flow. Keeps the
-          # historical eif name and S3 path.
-          - variant: combined
-            dockerfile: Dockerfile.enclave
-            eif_name: utexo-bridge-enclave.eif
-            s3_subpath: ""
-            artifact_suffix: ""
-          # RGB-only single-network EIF, send/receive flow (`rgb-swap`, retired).
-          - variant: rgb
-            dockerfile: Dockerfile.enclave.rgb
-            eif_name: utexo-bridge-enclave-rgb.eif
-            s3_subpath: "rgb/"
-            artifact_suffix: "-rgb"
-          # RGB-only single-network EIFs, mint/burn flow. Two signer roles,
-          # each its own enclave with its own PCR0 and seed: the mint signer
-          # (EVM -> RGB) and the burn signer (RGB -> EVM).
-          - variant: rgb-mint
-            dockerfile: Dockerfile.enclave.mint
-            eif_name: utexo-bridge-enclave-mint.eif
-            s3_subpath: "rgb-mint/"
-            artifact_suffix: "-mint"
-          - variant: rgb-burn
-            dockerfile: Dockerfile.enclave.burn
-            eif_name: utexo-bridge-enclave-burn.eif
-            s3_subpath: "rgb-burn/"
-            artifact_suffix: "-burn"
-          # Concordium-only single-network EIF.
-          - variant: ccd
-            dockerfile: Dockerfile.enclave.ccd
-            eif_name: utexo-bridge-enclave-ccd.eif
-            s3_subpath: "ccd/"
-            artifact_suffix: "-ccd"
+      matrix: ${{ fromJSON(needs.select-profile.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -160,9 +155,18 @@ jobs:
           # Enable debug features only for manual test builds. (F03-AF-12)
           ENCLAVE_DEBUG_FEATURES: ${{ github.event.inputs.debug_features || '' }}
           RGB_ASSET_ID: ${{ vars.BFA_RGB_ASSET_ID }}
+          STAGE_RGB_ASSET_ID: ${{ vars.STAGE_BFA_RGB_ASSET_ID }}
+          SIGNER_ROLE: ${{ matrix.signer_role || '' }}
+          EVM_CHAIN_ID: ${{ vars.STAGE_EVM_CHAIN_ID }}
+          EVM_PROXY_CONTRACT_ADDRESS: ${{ vars.STAGE_EVM_PROXY_CONTRACT_ADDRESS }}
+          FUNDS_IN_CONTRACT: ${{ vars.STAGE_FUNDS_IN_CONTRACT }}
+          TOKEN_CONTRACT: ${{ vars.STAGE_TOKEN_CONTRACT }}
         run: |
           set -euxo pipefail
           mkdir -p "$OUT_DIR"
+          if [ "$DOCKERFILE" = Dockerfile.enclave.stage ]; then
+            export RGB_ASSET_ID="$STAGE_RGB_ASSET_ID"
+          fi
           ./build/build-enclave.sh
 
       # Host-side binaries that run ON the EC2 host (not inside the enclave):

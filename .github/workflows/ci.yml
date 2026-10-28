@@ -153,6 +153,25 @@ jobs:
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
+      # Stage is a real Nitro profile: no mock attestation or seed import.
+      # Focused tests do not need a Nitro device; release checks match the EIF.
+      - name: Check release (public-signet stage, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo check --release -p utexo-bridge-enclave --no-default-features --features vsock,stage-signet,$role
+          done
+      - name: Test (public-signet stage, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo test -p utexo-bridge-enclave --no-default-features --features stage-signet,$role --lib stage_signet
+            cargo test -p utexo-bridge-enclave --no-default-features --features stage-signet,$role --test test_stage_signet
+          done
+      - name: Clippy (public-signet stage, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,stage-signet,$role --lib --bins --test test_stage_signet -- -D warnings
+          done
+
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors
       # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
@@ -307,6 +326,19 @@ jobs:
             parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
+
+      - name: Assert stage cannot import seeds or mock attestation
+        run: |
+          for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
+            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "stage-signet,mint-signer,$forbidden" 2>build.log; then
+              echo "::error::stage unexpectedly compiled with $forbidden"
+              exit 1
+            fi
+            if ! grep -q "stage-signet requires real attestation and internally generated keys" build.log; then
+              cat build.log
+              exit 1
+            fi
+          done
 
       - name: Assert rgb-validation without spv is rejected
         run: |

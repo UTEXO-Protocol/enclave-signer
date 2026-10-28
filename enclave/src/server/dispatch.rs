@@ -2,7 +2,7 @@
 //!
 //! This is the only place that turns a handler `Err` into an `ErrorResponse`.
 
-#[cfg(not(feature = "kms-persistence"))]
+#[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
 use super::cloning::{handle_get_clone, handle_initiate_cloning, handle_set_clone};
 use super::context::ServerContext;
 use super::endpoints::handle_set_endpoints;
@@ -63,7 +63,7 @@ pub(super) fn dispatch(
             let path = if !req.mnemonic.is_empty() {
                 "mnemonic-import"
             } else if req.seed.is_empty() {
-                if cfg!(feature = "kms-persistence") {
+                if cfg!(all(feature = "kms-persistence", not(feature = "stage-signet"))) {
                     "kms"
                 } else {
                     "entropy"
@@ -149,26 +149,30 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("rights refills"))
             }
         }
-        #[cfg(feature = "kms-persistence")]
+        #[cfg(feature = "stage-signet")]
+        Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
+            Err(EnclaveError::InvalidRequest("cloning is disabled in stage-signet; each enclave generates its own keys".into()))
+        }
+        #[cfg(all(feature = "kms-persistence", not(feature = "stage-signet")))]
         Some(Request::InitiateCloning(_) | Request::GetClone(_) | Request::SetClone(_)) => {
             Err(EnclaveError::InvalidRequest(
                 "cloning is disabled with KMS persistence; initialize each replica from its configured seed"
                     .into(),
             ))
         }
-        #[cfg(not(feature = "kms-persistence"))]
+        #[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
         Some(Request::InitiateCloning(req)) => {
             tracing::info!("request: InitiateCloning");
             handle_initiate_cloning(&ctx.state, req)
         }
-        #[cfg(not(feature = "kms-persistence"))]
+        #[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
         Some(Request::GetClone(req)) => {
             tracing::info!("request: GetClone");
             let response = handle_get_clone(ctx, req)
                 .unwrap_or_else(|e| error_response(e.clone_error_code(), &e));
             return (response, None);
         }
-        #[cfg(not(feature = "kms-persistence"))]
+        #[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
         Some(Request::SetClone(req)) => {
             tracing::info!("request: SetClone");
             handle_set_clone(ctx, req)

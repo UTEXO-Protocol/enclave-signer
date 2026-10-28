@@ -28,10 +28,28 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
+// Staging is a real Nitro image with a separate, non-production policy.
+#[cfg(all(
+    feature = "stage-signet",
+    any(
+        feature = "allow-seed-import",
+        feature = "mock-attestation",
+        feature = "allow-debug-pcrs"
+    )
+))]
+compile_error!("stage-signet requires real attestation and internally generated keys; seed import and mock/debug attestation features are forbidden");
+#[cfg(all(
+    feature = "stage-signet",
+    not(any(feature = "mint-signer", feature = "burn-signer"))
+))]
+compile_error!("stage-signet requires mint-signer or burn-signer");
+
 // Without `spv`, the host-controlled indexer tells if witness txs are mined.
 // A malicious host can then get a `fundsOut` signed against a fake anchor.
 // `spv` checks every witness tx against the enclave's own header chain.
-// Unsafe in every profile, so this guard is not release-gated (M-01).
+// This guard is not release-gated (M-01). The separately measured public-
+// signet staging image retains these modules but explicitly replaces SPV
+// verification with indexer trust and attests a Development policy.
 #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
 compile_error!(
     "rgb-validation requires spv: without spv, consignment anchoring trusts only \

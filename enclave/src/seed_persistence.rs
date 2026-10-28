@@ -31,6 +31,7 @@ pub const BROKER_LOCAL_PORT: u16 = 3446;
 pub const BROKER_VSOCK_PORT: u32 = 8004;
 // Less than the 30 s request timeout, to leave time for ingress and reply.
 pub const RECOVERY_TIMEOUT: Duration = Duration::from_secs(25);
+#[cfg(not(feature = "stage-signet"))]
 pub(crate) const RESPONSE_RESERVE: Duration = Duration::from_secs(2);
 // The broker's own 7 s operation deadline expires first.
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);

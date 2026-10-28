@@ -1451,6 +1451,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stage_export_verifies_real_development_policy_and_key_bindings() {
+        let nonce = [0x42; 32];
+        let (good, root) = signed(&ExpectedPolicy::Development, &nonce);
+        let export = |answer, want_nonce, pcrs: &ExpectedPcrs, evm| {
+            export_bundle_with(
+                answer,
+                want_nonce,
+                VerifyMode::Real,
+                &AttestedPolicy::Development,
+                evm,
+                |doc| {
+                    Ok(verify_at_document_time_with_root(
+                        doc,
+                        pcrs,
+                        &want_nonce,
+                        &root,
+                    )?)
+                },
+            )
+        };
+        let bundle = export(enclave_answer(good.clone()), nonce, &PCRS, Some([0x0E; 20])).unwrap();
+        assert_eq!(bundle.verification_mode, VerifyMode::Real);
+        assert_eq!(
+            bundle.attested_policy,
+            hex0x(&AttestedPolicy::Development.to_bytes())
+        );
+
+        let mut wrong_key = good.clone();
+        wrong_key.evm_uncompressed_pub[0] ^= 1;
+        let mut wrong_bundle = good.clone();
+        wrong_bundle.bridge_contract[0] ^= 1;
+        let mut wrong_policy = good.clone();
+        wrong_policy.attested_policy = committed(&production(SignerRole::Burn)).0.attested_policy;
+        let mut wrong_signature = good.clone();
+        *wrong_signature.attestation_doc.last_mut().unwrap() ^= 1;
+        for response in [wrong_key, wrong_bundle, wrong_policy, wrong_signature] {
+            assert!(export(enclave_answer(response), nonce, &PCRS, None).is_err());
+        }
+        let other_pcrs = ExpectedPcrs::new([9; 48], [2; 48], [3; 48]);
+        assert!(export(enclave_answer(good.clone()), nonce, &other_pcrs, None).is_err());
+        assert!(export(enclave_answer(good.clone()), [9; 32], &PCRS, None).is_err());
+        assert!(export(enclave_answer(good), nonce, &PCRS, Some([9; 20])).is_err());
+
+        // The stage live path always uses AWS-root verification, never raw CBOR.
+        let mock = attested_by(&ExpectedPolicy::Development, &nonce);
+        assert!(export_bundle(
+            enclave_answer(mock),
+            nonce,
+            &PCRS,
+            VerifyMode::Real,
+            &AttestedPolicy::Development,
+            None,
+        )
+        .is_err());
+    }
+
     /// Issue #270: a cloning role commits the document PCR3 (the parent IAM
     /// role). The mint signer commits none.
     #[test]

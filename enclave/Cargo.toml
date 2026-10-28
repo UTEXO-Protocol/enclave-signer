@@ -151,6 +151,12 @@ kms-persistence = [
     "dep:cbc",
 ]
 
+# Explicit public-signet Nitro staging mode. Real attestation and internal,
+# ephemeral entropy only; no SPV synchronization, KMS custody or cloning.
+# The role still pulls in the shared SPV/KMS code, but staging never uses it.
+# lib.rs rejects import/mock features and bootstrap checks the network pins.
+stage-signet = []
+
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []

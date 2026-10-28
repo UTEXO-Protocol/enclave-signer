@@ -180,6 +180,19 @@ enum Command {
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
+    /// Verify and export real NSM key attestation for an approved stage EIF.
+    /// Explicitly expects Development policy; never accepts mock/debug PCRs.
+    ExportStageAttestation {
+        /// Trusted PCR.json for this stage role and its baked configuration.
+        #[arg(long)]
+        pcr_file: PathBuf,
+        /// The verified bundle file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// Previously approved EVM address, if checking an existing identity.
+        #[arg(long)]
+        expect_evm_address: Option<String>,
+    },
     /// Clone the signing identity from a donor enclave into the local
     /// (requester) enclave. Steps:
     ///   1. InitiateCloning on the local enclave.
@@ -672,6 +685,18 @@ fn main() {
                 process::exit(1);
             }
         }
+        Command::ExportStageAttestation {
+            pcr_file,
+            out,
+            expect_evm_address,
+        } => {
+            if let Err(e) =
+                export_stage_attestation(&client, &pcr_file, &out, expect_evm_address.as_deref())
+            {
+                eprintln!("FAIL: {e:#}");
+                process::exit(1);
+            }
+        }
         Command::Clone {
             cloning_secret,
             cloning_secret_file,
@@ -797,7 +822,7 @@ fn export_attestation(
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use attestation_verify::{AttestedPolicy, ExpectedPcrs, SignerRole};
-    use utexo_bridge_parent::attest_verify::{export_bundle, VerifyMode};
+    use utexo_bridge_parent::attest_verify::VerifyMode;
     use utexo_bridge_parent::launch_check;
 
     let pcrs = pcr_file.map_or(Ok(ExpectedPcrs::zero()), read_pcrs)?;
@@ -813,6 +838,58 @@ fn export_attestation(
         let expected = launch_check::expected_policy(role, &read(image_env)?, &endpoints)?;
         (VerifyMode::Real, expected)
     };
+    export_verified_attestation(client, &pcrs, mode, &expected, out, expect_evm_address)
+}
+
+/// Stage verification uses the real NSM trust root and the approved image's
+/// measurements. Development policy does not separately attest endpoints or
+/// the role, so the operator must approve PCRs for the intended stage image.
+fn export_stage_attestation(
+    client: &EnclaveClient,
+    pcr_file: &std::path::Path,
+    out: &std::path::Path,
+    expect_evm_address: Option<&str>,
+) -> anyhow::Result<()> {
+    use attestation_verify::AttestedPolicy;
+    use utexo_bridge_parent::attest_verify::VerifyMode;
+
+    let pcrs = read_pcrs(pcr_file)?;
+    require_stage_pcrs(&pcrs)?;
+    export_verified_attestation(
+        client,
+        &pcrs,
+        VerifyMode::Real,
+        &AttestedPolicy::Development,
+        out,
+        expect_evm_address,
+    )
+}
+
+fn require_stage_pcrs(pcrs: &attestation_verify::ExpectedPcrs) -> anyhow::Result<()> {
+    for (name, pcr) in [
+        ("PCR0", pcrs.pcr0),
+        ("PCR1", pcrs.pcr1),
+        ("PCR2", pcrs.pcr2),
+    ] {
+        anyhow::ensure!(
+            pcr != [0; 48],
+            "stage attestation requires independently approved nonzero {name}; Nitro debug mode is not supported"
+        );
+    }
+    Ok(())
+}
+
+fn export_verified_attestation(
+    client: &EnclaveClient,
+    pcrs: &attestation_verify::ExpectedPcrs,
+    mode: utexo_bridge_parent::attest_verify::VerifyMode,
+    expected: &attestation_verify::AttestedPolicy,
+    out: &std::path::Path,
+    expect_evm_address: Option<&str>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use utexo_bridge_parent::attest_verify::export_bundle;
+
     let expect_evm = expect_evm_address
         .map(|a| {
             hex::decode(a.strip_prefix("0x").unwrap_or(a))
@@ -825,7 +902,7 @@ fn export_attestation(
     let mut nonce = [0u8; 32];
     rand::fill(&mut nonce);
     let response = client.get_attested_public_key(nonce)?;
-    let bundle = export_bundle(response, nonce, &pcrs, mode, &expected, expect_evm)?;
+    let bundle = export_bundle(response, nonce, pcrs, mode, expected, expect_evm)?;
 
     let tmp = out.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&bundle)? + "\n")
@@ -1030,5 +1107,49 @@ mod tests {
         let cli = Cli::try_parse_from(args("burn")).unwrap();
         assert!(matches!(cli.command, Command::ExportAttestation { .. }));
         assert!(Cli::try_parse_from(args("mint")).is_err());
+    }
+
+    #[test]
+    fn stage_attestation_requires_explicit_pcrs_and_has_no_mock_mode() {
+        let args = [
+            "utexo-bridge-parent-cli",
+            "--addr",
+            "vsock://16:5000",
+            "export-stage-attestation",
+            "--pcr-file",
+            "stage-PCR.json",
+            "--out",
+            "stage-attestation.json",
+            "--expect-evm-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ExportStageAttestation { .. }
+        ));
+        assert!(
+            Cli::try_parse_from(["cli", "export-stage-attestation", "--out", "stage.json",])
+                .is_err()
+        );
+        let mut mock = args.to_vec();
+        mock.push("--mock");
+        assert!(Cli::try_parse_from(mock).is_err());
+    }
+
+    #[test]
+    fn stage_attestation_refuses_each_zero_measurement() {
+        use attestation_verify::ExpectedPcrs;
+        require_stage_pcrs(&ExpectedPcrs::new([1; 48], [2; 48], [3; 48])).unwrap();
+        for index in 0..3 {
+            let mut values = [[1; 48], [2; 48], [3; 48]];
+            values[index] = [0; 48];
+            let err = require_stage_pcrs(&ExpectedPcrs::new(values[0], values[1], values[2]))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("nonzero PCR{index}")),
+                "{err}"
+            );
+        }
     }
 }

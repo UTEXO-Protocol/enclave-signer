@@ -28,6 +28,11 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
+    #[cfg(feature = "stage-signet")]
+    ctx.bridge_config
+        .validate_stage_signet()
+        .map_err(EnclaveError::InvalidRequest)?;
+
     let endpoints = Endpoints::parse(&req).map_err(EnclaveError::InvalidRequest)?;
     #[cfg(feature = "evm-rpc")]
     let tls = endpoints

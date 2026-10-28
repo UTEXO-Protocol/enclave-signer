@@ -314,6 +314,19 @@ exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
+### Public-signet staging EIFs
+
+The `stage-signet` profile runs mint and burn signers in real Nitro Enclaves
+without SPV synchronization or BtcRelay checks. Each enclave generates its
+own seed internally; keys are ephemeral and imports, cloning and KMS are
+disabled. RGB validation and EVM deposit checks remain active, with Bitcoin
+confirmations supplied by the TLS indexer.
+
+Build with `Dockerfile.enclave.stage` and an explicit signer role and staging
+contract pins, or manually select `public-signet-stage` in **Build EIF**.
+The image uses real NSM attestation and reports a Development policy. See
+[staging build, launch and initialization](docs/stage-signet.md).
+
 ### Enclave image (EIF)
 
 No image takes a KMS value: the mint enclave gets them at launch. See
@@ -712,6 +725,7 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Requires `spv`. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over JSON-RPC, TLS to a pinned host and CA. Without it the enclave refuses every bridge PSBT. |
 | `vsock` | - | vsock listener and forwarders (Linux). |
+| `stage-signet` | - | Real-Nitro public-signet stage: indexer-confirmed witnesses, no SPV/BtcRelay checks, internally generated ephemeral keys. Explicit staging pins; imports and mock attestation forbidden. |
 | `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |
 | `mock-attestation` | - | Raw-CBOR attestation with zero PCRs. Dev only, does not compile in release. |
 

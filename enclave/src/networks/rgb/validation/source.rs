@@ -12,7 +12,7 @@ use super::witness::WitnessCheck;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
-#[cfg(rgb_to_evm)]
+#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
 use crate::networks::rgb::spv_crosscheck;
 #[cfg(rgb_to_evm)]
 use crate::networks::ValidationContext;
@@ -20,7 +20,7 @@ use crate::networks::ValidationContext;
 use crate::proto::RgbSource;
 #[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
-#[cfg(rgb_to_evm)]
+#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
 use std::time::SystemTime;
 
 /// Validates all fields and source-chain evidence of an RGB source.
@@ -38,6 +38,10 @@ use std::time::SystemTime;
 ///    pinned until signing (`rgb-validation` requires `spv`);
 /// 4. no input of the settling transition descends from an opout the asset's
 ///    reject list rejects.
+///
+/// The explicit `stage-signet` build uses the configured indexer for witness
+/// confirmation at the same depth instead of the enclave header chain. It
+/// trusts that indexer's chain view and does not pin SPV blocks.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -51,6 +55,7 @@ pub fn validate_source(
         )
     })?;
 
+    #[cfg(not(feature = "stage-signet"))]
     let proven = {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::proven_witnesses(
@@ -59,6 +64,8 @@ pub fn validate_source(
             ctx.bridge_config.spv_min_confirmations,
         )?
     };
+    #[cfg(feature = "stage-signet")]
+    let proven = validator.indexer_witnesses(ctx.bridge_config.spv_min_confirmations);
     let witnesses = WitnessCheck {
         chain: &proven,
         allow_unbroadcast_last: false,
@@ -76,6 +83,7 @@ pub fn validate_source(
         AssetBindMode::Source,
     )?;
 
+    #[cfg(not(feature = "stage-signet"))]
     {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(
@@ -98,7 +106,7 @@ pub fn validate_source(
     Ok(validated)
 }
 
-#[cfg(rgb_to_evm)]
+#[cfg(all(rgb_to_evm, not(feature = "stage-signet")))]
 fn lock_chain<'a>(
     ctx: &'a ValidationContext<'_>,
 ) -> Result<std::sync::MutexGuard<'a, crate::networks::rgb::spv::HeaderChain>> {
@@ -173,4 +181,175 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "stage-signet", feature = "burn-signer"))]
+mod stage_signet_source {
+    use super::*;
+    use crate::networks::rgb::spv::Network;
+    use crate::networks::rgb::validation::{BoundAnchors, RgbValidator, VerifiedLock};
+    use crate::test_support::bfa_consignment::{self as gen, History, Issue};
+    use bitcoin::hashes::Hash;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Write};
+
+    /// Indexer answers can be well-formed without an independently verified
+    /// chain. That is the explicit staging trust assumption this test exercises.
+    fn indexer(history: &History, depth: u32, mined: bool, correct_network: bool) -> String {
+        let txids: Vec<_> = history.bundles.iter().map(|b| b.witness_id()).collect();
+        let headers: Vec<_> = txids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array(id.to_byte_array()),
+                time: gen::ISSUED_AT as u32 + 100 + i as u32,
+                bits: bitcoin::CompactTarget::from_consensus(0x1e03_77ae),
+                nonce: 0,
+            })
+            .collect();
+        let tip = 100 + txids.len() as u32 - 1 + depth - 1;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let txids = txids.clone();
+                let headers = headers.clone();
+                std::thread::spawn(move || {
+                    let mut output = stream.try_clone().unwrap();
+                    for line in BufReader::new(stream).lines() {
+                        let Ok(line) = line else { break };
+                        let request: Value = serde_json::from_str(&line).unwrap();
+                        let params = &request["params"];
+                        let header_hex = bitcoin::consensus::encode::serialize_hex;
+                        let result = match request["method"].as_str().unwrap() {
+                            "server.version" => json!(["stage-test-indexer", "1.4"]),
+                            "blockchain.headers.subscribe" => {
+                                json!({"height": tip, "hex": header_hex(headers.last().unwrap())})
+                            }
+                            "blockchain.block.header" => {
+                                let height = params[0].as_u64().unwrap() as usize;
+                                if height == 0 {
+                                    let network = if correct_network {
+                                        bitcoin::Network::Signet
+                                    } else {
+                                        bitcoin::Network::Regtest
+                                    };
+                                    json!(header_hex(
+                                        &bitcoin::constants::genesis_block(network).header
+                                    ))
+                                } else {
+                                    json!(header_hex(&headers[height - 100]))
+                                }
+                            }
+                            "blockchain.scripthash.get_history" => json!(txids
+                                .iter()
+                                .enumerate()
+                                .map(|(i, id)| json!({
+                                    "height": if mined { 100 + i } else { 0 },
+                                    "tx_hash": id.to_string()
+                                }))
+                                .collect::<Vec<_>>()),
+                            "blockchain.transaction.get_merkle" => json!({
+                                "block_height": params[1], "pos": 0, "merkle": []
+                            }),
+                            method => panic!("unexpected indexer request: {method}"),
+                        };
+                        let response =
+                            json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+                        if writeln!(output, "{response}").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        format!("tcp://{address}")
+    }
+
+    fn validate(depth: u32, mined: bool, correct_network: bool) -> Result<ValidatedConsignment> {
+        let right = gen::outpoint(0xa0, 0);
+        let mut issue = Issue::new(11_155_111, [0x11; 20], vec![right]);
+        issue.chain_net = rgbstd::ChainNet::BitcoinSignet;
+        let mut history = History::issue(issue);
+        let units = history.mint_owned(history.genesis_right(0, right), 1_000, 90);
+        history.burn(
+            units,
+            1_000,
+            Some(1_000),
+            Some(gen::burn_reason_for([0x43; 20])),
+        );
+        let consignment = history.consignment(vec![]);
+        let source = RgbSource {
+            asset_id: history.contract_id.to_string(),
+            consignment_hash: Keccak256::digest(&consignment).to_vec(),
+            consignment,
+            ..Default::default()
+        };
+        let config = BridgeConfig {
+            bitcoin_network: crate::policy::BitcoinNetwork::Signet,
+            chain_id: 11_155_111,
+            bridge_contract: [0x11; 20],
+            rgb_asset_id: source.asset_id.clone(),
+            spv_min_confirmations: 6,
+            ..Default::default()
+        };
+        let validator =
+            RgbValidator::new(indexer(&history, depth, mined, correct_network), "signet")?;
+        let bind = |bridge: &super::super::BfaBridge, anchors: &[super::super::MintAnchor]| {
+            Ok(BoundAnchors {
+                evm_chain_id: bridge.chain_id,
+                locks: anchors
+                    .iter()
+                    .map(|a| VerifiedLock {
+                        mint_opid: a.opid,
+                        minted: a.amount,
+                        operation_id: [0xd0; 32],
+                        net_amount: a.amount,
+                    })
+                    .collect(),
+            })
+        };
+        let chain = crate::bootstrap::build_header_chain(Network::Signet);
+        let pins = crate::networks::rgb::spv_crosscheck::ChainPins::new();
+        let result = validate_source(
+            &source,
+            &ValidationContext {
+                bridge_config: &config,
+                rgb_validator: Some(&validator),
+                header_chain: &chain,
+                chain_pins: &pins,
+                anchor_binder: Some(&bind),
+                reject_list_reader: None,
+            },
+        );
+        assert!(chain.lock().unwrap().is_empty());
+        assert!(pins.is_empty());
+        result
+    }
+
+    #[test]
+    fn validates_real_consensus_using_indexer_confirmations_without_spv() {
+        let validated = validate(6, true, true).unwrap();
+        assert_eq!(validated.witness_txids.len(), 2);
+        assert!(validated.non_mined_witness_txids.is_empty());
+        assert_eq!(
+            validated.last_transition.unwrap().burned_asset_amount,
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn refuses_unmined_shallow_and_wrong_network_indexer_answers() {
+        for (depth, mined, network, reason) in [
+            (6, false, true, "unmined"),
+            (5, true, true, "confirmation(s)"),
+            (6, true, false, "does not serve"),
+        ] {
+            let error = validate(depth, mined, network).unwrap_err().to_string();
+            assert!(error.contains(reason), "{error}");
+        }
+    }
 }

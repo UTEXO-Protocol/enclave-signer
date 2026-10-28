@@ -6,7 +6,7 @@
 mod bfa;
 // KMS persistence disables cloning. All replicas recover the same seed from
 // KMS, so the cloning handshake has no purpose.
-#[cfg(not(feature = "kms-persistence"))]
+#[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
 mod cloning;
 mod context;
 mod dispatch;

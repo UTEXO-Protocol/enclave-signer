@@ -2,15 +2,18 @@
 //!
 //! `server/mod.rs` gates this module on `rgb-validation`.
 
+#[cfg(not(feature = "stage-signet"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
+#[cfg(not(feature = "stage-signet"))]
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 
 // A poisoned mutex is recovered, not left to block the enclave.
 // All chain mutations are atomic, so the chain stays consistent.
+#[cfg(not(feature = "stage-signet"))]
 pub(super) fn handle_submit_headers(
     ctx: &ServerContext,
     req: SubmitHeadersRequest,
@@ -49,6 +52,7 @@ pub(super) fn handle_submit_headers(
     })
 }
 
+#[cfg(not(feature = "stage-signet"))]
 pub(super) fn handle_get_last_saved_block(
     ctx: &ServerContext,
     _req: GetLastSavedBlockRequest,
@@ -73,4 +77,24 @@ pub(super) fn handle_get_last_saved_block(
             block_hash: hash.to_vec(),
         })),
     })
+}
+
+#[cfg(feature = "stage-signet")]
+pub(super) fn handle_submit_headers(
+    _ctx: &ServerContext,
+    _req: SubmitHeadersRequest,
+) -> Result<EnclaveResponse> {
+    Err(EnclaveError::InvalidRequest(
+        "SPV header synchronization is disabled in stage-signet builds".into(),
+    ))
+}
+
+#[cfg(feature = "stage-signet")]
+pub(super) fn handle_get_last_saved_block(
+    _ctx: &ServerContext,
+    _req: GetLastSavedBlockRequest,
+) -> Result<EnclaveResponse> {
+    Err(EnclaveError::InvalidRequest(
+        "SPV header synchronization is disabled in stage-signet builds".into(),
+    ))
 }

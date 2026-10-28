@@ -107,6 +107,8 @@ pub struct ProductionPolicy {
 /// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
+    /// Real Nitro public-signet staging, with indexer-trusted Bitcoin finality.
+    StageSignet,
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
     /// `mock-attestation` feature: zero-PCR attestation documents.
@@ -166,6 +168,13 @@ impl SecurityPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
     ) -> Self {
+        if cfg!(feature = "stage-signet") {
+            return Self::dev(if bridge.validate_stage_signet().is_ok() {
+                DevReason::StageSignet
+            } else {
+                DevReason::Unconfigured
+            });
+        }
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
         if ctx.mock_attestation {
@@ -302,8 +311,19 @@ impl SecurityPolicy {
     /// to a valid [`SecurityPolicy::Production`], or `SetEndpoints` fails.
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
     ///
-    /// Debug, test and non-bridge builds are exempt.
+    /// Debug, test and non-bridge builds are exempt. The explicit staging
+    /// image instead requires its validated public-signet Development policy.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
+        // This exception belongs only to the separately measured stage image.
+        // resolve() produces StageSignet only after checking its network/pins.
+        if cfg!(feature = "stage-signet") {
+            return match self {
+                Self::Development {
+                    reason: DevReason::StageSignet,
+                } => Ok(()),
+                _ => Err("stage-signet requires a valid public-signet staging policy".into()),
+            };
+        }
         if ctx.debug_or_test || !ctx.rgb_validation {
             return Ok(());
         }
