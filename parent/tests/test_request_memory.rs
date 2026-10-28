@@ -23,7 +23,7 @@ use utexo_bridge_parent::{
         MerkleProofEntry, RgbSource, SignRequest, SourceProof,
     },
     grpc_server::{EnclaveTarget, ParentAdapterService},
-    request_shape::{ShapeLayer, MAX_WIRE_ELEMENTS},
+    request_shape::{ShapeLayer, MAX_OTHER_MESSAGE_SIZE, MAX_WIRE_ELEMENTS},
     signer::SignatureResponse,
     transport_security::LimitedIncoming,
 };
@@ -73,6 +73,8 @@ unsafe impl GlobalAlloc for Meter {
 static METER: Meter = Meter;
 
 const MIB: usize = 1024 * 1024;
+const SIGN: &str = "/parent.ParentService/Sign";
+const PUBLIC_KEY: &str = "/parent.ParentService/PublicKey";
 
 /// Sends a ready-made protobuf body, so the client holds no decoded copy.
 #[derive(Clone, Default)]
@@ -213,13 +215,13 @@ async fn server() -> std::net::SocketAddr {
         .await
         .unwrap();
     let addr = incoming.local_addr().unwrap();
-    let max_concurrent = Config::from_env().grpc_max_concurrent;
+    let cfg = Config::from_env();
     tokio::spawn(async move {
         Server::builder()
             .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
-                max_concurrent,
+                cfg.grpc_max_concurrent,
             ))
-            .layer(ShapeLayer)
+            .layer(ShapeLayer::new(cfg.grpc_max_concurrent_sign))
             .load_shed(true)
             .concurrency_limit_per_connection(32)
             .max_concurrent_streams(Some(32))
@@ -237,10 +239,11 @@ async fn server() -> std::net::SocketAddr {
     addr
 }
 
-/// Sends each body at once and returns the outcomes and the peak heap above
-/// the start.
+/// Sends each body at once to the RPC at `path`, and returns the outcomes and
+/// the peak heap above the start.
 async fn send(
     addr: std::net::SocketAddr,
+    path: &'static str,
     bodies: Vec<Vec<u8>>,
 ) -> (Vec<Result<(), Status>>, usize) {
     let channel = Endpoint::from_shared(format!("http://{addr}"))
@@ -257,8 +260,7 @@ async fn send(
         let mut grpc = tonic::client::Grpc::new(channel.clone());
         calls.spawn(async move {
             grpc.ready().await.unwrap();
-            let path =
-                tonic::codegen::http::uri::PathAndQuery::from_static("/parent.ParentService/Sign");
+            let path = tonic::codegen::http::uri::PathAndQuery::from_static(path);
             grpc.unary(tonic::Request::new(body), path, Raw)
                 .await
                 .map(|_| ())
@@ -274,7 +276,9 @@ async fn send(
 /// One test, so that no other test moves the meter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
-    assert_eq!(Config::from_env().grpc_max_concurrent, 8);
+    let cfg = Config::from_env();
+    assert_eq!(cfg.grpc_max_concurrent, 128);
+    assert_eq!(cfg.grpc_max_concurrent_sign, 8);
     let addr = server().await;
     let frame = framing::MAX_MESSAGE_SIZE as usize;
 
@@ -282,7 +286,7 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
     // shape check, it took 65 times its size.
     let worst = empty_entries((frame - 16) / 2);
     let size = worst.len();
-    let (outcomes, peak) = send(addr, vec![worst]).await;
+    let (outcomes, peak) = send(addr, SIGN, vec![worst]).await;
     let status = outcomes[0].as_ref().unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument, "{status}");
     assert!(
@@ -301,7 +305,7 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
     // enclave stand-in.
     let burn = real_burn(10 * MIB);
     let size = burn.len();
-    let (outcomes, peak) = send(addr, vec![burn]).await;
+    let (outcomes, peak) = send(addr, SIGN, vec![burn]).await;
     let status = outcomes[0].as_ref().unwrap_err();
     assert_eq!(status.message(), "refused by the test enclave", "{status}");
     println!("largest real burn: {size} bytes, peak {} MiB", peak / MIB);
@@ -314,7 +318,7 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
     // the most bytes.
     let densest = densest_passing(frame);
     let size = densest.len();
-    let (outcomes, peak) = send(addr, vec![densest]).await;
+    let (outcomes, peak) = send(addr, SIGN, vec![densest]).await;
     let status = outcomes[0].as_ref().unwrap_err();
     assert_eq!(status.message(), "refused by the test enclave", "{status}");
     println!(
@@ -326,11 +330,33 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
         "peak {peak} for a request of {size} bytes"
     );
 
+    // Any other request has a small size limit. A PublicKey request at the
+    // limit reaches the enclave stand-in, and one byte more is refused.
+    for (size, reached) in [
+        (MAX_OTHER_MESSAGE_SIZE, true),
+        (MAX_OTHER_MESSAGE_SIZE + 2, false),
+    ] {
+        // Field 1 of PublicKeyRequest again and again: 2 bytes each.
+        let body = [0x08u8, 0x01].repeat(size / 2);
+        let (outcomes, peak) = send(addr, PUBLIC_KEY, vec![body]).await;
+        let status = outcomes[0].as_ref().unwrap_err();
+        if reached {
+            assert_eq!(status.message(), "refused by the test enclave", "{status}");
+            println!("read request: {size} bytes, peak {} KiB", peak / 1024);
+            assert!(
+                peak <= 4 * size,
+                "peak {peak} for a request of {size} bytes"
+            );
+        } else {
+            assert_eq!(status.code(), Code::ResourceExhausted, "{status}");
+        }
+    }
+
     // Requests sent at once add up, each within its own bound.
     let bursts = 12;
     let each = real_burn(MIB);
     let size = each.len();
-    let (outcomes, peak) = send(addr, vec![each; bursts]).await;
+    let (outcomes, peak) = send(addr, SIGN, vec![each; bursts]).await;
     assert!(outcomes.iter().all(|o| o.is_err()));
     println!(
         "{bursts} burns at once: {size} bytes each, peak {} MiB",

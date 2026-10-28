@@ -22,10 +22,10 @@ class ParentUnitTests(unittest.TestCase):
         self.assertIn('MemoryMax=1G', unit)
         self.assertIn('Restart=on-failure', unit)
 
-    def test_the_limit_matches_the_default_number_of_requests(self):
-        # The unit comment counts on 8 requests at once, the parent default.
-        self.assertIn('env_or("GRPC_MAX_CONCURRENT", 8usize)', CONFIG.read_text())
-        self.assertTrue(any('at most 8 requests at once' in line for line in parent_unit()))
+    def test_the_limit_matches_the_default_number_of_sign_requests(self):
+        # The unit comment counts on 8 Sign requests at once, the parent default.
+        self.assertIn('env_or("GRPC_MAX_CONCURRENT_SIGN", 8usize)', CONFIG.read_text())
+        self.assertTrue(any('at most 8 Sign requests at once' in line for line in parent_unit()))
 
 
 if __name__ == '__main__':
