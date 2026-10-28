@@ -32,6 +32,9 @@ pub(super) fn handle_sign_rights_refill(
         txid = %psbt.unsigned_tx.compute_txid(),
         "rights refill validated"
     );
+    // The signer parses the bytes again. Only one parsed copy is alive at a
+    // time (`memory.rs`).
+    drop(psbt);
     sign_colored_psbt(ctx, &req.psbt_bytes)
 }
 

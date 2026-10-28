@@ -34,6 +34,7 @@ fn parse_parent(bytes: &[u8]) -> Result<Psbt> {
                 .into(),
         ));
     }
+    crate::config::check_psbt_size("parent_psbt", bytes)?;
     Psbt::deserialize(bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("parent_psbt is not a valid PSBT: {e}")))
 }

@@ -47,7 +47,7 @@ const MAX_RLP_DEPTH: usize = 8;
 
 /// Maximum RLP items in one gas transaction: every string and list, at any
 /// depth. A gas tx has 9 fields and a small or empty access list. Each decoded
-/// item takes 24 bytes, however short its encoding is. Without this cap, a
+/// item takes 24 bytes, however short its encoding is. Without this limit, a
 /// 24 MiB request of one-byte empty lists decodes into more than 1 GiB.
 /// Calldata is one item at any length.
 const MAX_RLP_ITEMS: usize = 1024;

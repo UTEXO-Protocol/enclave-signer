@@ -217,7 +217,7 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
 ## Enclave requests
 
 Wire format: `[4-byte little-endian length][protobuf EnclaveRequest]`. One
-request per connection. Frame cap 24 MiB. Schema:
+request per connection. Frame limit 24 MiB. Schema:
 [`enclave-proto/proto/enclave.proto`](enclave-proto/proto/enclave.proto).
 
 | Request | Phase | Signer | Description |
@@ -465,13 +465,64 @@ per enclave; it does not limit the total number of replicas across a cluster.
 
 ### Production (Nitro)
 
-`--memory` must be at least 3584 MiB. The enclave needs 2688 MiB of usable
-memory (`enclave/src/memory.rs`), and the kernel and the root file system keep
-part of the launch value. The host allocator must hold `ENCLAVE_MEMORY` for
-every enclave it runs: three replicas need 10752 MiB.
+`--memory` must be at least 4096 MiB, a whole number of GiB. The enclave
+needs 2688 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
+the root file system keep part of the launch value. nitro-cli gives an enclave
+whole hugepages, 1 GiB pages first. A value that is not a whole number of GiB
+can take a further 1 GiB page, so the deploy scripts refuse it.
+
+The Nitro allocator must hold `ENCLAVE_MEMORY` for every enclave of the host:
+three replicas need 12288 MiB. `memory_mib` in
+`/etc/nitro_enclaves/allocator.yaml` sets the pool when the allocator starts,
+at boot or on a restart of `nitro-enclaves-allocator.service`. The allocator
+refuses to change the pool while an enclave runs, and the enclave units
+require its service. So a restart of that service stops and restarts every
+enclave of the host, and a restart removes the in-memory keys. Change the pool
+only when every enclave of the host can stop, for example right before a cold
+deploy or a reboot.
+
+The pool comes out of the memory of the parent instance. Make sure that the
+instance keeps enough memory for its system and the parents. When the
+allocator cannot reserve the pool, its service fails, and no enclave of the
+host starts. A new start of the allocator service does not start the enclave
+units. Set `memory_mib` to a value that the instance can hold. Then reboot the
+host, or start the `utexo-parent@` units. Each parent unit also starts its
+enclave unit and the allocator service.
+
+Both deploy scripts read `memory_mib` and the hugepages that the kernel holds.
+`deploy-host.sh` refuses a pool that cannot hold every enclave before it
+downloads or stops anything. `systemctl restart` stops the old enclave before
+`start` runs. So run `utexo-enclave-ctl.sh check <cid>` before each step of a
+rolling restart. It makes the same checks and changes nothing. `start` refuses
+only when the free hugepages cannot hold its own enclave.
+
+`check` reads its values from `/etc/utexo/enclave.env`, the file that systemd
+gives to `start`. The number of enclaves comes from `ENCLAVE_COUNT` (default
+3), which `deploy-host.sh` writes to that file. A key that is not in the file
+gets its default. `check` reads only these plain lines:
+
+- `KEY=value`. The key and the `=` can have blanks around them. The value has
+  no backslash. A quote must be one of a pair around the whole value.
+- A comment line. Its first character that is not a blank is `#` or `;`, and
+  it does not end with a backslash.
+- A blank line.
+
+A plain line has only tabs and printable ASCII. It can end with a carriage
+return, but it has no other carriage return. A plain line has at most 4096
+bytes, and the file has at most 65536 bytes. systemd does not start the unit
+with some much larger values and files. On plain lines, `check` reads the
+same values as systemd. It refuses a file with other lines, because systemd
+joins, splits or changes some of them, or refuses the file. If `check` refuses
+the file, write it again with plain lines only.
+
+A new launch value needs one `MemTotal` reading before release. Run one image
+at that value with `ENCLAVE_DEBUG_MODE=1`, and make sure that
+`nitro-cli describe-enclaves` shows that value in `MemoryMiB`. On
+`nitro-cli console`, the "memory check passed" line gives `total_mib`, which
+must be at least 2688.
 
 ```bash
-nitro-cli run-enclave --cpu-count 2 --memory 3584 --enclave-cid 16 \
+nitro-cli run-enclave --cpu-count 2 --memory 4096 --enclave-cid 16 \
   --eif-path build/utexo-bridge-enclave.eif
 
 # Host-side proxies (allowlist each upstream)
@@ -614,9 +665,9 @@ Limits and dev knobs:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONSIGNMENT_BYTES` | 12 MiB | Consignment size cap. Sized for a history of 10,000 transitions, each with an SPV proof. |
-| `MAX_MERKLE_PROOFS` | `16384` | Proof-count cap per request. A burn needs one proof for each witness tx in its history. |
-| `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
+| `MAX_CONSIGNMENT_BYTES` | 10 MiB | Consignment size limit. Sized for a history of 10,000 transitions, each with an SPV proof. The enclave refuses to start with a larger value, because the request memory model holds only up to 10 MiB. |
+| `MAX_MERKLE_PROOFS` | `16384` | Proof-count limit per request. A burn needs one proof for each witness tx in its history. |
+| `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes limit per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
 

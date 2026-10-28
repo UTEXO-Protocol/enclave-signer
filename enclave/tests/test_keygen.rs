@@ -215,6 +215,32 @@ fn deterministic_seed_import() {
     assert_eq!(init1.btc_xpub, init2.btc_xpub);
 }
 
+/// The enclave refuses a mnemonic over the size limit before the parse,
+/// which normalizes the whole string first. The refusal changes no state.
+#[test]
+#[cfg(feature = "allow-seed-import")]
+fn a_mnemonic_over_the_size_limit_is_refused() {
+    let port = common::start_test_server();
+    let init = |mnemonic: String| EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic,
+            cloning_secret: String::new(),
+        })),
+    };
+    let resp = common::send_request(port, &init("abandon ".repeat(200)));
+    match &resp.response {
+        Some(Response::Error(e)) => assert!(e.message.contains("the limit is"), "{}", e.message),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let resp = common::send_request(port, &init(TEST_MNEMONIC.into()));
+    assert!(
+        matches!(resp.response, Some(Response::InitializeKey(_))),
+        "{:?}",
+        resp.response
+    );
+}
+
 // Canonical BIP-39 test vector. It is stable and not secret.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";

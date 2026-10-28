@@ -101,6 +101,17 @@ fn refuses_a_parent_that_is_not_a_psbt() {
     assert!(err.to_string().contains("not a valid PSBT"), "{err}");
 }
 
+/// A parent over the PSBT size limit is refused before the parse.
+#[test]
+fn refuses_a_parent_over_the_size_limit() {
+    let (mut history, _, rights) = seeded();
+    let child = refill(&mut history, rights[0]);
+    let parent = vec![0x70; crate::config::MAX_PSBT_BYTES + 1];
+    let err = right_input(&child.psbt, &parent, rights[0].opout, history.contract_id).unwrap_err();
+    assert!(err.to_string().contains("parent_psbt is"), "{err}");
+    assert!(err.to_string().contains("the limit is"), "{err}");
+}
+
 /// The PSBT of another tx: here, the right's own child.
 #[test]
 fn refuses_parent_that_does_not_commit_the_input_op() {

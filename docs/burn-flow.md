@@ -118,7 +118,8 @@ the first step that reads the keys. It refuses an enclave without keys.
 ### Stage 1 - Is the request within the caps?
 
 - **B1.1** The consignment must not be larger than `MAX_CONSIGNMENT_BYTES`
-  (default 12 MiB).
+  (default 10 MiB). The enclave refuses to start with a larger value, because
+  the request memory model holds only up to 10 MiB.
 - **B1.2** Proof count must be at most `MAX_MERKLE_PROOFS` (default 16384).
   Proof bytes must be at most `MAX_TOTAL_PROOF_BYTES` (default 8 MiB).
 - **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check

@@ -172,26 +172,42 @@ fn revealed_seal(
 }
 
 /// The flat transition summary of a consignment that consensus validated:
-/// all transitions grouped by witness tx. rgb-lib's wallet-free inspection
+/// its transitions grouped by witness tx. rgb-lib's wallet-free inspection
 /// reads it, mapped back to the shape the consignment-utils parser gave.
+/// `witness` limits the summary to the bundle that tx commits, and `None`
+/// summarizes every bundle. rgb-lib decodes every bundle in both cases.
 pub(super) fn extract_transition_summary(
     consignment_bytes: &[u8],
+    witness: Option<bitcoin::Txid>,
 ) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
-    summary_from_inspection(&inspect(consignment_bytes)?)
+    let filter = witness.map_or(BundleFilter::All, |txid| {
+        BundleFilter::Witness(txid.to_string())
+    });
+    summary_from_inspection(&inspect(consignment_bytes, filter)?)
 }
 
 /// Runs `inspect_consignment` over `bytes`. It reads only a file, so the bytes
 /// go through a scratch file that is always removed. A panic inside rgb-lib
 /// aborts the enclave (`panic = "abort"`), as one anywhere else does.
-fn inspect(bytes: &[u8]) -> Result<ConsignmentInspection> {
-    inspect_at(&scratch_path(), bytes)
+fn inspect(bytes: &[u8], filter: BundleFilter) -> Result<ConsignmentInspection> {
+    inspect_filtered_at(&scratch_path(), bytes, filter)
+}
+
+/// [`inspect`] of every bundle through a new file at `path`.
+#[cfg(test)]
+pub(super) fn inspect_at(path: &Path, bytes: &[u8]) -> Result<ConsignmentInspection> {
+    inspect_filtered_at(path, bytes, BundleFilter::All)
 }
 
 /// [`inspect`] through a new file at `path`. An existing file is refused, not
 /// overwritten or removed.
-pub(super) fn inspect_at(path: &Path, bytes: &[u8]) -> Result<ConsignmentInspection> {
+fn inspect_filtered_at(
+    path: &Path,
+    bytes: &[u8],
+    filter: BundleFilter,
+) -> Result<ConsignmentInspection> {
     let file = File::create_new(path).map_err(|e| scratch_error("create", path, e))?;
-    let inspected = inspect_file(file, path, bytes);
+    let inspected = inspect_file(file, path, bytes, filter);
     match (inspected, std::fs::remove_file(path)) {
         (inspected, Ok(())) => inspected,
         (Ok(_), Err(e)) => Err(scratch_error("remove", path, e)),
@@ -202,11 +218,16 @@ pub(super) fn inspect_at(path: &Path, bytes: &[u8]) -> Result<ConsignmentInspect
     }
 }
 
-fn inspect_file(mut file: File, path: &Path, bytes: &[u8]) -> Result<ConsignmentInspection> {
+fn inspect_file(
+    mut file: File,
+    path: &Path,
+    bytes: &[u8],
+    filter: BundleFilter,
+) -> Result<ConsignmentInspection> {
     file.write_all(bytes)
         .map_err(|e| scratch_error("write", path, e))?;
     drop(file);
-    inspect_consignment(path.to_string_lossy().into_owned(), BundleFilter::All).map_err(|e| {
+    inspect_consignment(path.to_string_lossy().into_owned(), filter).map_err(|e| {
         EnclaveError::CrossCheck(format!("rgb-lib consignment inspection failed: {e}"))
     })
 }

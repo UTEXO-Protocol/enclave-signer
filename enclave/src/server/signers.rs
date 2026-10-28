@@ -124,6 +124,9 @@ pub(super) fn handle_sign_psbt(
             keys,
         )
     })?;
+    // The signer parses the bytes again. Only one parsed copy is alive at a
+    // time (`memory.rs`).
+    drop(psbt);
 
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.

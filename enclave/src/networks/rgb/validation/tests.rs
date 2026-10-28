@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use amplify::Wrapper;
+use amplify::{ByteArray, Wrapper};
 use bitcoin::OutPoint;
 use rgbstd::containers::FileContent;
 use rgbstd::contract::AllocatedState;
@@ -164,6 +164,43 @@ fn rejects_a_non_bfa_schema() {
     transfer.genesis.schema_id = schemata::CFA_SCHEMA_ID;
     let err = error_of(validate(&gen::save(&transfer)));
     assert!(err.contains("validates only the bridged fungible"), "{err}");
+}
+
+/// A transfer of `outputs` mint rights, each on its own seal, and terminals
+/// that name each seal.
+fn rights_named_by_terminals(outputs: usize) -> Vec<u8> {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let seals: Vec<_> = (0..outputs as u64)
+        .map(|no| GraphSeal::with_blinded_vout(1u32, 0x5000 + no))
+        .collect();
+    let mut send = history
+        .transition("transfer")
+        .add_input(right.opout, AllocatedState::Void)
+        .unwrap();
+    for seal in &seals {
+        send = send.add_rights("mintRight", *seal).unwrap();
+    }
+    let send = send.complete_transition().unwrap();
+    history.commit(vec![send], vec![right.outpoint], vec![gen::dust(1)]);
+    history.consignment(seals.into_iter().map(BuilderSeal::from).collect())
+}
+
+/// Phase 1 keeps an entry for each output that a terminal names, so
+/// validation refuses more than `MAX_TERMINAL_OUTPUTS` before phase 1.
+#[test]
+fn refuses_terminals_that_name_too_many_outputs() {
+    use super::consensus::MAX_TERMINAL_OUTPUTS;
+
+    validate(&rights_named_by_terminals(MAX_TERMINAL_OUTPUTS))
+        .expect("terminals at the limit validate");
+    let err = error_of(validate(&rights_named_by_terminals(
+        MAX_TERMINAL_OUTPUTS + 1,
+    )));
+    assert!(
+        err.contains("terminals name more than 4096 outputs"),
+        "{err}"
+    );
 }
 
 // ===== reject list =====
@@ -1279,13 +1316,15 @@ fn the_flat_summary_refuses_a_contract() {
     let contract = issue().transfer_with(vec![]).into_contract();
     let mut bytes = Vec::new();
     contract.save(&mut bytes).unwrap();
-    let err = extract_transition_summary(&bytes).unwrap_err().to_string();
+    let err = extract_transition_summary(&bytes, None)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("expected Transfer"), "{err}");
 }
 
 #[test]
 fn the_flat_summary_refuses_random_bytes() {
-    let err = extract_transition_summary(&[0u8; 64])
+    let err = extract_transition_summary(&[0u8; 64], None)
         .unwrap_err()
         .to_string();
     assert!(
@@ -2509,6 +2548,21 @@ fn validates_a_history_of_200_transfers() {
     assert_eq!(validated.mint_locks.len(), 1);
     let last = validated.last_transition.unwrap();
     assert_eq!(last.burned_asset_amount, Some(MINTED));
+    // The summary keeps only the settling bundle (`consensus::summarize`).
+    let settling = validated.last_witness_txid.expect("a settling witness");
+    let kept: Vec<_> = validated
+        .transitions_by_witness
+        .iter()
+        .map(|(txid, _)| *txid)
+        .collect();
+    assert_eq!(kept, vec![settling]);
+}
+
+/// Validates one small burn before a measurement, as `measure_dispatch` does.
+/// The one-time build of the schema rules then stays outside the meter. Boot
+/// builds them in production.
+fn warm_up() {
+    validate(&burn_bytes()).unwrap();
 }
 
 /// The request memory model (`memory.rs`): validating a consignment stays
@@ -2517,6 +2571,7 @@ fn validates_a_history_of_200_transfers() {
 fn consignment_validation_stays_within_the_request_memory_factor() {
     use crate::memory::peak;
 
+    warm_up();
     let (consignment, validated, peak) = peak::measure(
         || long_history(2_000).consignment(vec![]),
         |consignment| validate(consignment),
@@ -2525,13 +2580,286 @@ fn consignment_validation_stays_within_the_request_memory_factor() {
     peak::assert_within_factor("consignment validation", consignment.len(), peak);
 }
 
-/// The same measurement at the largest history the request caps allow.
-/// Ignored by default because it is slow in a debug build.
+/// A mint, then one transfer that splits the units into `outputs` outputs,
+/// all on one vout with their own blinding.
+fn wide_split(outputs: u16) -> History {
+    let (mut history, units) = minted();
+    let share = MINTED / u64::from(outputs);
+    let mut split = history
+        .transition("transfer")
+        .add_input(
+            units.opout,
+            AllocatedState::from(RevealedValue::from(MINTED)),
+        )
+        .unwrap();
+    for no in 0..outputs {
+        let seal = GraphSeal::with_blinded_vout(1u32, 0x3000 + u64::from(no));
+        split = split.add_fungible_state("assetOwner", seal, share).unwrap();
+    }
+    let split = split.complete_transition().unwrap();
+    history.commit(vec![split], vec![units.outpoint], vec![gen::dust(1)]);
+    history
+}
+
+/// One transfer that turns the mint right `input` into `outputs` mint
+/// rights. The first right sits alone on vout 2, and the others share vout 1
+/// with their own blinding. Returns the right on vout 2, which the next
+/// transfer can spend.
+fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64) -> Utxo {
+    let mut send = history
+        .transition("transfer")
+        .add_input(input.opout, AllocatedState::Void)
+        .unwrap();
+    for no in 0..outputs {
+        let vout = if no == 0 { 2u32 } else { 1u32 };
+        let seal = GraphSeal::with_blinded_vout(vout, salt + u64::from(no));
+        send = send.add_rights("mintRight", seal).unwrap();
+    }
+    let send = send.complete_transition().unwrap();
+    let index = send
+        .assignments
+        .get(&schemata::OS_MINT)
+        .unwrap()
+        .seals()
+        .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == 2))
+        .unwrap() as u16;
+    let opid = rgbstd::Operation::id(&send);
+    let tx = history.commit(
+        vec![send],
+        vec![input.outpoint],
+        vec![gen::dust(1), gen::dust(2)],
+    );
+    Utxo {
+        opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+        outpoint: OutPoint::new(tx.compute_txid(), 2),
+    }
+}
+
+/// `sends` chained transfers of `outputs` mint rights each on the asset of
+/// `history`, then a mint on the last right and a full burn. The history of
+/// the burn carries the wide transfers.
+fn wide_rights_burn(mut history: History, sends: u64, outputs: u16) -> History {
+    let mut right = history.genesis_right(0, right_utxo());
+    for k in 1..=sends {
+        right = send_wide_rights(&mut history, right, outputs, 0x10_0000 * k);
+    }
+    let units = history.mint_owned(right, MINTED, 90);
+    history.burn(
+        units,
+        MINTED,
+        Some(MINTED),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    history
+}
+
+/// A genesis of five mint rights whose OpId sorts above every transfer of
+/// [`dense_rights_burn`], and the tag of their outpoints.
+fn high_genesis() -> (History, u8) {
+    (0u8..=255)
+        .map(|tag| {
+            let rights = (0..5).map(|no| gen::outpoint(tag, no)).collect();
+            (
+                History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, rights)),
+                tag,
+            )
+        })
+        .find(|(history, _)| rgbstd::Operation::id(&history.genesis).to_byte_array()[0] >= 0xF8)
+        .expect("a tag gives a genesis OpId that starts with 0xF8 or more")
+}
+
+/// Sets the nonce of `send` so that the first byte of its OpId is in
+/// `first`, and returns the OpId. Only the nonce of the commitment changes,
+/// so each try is one hash.
+fn opid_in(send: &mut rgbstd::Transition, first: std::ops::Range<u8>) -> rgbstd::OpId {
+    use rgbstd::rgbcore::commit_verify::CommitId;
+
+    let mut commitment = send.commit();
+    send.nonce = (1u64..)
+        .find(|&nonce| {
+            commitment.nonce = nonce;
+            first.contains(&commitment.commit_id().to_byte_array()[0])
+        })
+        .unwrap();
+    rgbstd::Operation::id(&*send)
+}
+
+/// The densest rights chain found: `sends` transfers of `outputs` mint
+/// rights each, then a mint on the last right and a full burn. The sender
+/// sets two layouts that add heap to each right:
+///
+/// - The number of rights in a transfer. strict_encoding reserves at most
+///   64 KiB of a decoded list, which is 1 365 assignments, and then doubles
+///   the list. So a decoded list of 1 366, 21 841 or 43 681 rights takes
+///   twice its length. Validation clones the decoded consignment, so this
+///   layout no longer adds heap at the peak.
+/// - The OpIds. Each transfer has an OpId below the transfer before it.
+///   So its opouts go in front of exactly five opouts in a leaf of the two
+///   B-trees that RGB validation fills. Then each leaf that they fill keeps
+///   5 keys, not 6. The genesis has five rights, and the second transfer
+///   spends the first right of the first transfer, so both B-trees start
+///   that way.
+fn dense_rights_burn(sends: u8, outputs: u16) -> History {
+    assert!(sends <= 18, "the OpId ranges are for 18 transfers at most");
+    let (mut history, tag) = high_genesis();
+    let mut right = history.genesis_right(4, gen::outpoint(tag, 4));
+    for k in 1..=sends {
+        // The right that the next transfer spends. On vout 1 it sorts first,
+        // and on vout 3 it sorts last. The other rights share vout 2.
+        let vout = if k == 1 { 1u32 } else { 3 };
+        let mut send = history
+            .transition("transfer")
+            .add_input(right.opout, AllocatedState::Void)
+            .unwrap()
+            .add_rights("mintRight", GraphSeal::with_blinded_vout(vout, 1))
+            .unwrap();
+        for no in 1..outputs {
+            let blinding = 0x10_0000 * u64::from(k) + u64::from(no);
+            send = send
+                .add_rights("mintRight", GraphSeal::with_blinded_vout(2u32, blinding))
+                .unwrap();
+        }
+        let mut send = send.complete_transition().unwrap();
+        let opid = opid_in(&mut send, 0xF0 - 13 * k..0xF0 - 13 * (k - 1));
+        let index = send
+            .assignments
+            .get(&schemata::OS_MINT)
+            .unwrap()
+            .seals()
+            .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == vout))
+            .unwrap() as u16;
+        assert_eq!(index, if k == 1 { 0 } else { outputs - 1 });
+        let tx = history.commit(
+            vec![send],
+            vec![right.outpoint],
+            vec![gen::dust(1), gen::dust(2), gen::dust(3)],
+        );
+        right = Utxo {
+            opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+            outpoint: OutPoint::new(tx.compute_txid(), vout),
+        };
+    }
+    let units = history.mint_owned(right, MINTED, 90);
+    history.burn(
+        units,
+        MINTED,
+        Some(MINTED),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    history
+}
+
+/// Size of the consignment of `history`, and the peak heap of [`validate`]
+/// on it.
+fn validation_peak(history: impl FnOnce() -> History) -> (usize, usize) {
+    use crate::memory::peak;
+
+    warm_up();
+    let (consignment, validated, peak) = peak::measure(
+        || history().consignment(vec![]),
+        |consignment| validate(consignment).map(|_| ()),
+    );
+    validated.unwrap();
+    (consignment.len(), peak)
+}
+
+/// The request memory model (`memory.rs`): consignment validation of the
+/// densest shapes measured takes more than the factor. Each output of a wide
+/// transfer of rights is about 14 bytes of consignment, and of a split about
+/// 23. RGB validation keeps two records of more than 100 bytes for each.
+/// Each further byte of mint rights takes about 39 to 41 bytes of heap, and
+/// each further byte of a fungible split about 26. The mint and the burn add
+/// about 2 MiB that does not grow with the consignment.
+///
+/// The test measures each shape at two sizes. It takes the heap of each
+/// further byte from the difference, and the rest as the part that does not
+/// grow. The rate changes a little with the size, and with the genesis
+/// through the layout of the maps in RGB validation. At the test sizes the
+/// rights give 39.1, and 40.7 on the asset with a reject list. One-off
+/// chains of rights near the 10 MiB limit, on three geneses, gave at most
+/// 40.2. The split gives 26.3 between 10 000 and 20 000 outputs, and a
+/// one-off chain of 24 MiB gave 25.5. A split of fewer outputs takes less
+/// per output, so the test measures the split at 10 000 outputs or more. The
+/// test adds 1.5 to each rate it measures.
+///
+/// It then checks that a whole burn request at the limits fits the heap
+/// each worker holds. That request carries a consignment of the shape at
+/// `DEFAULT_MAX_CONSIGNMENT_BYTES` and the decoded elements. The read and
+/// decode of its frame of `MAX_MESSAGE_SIZE` take 3 times the frame. Then
+/// `read_request` releases the frame, so validation runs beside the decoded
+/// request, which is at most one frame.
+#[test]
+fn the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds() {
+    use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
+    use crate::framing::MAX_MESSAGE_SIZE;
+    use crate::memory::{request_bound, ELEMENTS_BYTES};
+
+    type Shape = fn() -> History;
+    let shapes: [(&str, Shape, Shape, f64); 4] = [
+        (
+            "transfers of mint rights, then a burn",
+            || wide_rights_burn(issue(), 1, 1_000),
+            || wide_rights_burn(issue(), 2, 30_000),
+            35.0,
+        ),
+        (
+            "the same on an asset with a reject list",
+            || wide_rights_burn(listed(), 1, 1_000),
+            || wide_rights_burn(listed(), 2, 30_000),
+            35.0,
+        ),
+        (
+            "the same in the densest layout found",
+            || dense_rights_burn(2, 1_366),
+            || dense_rights_burn(3, 21_841),
+            40.0,
+        ),
+        (
+            "one transfer split into many outputs",
+            || wide_split(10_000),
+            || wide_split(20_000),
+            20.0,
+        ),
+    ];
+    let limit = DEFAULT_MAX_CONSIGNMENT_BYTES as f64;
+    let frame = MAX_MESSAGE_SIZE as usize;
+    let held = request_bound(frame) as f64;
+    let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
+    for (what, small, large, dense) in shapes {
+        let (small_bytes, small_peak) = validation_peak(small);
+        let (large_bytes, large_peak) = validation_peak(large);
+        let rate = (large_peak as f64 - small_peak as f64) / (large_bytes - small_bytes) as f64;
+        let fixed = (large_peak as f64 - rate * large_bytes as f64).max(0.0);
+        let validation = (rate + 1.5) * limit + fixed;
+        // The read and decode of the frame, or validation beside the decoded
+        // request.
+        let request = ((3 * frame) as f64).max(frame as f64 + validation) + ELEMENTS_BYTES as f64;
+        println!(
+            "{what}: {small_bytes} and {large_bytes} bytes, {rate:.1} bytes of heap for each \
+             further byte, {:.1} MiB that does not grow; a burn request at the limits \
+             {:.0} MiB, heap each worker holds {:.0} MiB",
+            mib(fixed),
+            mib(request),
+            mib(held)
+        );
+        assert!(rate > dense, "{what}: the shape is not dense: {rate:.1}");
+        assert!(
+            request <= held,
+            "{what}: a burn request at the limits takes {request:.0} bytes, over the heap \
+             each worker holds, {held:.0} bytes"
+        );
+    }
+}
+
+/// The 2 000-transfer measurement at a history of 10 000 transfers, the
+/// history the default limits are sized for (`config.rs`). Ignored by default
+/// because it is slow in a debug build.
 #[test]
 #[ignore = "measures a history of 10_000 transfers; run it on request"]
 fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
     use crate::memory::peak;
 
+    warm_up();
     let (consignment, validated, peak) = peak::measure(
         || long_history(10_000).consignment(vec![]),
         |consignment| validate(consignment),
@@ -2541,7 +2869,7 @@ fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
 }
 
 /// A burn with a history of 10_000 transfers and an SPV proof on every bundle
-/// passes with the default limits: consensus, the request caps
+/// passes with the default limits: consensus, the request limits
 /// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`) and
 /// the frame. Each proof has 13 siblings, the depth of a full mainnet block.
 ///

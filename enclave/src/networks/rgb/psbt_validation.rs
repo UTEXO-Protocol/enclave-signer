@@ -66,6 +66,7 @@ pub(crate) fn parse_psbt_shape(psbt_bytes: &[u8]) -> Result<Psbt> {
     if psbt_bytes.is_empty() {
         return Err(EnclaveError::CrossCheck("psbt_bytes is empty".into()));
     }
+    crate::config::check_psbt_size("psbt_bytes", psbt_bytes)?;
     let psbt = Psbt::deserialize(psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
     if psbt.unsigned_tx.input.is_empty() {
