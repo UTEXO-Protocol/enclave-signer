@@ -54,7 +54,7 @@ synchronization stops automatically. Header RPCs refuse requests.
 Export the real key attestation with the existing command:
 
 ```bash
-utexo-bridge-parent-cli --cid <cid> export-attestation \
+utexo-bridge-parent-cli --addr vsock://<cid>:5000 export-attestation \
   --allow-development-policy --pcr-file build/signet-burn/PCR.json \
   --out burn-attestation.json
 ```
@@ -69,7 +69,8 @@ verification.
 Burns still undergo RGB consensus, asset, amount, recipient, burn-operation,
 settlement and ancestry checks. Bitcoin witness confirmations come from the
 TLS indexer at `SPV_MIN_CONFIRMATIONS` depth (mint image default 3, burn 6).
-There are no Merkle/header proofs or BtcRelay agreement checks. Caller-supplied
+No caller-supplied Merkle/header proofs are required, and no independent SPV
+or BtcRelay agreement checks run. Caller-supplied
 relay proof bytes are not independently verified. Use compatible test contracts.
 Mint signing retains its existing in-enclave EVM receipt/finality checks.
 
