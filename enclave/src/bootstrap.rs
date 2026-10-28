@@ -255,7 +255,9 @@ pub fn build_header_chain(
         "stage-signet requires public signet"
     );
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Signet);
-    tracing::warn!("public-signet staging: SPV disabled; Bitcoin confirmations are trusted from the indexer; keys are ephemeral");
+    tracing::warn!(
+        "public-signet staging: SPV disabled; Bitcoin confirmations are trusted from the indexer"
+    );
     std::sync::Mutex::new(HeaderChain::new(
         network,
         Checkpoint {

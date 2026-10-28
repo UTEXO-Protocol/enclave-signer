@@ -151,9 +151,9 @@ kms-persistence = [
     "dep:cbc",
 ]
 
-# Explicit public-signet Nitro staging mode. Real attestation and internal,
-# ephemeral entropy only; no SPV synchronization, KMS custody or cloning.
-# The role still pulls in the shared SPV/KMS code, but staging never uses it.
+# Explicit public-signet Nitro staging mode. Real attestation and the same
+# role-specific KMS/cloning key custody as production; no SPV synchronization.
+# The role retains its production initialization and persistence behavior.
 # lib.rs rejects import/mock features and bootstrap checks the network pins.
 stage-signet = []
 

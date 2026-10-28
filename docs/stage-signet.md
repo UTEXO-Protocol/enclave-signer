@@ -1,12 +1,10 @@
 # Public-signet staging on AWS Nitro
 
 `stage-signet` runs separate mint and burn signers inside real AWS Nitro
-Enclaves, using vsock and real NSM attestation. Each enclave generates its own
-random seed on an empty `InitializeKey` request. It refuses seed/mnemonic
-imports, cloning, and KMS launch values. The seed stays in enclave memory;
-restarting the enclave loses that identity and a subsequent initialization
-creates new keys. Re-register the new public keys and update the staging
-wallet setup after every restart.
+Enclaves, using vsock and real NSM attestation. Initialization and persistence
+match production: the mint signer recovers or bootstraps its seed through KMS,
+and the burn signer supports authenticated peer cloning. Seed/mnemonic imports
+remain forbidden. A restart does not intentionally rotate either identity.
 
 This profile disables SPV synchronization and the enclave's BtcRelay checks.
 Burn consignments still undergo RGB validation, asset/amount/operation and
@@ -23,8 +21,9 @@ with explicit bridge, asset and token pins. Ethereum mainnet and Arbitrum One
 chain IDs are refused. The image attests a **Development** policy because its
 Bitcoin evidence is not SPV verified; its NSM document and measured PCRs are
 still real. Production feature sets and verification requirements are unchanged.
-The Cargo dependency graph retains SPV and mint KMS code, but stage does not
-run those services.
+The Cargo dependency graph retains SPV code for shared validation types, but
+stage does not run header synchronization. Mint KMS custody and burn cloning
+remain active.
 
 ## Build the two EIFs
 
@@ -95,6 +94,12 @@ serve JSON-RPC at `/` and support the `safe` finality tag. The indexer and EVM
 RPC must use distinct TLS ports inside the enclave; for example Electrum
 50002 and EVM RPC 443.
 
+For mint, configure the same KMS proxy and parent custody broker as production
+on ports 8003 and 8004. Follow [mint KMS setup](kms-persistence.md), but approve
+the **stage PCR0** in the KMS key policy and use `bitcoin_network=signet` in its
+encryption context. Do not disable the custody broker or allow a fallback to
+ephemeral key generation.
+
 Launch each role with a separate CID. Run without Nitro `--debug-mode`, so
 runtime PCRs remain populated:
 
@@ -111,24 +116,44 @@ nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 18 \
 ```
 
 Compare the running enclave measurements with each role's approved PCR
-manifest. Using the matching host CLI, set endpoints once per enclave, then
-initialize without any seed, mnemonic or cloning secret:
+manifest. Set the common endpoint inputs:
 
 ```bash
 export ELECTRUM_URL='ssl://<public-signet indexer>:50002'
 export EVM_RPC_HOST='<staging RPC TLS host>'
 export EVM_RPC_TLS_PORT=443
 export EVM_RPC_TLS_CA_DER_FILE='/path/to/staging-rpc-ca.der'
-unset KMS_KEY_ARN KMS_REGION KMS_SEED_ID KMS_EXPECTED_EVM_ADDRESS
-unset UTEXO_CLONING_SECRET
 CLI=./utexo-bridge-parent-cli
-for cid in 16 18; do
-  "$CLI" --addr "vsock://$cid:5000" set-endpoints
-  "$CLI" --addr "vsock://$cid:5000" init
-  "$CLI" --addr "vsock://$cid:5000" get-keys
-  "$CLI" --addr "vsock://$cid:5000" health
-done
 ```
+
+Initialize mint through the production KMS path. Leave the address pin empty
+only for first bootstrap; set it to the verified existing address for recovery:
+
+```bash
+export KMS_KEY_ARN='arn:aws:kms:<region>:<account>:key/<stage-key-id>'
+export KMS_REGION='<region>'
+export KMS_SEED_ID='<stable-stage-mint-id>'
+export KMS_EXPECTED_EVM_ADDRESS=''
+"$CLI" --addr vsock://16:5000 set-endpoints
+"$CLI" --addr vsock://16:5000 init
+"$CLI" --addr vsock://16:5000 get-keys
+"$CLI" --addr vsock://16:5000 health
+```
+
+Initialize the first burn donor with a runtime cloning secret, just as in
+production. The secret is not baked into the EIF:
+
+```bash
+unset KMS_KEY_ARN KMS_REGION KMS_SEED_ID KMS_EXPECTED_EVM_ADDRESS
+"$CLI" --addr vsock://18:5000 set-endpoints
+"$CLI" --addr vsock://18:5000 init --cloning-secret-file /path/to/cloning-secret
+"$CLI" --addr vsock://18:5000 get-keys
+"$CLI" --addr vsock://18:5000 health
+```
+
+For a burn replacement or replica, set its endpoints and use the normal
+`clone --donor-grpc ... --donor-evm ... --cloning-secret-file ...` command
+instead of `init`. Mint replicas recover through KMS and do not clone.
 
 Before registering keys, verify a fresh keyed NSM attestation for each role
 against the **independently approved** PCR manifest from its trusted stage
@@ -147,16 +172,19 @@ Use the verified bundle's public keys to register the stage signer and
 configure its wallet descriptors. On subsequent checks, also pass
 `--expect-evm-address 0x<approved address>` to detect a changed identity.
 The approved PCRs select the stage role and baked configuration. Development
-policy does not separately commit the launch endpoint hosts or RPC CA; approve
-those as deployment inputs before initialization. The operator controlling
-`SetEndpoints` is trusted: a real stage attestation proves the measured code
-and public keys, not which chain endpoints were installed. Registration and
-on-chain consumers must pin the approved stage PCRs as well; accepting the
-Development policy alone does not distinguish this image from another dev build.
+policy does not separately commit the launch endpoint hosts, RPC CA or KMS pin;
+approve those as deployment inputs before initialization. The operator
+controlling `SetEndpoints` is trusted: a real stage attestation proves the
+measured code and public keys, not which chain endpoints were installed.
+Registration and on-chain consumers must pin the approved stage PCRs as well;
+accepting the Development policy alone does not distinguish this image from
+another dev build. The cloning handshake still directly requires matching
+approved PCR0/1/2 and the same nonzero PCR3 IAM-role measurement on donor and
+requester.
 
-Each enclave has a distinct identity; repeated `init`
-does not replace an already initialized seed. Keep the enclave's vsock
-listener private to its host. Run the parent using `USE_VSOCK=true` and the
+Repeated `init` does not replace an already initialized seed. Identity recovery
+uses the same KMS object or authenticated clone path as production. Keep the
+enclave's vsock listener private to its host. Run the parent using `USE_VSOCK=true` and the
 matching `ENCLAVE_VSOCK_CID`; keep the existing parent mTLS certificates and
 ACLs described in [parent-mtls.md](parent-mtls.md).
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Public-signet staging Nitro EIF, with real NSM attestation and vsock.
-# Separate mint and burn images; keys are generated inside each enclave.
+# Separate mint and burn images with production KMS/cloning key custody.
 # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
 # needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
 # never in a layer, the image or PCR0.
@@ -34,9 +34,9 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# The role retains the RGB/EVM validators. stage-signet disables operational
-# SPV, relay agreement and KMS; the feature dependencies remain compiled.
-# No mock attestation, seed import, cloning or Nitro debug mode.
+# The role retains the RGB/EVM validators and production KMS/cloning custody.
+# stage-signet disables only operational SPV and relay agreement.
+# No mock attestation, seed import or Nitro debug mode.
 ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac

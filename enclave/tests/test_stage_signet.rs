@@ -1,4 +1,4 @@
-//! Both real-attestation stage roles use the same entropy-only lifecycle.
+//! Both real-attestation stage roles preserve their production key lifecycle.
 #![cfg(feature = "stage-signet")]
 
 use std::net::{TcpListener, TcpStream};
@@ -60,16 +60,26 @@ fn send(port: u16, request: Request) -> Response {
 }
 
 fn endpoints() -> SetEndpointsRequest {
-    SetEndpointsRequest {
+    let request = SetEndpointsRequest {
         electrum_url: "ssl://electrum.test:50002".into(),
         evm_rpc_host: "rpc.test".into(),
         evm_rpc_ca_der: hex::decode(include_str!("fixtures/evm_rpc_tls/ca_a.der.hex").trim())
             .unwrap(),
         evm_rpc_tls_port: 443,
         ..Default::default()
-    }
+    };
+    #[cfg(feature = "mint-signer")]
+    let request = SetEndpointsRequest {
+        kms_key_arn: "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+            .into(),
+        kms_region: "eu-west-1".into(),
+        kms_seed_id: "stage".into(),
+        ..request
+    };
+    request
 }
 
+#[cfg(feature = "burn-signer")]
 fn initialize(port: u16) -> InitializeKeyResponse {
     match send(
         port,
@@ -87,6 +97,7 @@ fn health(port: u16) -> HealthResponse {
     }
 }
 
+#[cfg(feature = "burn-signer")]
 #[test]
 fn stage_signet_generates_distinct_keys_and_refuses_reinitialization() {
     let first = start();
@@ -110,7 +121,7 @@ fn stage_signet_generates_distinct_keys_and_refuses_reinitialization() {
 }
 
 #[test]
-fn stage_signet_refuses_imports_and_cloning_without_installing_keys() {
+fn stage_signet_refuses_imports_without_installing_keys() {
     let port = start();
     for request in [
         Request::InitializeKey(InitializeKeyRequest {
@@ -121,20 +132,36 @@ fn stage_signet_refuses_imports_and_cloning_without_installing_keys() {
             mnemonic: "abandon ".repeat(24),
             ..Default::default()
         }),
-        Request::InitializeKey(InitializeKeyRequest {
-            cloning_secret: "operator-secret-with-sufficient-length".into(),
-            ..Default::default()
-        }),
-        Request::InitiateCloning(InitiateCloningRequest::default()),
-        Request::GetClone(GetCloneRequest::default()),
-        Request::SetClone(SetCloneRequest::default()),
     ] {
         assert!(matches!(send(port, request), Response::Error(_)));
         assert!(!health(port).key_loaded);
     }
-    initialize(port);
 }
 
+#[test]
+fn stage_signet_cloning_routing_matches_the_production_role() {
+    let response = send(
+        start(),
+        Request::InitiateCloning(InitiateCloningRequest::default()),
+    );
+    let Response::Error(error) = response else {
+        panic!("expected cloning request validation to fail before attestation");
+    };
+    #[cfg(feature = "burn-signer")]
+    assert!(
+        error.message.contains("cloning_secret is required"),
+        "{error:?}"
+    );
+    #[cfg(feature = "mint-signer")]
+    assert!(
+        error
+            .message
+            .contains("cloning is disabled with KMS persistence"),
+        "{error:?}"
+    );
+}
+
+#[cfg(feature = "burn-signer")]
 #[test]
 fn stage_signet_is_ready_without_headers_only_after_keys_and_endpoints() {
     let port = start();
@@ -165,8 +192,9 @@ fn stage_signet_is_ready_without_headers_only_after_keys_and_endpoints() {
     assert!(health(port).ready);
 }
 
+#[cfg(feature = "burn-signer")]
 #[test]
-fn stage_signet_launch_refuses_kms_fields_for_both_roles() {
+fn stage_signet_burn_refuses_kms_fields() {
     assert!(Endpoints::parse(&endpoints()).unwrap().kms.is_none());
     for field in 0..4 {
         let mut request = endpoints();
@@ -178,6 +206,33 @@ fn stage_signet_launch_refuses_kms_fields_for_both_roles() {
         }
         assert!(Endpoints::parse(&request).is_err());
     }
+}
+
+#[cfg(feature = "mint-signer")]
+#[test]
+fn stage_signet_mint_requires_and_accepts_production_kms_pins() {
+    let kms = Endpoints::parse(&endpoints()).unwrap().kms.unwrap();
+    assert_eq!(kms.region, "eu-west-1");
+    assert_eq!(kms.seed_id, "stage");
+    for field in 0..3 {
+        let mut request = endpoints();
+        match field {
+            0 => request.kms_key_arn.clear(),
+            1 => request.kms_region.clear(),
+            _ => request.kms_seed_id.clear(),
+        }
+        assert!(Endpoints::parse(&request).is_err());
+    }
+    let mut pinned = endpoints();
+    pinned.kms_expected_evm_address = "ab".repeat(20);
+    assert_eq!(
+        Endpoints::parse(&pinned)
+            .unwrap()
+            .kms
+            .unwrap()
+            .expected_evm_address,
+        Some([0xab; 20])
+    );
 }
 
 #[test]

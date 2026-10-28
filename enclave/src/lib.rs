@@ -37,7 +37,7 @@ dev_feature_release_guard!(
         feature = "allow-debug-pcrs"
     )
 ))]
-compile_error!("stage-signet requires real attestation and internally generated keys; seed import and mock/debug attestation features are forbidden");
+compile_error!("stage-signet requires real attestation and production key custody; seed import and mock/debug attestation features are forbidden");
 #[cfg(all(
     feature = "stage-signet",
     not(any(feature = "mint-signer", feature = "burn-signer"))

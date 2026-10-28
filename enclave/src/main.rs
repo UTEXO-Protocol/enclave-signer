@@ -49,7 +49,7 @@ fn main() {
     }
 
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
-    #[cfg(all(not(feature = "kms-persistence"), not(feature = "stage-signet")))]
+    #[cfg(not(feature = "kms-persistence"))]
     bootstrap::install_env_cloning_secret(&state);
 
     // The policy and chain clients come with `SetEndpoints`. Until then the

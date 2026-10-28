@@ -520,7 +520,7 @@ impl Endpoints {
             ("kms_seed_id", &req.kms_seed_id),
             ("kms_expected_evm_address", &req.kms_expected_evm_address),
         ];
-        #[cfg(all(feature = "kms-persistence", not(feature = "stage-signet")))]
+        #[cfg(feature = "kms-persistence")]
         let kms = if cfg!(feature = "allow-seed-import")
             && kms_values.iter().all(|(_, v)| v.is_empty())
         {
@@ -555,7 +555,7 @@ impl Endpoints {
                 expected_evm_address,
             })
         };
-        #[cfg(any(not(feature = "kms-persistence"), feature = "stage-signet"))]
+        #[cfg(not(feature = "kms-persistence"))]
         let kms = {
             for (name, value) in kms_values {
                 unused(name, value.is_empty())?;
@@ -573,10 +573,7 @@ impl Endpoints {
     }
 }
 
-#[cfg(any(
-    feature = "stage-signet",
-    not(all(feature = "evm-rpc", feature = "kms-persistence"))
-))]
+#[cfg(not(all(feature = "evm-rpc", feature = "kms-persistence")))]
 fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
     if empty {
         Ok(())

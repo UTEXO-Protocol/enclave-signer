@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "EIF profile (public-signet stage uses real Nitro with ephemeral keys and no SPV)"
+        description: "EIF profile (public-signet stage uses real Nitro with production key custody and no SPV)"
         type: choice
         options: [production, public-signet-stage]
         required: true

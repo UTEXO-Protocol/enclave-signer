@@ -334,7 +334,7 @@ jobs:
               echo "::error::stage unexpectedly compiled with $forbidden"
               exit 1
             fi
-            if ! grep -q "stage-signet requires real attestation and internally generated keys" build.log; then
+            if ! grep -q "stage-signet requires real attestation and production key custody" build.log; then
               cat build.log
               exit 1
             fi
