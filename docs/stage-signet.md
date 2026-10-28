@@ -55,7 +55,11 @@ done
 No seed, mnemonic, KMS key, endpoint host, or RPC CA is baked into the image.
 The build fails if a required deployment pin or signer role is missing.
 The mint image permits the existing `create_utxo` path up to
-`BTC_MAX_TOTAL_SATS=1000000`. Gas-transaction signing remains disabled by the
+`BTC_MAX_TOTAL_SATS=1000000` and pins `RGB_MAX_UNOWNED_SATS=1000` for RGB
+PSBTs. This is the maximum Bitcoin value paid to outputs the enclave cannot
+prove it controls; the existing mint ownership checks still apply. Leaving
+this limit unset refuses every RGB mint PSBT, even when all outputs belong
+to the enclave. Gas-transaction signing remains disabled by the
 zero default gas/fee caps; use the normal staging transaction submitter or
 explicitly review and bake gas limits before enabling that separate API.
 
@@ -90,6 +94,11 @@ RPC must use distinct TLS ports inside the enclave; for example Electrum
 
 Launch each role with a separate CID. Run without Nitro `--debug-mode`, so
 runtime PCRs remain populated:
+
+Running both commands at once requires four enclave vCPUs and 6144 MiB of
+enclave memory, in addition to the parent instance's resources. A host that
+reserves only two vCPUs for Nitro can run the roles sequentially for testing;
+use sufficient capacity or separate hosts for a simultaneous deployment.
 
 ```bash
 nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 16 \

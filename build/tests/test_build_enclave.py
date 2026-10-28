@@ -264,6 +264,18 @@ class BuildArgumentsTests(unittest.TestCase):
 class ImageInputsTests(unittest.TestCase):
     RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd', 'Dockerfile.enclave.stage')
 
+    def test_stage_configures_bounded_bitcoin_signing(self):
+        # Release signing refuses an unset RGB budget even for a mint whose
+        # outputs all belong to the enclave. Exercise the shipped image inputs.
+        text = (ROOT / 'build/Dockerfile.enclave.stage').read_text().replace('\\\n', ' ')
+        env = dict(token.split('=', 1)
+                   for line in text.splitlines() if line.startswith('ENV ')
+                   for token in shlex.split(line[4:]) if '=' in token)
+        self.assertEqual(env['BITCOIN_NETWORK'], 'signet')
+        self.assertGreater(int(env['RGB_MAX_UNOWNED_SATS']), 0)
+        self.assertLessEqual(int(env['RGB_MAX_UNOWNED_SATS']),
+                             int(env['BTC_MAX_TOTAL_SATS']))
+
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:
             text = (ROOT / 'build' / recipe).read_text().replace('\\\n', ' ')
