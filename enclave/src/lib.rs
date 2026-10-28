@@ -47,17 +47,6 @@ compile_error!("rgb-validation without spv requires real attestation; seed impor
 ))]
 compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
 
-// Preserve the production mint's custody contract when KMS is selected
-// explicitly instead of being pulled in by the role feature.
-#[cfg(all(
-    feature = "mint-signer",
-    feature = "spv",
-    not(feature = "kms-persistence")
-))]
-compile_error!(
-    "mint-signer with spv requires kms-persistence; enable it to preserve the production mint seed"
-);
-
 // `rgb` enables `spv`, and `spv` enables `rgb-validation`. The role features
 // enable validation without SPV; use `rgb` for a production signer.
 
@@ -69,7 +58,7 @@ compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
      ship as separate enclave instances. Build one image per flow - the default feature set \
      carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
-     vsock,rgb,mint-signer,kms-persistence` (or `vsock,rgb,burn-signer`)"
+     vsock,rgb,mint-signer` (or `vsock,rgb,burn-signer`)"
 );
 #[cfg(all(
     feature = "rgb-validation",
@@ -98,7 +87,7 @@ compile_error!(
 compile_error!(
     "a mint/burn build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
-     vsock,rgb,mint-signer,kms-persistence`"
+     vsock,rgb,mint-signer`"
 );
 
 // The attested role reads the features. The gates read the `build.rs` cfgs.

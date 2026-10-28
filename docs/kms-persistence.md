@@ -1,6 +1,6 @@
 # Mint signer KMS seed persistence
 
-Production mint images enable `mint-signer,kms-persistence`, using AWS KMS to generate a
+The `mint-signer` feature enables `kms-persistence`, using AWS KMS to generate a
 64-byte seed and S3 to persist its encrypted `CiphertextBlob`. On initialization
 the enclave loads the saved blob, decrypts it with KMS recipient attestation,
 and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
@@ -10,7 +10,9 @@ The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
-cloning lifecycle.
+cloning lifecycle. [Public-Signet staging](stage-signet.md) uses this same
+`PersistentSeed` lifecycle even when Bitcoin SPV is omitted. It does not
+replace mint recovery with fresh entropy or peer cloning.
 
 The address pin selects one of two initialization modes:
 
@@ -46,7 +48,9 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
 `/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
-carry them, and the attested policy commits them:
+carry them. A Production attested policy commits them. The Development policy
+used by public-Signet builds without SPV does not separately commit these KMS
+fields; approve the launch values as deployment inputs:
 
 | Setting | Value |
 | --- | --- |
@@ -61,7 +65,7 @@ different recovered seed and makes missing storage fail before generation; no
 pin makes an existing object fail before decryption. There is no creation switch.
 A development image built with `allow-seed-import` and launched with all KMS
 values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
-A verifier checks them with `attest-verify --expect-kms-key-arn`,
+For Production policy, a verifier checks them with `attest-verify --expect-kms-key-arn`,
 `--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
@@ -130,7 +134,7 @@ resource policies with these permissions:
 | `s3:ListBucket` | The containing bucket, so an absent object is distinguishable from access denial. |
 
 Both KMS operations must require recipient attestation with the approved
-production PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
+mint image PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
 exactly these public encryption-context fields:
 
 ```json
@@ -139,7 +143,11 @@ exactly these public encryption-context fields:
 
 The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
-context automatically; policies must match it exactly.
+context automatically; policies must match it exactly. For public-Signet
+staging, authorize the independently approved stage mint PCR0 and set
+`bitcoin_network` to `signet`; use its stable staging seed ID and S3 object.
+The KMS recipient attestation remains real even when the signer exports a
+Development security policy.
 
 Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when

@@ -17,10 +17,12 @@ assumptions. Known gaps are collected in Sec 13.
 
 ---
 
-Production mint images enable `kms-persistence`: initialization uses attested KMS seed
+`mint-signer` enables `kms-persistence`: initialization uses attested KMS seed
 generation/recovery and encrypted S3 storage; peer cloning is disabled. Burn
 signers and other builds without this capability retain the entropy/cloning
-lifecycle below. See [KMS seed persistence](kms-persistence.md).
+lifecycle below. Public-Signet staging without SPV uses these same custody
+paths. See [KMS seed persistence](kms-persistence.md) and
+[staging deployment](stage-signet.md).
 
 ## 1. Purpose
 
@@ -143,8 +145,8 @@ Four crates plus the infrastructure they touch:
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
 `ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
-or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. SPV mint images also require
-`kms-persistence`. Production images are built with
+or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
+enables `kms-persistence`, with or without SPV. Production images are built with
 `--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
@@ -154,15 +156,20 @@ indexer and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.
 
-**Launch endpoints.** The endpoints are not in the image, so a rebuild of the
-EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
+**Launch endpoints.** The operator sends the endpoint and custody values once,
+after launch, in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. The burn signer still requires and pins the indexer URL
-although its RGB-source path never calls it; dropping it changes the
-`SetEndpoints` and attested-policy shape, so that waits until after the RGB
-0.11.2 cutover. The enclave refuses a second set; changing them needs a
-restart, which loses the keys. Until the set, the enclave refuses `Sign`,
+expected EVM address. Production images keep these values outside the image
+and commit them through the attested policy. Public-Signet builds without SPV
+measure the chain endpoint digest as `ENDPOINTS_SHA256`; changing those network
+inputs requires a new digest, EIF and approved PCRs. KMS fields are excluded
+from this digest, so bootstrap and pinned recovery use the same EIF.
+The burn signer requires the indexer URL in both modes: its SPV source path
+does not call it, while its no-SPV source path queries it for confirmations.
+The enclave refuses a second set; changing launch values needs a restart,
+which clears the in-memory keys. Mint recovers its saved KMS identity; burn
+recovery requires a live approved donor with matching PCRs. Until the set, the enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
 `InitializeKey`. It starts no Electrum or
@@ -245,7 +252,14 @@ SecurityPolicy = Production {
   Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` is restricted to public-Signet mint/burn
-  builds with real attestation and a Development policy. A build fails with both RGB flows
+  builds with real attestation and a Development policy. These builds require
+  `BITCOIN_NETWORK=signet` and `BTC_RELAY_MODE=none`; the EVM side may use
+  Arbitrum One (`42161`). They retain mint KMS persistence and burn cloning.
+  Their generic Development policy does not separately commit endpoint/KMS
+  launch fields or clone-peer PCR3. PCR0 binds the measured `ENDPOINTS_SHA256`
+  network digest, enforced at `SetEndpoints`. Approve the runtime KMS inputs
+  independently; clone peers directly enforce nonzero, matching PCR3.
+  A build fails with both RGB flows
   (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
   both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
@@ -701,7 +715,10 @@ permit another acceptance.
 After SetClone, the CLI performs a bounded read-only identity check, including
 when the response was lost. Automation must use the versioned
 [CLI completion results](clone-cli-results.md); an error or timeout alone does
-not establish whether keys were installed.
+not establish whether keys were installed. A replacement must complete cloning
+while an approved donor is still alive. If every replica stops, cloning alone
+cannot recover the seed; it does not provide durable storage. This also applies
+to public-Signet burn images without SPV.
 
 ### 7.9 Concordium (`CcdSource`, `SignCcd`)
 
@@ -892,12 +909,13 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   in any AWS account; PCR3 binds the peer to the operator's role (#270). Each
   side compares the peer's PCR3 with its own (`GetClone` and `SetClone`) and
   refuses a missing or different PCR3, and refuses to clone at all when its own
-  PCR3 is all zero (no IAM role). A role that clones (burn, combined) commits
-  its PCR3 in the attested policy (`clone_peer_pcr3`) and refuses
-  `SetEndpoints` when it is all zero, so such an enclave does not start on an
-  instance without an IAM role. Recovery onto an instance with another role
-  fails by design. The mint signer does not clone and does not read PCR3. The DH exchange rejects small-order points; the seed
-  ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
+  PCR3 is all zero (no IAM role). A Production policy for a role that clones
+  (burn, combined) commits its PCR3 (`clone_peer_pcr3`) and refuses
+  `SetEndpoints` when it is all zero. A public-Signet Development policy does
+  not contain this field, but its clone handshake still enforces the same
+  nonzero, matching PCR3. Recovery onto an instance with another role
+  fails by design. The mint signer does not clone and does not read PCR3.
+  The DH exchange rejects small-order points; the seed ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
   recorded only **after** authentication succeeds, and the guard
   is TTL-bounded (1 h) with oldest-first eviction so it cannot be wedged.
   By design: authorization rests on the operator's cluster-wide secret

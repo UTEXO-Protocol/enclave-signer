@@ -44,9 +44,7 @@ ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
 RUN --mount=type=secret,id=lib_key \
-    features="allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE"; \
-    if [ "$SIGNER_ROLE" = mint-signer ]; then features="$features,kms-persistence"; fi; \
-    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features "$features"
+    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

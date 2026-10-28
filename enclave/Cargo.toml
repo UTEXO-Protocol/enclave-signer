@@ -96,7 +96,7 @@ aws-nitro-enclaves-nsm-api = "0.5"
 #
 # Single-network EIFs, one flow each:
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
-#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer,kms-persistence`
+#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
 #   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (no
 #                     bridge-signing path).
@@ -133,7 +133,7 @@ rgb-swap = ["rgb"]
 # with BFA `mint`, withdrawals destroy with BFA `burn`.
 rgb-mint-burn = ["rgb-validation"]
 
-# Seed custody is a separate capability, required by an SPV mint signer.
+# Seed custody is a separate capability, enabled by every mint signer.
 kms-persistence = [
     "dep:base64",
     "dep:serde_json",
@@ -196,7 +196,7 @@ bfa-mint = ["rgb-mint-burn", "bfa-validation", "dep:rgb-psbt-utils"]
 # `build.rs` turns the role into the `evm_to_rgb` / `rgb_to_evm` cfgs.
 #
 # `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
-mint-signer = ["bfa-mint"]
+mint-signer = ["bfa-mint", "kms-persistence"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
 burn-signer = ["bfa-mint"]
 

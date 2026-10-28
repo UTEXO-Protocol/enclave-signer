@@ -90,7 +90,7 @@ fi
 # Optional measured configuration for the mint/burn recipes. Unset values
 # retain each Dockerfile's production defaults.
 for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-    EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS; do
+    EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS ENDPOINTS_SHA256; do
     if [ -n "${!arg:-}" ]; then
         BUILD_ARGS+=(--build-arg "$arg=${!arg}")
     fi

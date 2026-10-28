@@ -44,7 +44,9 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-ARG ENCLAVE_FEATURES=vsock,rgb,mint-signer,kms-persistence
+# mint-signer always includes KMS persistence. Public-Signet staging may omit
+# rgb/SPV with ENCLAVE_FEATURES=vsock,mint-signer; custody stays the same.
+ARG ENCLAVE_FEATURES=vsock,rgb,mint-signer
 RUN --mount=type=secret,id=lib_key \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
 
@@ -86,9 +88,10 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
 # bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
 # boot without these pins (enclave/src/policy.rs). Public
-# identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
-# Arbitrum One (chain_id 42161). Electrum is set at launch. The enclave pins its
-# host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# identifiers, baked so PCR0 commits to them. Defaults use Bitcoin mainnet +
+# Arbitrum One (chain_id 42161). Public-Signet staging overrides the Bitcoin
+# network and relay mode and may keep Arbitrum One. Electrum is set at launch.
+# The enclave pins its host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
@@ -104,9 +107,12 @@ ARG FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951
 ARG TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
 ARG BITCOIN_NETWORK=bitcoin
 ARG BTC_RELAY_MODE=required
+# Required without SPV; KMS runtime recovery fields are excluded.
+ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
-ENV EVM_CHAIN_ID=${EVM_CHAIN_ID} \
+ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
+    EVM_CHAIN_ID=${EVM_CHAIN_ID} \
     EVM_PROXY_CONTRACT_ADDRESS=${EVM_PROXY_CONTRACT_ADDRESS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=${BITCOIN_NETWORK}
@@ -123,8 +129,8 @@ ENV EVM_CHAIN_ID=${EVM_CHAIN_ID} \
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 # The Electrum URL and the EVM RPC host, CA and TLS port are not in the
-# image. The operator sets them at launch (SetEndpoints), and the attestation
-# commits them. See docs/tee-spec.md.
+# image. The operator sets them at launch (SetEndpoints). Production policy
+# commits them; Development policy does not. See docs/stage-signet.md.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).

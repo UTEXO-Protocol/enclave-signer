@@ -99,7 +99,7 @@ class BuildArgumentsTests(unittest.TestCase):
         pins = dict(BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none',
                     EVM_CHAIN_ID='11155111', EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
                     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
-                    RGB_MAX_UNOWNED_SATS='1000')
+                    RGB_MAX_UNOWNED_SATS='1000', ENDPOINTS_SHA256='12' * 32)
         for role in ('mint', 'burn'):
             overrides = dict(pins, ENCLAVE_FEATURES=f'vsock,{role}-signer')
             result = self.invoke(f'Dockerfile.enclave.{role}',

@@ -140,11 +140,11 @@ jobs:
       # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
       # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer,kms-persistence
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
       - name: Clippy (rgb mint signer)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer,kms-persistence --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --all-targets -- -D warnings
       - name: Test (rgb mint signer)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,kms-persistence,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 
       - name: Build (rgb burn signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
@@ -153,8 +153,9 @@ jobs:
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
-      # Stage is a real Nitro profile: no mock attestation or seed import.
-      # Focused tests do not need a Nitro device; release checks match the EIF.
+      # No-SPV Signet keeps production custody: mint uses KMS, burn supports
+      # authenticated cloning. No mock attestation or seed import. Focused
+      # tests do not need a Nitro device; release checks match the EIF.
       - name: Check release (public-signet stage, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
@@ -165,7 +166,10 @@ jobs:
           for role in mint-signer burn-signer; do
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib a_release_build_refuses_a_plaintext_indexer
           done
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_bfa_mint_over_the_wire
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_signing test_sign_btc
       - name: Clippy (public-signet stage, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
@@ -336,14 +340,6 @@ jobs:
             fi
           done
 
-      - name: Assert SPV mint cannot silently omit KMS persistence
-        run: |
-          if cargo check --locked -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer 2>build.log; then
-            echo "::error::SPV mint unexpectedly compiled without KMS persistence"
-            exit 1
-          fi
-          grep -q "mint-signer with spv requires kms-persistence" build.log
-
       - name: Assert bare rgb-validation without a signer role is rejected
         run: |
           if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
@@ -391,7 +387,7 @@ jobs:
       # rules in one binary, neither would leave the role unstated.
       - name: Assert both signer roles at once is rejected
         run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,kms-persistence,burn-signer 2>build.log; then
+          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,burn-signer 2>build.log; then
             echo "::error::build unexpectedly SUCCEEDED with both mint-signer and burn-signer - the compile_error guard is missing or not firing"
             exit 1
           fi

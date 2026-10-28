@@ -28,6 +28,13 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    if ctx.bridge_config.endpoints_sha256 != Some(crate::config::chain_endpoints_sha256(&req)) {
+        return Err(EnclaveError::InvalidRequest(
+            "SetEndpoints does not match the measured ENDPOINTS_SHA256 pin".into(),
+        ));
+    }
+
     let endpoints = Endpoints::parse(&req).map_err(EnclaveError::InvalidRequest)?;
     #[cfg(feature = "evm-rpc")]
     let tls = endpoints

@@ -1,6 +1,6 @@
 # Mint flow (EVM -> RGB)
 
-**Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer,kms-persistence`).
+**Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
 **Checked against repository code:** 2026-10-15 (plan B: the mint signer reads the PSBT).
 Deployment was not checked.
 
@@ -407,7 +407,11 @@ refills per hour.
 ## 10. Seed
 
 The mint signer gets its seed from AWS KMS. The encrypted seed is in S3. Mint
-replicas recover the same seed. See [KMS seed persistence](kms-persistence.md).
+replicas recover the same seed. `mint-signer` always enables this custody path,
+including [public-Signet staging](stage-signet.md) built without SPV. Bootstrap
+uses an empty expected-address pin only for the first saved object; subsequent
+launches recover with the verified address pinned and never fall back to a new
+seed. See [KMS seed persistence](kms-persistence.md).
 
 ## 11. The main idea
 

@@ -125,6 +125,9 @@ pub struct BridgeConfig {
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
     /// 6, at least 1). Image env, so PCR0 measures it, and attested.
     pub spv_min_confirmations: u32,
+    /// Measured commitment to chain endpoint hosts, ports and RPC CA. KMS
+    /// launch fields remain runtime inputs, as in production recovery.
+    pub endpoints_sha256: Option<[u8; 32]>,
 }
 
 /// Env var selecting [`BtcRelayMode`].
@@ -197,6 +200,7 @@ impl Default for BridgeConfig {
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
+            endpoints_sha256: None,
         }
     }
 }
@@ -218,17 +222,16 @@ impl BridgeConfig {
                 "indexer-trusted validation requires at least one Bitcoin confirmation".into(),
             );
         }
+        if self.endpoints_sha256.is_none_or(|hash| hash == [0; 32]) {
+            return Err(
+                "RGB validation without SPV requires a nonzero ENDPOINTS_SHA256 pin".into(),
+            );
+        }
         if !self.is_configured()
             || self.funds_in_contract == [0; 20]
             || self.token_contract == [0; 20]
         {
             return Err("RGB validation without SPV requires EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID, FUNDS_IN_CONTRACT and TOKEN_CONTRACT pins".into());
-        }
-        if crate::policy::MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id) {
-            return Err(
-                "RGB validation without SPV refuses the production Ethereum and Arbitrum chain IDs"
-                    .into(),
-            );
         }
         Ok(())
     }
@@ -381,6 +384,10 @@ impl BridgeConfig {
             max_merkle_proofs,
             max_total_proof_bytes,
             spv_min_confirmations,
+            endpoints_sha256: parse_endpoints_sha256(
+                std::env::var("ENDPOINTS_SHA256").ok().as_deref(),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
         }
     }
 
@@ -412,6 +419,30 @@ impl BridgeConfig {
     /// `btc_crosscheck::validate_btc_request` enforces it. The two must agree.
     pub fn allows_vanilla_btc(&self) -> bool {
         self.btc_max_total_sats != 0
+    }
+}
+
+/// Commit network inputs without changing the runtime KMS recovery contract.
+/// Hash the decoded request re-encoded with the pinned protobuf schema.
+pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u8; 32] {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    let mut network = request.clone();
+    network.kms_key_arn.clear();
+    network.kms_region.clear();
+    network.kms_seed_id.clear();
+    network.kms_expected_evm_address.clear();
+    Sha256::digest(network.encode_to_vec()).into()
+}
+
+fn parse_endpoints_sha256(value: Option<&str>) -> std::result::Result<Option<[u8; 32]>, String> {
+    match value {
+        None | Some("") => Ok(None),
+        Some(value) => hex::decode(value)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(Some)
+            .ok_or_else(|| "ENDPOINTS_SHA256 must be exactly 64 hex characters".into()),
     }
 }
 
@@ -694,6 +725,54 @@ fn parse_host(name: &str, host: &str) -> std::result::Result<String, String> {
 mod tests {
     use super::*;
     use crate::proto::SetEndpointsRequest;
+
+    #[test]
+    fn endpoints_digest_matches_the_parent_golden_vector_and_excludes_kms() {
+        // The parent uses the upstream protobuf crate; the enclave vendors its
+        // schema. Keep this independently computed wire vector equal in both.
+        let mut request = SetEndpointsRequest {
+            electrum_url: "ssl://electrum.test:50002".into(),
+            evm_rpc_host: "rpc.test".into(),
+            evm_rpc_ca_der: vec![1, 2, 3],
+            evm_rpc_tls_port: 443,
+            kms_key_arn: "key".into(),
+            kms_region: "region".into(),
+            kms_seed_id: "seed".into(),
+            kms_expected_evm_address: "address".into(),
+        };
+        let expected = "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9";
+        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
+
+        // Runtime seed recovery inputs must not require another measured EIF.
+        for field in [
+            &mut request.kms_key_arn,
+            &mut request.kms_region,
+            &mut request.kms_seed_id,
+            &mut request.kms_expected_evm_address,
+        ] {
+            field.clear();
+        }
+        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
+    }
+
+    #[test]
+    fn endpoints_digest_env_requires_exactly_64_hex_characters() {
+        assert_eq!(parse_endpoints_sha256(None), Ok(None));
+        assert_eq!(parse_endpoints_sha256(Some("")), Ok(None));
+        for value in ["ab".repeat(32), "AB".repeat(32)] {
+            assert_eq!(parse_endpoints_sha256(Some(&value)), Ok(Some([0xab; 32])));
+        }
+        for value in [
+            "a".repeat(63),
+            "a".repeat(65),
+            "gg".repeat(32),
+            format!("0x{}", "ab".repeat(32)),
+            format!(" {}", "ab".repeat(32)),
+            format!("{} ", "ab".repeat(32)),
+        ] {
+            assert!(parse_endpoints_sha256(Some(&value)).is_err(), "{value}");
+        }
+    }
 
     /// Every name the SPV chain runs on attests the network a verifier
     /// expects for that same name (W-04: testnet4 attested as mainnet).

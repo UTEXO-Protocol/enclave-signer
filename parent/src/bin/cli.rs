@@ -135,6 +135,10 @@ enum Command {
     /// Set the chain endpoints and the KMS values once, after launch. The
     /// enclave rejects a second call.
     SetEndpoints {
+        /// Print the chain-endpoint SHA-256 (excluding KMS fields) without contacting
+        /// an enclave. Uses the same flags, environment and CA file as launch.
+        #[arg(long)]
+        print_sha256: bool,
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
@@ -276,6 +280,17 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
     }
+}
+
+fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    let mut network = request.clone();
+    network.kms_key_arn.clear();
+    network.kms_region.clear();
+    network.kms_seed_id.clear();
+    network.kms_expected_evm_address.clear();
+    Sha256::digest(network.encode_to_vec()).into()
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -636,8 +651,16 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SetEndpoints { endpoints } => {
-            match client.set_endpoints(endpoints_request(endpoints)) {
+        Command::SetEndpoints {
+            print_sha256,
+            endpoints,
+        } => {
+            let request = endpoints_request(endpoints);
+            if print_sha256 {
+                println!("{}", hex::encode(endpoints_sha256(&request)));
+                return;
+            }
+            match client.set_endpoints(request) {
                 Ok(()) => println!("Endpoints set"),
                 Err(e) => fail(e.to_string()),
             }
@@ -993,6 +1016,47 @@ fn run_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoints_digest_matches_the_enclave_golden_vector() {
+        let cli = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::SetEndpoints {
+                print_sha256: true,
+                ..
+            }
+        ));
+        // The enclave uses its vendored protobuf schema; the parent uses the
+        // upstream crate. This shared vector detects schema/encoding drift.
+        let mut request = SetEndpointsRequest {
+            electrum_url: "ssl://electrum.test:50002".into(),
+            evm_rpc_host: "rpc.test".into(),
+            evm_rpc_ca_der: vec![1, 2, 3],
+            evm_rpc_tls_port: 443,
+            kms_key_arn: "key".into(),
+            kms_region: "region".into(),
+            kms_seed_id: "seed".into(),
+            kms_expected_evm_address: "address".into(),
+        };
+        assert_eq!(
+            hex::encode(endpoints_sha256(&request)),
+            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+        );
+        // KMS bootstrap/recovery inputs are deliberately outside the chain pin.
+        for field in [
+            &mut request.kms_key_arn,
+            &mut request.kms_region,
+            &mut request.kms_seed_id,
+            &mut request.kms_expected_evm_address,
+        ] {
+            field.clear();
+        }
+        assert_eq!(
+            hex::encode(endpoints_sha256(&request)),
+            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+        );
+    }
 
     #[test]
     fn submit_headers_is_not_a_command() {

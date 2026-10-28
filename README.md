@@ -154,13 +154,17 @@ The mint signer and the burn signer get their seed in different ways:
   recover the same seed. Peer cloning is off. See
   [`docs/kms-persistence.md`](docs/kms-persistence.md).
 - **Burn signer**: the enclave makes a BIP-39 mnemonic from OS entropy.
-  Replicas get the seed through the attested cloning handshake.
+  Replicas get the seed through the attested cloning handshake. Keep a live
+  donor before replacing the last replica; cloning is not permanent storage.
 
 Both keep the 64-byte seed in a `SecretBox` (zeroized on drop). The enclave
 never exports the plaintext seed. For mint signers, KMS also handles the
 plaintext seed during generation and decryption. Mnemonic or raw-seed import
 exists only with
-`allow-seed-import` (dev builds).
+`allow-seed-import` (dev builds). The same custody rules apply to
+[public-Signet staging](docs/stage-signet.md): mint uses KMS/S3 recovery, burn
+uses authenticated cloning, and only Bitcoin SPV is omitted. Arbitrum One
+(`42161`) may remain the EVM network.
 
 Key paths:
 
@@ -285,7 +289,7 @@ has one role, its own PCR0 and its own seed. Use `--no-default-features`:
 
 ```bash
 # Mint signer (EVM -> RGB)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer,kms-persistence
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
 
 # Burn signer (RGB -> EVM)
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
@@ -308,11 +312,11 @@ cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-
 ```
 
 Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
-real-attestation mint/burn builds for [public Signet](docs/public-signet.md);
+real-attestation mint/burn builds for [public Signet](docs/stage-signet.md);
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 `kms-persistence` requires `mint-signer`;
-`mint-signer` with SPV requires `kms-persistence`;
+`mint-signer` always enables `kms-persistence`;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
@@ -592,8 +596,12 @@ after the selected head covers it. Production verification requires
 `--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
-(`SetEndpoints`), never in the image. The attested policy commits the Electrum
-host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. A build
+(`SetEndpoints`), never in the image. A Production policy commits the Electrum
+host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. The
+Development policy used without SPV does not separately commit these fields;
+those images enforce a measured `ENDPOINTS_SHA256` digest of the network inputs,
+while KMS values remain runtime inputs. Approve them as described in
+[staging](docs/stage-signet.md). A build
 requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
@@ -683,7 +691,7 @@ utexo-bridge-parent-cli --addr vsock://16 health
 
 ```bash
 cargo test                                                              # enclave workspace, default features
-cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,kms-persistence,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --features evm-rpc
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
@@ -707,7 +715,7 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb-validation` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
 | `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `rgb-psbt-utils` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the PSBT. |
-| `mint-signer` | `bfa-mint` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
+| `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
