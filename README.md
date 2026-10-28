@@ -471,9 +471,10 @@ the root file system keep part of the launch value. nitro-cli gives an enclave
 whole hugepages, 1 GiB pages first. A value that is not a whole number of GiB
 can take a further 1 GiB page, so the deploy scripts refuse it.
 
-The Nitro allocator must hold `ENCLAVE_MEMORY` for every configured enclave:
-the default single enclave needs 4096 MiB. An operator can explicitly deploy
-more with `ENCLAVE_CIDS="16 18 20"`; three replicas need 12288 MiB. `memory_mib` in
+Each deployment invocation configures exactly one enclave, so it needs
+`ENCLAVE_MEMORY` (4096 MiB by default). The default CID is `16`; set
+`ENCLAVE_CID=18` or `20` to deploy another supported CID. Run the command again
+for each additional enclave. `memory_mib` in
 `/etc/nitro_enclaves/allocator.yaml` sets the pool when the allocator starts,
 at boot or on a restart of `nitro-enclaves-allocator.service`. The allocator
 refuses to change the pool while an enclave runs, and the enclave units
@@ -498,11 +499,10 @@ rolling restart. It makes the same checks and changes nothing. `start` refuses
 only when the free hugepages cannot hold its own enclave.
 
 `check` reads its values from `/etc/utexo/enclave.env`, the file that systemd
-gives to `start`. The deployed CIDs come from `ENCLAVE_CIDS` (default `16`),
-which `deploy-host.sh` writes to that file. The memory requirement is derived
-from the list; there is no separate enclave-count setting. A key that is not
-in the file gets its default. A drop-in or the systemd manager can still give
-`start` a value for such a key, but `deploy-host.sh` writes all four keys. `check`
+gives to `start`. Each invocation checks one enclave; there is no enclave-count
+or CID-list setting. A key that is not in the file gets its default. A drop-in
+or the systemd manager can still give `start` a value for such a key, but
+`deploy-host.sh` writes all three keys. `check`
 refuses a file that it cannot read, so run it as root or as a user that can
 read the file. `check` reads only these plain lines:
 
