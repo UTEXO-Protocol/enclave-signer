@@ -32,6 +32,8 @@ name = "attest-verify"
 path = "src/bin/attest_verify.rs"
 
 [dependencies]
+bytes = "1"
+http-body-util = "0.1"
 prost = "0.14"
 tonic = { version = "0.14", features = ["tls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

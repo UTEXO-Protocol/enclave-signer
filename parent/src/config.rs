@@ -24,7 +24,10 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// Maximum active gRPC requests across all connections. (F03-AF-13)
+    /// Maximum active gRPC requests across all connections (F03-AF-13). An
+    /// active request holds its body and its decoded message, at most about
+    /// 75 MiB (`request_shape`). So the default is 8. The enclave works
+    /// on 4 requests at once and queues 16.
     pub grpc_max_concurrent: usize,
 
     /// Maximum in-flight gRPC requests and HTTP/2 streams per connection.
@@ -54,7 +57,7 @@ impl Config {
             use_vsock: std::env::var("USE_VSOCK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
+            grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 8usize).max(1),
             grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
             grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),
             health_host: std::env::var("HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),

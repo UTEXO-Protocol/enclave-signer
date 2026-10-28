@@ -274,6 +274,10 @@ EnvironmentFile=/etc/utexo/parent-%i.env
 ExecStart=/usr/local/bin/utexo-parent-ctl.sh
 Restart=on-failure
 RestartSec=2
+# The parent serves at most 8 requests at once, each at most about 75 MiB
+# (parent/src/request_shape.rs). Above this limit the kernel stops this
+# parent only, and systemd starts it again.
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target

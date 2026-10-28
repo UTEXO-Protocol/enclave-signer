@@ -203,15 +203,18 @@ impl ParentAdapterService {
         }
     }
 
+    /// Copies only `common`. A copy of the whole request would also copy the
+    /// source with every Merkle proof.
     fn common_sign_request(req: &grpc_proto::SignRequest) -> Result<CommonSignRequest, Status> {
-        req.clone()
-            .common
+        req.common
             .ok_or_else(|| Status::invalid_argument("SignRequest.common is missing"))
     }
 
-    fn source_proof(req: &grpc_proto::SignRequest) -> Result<SourceProof, Status> {
+    /// Moves the source out of the request, so that its Merkle proofs exist
+    /// once.
+    fn source_proof(req: &mut grpc_proto::SignRequest) -> Result<SourceProof, Status> {
         req.source
-            .clone()
+            .take()
             .ok_or_else(|| Status::invalid_argument("SignRequest.source is missing"))
     }
 
@@ -444,7 +447,7 @@ impl ParentService for ParentAdapterService {
         &self,
         request: Request<grpc_proto::SignRequest>,
     ) -> Result<Response<SignatureResponse>, Status> {
-        let inner = request.into_inner();
+        let mut inner = request.into_inner();
 
         let common = Self::common_sign_request(&inner)?;
         let data_type = DataType::try_from(common.data_type).map_err(|_| {
@@ -500,7 +503,7 @@ impl ParentService for ParentAdapterService {
 
         match data_type {
             DataType::Transaction => {
-                let source = Self::source_proof(&inner)?;
+                let source = Self::source_proof(&mut inner)?;
                 let amount = source.amount;
 
                 let destination_network = match inner.data {

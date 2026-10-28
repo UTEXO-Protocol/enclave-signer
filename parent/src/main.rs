@@ -112,6 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = server
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
+        // Inside the limit: the shape check holds each body it reads.
+        .layer(utexo_bridge_parent::request_shape::ShapeLayer)
         .load_shed(true)
         .max_connection_age(Duration::from_secs(300))
         .max_connection_age_grace(Duration::from_secs(30))
