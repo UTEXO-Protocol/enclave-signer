@@ -425,6 +425,24 @@ fn test_sign_psbt_invalid_bytes() {
     assert!(result.is_err());
 }
 
+/// A PSBT over the size limit is refused before the parse, for every account
+/// scope, with the cross-check error the validation paths give.
+#[test]
+fn a_psbt_over_the_size_limit_is_refused_before_signing() {
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy).unwrap();
+    let (km, _mnemonic) = KeyManager::generate(&mut entropy, Network::Bitcoin).unwrap();
+
+    let bytes = vec![0x70; crate::config::MAX_PSBT_BYTES + 1];
+    for scope in [None, Some(AccountType::Vanilla), Some(AccountType::Colored)] {
+        let err = km.sign_psbt_scoped(&bytes, scope).unwrap_err();
+        assert!(
+            matches!(err, EnclaveError::CrossCheck(ref m) if m.contains("the limit is")),
+            "{scope:?}: {err}"
+        );
+    }
+}
+
 /// A BIP-86 key-path taproot PSBT. The key is at m/86'/1'/0'/0/0 (vanilla
 /// testnet).
 fn build_test_taproot_psbt(km: &KeyManager) -> Vec<u8> {

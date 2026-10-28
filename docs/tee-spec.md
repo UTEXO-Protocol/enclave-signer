@@ -149,30 +149,57 @@ enables `kms-persistence`. Production images are built with
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
-protobuf, 24 MiB frame cap, no version field (`framing.rs`). Before the
+protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
 decode, `check_request_shape` counts the field occurrences on the wire and
 refuses a request with more than 2^19 (`MAX_WIRE_ELEMENTS`). The walk enters
 only the messages that `framing::Schema` names. A test reads `enclave.proto`
-and fails when a request message gets a repeated field outside them. The Bitcoin
-indexer and the EVM RPC are reached through in-enclave loopback forwarders
-that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
-and 8002); the enclave has no direct network stack.
+and fails when a request message gets a repeated field outside them. The
+Bitcoin indexer and the EVM RPC are reached through in-enclave loopback
+forwarders. They bridge over vsock to host-side `vsock-proxy` instances
+(vsock ports 8001 and 8002). The enclave has no direct network stack.
 
 **Request memory model** (`memory.rs`). The enclave has a fixed amount of
 memory and no swap. So the heap one request can use has a bound that depends
-only on its size. The bound is
-`REQUEST_MEMORY_FACTOR` (20) times the frame, plus 64 MiB for the decoded
-protobuf elements. Each parser with a large input has a test. The test runs
-the largest input and fails above the factor. The measured values are 3 for
-reading a frame, about 15 for consignment validation and under 2 for the gas
-transaction and PSBT parsers. A whole burn request through `dispatch`, with
-the decoded request held during validation, peaks at about 15 times its frame,
-or 14.5 beyond the element term. Four workers, the bound for a 24 MiB frame and a
-512 MiB baseline give the minimum usable memory (2688 MiB). A release build
-reads `MemTotal` from `/proc/meminfo` at boot and refuses to start with less,
-or with no readable total. `MemTotal` leaves out the memory the kernel keeps
-for itself, so `run-enclave --memory` must give at least 3584 MiB. The deploy
-scripts use that value and refuse a smaller `ENCLAVE_MEMORY`.
+only on its size. The bound is `REQUEST_MEMORY_FACTOR` (20) times the frame,
+plus 64 MiB for the decoded protobuf elements. Most parsers that grow with
+their input stay within the factor. Reading a frame takes 3 times the frame.
+Consignment validation of a long history takes about 11 times the
+consignment. The gas transaction parser stays under 0.1, and a PSBT whose
+bytes sit in large records takes about 1.5. A whole burn request through
+`dispatch` holds the decoded request during validation. It peaks at about
+10.7 times its frame beyond the element term.
+
+Some parsers take more on the densest inputs measured, and each has a size
+limit:
+
+- a PSBT of one input and outputs with two empty records each: about 102
+  times, 1 MiB limit
+- an attestation document of CBOR nulls: about 48 times, 64 KiB limit
+- a consignment of transfers that turn one mint right into tens of
+  thousands: about 43 times, 10 MiB limit
+
+At those limits each fits the bound of the largest frame, 544 MiB, which each
+worker holds. A request holds at most two parsed PSBTs at once. Validation
+of the densest consignment measured took 430 MiB at the limit. A burn request
+with it takes about 529 MiB by the test's count. The sender sets part of the
+rate through the order of the OpIds, which sets how full RGB validation keeps
+its B-trees. Validation clones the decoded consignment, so each decoded list
+keeps only its length. `MAX_CONSIGNMENT_BYTES` can lower that limit, and the
+enclave refuses to start with a larger value.
+
+The tests measure the frame, consignment, PSBT, gas transaction and
+attestation document parsers on the densest shapes measured. The other parsers
+have small size limits and refusal tests. The remaining request fields are
+fixed-size, refused before use, never read, or only compared, hashed or read
+once. `memory.rs` names the ones with no upper limit. Four workers, the bound
+for a 24 MiB frame and a 512 MiB baseline give the minimum usable memory
+(2688 MiB). A release build reads `MemTotal` from `/proc/meminfo` at boot. It
+refuses to start with less, or with no readable total. `MemTotal` leaves out
+the memory the kernel keeps for itself, so `run-enclave --memory` must give
+at least 4096 MiB, a whole number of GiB. The deploy scripts use that value
+and refuse a smaller `ENCLAVE_MEMORY`. `deploy-host.sh` and
+`utexo-enclave-ctl.sh check` also refuse a hugepage pool that cannot hold
+every enclave of the host.
 
 **Launch endpoints.** The endpoints are not in the image, so a rebuild of the
 EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
@@ -751,7 +778,9 @@ signer runs none (Sec 7.2). Cheap checks first: non-empty payload within
 (integrity only), asset id declared; then full `rgb-ops` 0.11.2 validation of
 a V1 transfer file. A V1 consignment carries no schema, types or scripts: the
 BFA rules come from `rgb-schemas`, and any other schema id, or a reject list
-that is not an EVM contract, is refused. Validation runs in two phases. Phase 1
+that is not an EVM contract, is refused. The enclave also refuses terminals
+that name more than 4096 outputs (`MAX_TERMINAL_OUTPUTS`), because Phase 1
+keeps an entry for each. Validation runs in two phases. Phase 1
 (`validate_deterministic`) checks everything that depends on the consignment
 only. It leaves open each witness and each BFA mint anchor (the mint's OpId,
 `issuedSupply` and `afterBlock`). Phase 2 resolves every witness on chain:

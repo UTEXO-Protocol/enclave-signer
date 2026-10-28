@@ -235,16 +235,77 @@ pub(super) fn dispatch(
     (response, reservation)
 }
 
+/// The most bytes of an error text that dispatch keeps before it adds the
+/// full length, in what it logs and returns. A text can quote request data,
+/// such as a declared asset id. The log formatter keeps a buffer as large as
+/// the longest line it wrote on each thread. So a long line would hold heap
+/// after its request ends (`memory.rs`).
+const MAX_ERROR_TEXT_BYTES: usize = 1024;
+
+/// The text of `e`, cut at [`MAX_ERROR_TEXT_BYTES`] with its full length
+/// after the cut.
+fn error_text(e: &EnclaveError) -> String {
+    let mut text = e.to_string();
+    if text.len() > MAX_ERROR_TEXT_BYTES {
+        let len = text.len();
+        let mut end = MAX_ERROR_TEXT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(&format!("... ({len} bytes)"));
+    }
+    text
+}
+
 fn error_response(code: u32, e: &EnclaveError) -> EnclaveResponse {
+    let message = error_text(e);
     if matches!(e, EnclaveError::EvmFinalityPending { .. }) {
-        tracing::debug!("waiting for EVM finality: {}", e);
+        tracing::debug!("waiting for EVM finality: {message}");
     } else {
-        tracing::warn!("handler error: {}", e);
+        tracing::warn!("handler error: {message}");
     }
     EnclaveResponse {
-        response: Some(Response::Error(ErrorResponse {
-            code,
-            message: e.to_string(),
-        })),
+        response: Some(Response::Error(ErrorResponse { code, message })),
+    }
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::*;
+
+    /// A long error text, here an asset id the request declares, is cut
+    /// before dispatch logs or returns it. A cut never splits a character.
+    #[test]
+    fn a_long_error_text_is_cut_before_it_is_logged_or_returned() {
+        let short = EnclaveError::CrossCheck("contract_id mismatch".into());
+        assert_eq!(error_text(&short), short.to_string());
+
+        for filler in ["a", "\u{00e9}", "\u{1f600}"] {
+            let declared = filler.repeat(4 * 1024 * 1024 / filler.len());
+            // The text before the filler is 41 bytes. So byte 1024 is inside a
+            // character of each multibyte filler, and the cut must move back.
+            let e = EnclaveError::CrossCheck(format!("RGB source declares x{declared}"));
+            if filler.len() > 1 {
+                assert!(!e.to_string().is_char_boundary(MAX_ERROR_TEXT_BYTES));
+            }
+            let EnclaveResponse {
+                response: Some(Response::Error(ErrorResponse { code, message })),
+            } = error_response(3, &e)
+            else {
+                panic!("not an error response");
+            };
+            assert_eq!(code, 3);
+            assert!(
+                message.len() <= MAX_ERROR_TEXT_BYTES + 32,
+                "{}",
+                message.len()
+            );
+            assert!(
+                message.ends_with(&format!("... ({} bytes)", e.to_string().len())),
+                "{} bytes",
+                message.len()
+            );
+        }
     }
 }

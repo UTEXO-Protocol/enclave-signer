@@ -152,6 +152,12 @@ jobs:
         run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer --all-targets -- -D warnings
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
+      # Three tests use a history of 10 000 transfers: the consignment memory
+      # test, the whole burn request through dispatch, and the default request
+      # limits. They are slow in a debug build and ignored by default. The
+      # name filter runs only them.
+      - name: Test (rgb burn signer, 10 000-transfer tests)
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import --lib -- --ignored 10_000
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors

@@ -286,7 +286,7 @@ fn reference_of(bytes: &[u8]) -> Summary {
 #[test]
 fn the_summary_matches_the_rgbstd_reading_on_every_generated_shape() {
     for (name, bytes) in generated_shapes() {
-        let inspected = extract_transition_summary(&bytes).unwrap();
+        let inspected = extract_transition_summary(&bytes, None).unwrap();
         assert_eq!(inspected, reference_of(&bytes), "{name}");
     }
 }

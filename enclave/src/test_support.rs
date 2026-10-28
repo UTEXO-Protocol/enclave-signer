@@ -242,7 +242,7 @@ pub(crate) fn regtest_header_chain() -> std::sync::Mutex<crate::networks::rgb::s
 
 /// A fresh regtest chain: one single-tx block per witness (display order)
 /// from height 1, then `depth_above` empty blocks, submitted in batches of
-/// the per-submit cap. Returns the chain and a Merkle proof per witness.
+/// the per-submit limit. Returns the chain and a Merkle proof per witness.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub(crate) fn chain_with_witnesses(
     witness_txids: &[[u8; 32]],

@@ -14,15 +14,23 @@
 use crate::error::{EnclaveError, Result};
 use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 
-/// Default consignment size cap (`MAX_CONSIGNMENT_BYTES`). Defense-in-depth DoS
-/// bound. The wire frame ([`crate::framing::MAX_MESSAGE_SIZE`]) also caps it.
+/// Default consignment size limit (`MAX_CONSIGNMENT_BYTES`), and the largest
+/// value that variable may set. The wire frame
+/// ([`crate::framing::MAX_MESSAGE_SIZE`]) also limits it.
 ///
 /// The three defaults below are sized for a history of 10_000 state
 /// transitions. A V1 consignment carries no schema or types, and each
 /// transition adds approx 470 bytes, or 890 with an SPV proof of a full
 /// mainnet block. Measured: 10_002 transitions, each with a proof, are
-/// 8_932_088 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
-pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 12 * 1024 * 1024;
+/// 8_932_069 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
+///
+/// The memory model sets the upper end. Validation of the densest
+/// consignment measured takes about 43 times its bytes. At this size, a burn
+/// request with such a consignment fits the heap each worker holds
+/// (`memory.rs`), with little room left. So the enclave refuses to start
+/// with a larger value ([`parse_consignment_limit`]).
+pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
+
 /// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
 /// one proof for each witness tx in its history.
 pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
@@ -31,6 +39,31 @@ pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
 /// fits: 16_384 x 448 bytes = 7.3 MB.
 pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most bytes a PSBT may have, on every path that parses one. A decoded
+/// input or output takes far more memory than its bytes. The densest shape
+/// measured parses at about 102 times its bytes: one input, and outputs that
+/// each carry two empty records. At this limit, the two PSBTs a request can
+/// hold parsed at once fit the heap each worker holds (`memory.rs`).
+///
+/// The tested flows are far smaller: a mint is about 1 KiB, and a rights
+/// refill of 255 outputs measured about 40 KiB. rgb-lib puts the whole
+/// previous transaction into each input. So the size of a plain-BTC PSBT
+/// grows with its inputs and the size of their previous transactions. A PSBT
+/// that spends very many outputs of large transactions must be split.
+pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
+
+/// Refuses `bytes` over [`MAX_PSBT_BYTES`] before any parse. `what` names the
+/// field in the error.
+pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
+    if bytes.len() > MAX_PSBT_BYTES {
+        return Err(crate::error::EnclaveError::CrossCheck(format!(
+            "{what} is {} bytes; the limit is {MAX_PSBT_BYTES}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
 
 /// Env var of [`BridgeConfig::spv_min_confirmations`].
 pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
@@ -116,9 +149,10 @@ pub struct BridgeConfig {
     /// `none` is for a local stand only; production does not boot on it
     /// ([`crate::policy::ProductionPolicy::check_invariants`]).
     pub btc_relay_mode: BtcRelayMode,
-    /// RGB request-size caps (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
-    /// `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*` value.
-    /// Defense-in-depth DoS bounds, not attested.
+    /// RGB request size limits (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
+    /// `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*` value. A
+    /// consignment limit above its default stops the boot
+    /// ([`parse_consignment_limit`]). Not attested.
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
@@ -320,7 +354,8 @@ impl BridgeConfig {
                 .unwrap_or(default)
         };
         let max_consignment_bytes =
-            parse_cap("MAX_CONSIGNMENT_BYTES", DEFAULT_MAX_CONSIGNMENT_BYTES);
+            parse_consignment_limit(std::env::var("MAX_CONSIGNMENT_BYTES").ok().as_deref())
+                .unwrap_or_else(|e| panic!("{e}"));
         let max_merkle_proofs = parse_cap("MAX_MERKLE_PROOFS", DEFAULT_MAX_MERKLE_PROOFS);
         let max_total_proof_bytes =
             parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
@@ -384,6 +419,25 @@ impl BridgeConfig {
     }
 }
 
+/// Parses `MAX_CONSIGNMENT_BYTES`. Unset, unparseable or zero gives the
+/// default, as for the other request limits. A value above
+/// [`DEFAULT_MAX_CONSIGNMENT_BYTES`] is refused, because the memory model
+/// holds only up to that size (`memory.rs`).
+pub fn parse_consignment_limit(value: Option<&str>) -> std::result::Result<usize, String> {
+    match value
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        None => Ok(DEFAULT_MAX_CONSIGNMENT_BYTES),
+        Some(n) if n <= DEFAULT_MAX_CONSIGNMENT_BYTES => Ok(n),
+        Some(n) => Err(format!(
+            "MAX_CONSIGNMENT_BYTES {n} is above {DEFAULT_MAX_CONSIGNMENT_BYTES}, the largest \
+             consignment the request memory model allows (memory.rs); set a smaller value or \
+             leave it unset"
+        )),
+    }
+}
+
 /// Parse `SPV_MIN_CONFIRMATIONS`. Unset or empty gives the default. Zero or a
 /// non-number is an error, so a typo cannot lower the depth.
 pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u32, String> {
@@ -411,6 +465,16 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
         ))
     })
 }
+
+/// The most bytes the EVM RPC CA certificate may have. A CA certificate is a
+/// few KiB. The DER parse only borrows the bytes, and the enclave keeps one
+/// copy of them for the TLS client. The limit bounds that copy (`memory.rs`).
+pub const MAX_EVM_RPC_CA_DER_BYTES: usize = 16 * 1024;
+
+/// The most bytes of each string in `SetEndpoints`: 2048, the longest ARN
+/// AWS allows. A legal value is at most 268 bytes, an Electrum URL with a
+/// host name of 253 bytes.
+pub const MAX_ENDPOINT_STRING_BYTES: usize = 2048;
 
 /// The TLS pin of the EVM RPC endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,6 +513,25 @@ impl Endpoints {
     /// Check the values this build uses. A value the build does not use
     /// must be empty.
     pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {
+        // Each string is short: a URL, a host name, an ARN of at most 2048
+        // bytes, a region, a seed id or an address. The parsers below split
+        // them into parts, which take more memory than their bytes. So the
+        // size limit runs first (`memory.rs`).
+        for (name, value) in [
+            ("electrum_url", &req.electrum_url),
+            ("evm_rpc_host", &req.evm_rpc_host),
+            ("kms_key_arn", &req.kms_key_arn),
+            ("kms_region", &req.kms_region),
+            ("kms_seed_id", &req.kms_seed_id),
+            ("kms_expected_evm_address", &req.kms_expected_evm_address),
+        ] {
+            if value.len() > MAX_ENDPOINT_STRING_BYTES {
+                return Err(format!(
+                    "{name} is {} bytes; the limit is {MAX_ENDPOINT_STRING_BYTES}",
+                    value.len()
+                ));
+            }
+        }
         // Allow one trailing slash. The Electrum client does not.
         let electrum_url = req
             .electrum_url
@@ -465,6 +548,14 @@ impl Endpoints {
         #[cfg(feature = "evm-rpc")]
         let evm_rpc_tls = {
             let host = parse_host("evm_rpc_host", &req.evm_rpc_host)?;
+            // A CA certificate is a few KiB. Refuse more before the parse and
+            // before the copy that the TLS client keeps.
+            if req.evm_rpc_ca_der.len() > MAX_EVM_RPC_CA_DER_BYTES {
+                return Err(format!(
+                    "evm_rpc_ca_der is {} bytes; the limit is {MAX_EVM_RPC_CA_DER_BYTES}",
+                    req.evm_rpc_ca_der.len()
+                ));
+            }
             let ca = rustls_pki_types::CertificateDer::from(req.evm_rpc_ca_der.as_slice());
             // The same check as the client root store, so a bad CA is never
             // attested.
@@ -783,6 +874,22 @@ mod tests {
         }
     }
 
+    /// `MAX_CONSIGNMENT_BYTES` may lower the limit, never raise it past the
+    /// size the memory model is sized for.
+    #[test]
+    fn the_consignment_limit_cannot_be_raised_above_the_default() {
+        let max = DEFAULT_MAX_CONSIGNMENT_BYTES;
+        for unset in [None, Some(""), Some("0"), Some("ten"), Some("-1")] {
+            assert_eq!(parse_consignment_limit(unset), Ok(max), "{unset:?}");
+        }
+        assert_eq!(parse_consignment_limit(Some("1048576")), Ok(1024 * 1024));
+        assert_eq!(parse_consignment_limit(Some(&max.to_string())), Ok(max));
+        for above in [max + 1, 12 * 1024 * 1024, 1 << 30] {
+            let err = parse_consignment_limit(Some(&above.to_string())).unwrap_err();
+            assert!(err.contains("memory model"), "{above}: {err}");
+        }
+    }
+
     #[test]
     fn parse_eth_address_rejects_wrong_length() {
         assert!(parse_eth_address("0xabcd").is_err());
@@ -1042,6 +1149,44 @@ mod tests {
                 "{ca:?}"
             );
         }
+        let err = parse_with(|r| r.evm_rpc_ca_der = vec![0x30; MAX_EVM_RPC_CA_DER_BYTES + 1])
+            .unwrap_err();
+        assert!(err.contains("the limit is"), "{err}");
+    }
+
+    /// Each `SetEndpoints` string over the limit is refused before any parse.
+    /// A key ARN of colons would split into one part per colon: the
+    /// measurement shows the refusal stays within the request bound.
+    #[test]
+    fn a_set_endpoints_string_over_the_limit_is_refused_before_the_parse() {
+        use crate::memory::peak;
+
+        type Set = fn(&mut SetEndpointsRequest, String);
+        let fields: [(&str, Set); 6] = [
+            ("electrum_url", |r, v| r.electrum_url = v),
+            ("evm_rpc_host", |r, v| r.evm_rpc_host = v),
+            ("kms_key_arn", |r, v| r.kms_key_arn = v),
+            ("kms_region", |r, v| r.kms_region = v),
+            ("kms_seed_id", |r, v| r.kms_seed_id = v),
+            ("kms_expected_evm_address", |r, v| {
+                r.kms_expected_evm_address = v
+            }),
+        ];
+        for (name, set) in fields {
+            let err =
+                parse_with(|r| set(r, ":".repeat(MAX_ENDPOINT_STRING_BYTES + 1))).unwrap_err();
+            assert!(
+                err.starts_with(name) && err.contains("the limit is"),
+                "{err}"
+            );
+        }
+
+        let (arn, result, peak) = peak::measure(
+            || ":".repeat(4 * 1024 * 1024),
+            |arn| parse_with(|r| r.kms_key_arn = arn.clone()),
+        );
+        assert!(result.unwrap_err().contains("the limit is"));
+        peak::assert_within_request_bound("SetEndpoints with a 4 MiB key ARN", arn.len(), peak);
     }
 
     #[cfg(feature = "evm-rpc")]

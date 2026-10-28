@@ -1537,16 +1537,179 @@ fn psbt_with_large_input_records(extra: usize) -> Vec<u8> {
     psbt
 }
 
-/// The request memory model (`memory.rs`): parsing a PSBT of the largest
-/// frame size uses a small multiple of its bytes.
+/// The request memory model (`memory.rs`): parsing a PSBT at the size limit
+/// whose bytes sit in large records uses a small multiple of its bytes.
 #[test]
 fn psbt_parsing_stays_within_the_request_memory_factor() {
     use crate::memory::peak;
 
     let (bytes, parsed, peak) = peak::measure(
-        || psbt_with_large_input_records(crate::framing::MAX_MESSAGE_SIZE as usize - 1024),
+        || psbt_with_large_input_records(crate::config::MAX_PSBT_BYTES - 1024),
         |bytes| super::parse_psbt_shape(bytes).map(|p| p.inputs.len()),
     );
-    assert_eq!(parsed.unwrap(), 8);
+    assert_eq!(parsed.unwrap(), 1);
     peak::assert_within_factor("PSBT parsing", bytes.len(), peak);
+}
+
+/// Dense PSBT shapes: each byte decodes into a large structure.
+#[derive(Clone, Copy, Debug)]
+enum Dense {
+    /// Equal numbers of the smallest inputs and outputs.
+    InputsAndOutputs,
+    /// One input and the smallest outputs: 9 bytes of transaction and an
+    /// empty map each.
+    Outputs,
+    /// Input maps full of distinct 4-byte records of unknown type.
+    UnknownRecords,
+    /// One input, and outputs that each carry one record of unknown type
+    /// and one proprietary record, both empty. The first record of a map
+    /// allocates a whole B-tree leaf.
+    OutputRecords,
+}
+
+/// A BIP-174 PSBT of at most `total` bytes in the `shape` given.
+fn dense_psbt(total: usize, shape: Dense) -> Vec<u8> {
+    fn compact_size(n: usize, out: &mut Vec<u8>) {
+        match n {
+            0..=0xfc => out.push(n as u8),
+            0xfd..=0xffff => {
+                out.push(0xfd);
+                out.extend_from_slice(&(n as u16).to_le_bytes());
+            }
+            _ => {
+                out.push(0xfe);
+                out.extend_from_slice(&(n as u32).to_le_bytes());
+            }
+        }
+    }
+    // Distinct record keys per map: types 0x20..=0xfb, which no known
+    // record uses, with one key byte each.
+    const KEYS_PER_MAP: usize = 220 * 256;
+    let room = total - 64;
+    // 42 bytes per input (41 in the transaction, 1 empty map), 10 per output,
+    // and 18 per output with its two records.
+    let (inputs, outputs, records) = match shape {
+        Dense::InputsAndOutputs => (room / 52, room / 52, 0),
+        Dense::Outputs => (1, (room - 42) / 10, 0),
+        Dense::OutputRecords => (1, (room - 42) / 18, 0),
+        Dense::UnknownRecords => {
+            let records = (room - 6 * 42 - 10) / 4;
+            (records.div_ceil(KEYS_PER_MAP), 1, records)
+        }
+    };
+
+    let mut tx = 2u32.to_le_bytes().to_vec();
+    compact_size(inputs, &mut tx);
+    for i in 0..inputs {
+        tx.extend_from_slice(&[0x11; 32]);
+        tx.extend_from_slice(&(i as u32).to_le_bytes());
+        tx.push(0);
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+    }
+    compact_size(outputs, &mut tx);
+    for _ in 0..outputs {
+        tx.extend_from_slice(&1_000u64.to_le_bytes());
+        tx.push(0);
+    }
+    tx.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut psbt = b"psbt\xff".to_vec();
+    psbt.push(1);
+    psbt.push(0x00);
+    compact_size(tx.len(), &mut psbt);
+    psbt.extend_from_slice(&tx);
+    psbt.push(0x00);
+    let mut left = records;
+    for _ in 0..inputs {
+        let here = left.min(KEYS_PER_MAP);
+        for r in 0..here {
+            // Key of length 2 (type and one byte), empty value.
+            psbt.extend_from_slice(&[0x02, 0x20 + (r / 256) as u8, (r % 256) as u8, 0x00]);
+        }
+        left -= here;
+        psbt.push(0x00);
+    }
+    for _ in 0..outputs {
+        if matches!(shape, Dense::OutputRecords) {
+            // Type 0x20 with no key data, then type 0xfc with an empty
+            // prefix and subtype 0. Both values are empty.
+            psbt.extend_from_slice(&[0x01, 0x20, 0x00, 0x03, 0xfc, 0x00, 0x00, 0x00]);
+        }
+        psbt.push(0x00);
+    }
+    assert!(psbt.len() <= total, "{shape:?}: {} bytes", psbt.len());
+    psbt
+}
+
+/// The request memory model (`memory.rs`): the dense PSBT shapes at the
+/// PSBT size limit. They parse at more than the factor. The densest shape
+/// measured is one input and outputs that each carry two empty records. It
+/// parses at about 102 times its bytes, because the first record of a map
+/// allocates a whole B-tree leaf. A request holds at most two parsed PSBTs
+/// at once, a PSBT and its parent. The test checks that two of each shape
+/// fit the heap each worker holds. That request also holds the decoded
+/// elements, and the read and decode of its frame of `MAX_MESSAGE_SIZE` take
+/// 3 times the frame.
+#[test]
+fn dense_psbts_at_the_size_limit_fit_the_heap_each_worker_holds() {
+    use crate::framing::MAX_MESSAGE_SIZE;
+    use crate::memory::{peak, request_bound, ELEMENTS_BYTES};
+
+    let frame = MAX_MESSAGE_SIZE as usize;
+    let held = request_bound(frame);
+    for shape in [
+        Dense::InputsAndOutputs,
+        Dense::Outputs,
+        Dense::UnknownRecords,
+        Dense::OutputRecords,
+    ] {
+        let (bytes, parsed, peak) = peak::measure(
+            || dense_psbt(crate::config::MAX_PSBT_BYTES, shape),
+            |bytes| {
+                super::parse_psbt_shape(bytes).map(|p| {
+                    let records: usize = p
+                        .inputs
+                        .iter()
+                        .map(|i| i.unknown.len() + i.proprietary.len())
+                        .chain(
+                            p.outputs
+                                .iter()
+                                .map(|o| o.unknown.len() + o.proprietary.len()),
+                        )
+                        .sum();
+                    (p.inputs.len(), p.outputs.len(), records)
+                })
+            },
+        );
+        let (inputs, outputs, records) = parsed.unwrap();
+        // Each shape decodes many small entries.
+        assert!(
+            inputs + outputs + records > 10_000,
+            "{shape:?}: {inputs} inputs, {outputs} outputs, {records} records"
+        );
+        let request = 2 * peak + 3 * frame + ELEMENTS_BYTES;
+        println!(
+            "dense PSBT {shape:?}: {} bytes, {inputs} inputs, {outputs} outputs, {records} \
+             records, factor {:.1}; two parsed at once in a request at the limits {} MiB, \
+             heap each worker holds {} MiB",
+            bytes.len(),
+            peak as f64 / bytes.len() as f64,
+            request / (1024 * 1024),
+            held / (1024 * 1024)
+        );
+        assert!(
+            request <= held,
+            "dense PSBT {shape:?}: a request with two takes {request} bytes, over the heap \
+             each worker holds, {held} bytes"
+        );
+    }
+}
+
+/// A PSBT over the size limit is refused before the parse.
+#[test]
+fn a_psbt_over_the_size_limit_is_refused_before_the_parse() {
+    let err = super::parse_psbt_shape(&vec![0x70; crate::config::MAX_PSBT_BYTES + 1])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("the limit is"), "{err}");
 }
