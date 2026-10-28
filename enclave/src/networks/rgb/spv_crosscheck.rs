@@ -432,9 +432,10 @@ struct Pin {
 /// `assert_unchanged` reads those heights again. It fails if a hash changed or
 /// a block is shallower than required. An extension touches no pinned hash
 /// and only deepens the blocks, so signing continues. A replacement chain of
-/// fewer, heavier blocks above a pin keeps the hash and lowers the depth. The
-/// depth check refuses it, and the parent retries when the block is deep
-/// again.
+/// fewer, heavier blocks above a pin keeps the hash and lowers the depth. If
+/// that leaves the block shallower than its check required, the depth check
+/// refuses the signature. The request fails, and the caller must send it
+/// again when the block is deep enough.
 #[derive(Debug, Default)]
 pub struct ChainPins {
     pinned: std::sync::Mutex<std::collections::BTreeMap<u32, Pin>>,
@@ -503,13 +504,7 @@ impl ChainPins {
                     )));
                 }
             }
-            // `confirmations` counts stored headers only. The checkpoint is
-            // not stored, but every block above it confirms it.
-            let depth = if height == chain.checkpoint().height {
-                (chain.tip_height() - height + 1).min(pin.depth)
-            } else {
-                chain.confirmations(height, pin.depth)
-            };
+            let depth = chain.tip_height() - height + 1;
             if depth < pin.depth {
                 return Err(EnclaveError::Spv(format!(
                     "chain reorg after validation: height {height} was at least {} blocks deep \
@@ -574,7 +569,7 @@ mod chain_pin_tests {
         )
     }
 
-    /// Regtest's maximum target: the chain checks no work there.
+    /// Regtest's maximum target: the chain checks no proof of work there.
     const REGTEST_BITS: u32 = 0x207fffff;
     /// Mainnet's genesis target. A header with these bits carries about 2^31
     /// times the work of a regtest header, and regtest does not check PoW.
@@ -666,15 +661,15 @@ mod chain_pin_tests {
 
     #[test]
     fn reorg_below_a_pinned_block_that_shortens_the_chain_fails() {
-        let chain = chain_of(20);
+        let mut chain = chain_of(20);
         let pins = ChainPins::new();
         pins.pin(&chain, 18, 1).unwrap();
 
-        // The work rule forbids a stronger chain that ends below height 18.
-        // So test the other loss case: no header at 18 at all.
-        let mut short = empty_chain();
-        submit(&mut short, 1, 5, 0);
-        let err = pins.assert_unchanged(&short).unwrap_err();
+        // One heavy block from height 10 out-works the eleven regtest blocks
+        // it displaces. The chain then ends below height 18.
+        submit_with_bits(&mut chain, 10, 1, 7, HEAVY_BITS);
+        assert_eq!(chain.tip_height(), 10);
+        let err = pins.assert_unchanged(&chain).unwrap_err();
         assert!(err.to_string().contains("no header there"), "got: {err}");
     }
 

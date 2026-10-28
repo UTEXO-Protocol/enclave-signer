@@ -1662,6 +1662,70 @@ mod btc_relay {
         );
     }
 
+    /// A replacement chain of fewer, heavier blocks above the relay `latest`
+    /// header keeps both pinned blocks and leaves the anchor shallower than
+    /// the check required. Only the anchor depth refuses the signature. The
+    /// test fails if the anchor pin records depth 1.
+    #[test]
+    fn accepted_shorter_heavier_reorg_above_the_anchor_refuses() {
+        let (mut chain, hashes) = chain();
+        // The proof cites the block above the anchor as `latest`, so the
+        // replacement chain keeps that pin too.
+        let latest = ANCHOR_HEIGHT + 1;
+        let cd = calldata(
+            ANCHOR_HEIGHT,
+            hashes[ANCHOR_HEIGHT as usize],
+            latest,
+            hashes[latest as usize],
+        );
+        let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let pins = ChainPins::new();
+        verify_btc_relay_agreement(
+            &params_of(&cd),
+            &validated,
+            &proofs,
+            &chain,
+            &pins,
+            BtcRelayMode::Required,
+            DEFAULT_SPV_MIN_CONFIRMATIONS,
+        )
+        .unwrap();
+        let pinned = [ANCHOR_HEIGHT, latest].map(|h| chain.hash_at(h));
+
+        // Two blocks of the mainnet genesis target out-work the five regtest
+        // blocks above `latest`. Regtest checks no proof of work.
+        let mut prev =
+            <bitcoin::BlockHash as bitcoin::hashes::Hash>::from_byte_array(pinned[1].unwrap());
+        let mut raw = Vec::new();
+        for height in latest + 1..=latest + 2 {
+            let header = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xEE; 32]),
+                time: 1_700_000_000 + height,
+                bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+                nonce: 0,
+            };
+            prev = header.block_hash();
+            raw.push(serialize(&header));
+        }
+        chain
+            .submit_headers(latest + 1, &raw, ANY_HEADER_CLOCK)
+            .unwrap();
+        assert_eq!(chain.tip_height(), latest + 2);
+        assert_eq!(
+            [ANCHOR_HEIGHT, latest].map(|h| chain.hash_at(h)),
+            pinned,
+            "both pinned blocks stay"
+        );
+
+        let err = pins.assert_unchanged(&chain).unwrap_err();
+        assert!(
+            err.to_string().contains("fewer confirmations"),
+            "got: {err}"
+        );
+    }
+
     /// The enclave holds branch A, with the burn in `A[11]`. The relay
     /// follows branch B. The proof cites B's relay records at the anchor
     /// height and at B's tip. The heights agree, the blocks do not.
@@ -1725,7 +1789,7 @@ mod btc_relay {
             base.block_hash(),
             base.time
         );
-        let cp = parse_checkpoint_spec(&spec, Network::Regtest, &REGTEST_CHECKPOINT).unwrap();
+        let cp = parse_checkpoint_spec(&spec).unwrap();
         let mut chain = HeaderChain::new(Network::Regtest, cp);
         let mut prev = base.block_hash();
         for height in 2001..=2030 {

@@ -719,3 +719,60 @@ fn proven_witnesses_refuse_a_duplicate_proof() {
     .unwrap_err();
     assert!(err.to_string().contains("duplicate merkle proof"), "{err}");
 }
+
+/// The source check pins each proof block with the depth it required. A
+/// replacement chain of fewer, heavier blocks above the proof block keeps its
+/// hash, so only that depth refuses the signature. The test fails if the pin
+/// records depth 1.
+#[test]
+fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
+    let headers = synth_headers(10);
+    let mut chain = regtest_chain_with(headers.clone());
+    let (txid, proof) = single_tx_proof(&headers[2], 3);
+    let validated = ValidatedConsignment {
+        chain_net: Network::Regtest.chain_net().prefix().to_string(),
+        witness_txids: vec![txid],
+        ..Default::default()
+    };
+    let pins = ChainPins::new();
+    validate_source_chain(
+        &chain,
+        Some(&validated),
+        &[proof],
+        unix(1_700_000_100),
+        &pins,
+        DEFAULT_SPV_MIN_CONFIRMATIONS,
+    )
+    .unwrap();
+    pins.assert_unchanged(&chain).unwrap();
+
+    // Two blocks of the mainnet genesis target from height 4 out-work the
+    // seven regtest blocks that they replace. Regtest checks no proof of work.
+    let mut prev = headers[2].block_hash();
+    let mut raw = Vec::new();
+    for height in 4..=5u32 {
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xEE; 32]),
+            time: 1_700_000_001 + height,
+            bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+            nonce: height,
+        };
+        prev = header.block_hash();
+        raw.push(serialize(&header));
+    }
+    chain.submit_headers(4, &raw, ANY_HEADER_CLOCK).unwrap();
+    assert_eq!(chain.tip_height(), 5);
+    assert_eq!(
+        chain.hash_at(3),
+        Some(headers[2].block_hash().to_byte_array()),
+        "the proof block stays"
+    );
+
+    let err = pins.assert_unchanged(&chain).unwrap_err();
+    assert!(
+        err.to_string().contains("fewer confirmations"),
+        "got: {err}"
+    );
+}

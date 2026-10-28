@@ -778,13 +778,13 @@ For an RGB-source request, the SPV layer enforces these rules:
    `time-too-new`). Without it a host could date free min-difficulty blocks
    ahead and lower its fork's difficulty 4x per period for the work of one
    block. A header must also be newer than the median time past of the eleven
-   blocks below it (Bitcoin Core `time-too-old`). The rule starts at the
-   eleventh block above the checkpoint, where the chain holds all eleven
-   times. A chain from genesis takes the median of the blocks it has, as Core
-   does. Without the rule the enclave accepts headers that Core refuses: a
-   host could date the blocks of a fork back without bound. On the testnets
-   that yields free min-difficulty blocks in bulk, each twenty minutes after
-   its parent and all in the past.
+   blocks below it (Bitcoin Core `time-too-old`). A chain from genesis takes
+   the median of the blocks it has, as Core does. Above any other checkpoint,
+   the rule starts at the eleventh block above the checkpoint, where the chain
+   holds all eleven times. Without the rule the enclave accepts headers that
+   Core refuses: a host could date the blocks of a fork back without bound. On
+   the testnets that yields free min-difficulty blocks in bulk, each more than
+   twenty minutes after its parent and all in the past.
    Accept a replacement chain only when its cumulative work is greater.
    Limit reorganization depth to `MAX_REORG_DEPTH = 100`.
 2. Retain all headers above the checkpoint. Do not prune old headers.
@@ -798,9 +798,11 @@ For an RGB-source request, the SPV layer enforces these rules:
    testnets min-difficulty blocks count, for testing convenience: testnets
    carry no production value.
    Record the hash and the required depth of each block a check used. Check
-   both again under the signing lock. A changed hash or a shallower block
-   refuses the signature. This is a signing rule, not a consensus rule: the
-   parent retries when the block is deep again.
+   both again under the signing lock. A changed hash, or a block shallower
+   than the depth its check required, refuses the signature. This is a
+   signing rule, not a consensus rule. The request fails like a proof below
+   `SPV_MIN_CONFIRMATIONS`, and the caller sends it again when the block is
+   deep enough.
 5. Reject a chain whose tip (on the testnets, min-difficulty blocks included)
    is more than two hours old or more than two hours in the future. This checks timestamps. It does not prove that the
    provider sent the network tip.
@@ -820,18 +822,20 @@ resource use; they never relax a verification step.
 **Checkpoints:** mainnet block 951,552 (retarget-aligned), testnet4 block
 155,232 (retarget-aligned, chainwork not set yet, so testnet4 `fundsOut`
 fails until it is) and UTEXO signet block 334,000 are real pinned
-checkpoints; regtest uses genesis. `signetcustom` uses the signet checkpoint
-with the RGB chain-network `sbc`. Local/dev
-builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
-at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time[:chainwork]]` to skip a long
-initial sync; a production-shaped build refuses to start if that variable is
-set, so the host can never choose the trust anchor.
+checkpoints. Regtest uses genesis. `signetcustom` uses the signet checkpoint
+with the RGB chain-network `sbc`. Local/dev builds (debug, `cfg(test)`, or
+`allow-seed-import`) may move the anchor forward at boot with
+`SPV_CHECKPOINT=height:block_hash:bits:time[:chainwork]` to skip a long
+initial sync. `bits` and `time` are those of that block. The median-time-past
+rule reads `time`, and on mainnet and the testnets the `nBits` checks read
+both. A production-shaped build refuses to start if that variable is set, so
+the host can never choose the trust anchor.
 Testnet3 remains a placeholder -- a release build refuses to boot on any
-placeholder checkpoint. **Signet caveat:** the enclave does not validate PoW or
-nBits on signet, and the BIP-325 challenge signature is not verified (the wire
-format carries no coinbase witness), so signet header integrity rests on chain
-linkage, the reorg/work rules, the submission caps, and the 2 h freshness
-gate.
+placeholder checkpoint. **Signet caveat:** the enclave does not check PoW or
+nBits on signet. It does not check the BIP-325 challenge signature either,
+because the wire format carries no coinbase witness. Signet header integrity
+rests on chain linkage, the clock bound, the median-time-past rule, the
+reorg/work rules, the submission caps and the 2 h freshness gate.
 
 ## 9. Unlock authorization predicates
 

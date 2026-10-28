@@ -612,7 +612,7 @@ Limits and dev knobs:
 | `MAX_CONSIGNMENT_BYTES` | 12 MiB | Consignment size cap. Sized for a history of 10,000 transitions, each with an SPV proof. |
 | `MAX_MERKLE_PROOFS` | `16384` | Proof-count cap per request. A burn needs one proof for each witness tx in its history. |
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
-| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
+| `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash:bits:time[:chainwork]` moves the SPV anchor forward. `bits` and `time` are those of that block. The median-time-past rule reads `time`, and on mainnet and the testnets the `nBits` checks read both. Without `chainwork` (Core's `getblockheader` value), the enclave refuses every RGB-source release under `BTC_RELAY_MODE=required`. `none` needs no chainwork. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
 
 ### Parent

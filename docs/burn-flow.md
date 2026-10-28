@@ -169,10 +169,12 @@ On testnet4 it applies the 20-minute rule and BIP94 (retarget from the first
 block of the period, the timewarp rule). On every network a header may be at
 most 2 hours ahead of the enclave clock, so a host cannot date free blocks
 ahead to lower its fork's difficulty. A header must also be newer than the
-median time past of the eleven blocks below it, as in Bitcoin Core. That rule
-starts at the eleventh block above the checkpoint. It accepts a replacement chain only
-when it has more work and meets the reorganization limits. Signet and regtest
-skip proof-of-work and `nBits` checks.
+median time past of the eleven blocks below it, as in Bitcoin Core. A chain
+from genesis, as on regtest, takes the median of the blocks it has. Above any
+other checkpoint, the rule starts at the eleventh block above the checkpoint.
+The signer accepts a replacement chain only when that chain has more work and
+meets the reorganization limits. Signet and regtest skip proof-of-work and
+`nBits` checks.
 
 - **B3.1** The chain tip must not be older than 2 hours, nor more than 2
   hours in the future. On the testnets a min-difficulty tip counts.
@@ -186,7 +188,7 @@ skip proof-of-work and `nBits` checks.
   blocks deep (default 6). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights, hashes and required depths it
   used. Just before it uses the key, it checks that no hash changed and no
-  block got shallower.
+  block is shallower than the depth its check required.
 
 ### Stage 3b - Did the issuer reject the burned units?
 

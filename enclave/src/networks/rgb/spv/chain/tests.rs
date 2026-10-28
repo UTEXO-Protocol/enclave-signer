@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash;
 const NOW: u64 = 1_791_217_894;
 
 /// Synthetic regtest chain: a checkpoint at 100 and 5 headers. Regtest checks
-/// linkage only, so the headers need no mining.
+/// no proof of work, so the headers need no mining.
 fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {
     let mut prev_hash = [0u8; 32];
     prev_hash[0] = 0xAA; // arbitrary checkpoint hash
@@ -931,7 +931,7 @@ fn fixture_headers(hex_lines: &str) -> Vec<Vec<u8>> {
 
 /// Real mainnet headers 951_553..=951_564 (blockstream.info) on the compiled
 /// checkpoint 951_552. They pass linkage, PoW, nBits and the median rule.
-/// Heights 951_563 and 951_564 have the checkpoint in their window.
+/// Only 951_563 has the checkpoint in its window.
 #[test]
 fn real_mainnet_headers_above_the_checkpoint_pass() {
     let mut chain = HeaderChain::new(
@@ -950,9 +950,11 @@ fn real_mainnet_headers_above_the_checkpoint_pass() {
 }
 
 /// Real UTEXO signet headers 334_001..=334_012 (esplora-api.utexo.com) on the
-/// compiled checkpoint 334_000. Signet checks no work. So this test pins the
-/// checkpoint hash and time to the real chain, and it runs the median rule at
-/// heights 334_011 and 334_012 with the checkpoint time in the window.
+/// compiled checkpoint 334_000. Signet checks no proof of work. So this test
+/// pins the checkpoint hash to the real chain, through the link of 334_001. It
+/// runs the median rule at 334_011 and 334_012. Only the window of 334_011
+/// holds the checkpoint, and it passes with any checkpoint time, so the test
+/// does not pin that time.
 #[test]
 fn real_signet_headers_above_the_checkpoint_pass() {
     let mut chain = HeaderChain::new(
@@ -968,4 +970,81 @@ fn real_signet_headers_above_the_checkpoint_pass() {
         .unwrap();
     assert_eq!(outcome.headers_accepted, 12);
     assert_eq!(chain.tip_height(), 334_012);
+}
+
+/// The real mainnet header 951_552 (blockstream.info) is the compiled
+/// checkpoint: the same hash, time and bits.
+#[test]
+fn the_mainnet_checkpoint_is_the_real_block() {
+    use crate::networks::rgb::spv::checkpoint::MAINNET_CHECKPOINT;
+
+    let raw = &fixture_headers(include_str!("mainnet_951552.hex"))[0];
+    let header: Header = bitcoin::consensus::deserialize(raw).unwrap();
+    assert_eq!(MAINNET_CHECKPOINT.height, 951_552);
+    assert_eq!(header.block_hash().to_byte_array(), MAINNET_CHECKPOINT.hash);
+    assert_eq!(header.time, MAINNET_CHECKPOINT.time);
+    assert_eq!(header.bits.to_consensus(), MAINNET_CHECKPOINT.bits);
+}
+
+/// A checkpoint moved forward with `SPV_CHECKPOINT` gives the time of its own
+/// block. Block times can go down: here the moved block is an hour older than
+/// the compiled checkpoint. With its real time, an honest header at the
+/// eleventh block above it passes. With the compiled time, the median of its
+/// window rises and refuses that header.
+#[test]
+fn a_moved_checkpoint_uses_the_real_time_of_its_block() {
+    use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, SIGNET_CHECKPOINT};
+
+    let base = SIGNET_CHECKPOINT.time;
+    let height = SIGNET_CHECKPOINT.height + 100;
+    let spec = format!(
+        "{height}:{}:0x{:08x}:{}",
+        hex::encode([0x5a_u8; 32]),
+        SIGNET_CHECKPOINT.bits,
+        base - 3_600
+    );
+    let moved = parse_checkpoint_spec(&spec).unwrap();
+    // Ten blocks above the moved checkpoint, which the rule does not check:
+    // five dated 2 000 s and five 500 s before the compiled time. `submit`
+    // adds the eleventh block at the time `last`.
+    let times: Vec<u32> = [base - 2_000; 5]
+        .into_iter()
+        .chain([base - 500; 5])
+        .collect();
+    let submit = |cp: Checkpoint, last: u32| {
+        let mut chain = HeaderChain::new(Network::Signet, cp);
+        let mut prev = cp.hash;
+        let mut raws = Vec::new();
+        for (i, &time) in times.iter().enumerate() {
+            let (raw, hash) = header_with_time(prev, time, i as u32);
+            raws.push(raw);
+            prev = hash;
+        }
+        raws.push(header_with_time(prev, last, 99).0);
+        chain.submit_headers(height + 1, &raws, NOW)
+    };
+    // The median time past that refused the eleventh block.
+    let refusing_median = |result: Result<_>| match result {
+        Err(SpvError::TimeTooOld {
+            height: refused,
+            median_time_past,
+            ..
+        }) if refused == height + 11 => median_time_past,
+        other => panic!("expected TimeTooOld at the eleventh block, got {other:?}"),
+    };
+
+    // The window of the eleventh block is the checkpoint and the ten. With
+    // the real time, its median is 2 000 s before the compiled time.
+    submit(moved, base - 1_000).unwrap();
+    assert_eq!(refusing_median(submit(moved, base - 2_000)), base - 2_000);
+    // With the compiled time, the median is 500 s before it, and the chain
+    // refuses the header.
+    let compiled_time = Checkpoint {
+        time: base,
+        ..moved
+    };
+    assert_eq!(
+        refusing_median(submit(compiled_time, base - 1_000)),
+        base - 500
+    );
 }

@@ -74,7 +74,7 @@ flowchart TD
 
     subgraph S [Sign]
         s1["EIP-712 domain: name MultisigProxy, version 1,<br/>chain_id, proxy_contract<br/>(pinned by contract-fixture test)"] --> s2["digest = TeeFundsOut(decoded fields)<br/>or TeeLzFundsOut(decoded fields,<br/>lz_release cross-checked)"]
-        s2 --> s2p{"SPV blocks pinned during validation<br/>still in the chain?"}
+        s2 --> s2p{"SPV blocks pinned during validation<br/>still in the chain, as deep as<br/>their check required?"}
         s2p -->|no| s2pr[REFUSE - chain changed]:::refuse
         s2p -->|yes| s3[signature = ECDSA over digest<br/>Active KeyManager]
         s3 --> sR([RETURN signature + call_data unchanged]):::accept
