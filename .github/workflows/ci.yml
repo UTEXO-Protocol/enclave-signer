@@ -157,12 +157,14 @@ jobs:
       # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors
       # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
       # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
+      # Enable vsock in the test step to run the forwarder regression tests;
+      # they use loopback TCP sockets and need no vsock device or Nitro enclave.
       - name: Build (ccd-only)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,ccd
       - name: Clippy (ccd-only)
         run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
       - name: Test (ccd-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features ccd,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import
       # The release-only refusals are `not(test)`, so no unit test reaches them.
       # No CI job ships the ccd image. Compile the release build and check that
       # both refusals are in the binary, so a wrong cfg cannot drop them silently.
