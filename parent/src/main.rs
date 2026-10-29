@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         %listen_addr,
         max_concurrent = cfg.grpc_max_concurrent,
+        max_concurrent_sign = cfg.grpc_max_concurrent_sign,
         max_concurrent_per_conn = per_conn,
         request_timeout_secs = cfg.grpc_request_timeout_secs,
         "starting gRPC server"
@@ -112,6 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = server
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
+        // Inside the limit: the shape check holds each body it reads, and it
+        // limits the Sign requests at once.
+        .layer(utexo_bridge_parent::request_shape::ShapeLayer::new(
+            cfg.grpc_max_concurrent_sign,
+        ))
         .load_shed(true)
         .max_connection_age(Duration::from_secs(300))
         .max_connection_age_grace(Duration::from_secs(30))
