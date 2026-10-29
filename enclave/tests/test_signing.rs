@@ -393,7 +393,8 @@ fn sign_psbt_request(
             asset_id: String::new(),
             consignment: vec![],
             consignment_hash: vec![],
-            parent_psbt: vec![],
+            fascia: vec![],
+            parent_fascia: vec![],
         })),
     }
 }

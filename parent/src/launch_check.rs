@@ -366,6 +366,7 @@ mod tests {
             kms_region: "eu-west-1".into(),
             kms_seed_id: "seed-1".into(),
             kms_expected_evm_address: format!("0x{}", "ab".repeat(20)),
+            evm_rpc_path: String::new(),
         }
     }
 

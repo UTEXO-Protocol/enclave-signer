@@ -1,16 +1,17 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
 //! genesis, then mints, transfers of units, propagates of rights and burns,
 //! each in a witness tx that commits its bundle in an OP_RETURN output. Each one is
-//! committed as rgb-lib does it, through psbtu's `rgb_commit`, so its PSBT is
-//! the one a signer gets. Tests need no stored V1 fixture. Deterministic:
-//! fixed times, nonces, blinding and entropy.
+//! committed as rgb-lib f3975623 does it, through psbtu's `rgb_commit`, which
+//! gives the fascia, then the RGB keys stripped, so its PSBT and fascia are the
+//! ones a signer gets. Tests need no stored V1 fixture. Deterministic: fixed
+//! times, nonces, blinding and entropy.
 //!
 //! It uses only external crates, so integration tests include it with
 //! `#[path]`.
 
 use std::collections::BTreeMap;
 
-use amplify::confinement::Confined;
+use amplify::confinement::{Confined, U32};
 use amplify::{ByteArray, Bytes20, Bytes32};
 use bitcoin::blockdata::opcodes::all::OP_RETURN;
 use bitcoin::blockdata::script::Builder;
@@ -18,8 +19,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction};
 use bitcoin::{TxIn, TxOut, Witness};
-use psrgbt::{RgbOutExt, RgbPsbtExt};
-use rgbstd::containers::{ConsignmentVer, FileContent, Transfer, WitnessBundle};
+use psrgbt::{
+    RgbOutExt, RgbPsbtExt, PSBT_MPC_PREFIX, PSBT_OPRET_PREFIX, PSBT_RGB_PREFIX, PSBT_TAPRET_PREFIX,
+};
+use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, Transfer, WitnessBundle};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -38,6 +41,7 @@ use rgbstd::{
     Transition, TransitionBundle,
 };
 use schemata::{BridgedFungibleAsset, OS_ASSET, OS_MINT};
+use strict_encoding::StrictSerialize;
 
 /// The genesis timestamp of every generated asset.
 pub const ISSUED_AT: i64 = 1_700_000_000;
@@ -58,23 +62,46 @@ pub struct Mint {
     pub before_block: u64,
 }
 
-/// One transition committed in its witness tx, and the PSBT of that tx.
+/// One transition committed in its witness tx, the PSBT of that tx with its
+/// RGB keys stripped, and the fascia rgb-lib writes for it.
 #[derive(Debug, Clone)]
 pub struct Committed {
     pub opid: OpId,
     pub tx: Transaction,
-    // Only the mint signer's tests read the PSBT.
+    // Only the mint signer's tests read the PSBT and the fascia.
     #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
     pub psbt: Psbt,
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fascia: Fascia,
 }
 
 impl Committed {
-    fn of(opid: OpId, psbt: Psbt) -> Self {
+    fn of(opid: OpId, psbt: Psbt, fascia: Fascia) -> Self {
         Self {
             opid,
             tx: psbt.unsigned_tx.clone(),
             psbt,
+            fascia,
         }
+    }
+
+    /// The fascia file bytes, as the bridge sends them.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fn fascia_bytes(&self) -> Vec<u8> {
+        fascia_bytes(&self.fascia)
+    }
+
+    /// The committed transition, as the fascia discloses it.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fn transition(&self) -> Transition {
+        self.fascia
+            .bundles()
+            .values()
+            .flat_map(|bundle| bundle.known_transitions.iter())
+            .find(|known| known.opid == self.opid)
+            .expect("the fascia discloses the committed transition")
+            .transition
+            .clone()
     }
 }
 
@@ -221,18 +248,22 @@ impl History {
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Transaction {
-        self.commit_psbt(transitions, inputs, outputs).unsigned_tx
+        self.commit_psbt(transitions, inputs, outputs).tx
     }
 
     /// [`Self::commit`] as rgb-lib's `prepare_rgb_psbt` does it: each
     /// transition pushed to the PSBT, the OP_RETURN marked as host with the
-    /// entropy, then `rgb_commit`. Returns the committed PSBT.
+    /// entropy, then [`rgb_commit`]. Named by the last transition's opid.
     pub fn commit_psbt(
         &mut self,
         transitions: Vec<Transition>,
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
-    ) -> Psbt {
+    ) -> Committed {
+        let opid = transitions
+            .last()
+            .expect("a bundle commits a transition")
+            .id();
         // psbtu orders known transitions by a hash map; the bundle keeps ours.
         let bundle = bundle_of(transitions.clone());
         let tree = self.mpc_tree(&bundle);
@@ -240,9 +271,9 @@ impl History {
         for transition in transitions {
             psbt.push_rgb_transition(transition).unwrap();
         }
-        rgb_commit(&mut psbt, 0, tree.entropy());
+        let fascia = rgb_commit(&mut psbt, 0, tree.entropy());
         self.push_bundle(bundle, psbt.unsigned_tx.clone(), tree);
-        psbt
+        Committed::of(opid, psbt, fascia)
     }
 
     /// [`Self::commit`] for a bundle the caller built, which no PSBT holds.
@@ -365,17 +396,16 @@ impl History {
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Committed {
-        let opid = mint.id();
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let psbt = self.commit_psbt(vec![mint], inputs, outputs);
+        let minted = self.commit_psbt(vec![mint], inputs, outputs);
         self.mints.push(Mint {
-            opid,
+            opid: minted.opid,
             amount,
             before_block,
         });
-        Committed::of(opid, psbt)
+        minted
     }
 
     /// Mints `amount` to a revealed seal on vout 2 of its witness tx, so a
@@ -417,12 +447,10 @@ impl History {
         outputs: Vec<TxOut>,
     ) -> Committed {
         let send = self.rights_transition(right, vouts);
-        let opid = send.id();
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let psbt = self.commit_psbt(vec![send], inputs, outputs);
-        Committed::of(opid, psbt)
+        self.commit_psbt(vec![send], inputs, outputs)
     }
 
     /// The propagate [`Self::send_rights`] commits, for a bundle the caller
@@ -475,9 +503,7 @@ impl History {
         reason: Option<[u8; 32]>,
     ) -> Committed {
         let transitions = self.burn_transitions(input, held, burned, reason);
-        let opid = transitions.last().unwrap().id();
-        let psbt = self.commit_psbt(transitions, vec![input.outpoint], vec![dust(0x04)]);
-        Committed::of(opid, psbt)
+        self.commit_psbt(transitions, vec![input.outpoint], vec![dust(0x04)])
     }
 
     /// The transitions [`Self::burn`] commits, in bundle order: the split, if
@@ -612,14 +638,42 @@ pub fn witness_psbt(inputs: Vec<OutPoint>, outputs: Vec<TxOut>) -> Psbt {
     Psbt::from_unsigned_tx(witness_tx(inputs, outputs)).unwrap()
 }
 
-/// Commits the RGB data `psbt` holds as rgb-lib does: output `host` is the
-/// opret host with `entropy`, then psbtu's `rgb_commit`.
-pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) {
+/// Commits `psbt` as rgb-lib f3975623 does: opret host `host` with `entropy`,
+/// psbtu's `rgb_commit`, then the RGB keys stripped. Returns the fascia.
+pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) -> Fascia {
     let output = &mut psbt.outputs[host];
     output.set_opret_host();
     output.set_mpc_entropy(entropy).unwrap();
     psbt.set_rgb_close_method(CloseMethod::OpretFirst);
-    psbt.rgb_commit().unwrap();
+    let fascia = psbt.rgb_commit().unwrap();
+    strip_rgb_data(psbt);
+    fascia
+}
+
+/// rgb-lib's `strip_rgb_data`: drops the RGB, MPC, OPRET and TAPRET
+/// proprietary keys from the global map, the inputs and the outputs.
+fn strip_rgb_data(psbt: &mut Psbt) {
+    let is_rgb = |key: &bitcoin::psbt::raw::ProprietaryKey| {
+        [
+            &PSBT_RGB_PREFIX[..],
+            &PSBT_MPC_PREFIX[..],
+            &PSBT_OPRET_PREFIX[..],
+            &PSBT_TAPRET_PREFIX[..],
+        ]
+        .contains(&key.prefix.as_slice())
+    };
+    psbt.proprietary.retain(|key, _| !is_rgb(key));
+    for input in &mut psbt.inputs {
+        input.proprietary.retain(|key, _| !is_rgb(key));
+    }
+    for output in &mut psbt.outputs {
+        output.proprietary.retain(|key, _| !is_rgb(key));
+    }
+}
+
+/// The fascia file bytes, as rgb-lib's `write_fascia` writes them.
+pub fn fascia_bytes(fascia: &Fascia) -> Vec<u8> {
+    fascia.to_strict_serialized::<U32>().unwrap().release()
 }
 
 /// A 1000-sat output to a throwaway P2WPKH.

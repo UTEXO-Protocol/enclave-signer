@@ -268,7 +268,7 @@ class PatchTests(unittest.TestCase):
 
     def test_the_parent_patches_the_rgb_crates_as_the_root_does(self):
         root = self.patch('Cargo.toml')
-        # Only bfa-mint uses rgb-psbt-utils; the parent's enclave build has no bfa-mint.
+        # Only the enclave's tests use rgb-psbt-utils; the parent never builds them.
         expected = {name: source for name, source in root.items() if name != 'rgb-psbt-utils'}
         self.assertEqual(self.patch('parent/Cargo.toml'), expected)
 

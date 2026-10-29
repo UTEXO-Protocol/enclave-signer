@@ -28,7 +28,7 @@ pub mod flow;
 // fetch that log (`evm-rpc` implies `rgb-validation`).
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 pub mod invoice;
-// The mint signer reads mints and refills from the PSBT, with no consignment.
+// The mint signer reads mints and refills from their fascias, with no consignment.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub mod parent_proof;
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]

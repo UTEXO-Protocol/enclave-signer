@@ -15,7 +15,7 @@ panic = "abort"
 codegen-units = 1
 
 # The root workspace's [patch.crates-io], for the enclave dev-dependency. Keep it equal, minus
-# rgb-psbt-utils: only bfa-mint uses it, so here cargo would warn it unused.
+# rgb-psbt-utils: only the enclave's tests use it, so here cargo would warn it unused.
 [patch.crates-io]
 rgb-consensus = { git = "ssh://git@github.com/rgb-tools-devs/rgb-consensus.git", rev = "4a614b72cf9d5fdca4f293ab529a7e342717021a" }
 rgb-ops = { git = "ssh://git@github.com/rgb-tools-devs/rgb-ops.git", rev = "9d831d2f75b076a0f9574678341f3b262a4a7e16" }
@@ -64,7 +64,7 @@ zeroize = "1"
 # Full schema from the shared upstream repo. The parent runs on the untrusted
 # host, so a private build credential is acceptable here. Keep this rev equal
 # to the vendored slice in `enclave-proto/` (see its README).
-federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "e402c2aed0c2b097bd1f86392d12e8a6ac415e36", package = "federated-signer-proto" }
+federated-signer-proto = { git = "ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git", rev = "6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0", package = "federated-signer-proto" }
 clap = { version = "4", features = ["derive", "env"] }
 # `GET /health` readiness probe. Keep the axum version equal to tonic's axum.
 axum = "0.8"

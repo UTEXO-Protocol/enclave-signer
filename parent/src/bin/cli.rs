@@ -121,9 +121,12 @@ enum Command {
         /// Hex-encoded RGB consignment bytes
         #[arg(long, default_value = "")]
         consignment: String,
-        /// Hex-encoded PSBT of the tx that made the spent mint right
+        /// Hex-encoded rgb-lib fascia of the PSBT's tx
         #[arg(long, default_value = "")]
-        parent_psbt: String,
+        fascia: String,
+        /// Hex-encoded rgb-lib fascia of the tx that made the spent mint right
+        #[arg(long, default_value = "")]
+        parent_fascia: String,
     },
     /// Get the enclave SPV chain tip (height and hash).
     /// The parent header sync reads it to find where to continue.
@@ -271,6 +274,8 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_region: args.kms_region.unwrap_or_default(),
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
+        // This enclave does not read it: it requests the EVM RPC at `/`.
+        evm_rpc_path: String::new(),
     }
 }
 
@@ -511,7 +516,8 @@ fn main() {
             evm_event_finalized,
             rgb_asset_id,
             consignment,
-            parent_psbt,
+            fascia,
+            parent_fascia,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
@@ -537,10 +543,17 @@ fn main() {
                 use sha3::{Digest, Keccak256};
                 Keccak256::digest(&consignment_bytes).to_vec()
             };
-            let parent_psbt = match hex::decode(&parent_psbt) {
+            let fascia = match hex::decode(&fascia) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("Invalid hex parent PSBT: {}", e);
+                    eprintln!("Invalid hex fascia: {}", e);
+                    process::exit(1);
+                }
+            };
+            let parent_fascia = match hex::decode(&parent_fascia) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex parent fascia: {}", e);
                     process::exit(1);
                 }
             };
@@ -588,7 +601,8 @@ fn main() {
                 rgb_asset_id,
                 consignment: consignment_bytes,
                 consignment_hash,
-                parent_psbt,
+                fascia,
+                parent_fascia,
             };
             match client.sign_psbt(req) {
                 Ok(r) => {
@@ -1030,5 +1044,32 @@ mod tests {
         let cli = Cli::try_parse_from(args("burn")).unwrap();
         assert!(matches!(cli.command, Command::ExportAttestation { .. }));
         assert!(Cli::try_parse_from(args("mint")).is_err());
+    }
+
+    /// rgb-lib f3975623 strips the PSBT, so the parent's PSBT gave way to two fascias.
+    #[test]
+    fn sign_psbt_takes_the_fascia_and_the_parent_fascia() {
+        let sign_psbt = |flag: &'static str| {
+            Cli::try_parse_from([
+                "utexo-bridge-parent-cli",
+                "sign-psbt",
+                "--psbt",
+                "70736274",
+                "--fascia",
+                "aa",
+                flag,
+                "bb",
+            ])
+        };
+        let Command::SignPsbt {
+            fascia,
+            parent_fascia,
+            ..
+        } = sign_psbt("--parent-fascia").unwrap().command
+        else {
+            panic!("expected sign-psbt");
+        };
+        assert_eq!((fascia.as_str(), parent_fascia.as_str()), ("aa", "bb"));
+        assert!(sign_psbt("--parent-psbt").is_err());
     }
 }

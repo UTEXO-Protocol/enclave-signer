@@ -384,9 +384,12 @@ pub struct RgbDestination {
     /// keccak256(consignment).
     #[prost(bytes="vec", tag="6")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
-    /// PSBT of the tx that created the right a mint spends; it pins that UTXO.
-    #[prost(bytes="vec", tag="8")]
-    pub parent_psbt: ::prost::alloc::vec::Vec<u8>,
+    /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
+    #[prost(bytes="vec", tag="9")]
+    pub fascia: ::prost::alloc::vec::Vec<u8>,
+    /// Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
+    #[prost(bytes="vec", tag="10")]
+    pub parent_fascia: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MerkleProofEntry {
@@ -405,16 +408,14 @@ pub struct MerkleProofEntry {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EvmSignatureResponse {
-    /// 65-byte Ethereum signature: r || s || v.
+    /// 65-byte signature: r (32) || s (32) || v (1). v is the raw recovery id,
+    /// 0 or 1, not 27 or 28.
     #[prost(bytes="vec", tag="1")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
-    /// The exact fundsOut calldata the signature commits to. For the RGB->EVM
-    /// fundsOut path the enclave derives the OpId-bound fields (burnId,
-    /// settlementData/fundsInIds) from the validated consignment and rewrites
-    /// them, so this MAY differ from the call_data sent in EvmDestination. The
-    /// caller MUST submit these bytes on-chain (the EIP-712 digest is keccak256
-    /// over this calldata). Equal to the request's call_data on non-fundsOut /
-    /// non-rgb-validation paths.
+    /// The request's call_data, unchanged. The enclave validates it as canonical
+    /// ABI and signs the EIP-712 TeeFundsOut digest built from the validated
+    /// fields; it never rewrites the calldata and never signs its keccak256. The
+    /// caller submits these bytes on-chain with the signature.
     #[prost(bytes="vec", tag="2")]
     pub call_data: ::prost::alloc::vec::Vec<u8>,
 }
@@ -444,16 +445,19 @@ pub struct SignBtcRequest {
 /// BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
 /// 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
 /// source and no EVM deposit, so only the mint signer handles it, by shape alone, from
-/// the PSBT's own RGB data. Response is a SignedPsbtResponse.
+/// its fascia. Response is a SignedPsbtResponse.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRightsRefillRequest {
     #[prost(bytes="vec", tag="1")]
     pub psbt_bytes: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag="4")]
     pub asset_id: ::prost::alloc::string::String,
-    /// PSBT of the tx that created the right the refill spends; it pins that UTXO.
-    #[prost(bytes="vec", tag="5")]
-    pub parent_psbt: ::prost::alloc::vec::Vec<u8>,
+    /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
+    #[prost(bytes="vec", tag="6")]
+    pub fascia: ::prost::alloc::vec::Vec<u8>,
+    /// Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
+    #[prost(bytes="vec", tag="7")]
+    pub parent_fascia: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawMessageRequest {
@@ -675,6 +679,10 @@ pub struct SetEndpointsRequest {
     /// 20-byte hex EVM address the seed must give. Empty: none.
     #[prost(string, tag="8")]
     pub kms_expected_evm_address: ::prost::alloc::string::String,
+    /// Absolute HTTP path, e.g. /v3/<API_KEY>. Empty means /. No query or fragment.
+    /// May contain credentials: do not log it or publish it in attestation data.
+    #[prost(string, tag="9")]
+    pub evm_rpc_path: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsResponse {

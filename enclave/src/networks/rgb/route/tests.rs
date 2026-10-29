@@ -209,7 +209,8 @@ mod asset_bind {
             asset_id: asset_id.into(),
             consignment_hash: Keccak256::digest(&consignment).to_vec(),
             consignment,
-            parent_psbt: vec![],
+            fascia: vec![],
+            parent_fascia: vec![],
         }
     }
 
@@ -373,6 +374,6 @@ mod asset_bind {
     // `validation::tests::asset_binding_rule` covers the rule.
 }
 
-/// The mint signer's routes, from the PSBT and its parent alone.
+/// The mint signer's routes, from the PSBT, its fascia and its parent's alone.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 mod psbt_path;

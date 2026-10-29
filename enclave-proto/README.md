@@ -44,13 +44,13 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
 | `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
 | `InitializeKeyResponse.account_xpub_colored`, `PublicKeysResponse.account_xpub_colored` | The comment says `m/86'/827167'/0'`. The enclave derives `m/86'/827166'/0'` on mainnet and `m/86'/827167'/0'` on other networks. |
-| `EvmSignatureResponse.call_data` | The enclave returns the input calldata unchanged. It signs decoded typed fields, not a hash of raw calldata. |
 | `SignBtcRequest` | The enclave derives output ownership and applies value budgets. There is no `BTC_ALLOWED_SCRIPTS` setting. |
 | `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
 | `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
 | `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
+| `SetEndpointsRequest.evm_rpc_path` | This enclave does not read it. It always requests the EVM RPC at path `/`. |
 
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.
@@ -60,8 +60,8 @@ recorded provenance. Do not change only the local generated comments.
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `e402c2aed0c2b097bd1f86392d12e8a6ac415e36` (branch `feat/rights-refill`, "feat(proto): carry the parent PSBT for the mint signer") |
-| Commit date | 2026-10-15T16:21:38Z |
+| Commit | `6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0` (branch `feat/mint-fascia`, "feat(proto): carry the rgb-lib fascia for the mint signer") |
+| Commit date | 2026-10-29T14:18:44Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -75,7 +75,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=e402c2aed0c2b097bd1f86392d12e8a6ac415e36
+REV=6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -90,8 +90,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `864e73a0237ed7e33dc048ec6c7c23a8194b9beb` |
-| `proto/enclave/enclave.proto` | `afa4ae192bf45df5bd5a7d5792543676b67bbf49` |
+| `rust-gen/src/enclave/enclave.rs` | `fbcc6b2ba09ef66a4c65c012134276d903f834cc` |
+| `proto/enclave/enclave.proto` | `3b9f5f5109147013777eb6d21f516b26e44695f3` |
 
 ## Why only `prost`
 

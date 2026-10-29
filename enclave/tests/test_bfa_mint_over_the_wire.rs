@@ -1,10 +1,10 @@
 //! A BFA mint over the wire, end to end, and the txid bind.
 //!
-//! The mint signer reads the mint from the PSBT rgb-lib commits and the PSBT
-//! of the issuer's seed send that made its right. The txid bind assumes every
-//! input finalizes with an empty `scriptSig`. A P2SH-wrapped SegWit input
-//! pushes its redeemScript there (BIP-16), which changes the txid, so the
-//! broadcastable tx is not the one the PSBT commits.
+//! The mint signer reads the mint from the fascia rgb-lib writes for the PSBT's
+//! tx and the fascia of the issuer's seed send that made its right. The txid
+//! bind assumes every input finalizes with an empty `scriptSig`. A P2SH-wrapped
+//! SegWit input pushes its redeemScript there (BIP-16), which changes the txid,
+//! so the broadcastable tx is not the one the PSBT commits.
 //!
 //! Runs over the wire through `handle_sign`, so the `FundsIn` read with its
 //! finality, the invoice bind, the mint-right rule and the parent proof are on
@@ -169,7 +169,7 @@ fn wrapped_segwit_aux() -> Aux {
 /// One BFA deposit, as the coordinator hands it to the enclave.
 struct Deposit {
     consignment: Vec<u8>,
-    /// The issuer's seed send. Its PSBT is the mint's parent proof.
+    /// The issuer's seed send. Its fascia is the mint's parent proof.
     seed: Committed,
     mint: Committed,
     contract_id: ContractId,
@@ -532,11 +532,12 @@ fn sign_request(built: &Built) -> SignRequest {
             psbt_bytes: built.psbt.serialize(),
             psbt_output_amount: 0,
             asset_id: built.deposit.contract_id.to_string(),
-            // The rollout bridge still sends the consignment; the mint signer
-            // reads only the PSBT and its parent.
+            // An old bridge still sends the consignment; the mint signer reads
+            // only the PSBT, its fascia and its parent's.
             consignment: built.deposit.consignment.clone(),
             consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
-            parent_psbt: built.deposit.seed.psbt.serialize(),
+            fascia: built.deposit.mint.fascia_bytes(),
+            parent_fascia: built.deposit.seed.fascia_bytes(),
         })),
     }
 }
@@ -752,9 +753,8 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
     .expect("consumer resolves the bound witness");
 }
 
-/// Plan B needs the PSBT that made the right: it pins the right's UTXO.
-#[test]
-fn refuses_a_mint_without_its_parent_psbt() {
+/// The native deposit's refusal once `edit` changes its RGB destination.
+fn refusal_of_edited(edit: impl FnOnce(&mut RgbDestination)) -> String {
     let native = build(None);
     let chain = deposit_chain(&native, LOCK_BLOCK, LOCK_BLOCK, vec![]);
     let ctx = context(&native.deposit.contract_id, chain);
@@ -762,10 +762,24 @@ fn refuses_a_mint_without_its_parent_psbt() {
     if let Some(DestinationNetwork::RgbDestination(destination)) =
         request.destination_network.as_mut()
     {
-        destination.parent_psbt.clear();
+        edit(destination);
     }
-    let refusal = refusal(&sign_over_the_wire(&ctx, request));
-    assert!(refusal.contains("parent_psbt required"), "{refusal}");
+    refusal(&sign_over_the_wire(&ctx, request))
+}
+
+/// Plan B needs the fascia of the tx that made the right: it pins the right's UTXO.
+#[test]
+fn refuses_a_mint_without_its_parent_fascia() {
+    let refusal = refusal_of_edited(|destination| destination.parent_fascia.clear());
+    assert!(refusal.contains("parent_fascia required"), "{refusal}");
+}
+
+/// rgb-lib strips the mint's PSBT, so without its fascia the request shows nothing.
+#[test]
+fn refuses_a_mint_without_its_fascia() {
+    let refusal = refusal_of_edited(|destination| destination.fascia.clear());
+    assert!(refusal.contains("fascia required"), "{refusal}");
+    assert!(!refusal.contains("parent_fascia"), "{refusal}");
 }
 
 /// The same deposit plus one P2SH-P2WPKH input. The enclave must refuse it.

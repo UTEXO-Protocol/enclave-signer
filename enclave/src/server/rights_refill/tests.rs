@@ -25,6 +25,8 @@ fn normal(i: u32) -> ChildNumber {
 /// How a test refill is built.
 struct Shape {
     rights: u32,
+    /// The fee the right's UTXO pays on top of the rights.
+    fee: u64,
     /// BTC change from the right's own UTXO, on the last output.
     change: bool,
     /// One Colored fee input, paid back as change on the last output.
@@ -37,6 +39,7 @@ impl Shape {
     fn rights(rights: u32) -> Self {
         Self {
             rights,
+            fee: FEE,
             change: false,
             fee_input: false,
             first_right: (AccountType::Colored, vec![normal(0), normal(1)]),
@@ -100,15 +103,15 @@ fn seeded(keys: &KeyManager) -> (History, Committed, Utxo) {
     (history, seed, seeded)
 }
 
-/// A seeded right sent as `shape` says: the PSBT of that send, and its parent.
-fn build(keys: &KeyManager, shape: &Shape) -> (History, Psbt, Committed) {
+/// A seeded right sent as `shape` says: that send, and its parent.
+fn build(keys: &KeyManager, shape: &Shape) -> (History, Committed, Committed) {
     let (mut history, seed, right) = seeded(keys);
-    let psbt = send(&mut history, right, keys, shape);
-    (history, psbt, seed)
+    let refill = send(&mut history, right, keys, shape);
+    (history, refill, seed)
 }
 
-/// Sends `right` as `shape` says. Returns the PSBT of that send.
-fn send(history: &mut History, right: Utxo, keys: &KeyManager, shape: &Shape) -> Psbt {
+/// Sends `right` as `shape` says, with the PSBT metadata rgb-lib writes.
+fn send(history: &mut History, right: Utxo, keys: &KeyManager, shape: &Shape) -> Committed {
     let destinations = destinations(shape);
     let outputs = destinations
         .iter()
@@ -121,8 +124,9 @@ fn send(history: &mut History, right: Utxo, keys: &KeyManager, shape: &Shape) ->
         .into_iter()
         .collect();
     let vouts: Vec<u32> = (1..=shape.rights).collect();
-    let sent = history.send_rights(right, &vouts, fee_inputs, outputs);
-    with_metadata(keys, shape, sent.psbt, &destinations)
+    let mut sent = history.send_rights(right, &vouts, fee_inputs, outputs);
+    sent.psbt = with_metadata(keys, shape, sent.psbt, &destinations);
+    sent
 }
 
 /// `psbt` with the input and output metadata rgb-lib writes.
@@ -133,7 +137,7 @@ fn with_metadata(
     destinations: &[(AccountType, Vec<ChildNumber>)],
 ) -> Psbt {
     let right_change = if shape.change { CHANGE_SATS } else { 0 };
-    let right_value = RIGHT_SATS * u64::from(shape.rights) + FEE + right_change;
+    let right_value = RIGHT_SATS * u64::from(shape.rights) + shape.fee + right_change;
     fx::anchor_input(&mut psbt, 0, keys, AccountType::Colored, 0, 0, right_value);
     if shape.fee_input {
         fx::anchor_input(
@@ -152,11 +156,12 @@ fn with_metadata(
     psbt
 }
 
-fn request(history: &History, psbt: &Psbt, parent: &Committed) -> SignRightsRefillRequest {
+fn request(history: &History, refill: &Committed, parent: &Committed) -> SignRightsRefillRequest {
     SignRightsRefillRequest {
-        psbt_bytes: psbt.serialize(),
+        psbt_bytes: refill.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: parent.psbt.serialize(),
+        fascia: refill.fascia_bytes(),
+        parent_fascia: parent.fascia_bytes(),
     }
 }
 
@@ -179,9 +184,9 @@ fn sign(ctx: &ServerContext, req: SignRightsRefillRequest) -> Result<EnclaveResp
 /// Signs the refill of `shape` and checks every input carries our signature.
 fn signs(shape: Shape) {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &shape);
+    let (history, refill, seed) = build(&keys, &shape);
     let ctx = context(&history.contract_id.to_string());
-    let response = sign(&ctx, request(&history, &psbt, &seed)).unwrap();
+    let response = sign(&ctx, request(&history, &refill, &seed)).unwrap();
     let Some(Response::SignedPsbt(signed)) = response.response else {
         panic!("expected a signed PSBT, got {response:?}");
     };
@@ -194,9 +199,9 @@ fn signs(shape: Shape) {
 
 fn refusal(shape: Shape) -> String {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &shape);
+    let (history, refill, seed) = build(&keys, &shape);
     let ctx = context(&history.contract_id.to_string());
-    sign(&ctx, request(&history, &psbt, &seed))
+    sign(&ctx, request(&history, &refill, &seed))
         .unwrap_err()
         .to_string()
 }
@@ -205,6 +210,16 @@ fn refusal(shape: Shape) -> String {
 fn signs_one_right_sent_to_two_and_to_three() {
     signs(Shape::rights(2));
     signs(Shape::rights(3));
+}
+
+/// The largest refill carries the largest fascia the mint signer reads. Its
+/// 255 outputs are about 11 100 vB, so it pays 12 000 sat for 1 sat/vB.
+#[test]
+fn signs_a_refill_of_max_refill_rights() {
+    signs(Shape {
+        fee: 12_000,
+        ..Shape::rights(psbt_validation::MAX_REFILL_RIGHTS as u32)
+    });
 }
 
 #[test]
@@ -257,43 +272,59 @@ fn refuses_a_right_a_mint_passed_on() {
     let to = rgbstd::BuilderSeal::from(rgbstd::GraphSeal::with_blinded_vout(2u32, 7));
     let outputs = vec![gen::dust(1), gen::dust(2)];
     let (mint, kept) = history.mint_keeping_right(right, 100_000, 90, to, vec![], outputs);
-    let psbt = send(&mut history, kept, &keys, &Shape::rights(2));
+    let refill = send(&mut history, kept, &keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
-    let err = sign(&ctx, request(&history, &psbt, &mint)).unwrap_err();
+    let err = sign(&ctx, request(&history, &refill, &mint)).unwrap_err();
     assert!(err.to_string().contains("not a propagate"), "{err}");
 }
 
 #[test]
-fn refuses_a_refill_without_its_parent_psbt() {
+fn refuses_a_refill_without_its_parent_fascia() {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &Shape::rights(2));
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
-    let mut req = request(&history, &psbt, &seed);
-    req.parent_psbt.clear();
+    let mut req = request(&history, &refill, &seed);
+    req.parent_fascia.clear();
     let err = sign(&ctx, req).unwrap_err();
-    assert!(err.to_string().contains("parent_psbt required"), "{err}");
+    assert!(err.to_string().contains("parent_fascia required"), "{err}");
 }
 
-/// A PSBT whose RGB keys commit nothing: the refill is refused, unsigned.
+/// rgb-lib strips the refill's PSBT, so without its fascia it shows nothing.
 #[test]
-fn refuses_a_refill_whose_psbt_commits_no_transition() {
+fn refuses_a_refill_without_its_fascia() {
     let keys = fx::km();
-    let (history, mut psbt, seed) = build(&keys, &Shape::rights(2));
-    psbt.proprietary.clear();
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
-    let err = sign(&ctx, request(&history, &psbt, &seed)).unwrap_err();
-    assert!(err.to_string().contains("exactly one"), "{err}");
+    let mut req = request(&history, &refill, &seed);
+    req.fascia.clear();
+    let err = sign(&ctx, req).unwrap_err().to_string();
+    assert!(err.contains("fascia required"), "{err}");
+    assert!(!err.contains("parent_fascia"), "{err}");
+}
+
+/// The fascia of the parent, not of the refill's tx: refused, unsigned.
+#[test]
+fn refuses_a_refill_whose_fascia_is_of_another_tx() {
+    let keys = fx::km();
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
+    let ctx = context(&history.contract_id.to_string());
+    let req = SignRightsRefillRequest {
+        fascia: seed.fascia_bytes(),
+        ..request(&history, &refill, &seed)
+    };
+    let err = sign(&ctx, req).unwrap_err();
+    assert!(err.to_string().contains("fascia is of tx"), "{err}");
 }
 
 #[test]
 fn refuses_the_thirteenth_refill_in_an_hour() {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &Shape::rights(2));
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
     for _ in 0..MAX_REFILLS_PER_HOUR {
-        sign(&ctx, request(&history, &psbt, &seed)).unwrap();
+        sign(&ctx, request(&history, &refill, &seed)).unwrap();
     }
-    let err = sign(&ctx, request(&history, &psbt, &seed)).unwrap_err();
+    let err = sign(&ctx, request(&history, &refill, &seed)).unwrap_err();
     assert!(err.to_string().contains("rate limit"), "{err}");
 }
 
@@ -301,16 +332,16 @@ fn refuses_the_thirteenth_refill_in_an_hour() {
 #[test]
 fn a_gate_refusal_does_not_count_against_the_rate_limit() {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &Shape::rights(2));
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
-    let mut junk = psbt.clone();
-    junk.unsigned_tx.output[1].script_pubkey = fx::foreign_address(0xB1);
+    let mut junk = refill.clone();
+    junk.psbt.unsigned_tx.output[1].script_pubkey = fx::foreign_address(0xB1);
     for _ in 0..MAX_REFILLS_PER_HOUR + 1 {
         let err = sign(&ctx, request(&history, &junk, &seed)).unwrap_err();
         assert!(err.to_string().contains("does not derive"), "{err}");
     }
     for _ in 0..MAX_REFILLS_PER_HOUR {
-        sign(&ctx, request(&history, &psbt, &seed)).unwrap();
+        sign(&ctx, request(&history, &refill, &seed)).unwrap();
     }
 }
 
@@ -318,23 +349,23 @@ fn a_gate_refusal_does_not_count_against_the_rate_limit() {
 #[test]
 fn a_refusal_past_the_gate_counts_against_the_rate_limit() {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &Shape::rights(2));
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let other = History::issue(Issue::new(1, [0xB9; 20], vec![gen::outpoint(0xA9, 0)]));
     let ctx = context(&other.contract_id.to_string());
     for _ in 0..MAX_REFILLS_PER_HOUR {
-        let err = sign(&ctx, request(&history, &psbt, &seed)).unwrap_err();
+        let err = sign(&ctx, request(&history, &refill, &seed)).unwrap_err();
         assert!(err.to_string().contains("not of the pinned"), "{err}");
     }
-    let err = sign(&ctx, request(&history, &psbt, &seed)).unwrap_err();
+    let err = sign(&ctx, request(&history, &refill, &seed)).unwrap_err();
     assert!(err.to_string().contains("rate limit"), "{err}");
 }
 
 #[test]
 fn refuses_before_any_check_while_the_key_is_not_ready() {
     let keys = fx::km();
-    let (history, psbt, seed) = build(&keys, &Shape::rights(2));
+    let (history, refill, seed) = build(&keys, &Shape::rights(2));
     let mut ctx = context(&history.contract_id.to_string());
     ctx.state = EnclaveState::new(Network::Testnet);
-    let err = sign(&ctx, request(&history, &psbt, &seed)).unwrap_err();
+    let err = sign(&ctx, request(&history, &refill, &seed)).unwrap_err();
     assert!(matches!(err, EnclaveError::KeyNotInitialized), "{err}");
 }

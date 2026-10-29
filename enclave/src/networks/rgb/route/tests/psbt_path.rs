@@ -1,19 +1,19 @@
 //! `validate_destination_anchor` and `validate_rights_refill` on the mint
-//! signer: generated rgb-lib-shaped PSBTs, each with the PSBT of the tx that
-//! made its right. Then parity with the consensus path on the same fixtures.
+//! signer: generated rgb-lib-shaped PSBTs, stripped of their RGB keys, each with
+//! its fascia and the fascia of the tx that made its right. Then parity with the
+//! consensus path on the same fixtures.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use amplify::confinement::SmallBlob;
-use bitcoin::psbt::raw::ProprietaryKey;
+use amplify::confinement::{NonEmptyOrdMap, SmallBlob};
 use bitcoin::psbt::{Psbt, PsbtSighashType};
 use bitcoin::{Amount, TxOut};
-use psrgbt::{RgbPropKeyExt, RgbPsbtExt};
+use psrgbt::RgbPsbtExt;
+use rgbstd::containers::Fascia;
 use rgbstd::contract::{AllocatedState, TransitionBuilder};
 use rgbstd::{
-    BuilderSeal, GlobalValues, GraphSeal, MetaValue, Operation, RevealedData, SecretSeal,
-    Transition,
+    BuilderSeal, GlobalValues, GraphSeal, MetaValue, RevealedData, SecretSeal, Transition,
 };
 
 use super::*;
@@ -75,7 +75,8 @@ fn destination(history: &History, mint: &Made, parent: &Made) -> RgbDestination 
     RgbDestination {
         psbt_bytes: mint.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: parent.psbt.serialize(),
+        fascia: mint.fascia_bytes(),
+        parent_fascia: parent.fascia_bytes(),
         ..Default::default()
     }
 }
@@ -131,19 +132,19 @@ fn valid_mint() -> (History, Made, Made) {
 
 /// Commits `mint` (an edited mint transition) on seed right 0, rgb-lib style.
 fn committed_mint(history: &mut History, mint: Transition, right: Utxo) -> Made {
+    committed_bundle(history, vec![mint], right)
+}
+
+/// Commits `transitions` in one bundle on seed right 0, rgb-lib style.
+fn committed_bundle(history: &mut History, transitions: Vec<Transition>, right: Utxo) -> Made {
     let keys = fx::km();
-    let opid = mint.id();
-    let mut psbt = history.commit_psbt(
-        vec![mint],
+    let mut made = history.commit_psbt(
+        transitions,
         vec![right.outpoint],
         vec![ours(&keys, 99, CHANGE_SATS)],
     );
-    our_input(&mut psbt, &keys, 1);
-    Made {
-        opid,
-        tx: psbt.unsigned_tx.clone(),
-        psbt,
-    }
+    our_input(&mut made.psbt, &keys, 1);
+    made
 }
 
 /// A mint transition on `right` of `issued`, open for edits.
@@ -205,19 +206,61 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     assert_eq!(bound.recipient_seal, recipient().to_string());
 }
 
+/// rgb-lib f3975623 strips the PSBT, so a mint without its fascia shows nothing.
 #[test]
-fn refuses_missing_parent_psbt() {
+fn refuses_a_mint_without_its_fascia() {
     let (history, seed, mint) = valid_mint();
     let destination = RgbDestination {
-        parent_psbt: vec![],
+        fascia: vec![],
+        ..destination(&history, &mint, &seed)
+    };
+    let (result, bound) = run_mint(&destination, &pinned(&history));
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("fascia required"), "{err}");
+    assert!(!err.contains("parent_fascia"), "{err}");
+    assert!(bound.is_none(), "no deposit is read for a refused mint");
+}
+
+#[test]
+fn refuses_missing_parent_fascia() {
+    let (history, seed, mint) = valid_mint();
+    let destination = RgbDestination {
+        parent_fascia: vec![],
         ..destination(&history, &mint, &seed)
     };
     let (result, bound) = run_mint(&destination, &pinned(&history));
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("parent_psbt required"));
+        .contains("parent_fascia required"));
     assert!(bound.is_none(), "no deposit is read for a refused mint");
+}
+
+/// RGB keys a host leaves in the PSBT are not read: the fascia's mint binds.
+#[test]
+fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let mut mint = mint_on(&mut history, rights[0], &keys);
+    let other = history.rights_transition(rights[1], &[1]);
+    mint.psbt.push_rgb_transition(other).unwrap();
+    assert!(!mint.psbt.rgb_bundles().unwrap().is_empty());
+    let (units, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(units.unwrap(), MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
+}
+
+/// rgb-lib moves a second right of the spent UTXO by a propagate in the mint's
+/// bundle. F6 signs one transition only.
+#[test]
+fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |mint| mint);
+    let side = history.rights_transition(rights[1], &[1]);
+    let mint = committed_bundle(&mut history, vec![mint, side], rights[0]);
+    let err = mint_refusal(&destination(&history, &mint, &seed), &history);
+    assert!(err.contains("discloses 2 transitions"), "{err}");
 }
 
 /// An old-form mint passed its right on. A mint from that right names a mint
@@ -241,13 +284,12 @@ fn refuses_replay_with_a_different_input() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let mint = mint_on(&mut history, rights[0], &keys);
-    let transition = mint.psbt.rgb_transition(mint.opid).unwrap().unwrap();
-    let replay = committed_mint(&mut history, transition, rights[1]);
+    let replay = committed_mint(&mut history, mint.transition(), rights[1]);
     let err = mint_refusal(&destination(&history, &replay, &seed), &history);
     assert!(err.contains("does not spend"), "{err}");
 }
 
-/// The tx commits another contract's bundle too; the PSBT drops its keys.
+/// The tx commits another contract's bundle too; the fascia drops it.
 #[test]
 fn refuses_a_hidden_bundle() {
     let keys = fx::km();
@@ -259,13 +301,17 @@ fn refuses_a_hidden_bundle() {
     let mut psbt = gen::witness_psbt(inputs, vec![ours(&keys, 99, CHANGE_SATS)]);
     psbt.push_rgb_transition(mint).unwrap();
     psbt.push_rgb_transition(hidden).unwrap();
-    gen::rgb_commit(&mut psbt, 0, 0x5eed);
-    psbt.proprietary
-        .remove(&ProprietaryKey::rgb_consumed_by(other.contract_id));
+    let both = gen::rgb_commit(&mut psbt, 0, 0x5eed);
+    let ours_only = both.bundles().get(&history.contract_id).unwrap().clone();
+    let fascia = Fascia::new(
+        both.seal_witness().clone(),
+        NonEmptyOrdMap::with_key_value(history.contract_id, ours_only),
+    );
     our_input(&mut psbt, &keys, 1);
     fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 2, RIGHT_SATS);
     let destination = RgbDestination {
         psbt_bytes: psbt.serialize(),
+        fascia: gen::fascia_bytes(&fascia),
         ..destination(&history, &seed, &seed)
     };
     let err = mint_refusal(&destination, &history);
@@ -539,7 +585,8 @@ fn refill_request(
     let request = SignRightsRefillRequest {
         psbt_bytes: refill.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: parent.psbt.serialize(),
+        fascia: refill.fascia_bytes(),
+        parent_fascia: parent.fascia_bytes(),
     };
     (refill, request)
 }
@@ -577,13 +624,13 @@ fn accepts_a_refill_of_a_refill_made_right() {
 }
 
 #[test]
-fn refuses_a_refill_without_its_parent_psbt() {
+fn refuses_a_refill_without_its_parent_fascia() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let (refill, mut request) = refill_request(&mut history, rights[0], &seed);
-    request.parent_psbt.clear();
+    request.parent_fascia.clear();
     let err = run_refill(&refill, &request, &history).unwrap_err();
-    assert!(err.to_string().contains("parent_psbt required"), "{err}");
+    assert!(err.to_string().contains("parent_fascia required"), "{err}");
 }
 
 #[test]
@@ -629,9 +676,9 @@ fn refuses_a_refill_with_a_non_all_sighash() {
     assert!(err.to_string().contains("non-ALL sighash 0x02"), "{err}");
 }
 
-/// Two transfers in one bundle: a sibling could move a co-located right.
+/// Two propagates in one bundle: a sibling could move a co-located right.
 #[test]
-fn refuses_two_transfers_in_the_signed_bundle() {
+fn refuses_two_propagates_in_the_signed_bundle() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let sends = vec![
@@ -639,16 +686,25 @@ fn refuses_two_transfers_in_the_signed_bundle() {
         history.rights_transition(rights[1], &[3, 4]),
     ];
     let outputs = (3..=6).map(|i| ours(&keys, i, 1_000)).collect();
-    let mut psbt =
+    let mut made =
         history.commit_psbt(sends, vec![rights[0].outpoint, rights[1].outpoint], outputs);
-    our_input(&mut psbt, &keys, 1);
-    fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 2, RIGHT_SATS);
+    our_input(&mut made.psbt, &keys, 1);
+    fx::anchor_input(
+        &mut made.psbt,
+        1,
+        &keys,
+        AccountType::Colored,
+        0,
+        2,
+        RIGHT_SATS,
+    );
     let request = SignRightsRefillRequest {
-        psbt_bytes: psbt.serialize(),
+        psbt_bytes: made.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: seed.psbt.serialize(),
+        fascia: made.fascia_bytes(),
+        parent_fascia: seed.fascia_bytes(),
     };
-    let err = validate_rights_refill(&request, &psbt, &pinned(&history)).unwrap_err();
+    let err = validate_rights_refill(&request, &made.psbt, &pinned(&history)).unwrap_err();
     assert!(err.to_string().contains("discloses 2 transitions"), "{err}");
 }
 
@@ -708,45 +764,46 @@ fn consensus(
 }
 
 #[test]
-fn a_mint_reads_the_same_from_the_psbt_as_from_consensus() {
+fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
     let (history, seed, mint) = valid_mint();
     let (_, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    let from_psbt = bound.expect("the mint is valid");
+    let from_fascia = bound.expect("the mint is valid");
 
     let (validated, anchors) = consensus(&history.consignment());
     let [anchor] = anchors.as_slice() else {
         panic!("one mint anchor, got {anchors:?}");
     };
-    assert_eq!(validated.last_transfer_op_id, Some(from_psbt.opid));
-    assert_eq!(anchor.opid, from_psbt.opid);
-    assert_eq!(anchor.amount, from_psbt.issued);
-    assert_eq!(anchor.before_block, from_psbt.before_block);
+    assert_eq!(validated.last_transfer_op_id, Some(from_fascia.opid));
+    assert_eq!(anchor.opid, from_fascia.opid);
+    assert_eq!(anchor.amount, from_fascia.issued);
+    assert_eq!(anchor.before_block, from_fascia.before_block);
     let last = validated.last_transition.unwrap();
-    assert_eq!(last.asset_output_amount, from_psbt.issued);
+    assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
         seals,
         vec![validation::OutputSeal::Confidential {
-            secret_seal: from_psbt.recipient_seal
+            secret_seal: from_fascia.recipient_seal
         }]
     );
     assert!(validated.last_mint_rights.is_empty());
     // PP7 pins the UTXO consensus closes.
-    let parent = seed.psbt.serialize();
+    let parent = seed.fascia_bytes();
     let spent =
-        parent_proof::right_input(&mint.psbt, &parent, from_psbt.right, history.contract_id)
+        parent_proof::right_input(&mint.psbt, &parent, from_fascia.right, history.contract_id)
             .unwrap();
     let pinned = mint.psbt.unsigned_tx.input[spent].previous_output;
     assert_eq!(validated.last_closed_seals, vec![pinned]);
 }
 
 #[test]
-fn a_refill_reads_the_same_from_the_psbt_as_from_consensus() {
+fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let (refill, request) = refill_request(&mut history, rights[0], &seed);
     let vouts = run_refill(&refill, &request, &history).unwrap();
-    let committed = psbt_commit::committed_transition(&refill.psbt, history.contract_id).unwrap();
+    let committed =
+        psbt_commit::committed_transition(&refill.tx, &refill.fascia, history.contract_id).unwrap();
 
     let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());

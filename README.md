@@ -86,16 +86,17 @@ Before it signs, the mint signer:
    have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
-3. Reads the mint from the PSBT rgb-lib committed, with no consignment. The
-   first `OP_RETURN` must commit exactly the bundles the PSBT discloses: one
-   bundle of the pinned `RGB_ASSET_ID`, holding one mint whose id is
-   recomputed. The txid and the sighash types cannot change. The mint
-   consumes one `mintRight`, passes no right on, and pays exactly
-   `amount - commission` units to one blinded seal.
-4. Checks the parent PSBT: the tx that made the spent right was a propagate
-   of one right that put that right alone on its own output, and the PSBT spends that
-   output, its only input. So every signature for this mint spends the same
-   UTXO.
+3. Reads the mint from the fascia rgb-lib wrote for the PSBT's tx (`fascia`),
+   with no consignment: rgb-lib strips the RGB data from the PSBT. The fascia
+   must be of that tx, and its first `OP_RETURN` must commit exactly the
+   bundles the fascia discloses: one bundle of the pinned `RGB_ASSET_ID`,
+   holding one mint whose id is recomputed. The txid and the sighash types
+   cannot change. The mint consumes one `mintRight`, passes no right on, and
+   pays exactly `amount - commission` units to one blinded seal.
+4. Checks the parent fascia (`parent_fascia`): the tx that made the spent right
+   was a propagate of one right that put that right alone on its own output,
+   and the PSBT spends that output, its only input. So every signature for
+   this mint spends the same UTXO.
 5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
    derives, before its `beforeBlock` and covered by the `EVM_FINALITY_TAG` head,
    read from a node on the pinned chain.
@@ -719,7 +720,7 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-swap` | `rgb` | Retired RGB flow: send/receive with BFA `Transfer`. In the default set. Not in production. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `rgb-psbt-utils` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the PSBT. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |
 | `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
@@ -758,7 +759,7 @@ Re-syncing changes PCR0. Procedure in
   if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
   transfer in the history fails validation. The burn signer proves this with
   the request's Merkle proofs against its own header chain. The mint signer
-  checks no witness: it reads the mint from the PSBT, and a bad history makes
+  checks no witness: it reads the mint from the fascia, and a bad history makes
   the mint invalid for every receiver.
 - **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
   authenticates the configured RPC hostname against the pinned CA. The host

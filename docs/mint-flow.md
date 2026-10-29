@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move; plan B: the mint signer reads the PSBT).
+**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move; plan B: the mint signer reads the rgb-lib fascia).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -14,9 +14,10 @@ document differ, investigate the difference. Either can contain an error.
 2. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
 3. The backend makes an RGB mint (a BFA `mint` transition) and a Bitcoin
    PSBT that anchors it. The mint commits to `beforeBlock`: its EVM lock
-   must be in an earlier (L2) block. The backend also sends the PSBT of the
-   tx that made the right the mint spends (the parent PSBT).
-4. The mint signer checks the deposit, the mint and the PSBT.
+   must be in an earlier (L2) block. The backend also sends the fascia
+   rgb-lib wrote for the mint tx, and the fascia of the tx that made the
+   right the mint spends (the parent fascia).
+4. The mint signer checks the deposit, the mint, the PSBT and both fascias.
 5. The mint signer signs the PSBT with its colored taproot key.
 6. The backend finalizes and broadcasts the Bitcoin transaction.
 7. The recipient validates the RGB transfer and waits for the required confirmations.
@@ -27,7 +28,7 @@ document differ, investigate the difference. Either can contain an error.
 |------|-------|-------------|-----|
 | User | EVM | - | Locks tokens. |
 | Bridge contract | EVM | Deposit records | Holds the tokens. Writes the deposit events. |
-| Backend and listener | Operator servers | Nothing | Build the PSBT. Find the parent PSBT. Send the request. |
+| Backend and listener | Operator servers | Nothing | Build the PSBT and its fascia. Find the parent fascia. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipts, canonical blocks and selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
@@ -46,19 +47,25 @@ diagnostic text is not used to identify this state. The enclave and listener
 log this wait at debug level. Other validation failures keep code 3; a receipt
 above the `latest` head also remains a validation failure.
 
-The mint signer validates no RGB consignment. It reads the mint from the
-PSBT that rgb-lib returns: rgb-lib stores each transition, the input map and
-the MPC entropy in the PSBT as proprietary keys. Each step from the signed
-txid to the transition is a commitment, so the txid fixes what the mint does:
+The mint signer validates no RGB consignment. rgb-lib f3975623 commits the
+PSBT and then strips its RGB, MPC, OPRET and TAPRET proprietary keys. It keeps
+the RGB data in the tx's fascia (`transfers/<txid>/fascia`): the unsigned tx,
+every bundle the tx commits and the MPC merkle block with its entropy,
+strict-encoded. The mint signer reads the mint from that fascia and checks it
+as rgb-lib's `inspect_rgb_transfer` does, without the wallet checks and with
+its own opret proof in place of the fascia's DBC proof (F5). Each step
+from the signed txid to the transition is a commitment, so the txid fixes what
+the mint does:
 
 1. The signature commits to the unsigned tx. Native SegWit inputs keep the
    txid fixed (F2).
-2. The first `OP_RETURN` or P2TR output is an `OP_RETURN` (F3). RGB consensus
+2. The fascia is of that tx: its witness txid is the PSBT's txid (F4).
+3. The first `OP_RETURN` or P2TR output is an `OP_RETURN` (F3). RGB consensus
    reads the commitment from that output.
-3. The enclave rebuilds the MPC tree from every bundle the PSBT discloses and
-   the entropy, and checks its root against that `OP_RETURN` (F5). A hidden
-   bundle changes the root.
-4. The bundle id commits the input map. Each entry must name the one
+4. The enclave rebuilds the MPC tree from every bundle the fascia discloses
+   and the fascia's entropy, and checks its root against that `OP_RETURN`
+   (F5). A hidden, extra or swapped bundle changes the root.
+5. The bundle id commits the input map. Each entry must name the one
    disclosed transition, whose id the enclave recomputes (F6).
 
 The parent proof (PP1 - PP7) pins the UTXO of the spent right. Every
@@ -87,14 +94,14 @@ sequenceDiagram
     participant E as Mint signer (enclave)
     participant R as EVM RPC (pinned TLS)
 
-    L->>L: mint_begin PSBT + the parent PSBT of its right
+    L->>L: mint_begin PSBT + its fascia, and the parent fascia of its right
     U->>C: lock tokens
     C-->>L: FundsIn + BridgeFundsIn events
-    L->>P: Sign(EvmSource -> RgbDestination with psbt, parent_psbt)
+    L->>P: Sign(EvmSource -> RgbDestination with psbt, fascia, parent_fascia)
     P->>E: forward over vsock
     E->>E: Stage 1: replay precheck
     E->>R: Stage 2: this deposit's receipt
-    E->>E: Stages 3-5: PSBT core, mint rule, parent proof, fee
+    E->>E: Stages 3-5: core on the fascia, mint rule, parent proof, fee
     E->>R: Stage 6: chain id, FundsIn of this mint, finality
     E->>E: Stage 6: recipient bind, replay reserve
     E->>E: Stage 7: sats rules, sign
@@ -102,6 +109,18 @@ sequenceDiagram
     P-->>L: signed PSBT
     L->>L: finalize and broadcast
 ```
+
+The RGB fields of a mint and a refill on each hop. Each fascia is the
+strict-encoded file rgb-lib writes, sent as raw bytes. The old `parent_psbt`
+numbers are reserved: a hop that still sends it sends no fascia, and F4
+refuses it.
+
+| Hop | Message | PSBT | Its fascia | Parent fascia | Reserved |
+|-----|---------|------|------------|---------------|----------|
+| Bridge to listener | `node.RgbSignData` | `psbt` 3 | `fascia` 6 | `parent_fascia` 7 | 5 |
+| Listener to parent | `parent.EnrichedRgbPayload` | `psbt_bytes` 2 | `fascia` 9 | `parent_fascia` 10 | 8 |
+| Parent to enclave, mint | `enclave.RgbDestination` | `psbt_bytes` 2 | `fascia` 9 | `parent_fascia` 10 | 8 |
+| Parent to enclave, refill | `enclave.SignRightsRefillRequest` | `psbt_bytes` 1 | `fascia` 6 | `parent_fascia` 7 | 5 |
 
 ## 4. Key values
 
@@ -117,6 +136,7 @@ sequenceDiagram
 | `SPV_MIN_CONFIRMATIONS` | 3 (mint image) | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
+| Fascia size | 16 MiB (`U24`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
 | `MINT_INPUTS` | 1 | A mint spends its right alone. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
@@ -172,8 +192,10 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 
 ### Stage 3 - Does the PSBT commit exactly one transition of the asset?
 
-The PSBT core. It also runs on the parent PSBT (PP2), where F1, F2 and F7 do
-not apply: the enclave does not sign the parent.
+The core. It reads the RGB data from the request's `fascia`, never from the
+PSBT: RGB keys left in a PSBT are ignored. It also runs on the parent fascia
+and the tx it carries (PP2), where F1, F2 and F7 do not apply: the enclave
+does not sign the parent.
 
 - **F1** The PSBT must parse and have at least one input.
 - **F2** Each input must have a `witness_utxo` with a native witness
@@ -183,13 +205,18 @@ not apply: the enclave does not sign the parent.
   `OP_RETURN`. Consensus reads the commitment from that output. A P2TR first
   would make it a tapret host that the opret check never sees. P2A is not
   P2TR.
-- **F4** The PSBT discloses exactly one bundle, of the contract
-  `RGB_ASSET_ID` names (compared as parsed ids). The request's `asset_id`
-  must name it too.
-- **F5** The `OP_RETURN` output carries the MPC entropy. The MPC tree of every
-  disclosed bundle under that entropy, at depth 3, must give the 34-byte
-  `OP_RETURN` commitment. The PSBT's own MPC message, commitment and proof keys
-  are not read.
+- **F4** `fascia` must not be empty and must decode as rgb-lib reads its
+  fascia file: strict encoding, nothing after it, at most 16 MiB. Its witness
+  txid must be the PSBT's unsigned txid. It discloses exactly one bundle, of
+  the contract `RGB_ASSET_ID` names (compared as parsed ids). The request's
+  `asset_id` must name it too.
+- **F5** The fascia's MPC merkle block carries the entropy rgb-lib committed
+  with; none is a refusal. The MPC tree of every bundle the fascia discloses,
+  under that entropy at depth 3, must give the 34-byte `OP_RETURN`
+  commitment. So the fascia shows exactly the bundles the tx commits. The
+  rest of the merkle block and the fascia's DBC proof are not read (rgb-lib
+  verifies that proof): the enclave checks its own opret proof, and F3 rules
+  out a tapret.
 - **F6** The bundle holds exactly one transition, stored under its own id, of
   the pinned contract. The input map must close exactly its inputs, each for
   that transition.
@@ -225,21 +252,24 @@ binds checked, on the committed transition.
 
 ### Stage 5 - Does the mint spend the right its parent made?
 
-The parent PSBT is the PSBT of the tx that made the spent right. It may be
-signed or not: only its unsigned tx and its RGB keys are read.
+The parent fascia (`parent_fascia`) is the fascia rgb-lib wrote for the tx
+that made the spent right. It carries that tx unsigned. rgb-lib writes the
+file once, at begin, and the txid of a native SegWit tx does not change when
+it is signed.
 
-- **PP1** `parent_psbt` must not be empty and must parse.
-- **PP2** The core (F3 - F6) runs on it, with the same pin. It gives the
-  parent's txid, OpId and transition.
+- **PP1** `parent_fascia` must not be empty and must decode as in F4.
+- **PP2** The core (F3 - F6) runs on it and the tx it carries, with the same
+  pin. It gives the parent's txid, OpId and transition.
 - **PP3** The mint's one input must be an `OS_MINT` output of that transition.
 - **PP4** The parent must be a `TS_PROPAGATE` that closes exactly one right
   (the schema moves rights only so). A transfer, mint or genesis parent is
-  refused. No PSBT commits a genesis, so a genesis right has no parent.
+  refused. No tx commits a genesis, so a genesis right has no parent.
 - **PP5** That right must sit on a witness seal: an output of the parent tx
   itself. The parent's id commits its concealed seal, so the recompute in PP2
   authenticates the vout.
 - **PP6** No other revealed assignment of the parent sits on that output.
-- **PP7** Exactly one PSBT input spends that output. For a mint it is the
+- **PP7** Exactly one PSBT input spends that output. So the parent fascia
+  must be of the tx whose output the right input spends. For a mint it is the
   only input (F7).
 
 ### Stage 6 - Is the deposit this mint's, and the user the right one?
@@ -320,10 +350,10 @@ the rule checks shape only: every new right and every sat stays on the
 enclave's own outputs, and no units move.
 
 The parent maps `data_type` `RGB_RIGHTS_REFILL` to `SignRightsRefill`
-(`psbt_bytes`, `asset_id`, `parent_psbt`). It refuses a request with a source
-proof or without `RgbData`. The reply is `SignedPsbtResponse`. Every other
-signer role answers "wrong signer role". Like every signing request it waits
-for `SetEndpoints`, but it reads no network.
+(`psbt_bytes`, `asset_id`, `fascia`, `parent_fascia`). It refuses a request
+with a source proof or without `RgbData`. The reply is `SignedPsbtResponse`.
+Every other signer role answers "wrong signer role". Like every signing
+request it waits for `SetEndpoints`, but it reads no network.
 
 The listener gRPC has no auth, so the cheap checks run first.
 
@@ -340,11 +370,11 @@ The listener gRPC has no auth, so the cheap checks run first.
   count is in memory, per enclave, and a restart resets it. A request the gate
   refuses does not count. A request refused later does.
 
-**From the PSBT** (the core of Stage 3):
+**From the PSBT and its fascia** (the core of Stage 3):
 
 - **RR5** F2, F3 and F5. F3 matters most here: RR12 admits 0-sat outputs, and
   a 0-sat P2TR before the `OP_RETURN` would switch the close method.
-- **RR3** F4 and F6: the pinned asset.
+- **RR3** F4 and F6: the refill's own fascia, of the pinned asset.
 - **RR6** F6, and the one transition is a `TS_PROPAGATE` (8014). A transfer
   moves units only.
 - **RR7** It closes exactly one input, an `OS_MINT`. It assigns `OS_MINT`
@@ -370,11 +400,15 @@ anchor refusal (section 11).
 - **RR14** S7.2 - S7.4: the Colored inputs are signed. Zero signed inputs is an
   error.
 
-**Where the parent PSBT comes from.** For a right a refill made, rgb-lib keeps
-the refill's `unsigned.psbt` and reports it as the Send transfer's `psbt_path`.
-For a right the issuer seeded, the issuer's `rights.psbt` (saved by
+**Where the fascias come from.** rgb-lib writes each one as the `fascia` file
+of the transfer dir, next to the transfer's `psbt_path`. A mint's own fascia
+is that of its mint transfer, and a refill's is the `fascia_path` its send
+begin returns. For a right a refill made, the parent fascia is that refill's.
+For a right the issuer seeded, the issuer's `rights.fascia` (saved by
 `bfa_issuer` at `send-rights-begin`) is placed once, at seeding, as
-`<connector data dir>/rights_seeds/<txid>.psbt`.
+`<connector data dir>/rights_seeds/<txid>.fascia`. It must be strict-encoded,
+as rgb-lib f3975623 writes it: an older rgb-lib wrote JSON, which PP1 refuses,
+and only opening that wallet on f3975623 re-saves it.
 
 What is not checked, and why that is safe:
 
@@ -406,7 +440,9 @@ input, at most 12 refills per hour.
 | `Sign` with an RGB source or an EVM destination (burn) | Refused: wrong signer role. |
 | `SignRawDigest` (gas transaction) | Refused: wrong signer role. |
 | `InitiateCloning`, `GetClone`, `SetClone` | Refused: the seed comes from KMS. |
-| `Sign` without `parent_psbt` | Refused (PP1). An old listener that drops the field fails closed. |
+| `Sign` without `fascia` | Refused (F4). rgb-lib f3975623 strips the PSBT, so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
+| `Sign` without `parent_fascia` | Refused (PP1). |
+| `SignRightsRefill` without `fascia` or `parent_fascia` | Refused (F4, PP1). |
 | `SignRightsRefill` that breaks a rule of section 8 | Refused. Past the gate it still counts against the hourly limit. |
 | `SignRawMessage` | Refused in every build. |
 
@@ -419,7 +455,7 @@ replicas recover the same seed. See [KMS seed persistence](kms-persistence.md).
 
 A mint spends one mint right (`OS_MINT`, no units) and makes units
 (`OS_ASSET`). It passes no right on, so each mint uses up a right. The mint
-signer checks the amount three times, from the PSBT and the deposit:
+signer checks the amount three times, from the fascia and the deposit:
 
 1. The mint rule: the one `OS_ASSET` leg equals `issuedSupply` (M5), as the
    VM's `sas` does for every receiver.
@@ -452,6 +488,8 @@ when it accepts the mint, and refuses a bad one.
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
-mint spends. rgb-lib f3975623 strips the `RGB` and `MPC` keys from the PSBTs
-it returns, so every mint and refill of a connector on it fails closed until
-the enclave reads the transitions from the fascia.
+mint spends.
+
+The fascia is read in the strict encoding of rgb-ops 9d831d2 (the pinned
+`rgb-ops` rev). A change of that encoding fails F4 and PP1 closed: every mint
+and refill is refused until the enclave moves with rgb-lib.

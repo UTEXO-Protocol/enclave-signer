@@ -1,6 +1,6 @@
 //! The mint rules (`Sign`, EVM -> RGB) on the committed transition: what the
 //! VM's `sas` and `pma` and the former consignment binds enforced, read from
-//! the PSBT. The rule ids (M1-M8) are those of `docs/mint-flow.md` section 5.
+//! the fascia. The rule ids (M1-M8) are those of `docs/mint-flow.md` section 5.
 
 use amplify::{ByteArray, Wrapper};
 use rgbstd::{BuilderSeal, Opout, Transition};
