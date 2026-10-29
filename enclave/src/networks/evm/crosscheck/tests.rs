@@ -583,35 +583,45 @@ mod settlement {
         net_amount: 20,
     };
 
-    fn settlement(pairs: &[(u8, u64)]) -> Bytes {
-        let ids: Vec<B256> = pairs.iter().map(|(t, _)| B256::from([*t; 32])).collect();
-        let amounts: Vec<U256> = pairs.iter().map(|(_, a)| U256::from(*a)).collect();
-        Bytes::from((ids, amounts).abi_encode_params())
+    fn settlement(ids: &[u8]) -> Bytes {
+        let ids: Vec<B256> = ids.iter().map(|t| B256::from([*t; 32])).collect();
+        Bytes::from((ids,).abi_encode_params())
     }
 
-    fn check(pairs: &[(u8, u64)], locks: &[VerifiedLock]) -> Result<()> {
-        let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), settlement(pairs));
+    fn check(ids: &[u8], locks: &[VerifiedLock]) -> Result<()> {
+        let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), settlement(ids));
         validate_funds_out_settlement(&params_of(&cd), locks)
     }
 
     #[test]
-    fn passes_when_the_cited_pairs_are_the_verified_locks() {
-        assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A, LOCK_B]).is_ok());
+    fn passes_when_the_cited_ids_are_the_verified_locks() {
+        assert!(check(&[0xA1, 0xB2], &[LOCK_A, LOCK_B]).is_ok());
+    }
+
+    /// Byte layout the module decodes: offset, length, then the ids.
+    #[test]
+    fn settlement_is_abi_encoded_bytes32_array() {
+        let data = settlement(&[0xA1, 0xB2]);
+        assert_eq!(data.len(), 4 * 32);
+        assert_eq!(U256::from_be_slice(&data[0..32]), U256::from(32));
+        assert_eq!(U256::from_be_slice(&data[32..64]), U256::from(2));
+        assert_eq!(&data[64..96], &[0xA1; 32]);
+        assert_eq!(&data[96..128], &[0xB2; 32]);
     }
 
     /// F05-NEW-AF-04: only the ascending order is signable.
     #[test]
     fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
-        assert!(check(&[(0xA1, 950), (0xB2, 20)], &locks).is_ok());
-        let err = check(&[(0xB2, 20), (0xA1, 950)], &locks).unwrap_err();
+        assert!(check(&[0xA1, 0xB2], &locks).is_ok());
+        let err = check(&[0xB2, 0xA1], &locks).unwrap_err();
         assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
     /// Lock order does not matter: only the calldata order is checked.
     #[test]
     fn passes_when_locks_arrive_in_any_order() {
-        assert!(check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_B, LOCK_A]).is_ok());
+        assert!(check(&[0xA1, 0xB2], &[LOCK_B, LOCK_A]).is_ok());
     }
 
     /// Order is by the full 32 bytes, not by the first byte only.
@@ -634,11 +644,7 @@ mod settlement {
                 .iter()
                 .map(|&i| B256::from(locks[i].operation_id))
                 .collect();
-            let amounts: Vec<U256> = order
-                .iter()
-                .map(|&i| U256::from(locks[i].net_amount))
-                .collect();
-            let data = Bytes::from((ids, amounts).abi_encode_params());
+            let data = Bytes::from((ids,).abi_encode_params());
             let cd = mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), data);
             validate_funds_out_settlement(&params_of(&cd), &locks)
         };
@@ -647,48 +653,41 @@ mod settlement {
         assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
-    /// A valid burn citing a deposit it does not descend from.
+    /// A valid burn citing a deposit it does not descend from. A deposit of
+    /// another amount for the same mint has another id, so it lands here too.
     #[test]
     fn rejects_a_deposit_the_burn_does_not_descend_from() {
-        let err = check(&[(0xC3, 950)], &[LOCK_A]).unwrap_err();
+        let err = check(&[0xC3], &[LOCK_A]).unwrap_err();
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
     #[test]
-    fn rejects_a_citation_of_the_mint_pair_instead_of_the_bridge_record() {
-        let err = check(&[(LOCK_A.mint_opid[0], LOCK_A.minted)], &[LOCK_A]).unwrap_err();
+    fn rejects_a_citation_of_the_mint_opid_instead_of_the_bridge_record() {
+        let err = check(&[LOCK_A.mint_opid[0]], &[LOCK_A]).unwrap_err();
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
     #[test]
     fn rejects_a_missing_ancestry_deposit() {
-        let err = check(&[(0xA1, 950)], &[LOCK_A, LOCK_B]).unwrap_err();
+        let err = check(&[0xA1], &[LOCK_A, LOCK_B]).unwrap_err();
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
     #[test]
     fn rejects_an_extra_cited_deposit() {
-        let err = check(&[(0xA1, 950), (0xB2, 20)], &[LOCK_A]).unwrap_err();
-        assert!(err.to_string().contains("settlementData mismatch"), "{err}");
-    }
-
-    /// The module checks the full recorded netAmount per pair. A wrong amount
-    /// is a wrong citation, not a rounding issue.
-    #[test]
-    fn rejects_a_wrong_net_amount() {
-        let err = check(&[(0xA1, 949)], &[LOCK_A]).unwrap_err();
+        let err = check(&[0xA1, 0xB2], &[LOCK_A]).unwrap_err();
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
     #[test]
     fn rejects_a_duplicated_citation() {
-        let err = check(&[(0xA1, 950), (0xA1, 950)], &[LOCK_A]).unwrap_err();
+        let err = check(&[0xA1, 0xA1], &[LOCK_A]).unwrap_err();
         assert!(err.to_string().contains("strictly ascending"), "{err}");
     }
 
     #[test]
     fn rejects_when_no_lock_was_verified() {
-        let err = check(&[(0xA1, 950)], &[]).unwrap_err();
+        let err = check(&[0xA1], &[]).unwrap_err();
         assert!(err.to_string().contains("no verified deposit"), "{err}");
     }
 
@@ -701,7 +700,7 @@ mod settlement {
 
     #[test]
     fn rejects_non_canonical_settlement_data() {
-        let mut padded = settlement(&[(0xA1, 950)]).to_vec();
+        let mut padded = settlement(&[0xA1]).to_vec();
         padded.extend_from_slice(&[0u8; 32]);
         let cd =
             mock_funds_out_calldata_full(Address::ZERO, 1000, Bytes::new(), Bytes::from(padded));
@@ -710,6 +709,20 @@ mod settlement {
             err.to_string().contains("canonically") || err.to_string().contains("decode"),
             "{err}"
         );
+    }
+
+    /// The pre-change `(bytes32[] ids, uint256[] amounts)` layout is refused:
+    /// the module no longer reads amounts, and the bytes must be canonical.
+    #[test]
+    fn rejects_the_old_ids_and_amounts_layout() {
+        let old = (vec![B256::from([0xA1; 32])], vec![U256::from(950u64)]);
+        let cd = mock_funds_out_calldata_full(
+            Address::ZERO,
+            1000,
+            Bytes::new(),
+            Bytes::from(old.abi_encode_params()),
+        );
+        assert!(validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).is_err());
     }
 }
 
@@ -768,10 +781,7 @@ mod lz_route {
 
     /// An LZ release that matches [`burn`] and [`LOCK`] in every bound field.
     fn honest() -> lzFundsOutCall {
-        let settlement = (
-            vec![B256::from(LOCK.operation_id)],
-            vec![U256::from(LOCK.net_amount)],
-        );
+        let settlement = (vec![B256::from(LOCK.operation_id)],);
         lzFundsOutCall {
             amount: U256::from(BURNED),
             burnId: U256::ZERO,
@@ -883,7 +893,7 @@ mod lz_route {
 
     #[test]
     fn rejects_lz_settlement_data_that_is_not_the_ancestry() {
-        let other = (vec![B256::from([0xC3; 32])], vec![U256::from(950u64)]);
+        let other = (vec![B256::from([0xC3; 32])],);
         let err = check(lzFundsOutCall {
             settlementData: Bytes::from(other.abi_encode_params()),
             ..honest()

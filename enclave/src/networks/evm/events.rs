@@ -659,7 +659,7 @@ pub const MAX_MINT_SCAN_BLOCKS: u64 = 500_000;
 /// refuses any other lock, so a signed mint would strand the user's deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
-/// contract. A later `fundsOut` must cite its `(operationId, netAmount)` in
+/// contract. A later `fundsOut` must cite its `operationId` in
 /// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
 #[cfg(feature = "bfa-validation")]
 pub fn verify_rgb_funds_in(

@@ -23,8 +23,8 @@ use crate::error::{EnclaveError, Result};
 /// One EVM deposit behind a BFA mint, verified from a receipt or derived.
 ///
 /// `operation_id` / `net_amount` are the `BridgeFundsIn` record that the
-/// settlement module stored. Thus they are the only pair that a
-/// `fundsOut.settlementData` can cite for this deposit.
+/// settlement module stored. `operation_id` hashes `net_amount`, so it is the
+/// only id that a `fundsOut.settlementData` can cite for this deposit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedLock {
     /// The mint that this lock backs.

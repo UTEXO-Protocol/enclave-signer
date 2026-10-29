@@ -84,7 +84,7 @@ sequenceDiagram
     Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>burn_destination::resolve(burnReason, record)<br/>V0: burnReason[12..] == calldata recipient, direct only<br/>V1: hash_v1(record) == burnReason, then<br/>destinationChainId, dstEid, recipient == record
-    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
+    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData operationIds ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
     Note right of Cx: LayerZero route: recipient = the LayerZero recipient.<br/>Only a V1 burn can leave via LayerZero.
     Cx-->>Srv: Ok / CrossCheck err
 
