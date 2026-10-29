@@ -165,6 +165,17 @@ jobs:
         run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
       - name: Test (ccd-only)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import
+      # The release-only refusals are `not(test)`, so no unit test reaches them.
+      # No CI job ships the ccd image. Compile the release build and check that
+      # both refusals are in the binary, so a wrong cfg cannot drop them silently.
+      - name: Clippy (ccd-only, release)
+        run: cargo clippy --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd -- -D warnings
+      - name: Release refusals present (ccd-only)
+        run: |
+          cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
+          bin=target/release/utexo-bridge-enclave
+          grep -aq "EVM domain unpinned" "$bin"
+          grep -aq "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned" "$bin"
 
       # Minimal build: no features at all (`--no-default-features` drops the
       # default rgb/rgb-swap/ccd set). Keeps the no-SPV path compiling and exercises the

@@ -376,6 +376,17 @@ pub fn validate_destination(
         ));
     }
 
+    // A release build without RGB (CCD) needs the EIP-712 domain pins too.
+    // Without them it would sign for any chain and proxy.
+    #[cfg(all(not(feature = "rgb-validation"), not(debug_assertions), not(test)))]
+    if bridge_config.chain_id == 0 || bridge_config.bridge_contract == [0u8; ADDRESS_LEN] {
+        return Err(EnclaveError::CrossCheck(
+            "EVM domain unpinned: set EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS - refusing to \
+             sign for a caller-chosen chain and proxy"
+                .into(),
+        ));
+    }
+
     if bridge_config.chain_id != 0 && destination.chain_id != bridge_config.chain_id {
         return Err(EnclaveError::CrossCheck(format!(
             "chain_id mismatch: request {} != pinned {}",
