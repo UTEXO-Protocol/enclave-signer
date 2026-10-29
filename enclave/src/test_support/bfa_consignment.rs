@@ -1,6 +1,6 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
-//! genesis, then mints, transfers of units or rights and burns, each in a
-//! witness tx that commits its bundle in an OP_RETURN output. Each one is
+//! genesis, then mints, transfers of units, propagates of rights and burns,
+//! each in a witness tx that commits its bundle in an OP_RETURN output. Each one is
 //! committed as rgb-lib does it, through psbtu's `rgb_commit`, so its PSBT is
 //! the one a signer gets. Tests need no stored V1 fixture. Deterministic:
 //! fixed times, nonces, blinding and entropy.
@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use amplify::confinement::{Confined, NonEmptyVec};
+use amplify::confinement::Confined;
 use amplify::{ByteArray, Bytes20, Bytes32};
 use bitcoin::blockdata::opcodes::all::OP_RETURN;
 use bitcoin::blockdata::script::Builder;
@@ -19,7 +19,7 @@ use bitcoin::psbt::Psbt;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction};
 use bitcoin::{TxIn, TxOut, Witness};
 use psrgbt::{RgbOutExt, RgbPsbtExt};
-use rgbstd::containers::{ConsignmentVer, FileContent, TerminalSeals, Transfer, WitnessBundle};
+use rgbstd::containers::{ConsignmentVer, FileContent, Transfer, WitnessBundle};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -27,8 +27,8 @@ use rgbstd::rgbcore::commit_verify::mpc::{
 };
 use rgbstd::rgbcore::commit_verify::{CommitId, EmbedCommitVerify, TryCommitVerify};
 use rgbstd::stl::{
-    AssetSpec, BlockNumber, BridgeLocation, BurnReason, ContractTerms, EvmAddress, EvmContract,
-    RejectListLocation, RicardianContract,
+    BlockNumber, BridgeLocation, BurnReason, ContractTerms, EvmAddress, EvmContract, Name,
+    RejectListLocation, RicardianContract, UnicodeTicker,
 };
 use rgbstd::txout::CloseMethod;
 use rgbstd::validation::{DbcProof, SchemaRules};
@@ -55,7 +55,7 @@ pub struct Utxo {
 pub struct Mint {
     pub opid: OpId,
     pub amount: u64,
-    pub after_block: u64,
+    pub before_block: u64,
 }
 
 /// One transition committed in its witness tx, and the PSBT of that tx.
@@ -151,10 +151,11 @@ impl History {
             BridgedFungibleAsset::schema_rules(),
             issue.chain_net,
         )
-        .add_global_state(
-            "spec",
-            AssetSpec::new("BUSDT", "Bridged USDT", Precision::Micro),
-        )
+        .add_global_state("ticker", UnicodeTicker::from("BUSDT"))
+        .unwrap()
+        .add_global_state("name", Name::from("Bridged USDT"))
+        .unwrap()
+        .add_global_state("precision", Precision::Micro)
         .unwrap()
         .add_global_state(
             "terms",
@@ -297,36 +298,36 @@ impl History {
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Committed {
         let mint = self
-            .mint_transition(right, amount, after_block, to)
+            .mint_transition(right, amount, before_block, to)
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs)
+        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
     }
 
     /// [`Self::mint`] in the old form, which passes a new right on to vout 1.
-    /// rgb-lib no longer builds it, and the mint signer refuses it.
+    /// The schema refuses it now; a refusal fixture only.
     pub fn mint_keeping_right(
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> (Committed, Utxo) {
         let mint = self
-            .mint_transition(right, amount, after_block, to)
+            .mint_transition(right, amount, before_block, to)
             .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, self.nonce))
             .unwrap()
             .complete_transition()
             .unwrap();
-        let minted = self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs);
+        let minted = self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs);
         let kept = Utxo {
             opout: Opout::new(minted.opid, OS_MINT, 0),
             outpoint: OutPoint::new(minted.tx.compute_txid(), 1),
@@ -339,13 +340,13 @@ impl History {
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
     ) -> TransitionBuilder {
         self.transition("mint")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap()
-            .add_metadata("afterBlock", BlockNumber::from(after_block))
+            .add_metadata("beforeBlock", BlockNumber::from(before_block))
             .unwrap()
             .add_global_state("issuedSupply", RgbAmount::from(amount))
             .unwrap()
@@ -359,7 +360,7 @@ impl History {
         &mut self,
         mint: Transition,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         right: Utxo,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
@@ -372,19 +373,19 @@ impl History {
         self.mints.push(Mint {
             opid,
             amount,
-            after_block,
+            before_block,
         });
         Committed::of(opid, psbt)
     }
 
     /// Mints `amount` to a revealed seal on vout 2 of its witness tx, so a
     /// later transition can spend it. Returns the units.
-    pub fn mint_owned(&mut self, right: Utxo, amount: u64, after_block: u64) -> Utxo {
+    pub fn mint_owned(&mut self, right: Utxo, amount: u64, before_block: u64) -> Utxo {
         let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 0x2000 + self.nonce));
         let minted = self.mint(
             right,
             amount,
-            after_block,
+            before_block,
             to,
             vec![],
             vec![dust(0x01), dust(0x02)],
@@ -424,11 +425,11 @@ impl History {
         Committed::of(opid, psbt)
     }
 
-    /// The transfer [`Self::send_rights`] commits, for a bundle the caller
-    /// builds.
+    /// The propagate [`Self::send_rights`] commits, for a bundle the caller
+    /// builds. Rights move only by propagate, one right in.
     pub fn rights_transition(&mut self, right: Utxo, vouts: &[u32]) -> Transition {
         let mut send = self
-            .transition("transfer")
+            .transition("propagate")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap();
         for &vout in vouts {
@@ -463,8 +464,9 @@ impl History {
         }
     }
 
-    /// Burns `burned` of `input` (holding `held`) and keeps the rest as
-    /// change on vout 1. `None` leaves the global out.
+    /// Burns `burned` of `input` (holding `held`). The rest goes to vout 1 as
+    /// rgb-lib does it: a split transfer first, then the burn of its output.
+    /// `None` burns it all without the global, which consensus refuses.
     pub fn burn(
         &mut self,
         input: Utxo,
@@ -472,13 +474,64 @@ impl History {
         burned: Option<u64>,
         reason: Option<[u8; 32]>,
     ) -> Committed {
-        let burn = self.burn_transition(input, held, burned, reason);
-        let opid = burn.id();
-        let psbt = self.commit_psbt(vec![burn], vec![input.outpoint], vec![dust(0x04)]);
+        let transitions = self.burn_transitions(input, held, burned, reason);
+        let opid = transitions.last().unwrap().id();
+        let psbt = self.commit_psbt(transitions, vec![input.outpoint], vec![dust(0x04)]);
         Committed::of(opid, psbt)
     }
 
-    /// The transition [`Self::burn`] commits, for a bundle the caller builds.
+    /// The transitions [`Self::burn`] commits, in bundle order: the split, if
+    /// there is change, then the burn.
+    pub fn burn_transitions(
+        &mut self,
+        input: Utxo,
+        held: u64,
+        burned: Option<u64>,
+        reason: Option<[u8; 32]>,
+    ) -> Vec<Transition> {
+        let change = burned.map_or(0, |burned| held - burned);
+        if change == 0 {
+            return vec![self.burn_transition(input, held, burned, reason)];
+        }
+        let (split, burnable) = self.split(input, held, change);
+        let burn = self.burn_transition(burnable, held - change, burned, reason);
+        vec![split, burn]
+    }
+
+    /// The split of a burn with change: `change` to vout 1, the rest to a seal
+    /// on the outpoint the burn tx spends, as rgb-lib puts it.
+    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo) {
+        let burnable_seal = GraphSeal::with_blinding(
+            input.outpoint.txid,
+            input.outpoint.vout,
+            0x6000 + self.nonce,
+        );
+        let split = self
+            .transition("transfer")
+            .add_input(input.opout, AllocatedState::from(RevealedValue::from(held)))
+            .unwrap()
+            .add_fungible_state(
+                "assetOwner",
+                GraphSeal::with_blinded_vout(1u32, self.nonce),
+                change,
+            )
+            .unwrap()
+            .add_fungible_state("assetOwner", burnable_seal, held - change)
+            .unwrap()
+            .complete_transition()
+            .unwrap();
+        let opout = Opout::new(split.id(), OS_ASSET, seal_index(&split, burnable_seal));
+        (
+            split,
+            Utxo {
+                opout,
+                outpoint: input.outpoint,
+            },
+        )
+    }
+
+    /// The burn of the whole of `input` (holding `held`), for a bundle the
+    /// caller builds. The schema gives a burn no outputs.
     pub fn burn_transition(
         &mut self,
         input: Utxo,
@@ -503,45 +556,33 @@ impl History {
                 )
                 .unwrap();
         }
-        let change = held - burned.unwrap_or(0);
-        if change > 0 {
-            burn = burn
-                .add_fungible_state(
-                    "assetOwner",
-                    GraphSeal::with_blinded_vout(1u32, self.nonce),
-                    change,
-                )
-                .unwrap();
-        }
         burn.complete_transition().unwrap()
     }
 
-    /// The consignment, with `terminals` on the last bundle.
-    pub fn transfer_with(&self, terminals: Vec<BuilderSeal<GraphSeal>>) -> Transfer {
-        let mut transfer = Transfer {
+    /// The consignment of the history.
+    pub fn as_transfer(&self) -> Transfer {
+        Transfer {
             version: ConsignmentVer::V1,
             transfer: true,
-            terminals: Default::default(),
             genesis: self.genesis.clone(),
             bundles: Confined::try_from(self.bundles.clone()).unwrap(),
-        };
-        if let (Some(last), Some((first, rest))) = (self.bundles.last(), terminals.split_first()) {
-            let mut seals = NonEmptyVec::with(*first);
-            for seal in rest {
-                seals.push(*seal).unwrap();
-            }
-            transfer
-                .terminals
-                .insert(last.bundle.bundle_id(), TerminalSeals::from(seals))
-                .unwrap();
         }
-        transfer
     }
 
     /// The TFR file bytes, as the bridge sends them.
-    pub fn consignment(&self, terminals: Vec<BuilderSeal<GraphSeal>>) -> Vec<u8> {
-        save(&self.transfer_with(terminals))
+    pub fn consignment(&self) -> Vec<u8> {
+        save(&self.as_transfer())
     }
+}
+
+/// The index of the `OS_ASSET` output on `seal`: the builder sorts outputs by seal.
+fn seal_index(transition: &Transition, seal: GraphSeal) -> u16 {
+    let assigns = transition.assignments.get(&OS_ASSET).unwrap().as_fungible();
+    let no = assigns
+        .iter()
+        .position(|a| a.revealed_seal() == Some(seal))
+        .unwrap();
+    u16::try_from(no).unwrap()
 }
 
 /// The rights `sent` made, one per vout of `vouts` in ascending order, as

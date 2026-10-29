@@ -868,7 +868,7 @@ mod key_not_ready {
     /// A valid burn and its asset id.
     fn valid_burn() -> (Vec<u8>, String) {
         let history = burn();
-        (history.consignment(vec![]), history.contract_id.to_string())
+        (history.consignment(), history.contract_id.to_string())
     }
 
     fn ready_state() -> EnclaveState {

@@ -33,7 +33,7 @@ fn listed_burn() -> (History, OpoutKey) {
 /// selectors the client saw.
 fn sign_listed(entries: Vec<RejectListEntry>) -> (String, Vec<[u8; 4]>) {
     let (history, _) = listed_burn();
-    let consignment = history.consignment(vec![]);
+    let consignment = history.consignment();
     let witnesses: Vec<[u8; 32]> = history
         .bundles
         .iter()

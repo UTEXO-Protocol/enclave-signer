@@ -20,8 +20,8 @@ pub struct MintFacts {
     pub opid: [u8; 32],
     /// `issuedSupply`, equal to the units of its one asset leg.
     pub issued: u64,
-    /// `afterBlock`: its EVM lock must be in a later block.
-    pub after_block: u64,
+    /// `beforeBlock`: its EVM lock must be in an earlier block.
+    pub before_block: u64,
     /// The `utxob:` seal of its one asset leg.
     pub recipient_seal: String,
 }
@@ -36,7 +36,7 @@ pub fn mint_facts(committed: &Committed) -> Result<MintFacts> {
     assert_mint_type(transition)?;
     let right = single_right_input(transition, "a mint")?;
     assert_asset_assignments_only(transition)?;
-    let (issued, after_block) = mint_globals(transition)?;
+    let (issued, before_block) = mint_globals(transition)?;
     let (units, recipient_seal) = one_blinded_leg(transition)?;
     if units != issued {
         return Err(EnclaveError::CrossCheck(format!(
@@ -47,7 +47,7 @@ pub fn mint_facts(committed: &Committed) -> Result<MintFacts> {
         right,
         opid: committed.opid.to_byte_array(),
         issued,
-        after_block,
+        before_block,
         recipient_seal,
     })
 }
@@ -88,15 +88,15 @@ fn assert_asset_assignments_only(transition: &Transition) -> Result<()> {
     Ok(())
 }
 
-/// M4: exactly `issuedSupply` (> 0) and `afterBlock`, each 8 LE bytes, the
+/// M4: exactly `issuedSupply` (> 0) and `beforeBlock`, each 8 LE bytes, the
 /// bytes the VM's `sas` and `pma` read. Nothing else rides along.
 fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
     let globals: Vec<_> = transition.globals.keys().collect();
     let metadata: Vec<_> = transition.metadata.keys().collect();
-    if globals != [&schemata::GS_ISSUED_SUPPLY] || metadata != [&schemata::MS_AFTER_BLOCK] {
+    if globals != [&schemata::GS_ISSUED_SUPPLY] || metadata != [&schemata::MS_BEFORE_BLOCK] {
         return Err(EnclaveError::CrossCheck(format!(
             "mint carries globals {globals:?} and metadata {metadata:?} - a mint carries \
-             issuedSupply and afterBlock only"
+             issuedSupply and beforeBlock only"
         )));
     }
     let issued = single_global::<8>(
@@ -111,18 +111,18 @@ fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
             "mint issuedSupply is 0 - no deposit backs an empty mint".into(),
         ));
     }
-    Ok((issued, after_block(transition)?))
+    Ok((issued, before_block(transition)?))
 }
 
-fn after_block(transition: &Transition) -> Result<u64> {
+fn before_block(transition: &Transition) -> Result<u64> {
     let value = transition
         .metadata
-        .get(&schemata::MS_AFTER_BLOCK)
+        .get(&schemata::MS_BEFORE_BLOCK)
         .map(|value| value.as_slice())
         .unwrap_or_default();
     let bytes: [u8; 8] = value.try_into().map_err(|_| {
         EnclaveError::CrossCheck(format!(
-            "mint afterBlock is {} bytes, expected 8",
+            "mint beforeBlock is {} bytes, expected 8",
             value.len()
         ))
     })?;

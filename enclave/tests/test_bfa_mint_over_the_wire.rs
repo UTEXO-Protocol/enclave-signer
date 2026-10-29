@@ -73,9 +73,9 @@ const EVM_CHAIN_ID: u64 = 1;
 const DEPOSIT_TX: [u8; 32] = [0x11; 32];
 const TOKEN_CONTRACT: [u8; 20] = [0x7E; 20];
 const MINTED: u64 = 100_000;
-/// The mint's `afterBlock`. The lock is at `LOCK_BLOCK`, which the node's
+/// The mint's `beforeBlock`. The lock is at `LOCK_BLOCK`, which the node's
 /// `EVM_FINALITY_TAG` head covers.
-const AFTER_BLOCK: u64 = 90;
+const BEFORE_BLOCK: u64 = 110;
 const LOCK_BLOCK: u64 = 100;
 const BRIDGE_FUNDS: u64 = 10_000;
 const BRIDGE_CHANGE: u64 = 9_700;
@@ -220,10 +220,10 @@ fn issue_and_mint(
     let to = BuilderSeal::Concealed(secret);
     let mint = if keeps_right {
         history
-            .mint_keeping_right(right, MINTED, AFTER_BLOCK, to, extra, vec![change])
+            .mint_keeping_right(right, MINTED, BEFORE_BLOCK, to, extra, vec![change])
             .0
     } else {
-        history.mint(right, MINTED, AFTER_BLOCK, to, extra, vec![change])
+        history.mint(right, MINTED, BEFORE_BLOCK, to, extra, vec![change])
     };
 
     let invoice = RgbInvoiceBuilder::with(
@@ -234,7 +234,7 @@ fn issue_and_mint(
     .to_string();
 
     Deposit {
-        consignment: history.consignment(vec![BuilderSeal::Concealed(secret)]),
+        consignment: history.consignment(),
         seed,
         mint,
         contract_id: history.contract_id,
@@ -825,11 +825,16 @@ fn refuses_a_lock_above_the_finality_head() {
     assert!(refusal.contains("above RPC safe block"), "{refusal}");
 }
 
-/// An RGB receiver refuses a lock at or before the mint's `afterBlock`.
+/// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.
 #[test]
-fn refuses_a_lock_at_or_before_after_block() {
-    let refusal = refusal(&drive_with(&build(None), AFTER_BLOCK, LOCK_BLOCK));
-    assert!(refusal.contains("afterBlock"), "{refusal}");
+fn refuses_a_lock_at_or_after_before_block() {
+    for lock_block in [BEFORE_BLOCK, BEFORE_BLOCK + 1] {
+        let refusal = refusal(&drive_with(&build(None), lock_block, lock_block));
+        assert!(
+            refusal.contains("not before the mint's beforeBlock"),
+            "{refusal}"
+        );
+    }
 }
 
 /// The old mint form passes its right on to the bridge change, an output the

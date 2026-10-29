@@ -61,7 +61,7 @@ mod burn {
         MintAnchor {
             opid: [tag; 32],
             amount,
-            after_block: 90,
+            before_block: 110,
             in_last_bundle,
         }
     }
@@ -160,13 +160,13 @@ mod mint {
         deposit(opid, amount, id)
     }
 
-    /// The mint a PSBT commits: `issued` units of mint `[2; 32]`, after block 90.
+    /// The mint a PSBT commits: `issued` units of mint `[2; 32]`, before block 110.
     fn mint(issued: u64) -> MintFacts {
         MintFacts {
             right: rgbstd::Opout::new(rgbstd::OpId::from([1; 32]), schemata::OS_MINT, 0),
             opid: [2; 32],
             issued,
-            after_block: 90,
+            before_block: 110,
             recipient_seal: "utxob:recipient".into(),
         }
     }
@@ -202,16 +202,18 @@ mod mint {
         assert!(err.contains("rgbOpId mismatch"), "{err}");
     }
 
-    /// An RGB receiver refuses a lock at or before the mint's `afterBlock`.
+    /// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.
     #[test]
-    fn refuses_deposit_not_after_block() {
+    fn refuses_deposit_at_or_after_before_block() {
         let ctx = context(config(), Box::new(paid([2; 32], 100)));
-        let late = MintFacts {
-            after_block: 100,
-            ..mint(100)
-        };
-        let err = bind(&ctx, &late);
-        assert!(err.contains("not after the mint's afterBlock"), "{err}");
+        for before_block in [100, 99] {
+            let late = MintFacts {
+                before_block,
+                ..mint(100)
+            };
+            let err = bind(&ctx, &late);
+            assert!(err.contains("not before the mint's beforeBlock"), "{err}");
+        }
     }
 
     #[test]

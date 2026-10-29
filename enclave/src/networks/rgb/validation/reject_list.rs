@@ -255,8 +255,8 @@ pub type RejectListReader<'a> = &'a dyn Fn(&RejectListContract) -> Result<Decisi
 /// The opouts a path checks, as rgb-lib does on its side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectCheck {
-    /// A release: the units the settling burn destroys. Its change is not
-    /// released, so it does not count.
+    /// A release: the units the settling burn destroys. The change stays on
+    /// the split transfer, which is not released, so it does not count.
     SettlingInputs,
     /// A mint: its right lineage, and the outputs its recipient checks.
     SettlingInputsAndOutputs,

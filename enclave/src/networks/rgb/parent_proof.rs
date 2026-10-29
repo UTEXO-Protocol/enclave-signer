@@ -8,7 +8,7 @@ use bitcoin::OutPoint;
 use rgbstd::txout::TxoSeal;
 use rgbstd::{BuilderSeal, ContractId, GraphSeal, Opout};
 
-use super::psbt_commit::{committed_transition, witness_vout, Committed};
+use super::psbt_commit::{committed_transition, single_right_input, witness_vout, Committed};
 use super::validation::output_seal;
 use crate::error::{EnclaveError, Result};
 
@@ -38,7 +38,7 @@ fn parse_parent(bytes: &[u8]) -> Result<Psbt> {
         .map_err(|e| EnclaveError::CrossCheck(format!("parent_psbt is not a valid PSBT: {e}")))
 }
 
-/// PP3-PP6: the parent is a transfer that made `input` alone on an output of
+/// PP3-PP6: the parent is a propagate that made `input` alone on an output of
 /// its own tx. Returns that vout.
 fn right_vout(made: &Committed, input: Opout) -> Result<u32> {
     if input.op != made.opid || input.ty != schemata::OS_MINT {
@@ -48,14 +48,15 @@ fn right_vout(made: &Committed, input: Opout) -> Result<u32> {
             made.opid
         )));
     }
-    // A transfer parent keeps every mint out of a mint's history (mint-flow 11).
-    if made.transition.transition_type != schemata::TS_TRANSFER {
+    // A propagate parent keeps every mint out of a mint's history (mint-flow 11).
+    if made.transition.transition_type != schemata::TS_PROPAGATE {
         return Err(EnclaveError::CrossCheck(format!(
-            "the spent right was made by transition type {}, not a transfer - a mint or genesis \
+            "the spent right was made by transition type {}, not a propagate - a mint or genesis \
              parent is refused",
             made.transition.transition_type
         )));
     }
+    single_right_input(&made.transition, "the parent propagate")?;
     let seal = made
         .transition
         .assignments

@@ -92,12 +92,12 @@ Before it signs, the mint signer:
    recomputed. The txid and the sighash types cannot change. The mint
    consumes one `mintRight`, passes no right on, and pays exactly
    `amount - commission` units to one blinded seal.
-4. Checks the parent PSBT: the tx that made the spent right was a transfer
-   that put that right alone on its own output, and the PSBT spends that
+4. Checks the parent PSBT: the tx that made the spent right was a propagate
+   of one right that put that right alone on its own output, and the PSBT spends that
    output, its only input. So every signature for this mint spends the same
    UTXO.
 5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
-   derives, after its `afterBlock` and covered by the `EVM_FINALITY_TAG` head,
+   derives, before its `beforeBlock` and covered by the `EVM_FINALITY_TAG` head,
    read from a node on the pinned chain.
 6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
@@ -257,15 +257,19 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
 
 - **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
   matters for reproducible PCR0.
-- **Read access to `UTEXO-Protocol/rgb-lib-bfa`.** The RGB crates come from
-  crates.io (`0.11.2-rc.1`, exact pins). rgb-lib, which reads consignments,
-  comes from our private mirror of the RGB-Tools release until that release
-  is public. Both workspaces fetch it over HTTPS, so Git needs a GitHub token
-  with read access to it. The parent also needs read access to
-  `federated-signer-proto` through the `github-federated-signer` SSH alias.
-  CI wires both in `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_TOKEN` and
-  `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). Repository access alone does not
-  prove that a build reproduces the approved PCR0.
+- **Read access to the private RGB repos.** rgb-lib comes from our private
+  mirror of the RGB-Tools release, `UTEXO-Protocol/rgb-lib-bfa`, through the
+  `github-rgb-lib` SSH alias (deploy key `lib_key`). The RGB protocol crates
+  it pins come from the `[patch.crates-io]` of `Cargo.toml` and
+  `parent/Cargo.toml`: `ssh://git@github.com/rgb-tools-devs/<repo>.git` at
+  full revs, which builds map to our `UTEXO-Protocol/<repo>-s-bfa` mirrors
+  (`build/map-rgb-mirrors.sh`, a token in a credential helper). The parent
+  also needs read access to `federated-signer-proto` through the
+  `github-federated-signer` SSH alias. CI wires them in
+  `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_DEPLOY_KEY`,
+  `RGB_PRIVATE_DEPS_TOKEN` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
+  Repository access alone does not prove that a build reproduces the
+  approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
@@ -319,11 +323,13 @@ profile. CI asserts every guard fires.
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
-Every enclave image needs a GitHub token with read access to
-`UTEXO-Protocol/rgb-lib-bfa` at build time: `GITHUB_TOKEN`, or a
-`github_token` file in `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes it as the
-BuildKit secret `github_token`, and `build/with-private-deps.sh enclave` reads
-it for the cargo build only. The token is never in a layer, the image or PCR0.
+Every enclave image needs, at build time, the deploy key of
+`UTEXO-Protocol/rgb-lib-bfa` (`RGB_LIB_BFA_DEPLOY_KEY`) and a token that reads
+the `UTEXO-Protocol/<repo>-s-bfa` mirrors of the RGB protocol crates
+(`RGB_PRIVATE_DEPS_TOKEN`), or `lib_key` and `rgb_deps_token` files in
+`PRIVATE_DEPS_DIR`. `build-enclave.sh` passes them as the BuildKit secrets
+`lib_key` and `rgb_deps_token`, and `build/with-private-deps.sh enclave` reads
+them for the cargo build only. They are never in a layer, the image or PCR0.
 
 ```bash
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
@@ -361,28 +367,38 @@ Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
-Every image resolves the private rgb-lib mirror: supply a GitHub token with
-read access to `UTEXO-Protocol/rgb-lib-bfa` as the `github_token` secret.
-`Dockerfile.parent` also resolves `federated-signer-proto`: the same token
-(if it can read it) or its deploy key as `federated_key`. Credentials are
-mounted as BuildKit secrets during Cargo's build step; they are not copied
-into image layers.
+Every image resolves the private rgb-lib mirror and the RGB protocol crate
+mirrors: supply the `lib_key` and `rgb_deps_token` secrets.
+`build/with-private-deps.sh` refuses to start cargo without either. It maps
+each `ssh://git@github.com/rgb-tools-devs/<repo>.git` of the `[patch]` to
+`https://github.com/UTEXO-Protocol/<repo>-s-bfa.git` (branch `rgb-tools-bfa`
+holds the pinned revs), and a credential helper scoped to those four URLs
+reads the token from its file, so it never sits in a URL cargo could print.
+`Dockerfile.parent` also resolves `federated-signer-proto`: its deploy key as
+`federated_key`. Credentials are mounted as BuildKit secrets during Cargo's
+build step; they are not copied into image layers.
 
 ```bash
-docker build --secret id=github_token,env=GITHUB_TOKEN \
+# Both values must already be exported; neither is a build argument.
+docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
   -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
 RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh
 
-# GITHUB_TOKEN must already be exported; the value is not a build argument.
-docker build --secret id=github_token,env=GITHUB_TOKEN \
+docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
+  --secret id=federated_key,src=<absolute-path> \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-`make build_parent*` and `make build_enclave*` use the token option by
-default. A `DOCKER_AUTH_ARGS` value replaces that default, so to pass the
-parent's deploy key set both: `--secret id=github_token,env=GITHUB_TOKEN --secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the `RGB_LIB_BFA_TOKEN` and
-`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The workflow's automatic `GITHUB_TOKEN` is used for image publishing,
-not cross-repository dependency access.
+`make build_parent*` and `make build_enclave*` pass `lib_key` and
+`rgb_deps_token` by default. A `DOCKER_AUTH_ARGS` value replaces that
+default, so to pass the parent's deploy key set all three, adding
+`--secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the
+`RGB_LIB_BFA_DEPLOY_KEY`, `RGB_PRIVATE_DEPS_TOKEN` and
+`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The
+workflow's automatic `GITHUB_TOKEN` is used for image publishing, not
+cross-repository dependency access.
 
 The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,

@@ -52,14 +52,14 @@ sequenceDiagram
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
     Srv->>Core: F1 parse; F2 witness_utxo native SegWit, sighash ALL / DEFAULT
     Srv->>Core: F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 one bundle, of RGB_ASSET_ID (== asset_id)<br/>F5 MPC tree of every disclosed bundle + entropy == opret commitment<br/>F6 one transition, its own id, input map == its inputs
-    Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and afterBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one blinded leg
+    Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one blinded leg
     Srv->>Anchor: F7 one input, Colored key path of this enclave
-    Srv->>Core: PP1-PP7 parent PSBT: core again, TS_TRANSFER parent,<br/>right alone on a witness seal, the PSBT spends that output
+    Srv->>Core: PP1-PP7 parent PSBT: core again, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
     Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == mint OpId)<br/>+ one BridgeFundsIn, block > afterBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == mint OpId)<br/>+ one BridgeFundsIn, block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
 
     Note over Srv,Inv: 5 — route and recipient
     Srv->>Srv: amount ≥ minted units + commission

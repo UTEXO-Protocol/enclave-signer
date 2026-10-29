@@ -2,10 +2,10 @@
 # Enclave (dev mode, TCP, no vsock) WITH the BFA mint path, one signer role.
 # SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
 # (RGB -> EVM). The two roles are two enclaves with two seeds.
-# rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key) to it. The secret is
-# never in a layer, the image or PCR0.
+# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+#   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
 # Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim AS builder
@@ -44,6 +44,7 @@ ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
 RUN --mount=type=secret,id=lib_key \
+    --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====

@@ -16,10 +16,13 @@
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   PRIVATE_DEPS_DIR        or a directory with that key in a lib_key file
+#   RGB_PRIVATE_DEPS_TOKEN  token with read access to the UTEXO-Protocol/<repo>-s-bfa
+#                           mirrors of the RGB protocol crates
+#   PRIVATE_DEPS_DIR        or a directory with those in lib_key and rgb_deps_token files
 #
-# rgb-lib comes from the private rgb-lib-bfa mirror. The deploy key goes in a
-# BuildKit secret: never in a build arg, a layer, the image or PCR0.
+# rgb-lib and the RGB protocol crates it pins come from private mirrors. The
+# key and the token go in BuildKit secrets: never in a build arg, a layer, the
+# image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -88,16 +91,26 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
 fi
 
 if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    [ -s "$PRIVATE_DEPS_DIR/lib_key" ] || {
-        echo "Error: $PRIVATE_DEPS_DIR/lib_key is missing or empty." >&2
-        exit 1
-    }
-    SECRET_ARGS=(--secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key")
-elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ]; then
-    SECRET_ARGS=(--secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY)
+    for secret in lib_key rgb_deps_token; do
+        [ -s "$PRIVATE_DEPS_DIR/$secret" ] || {
+            echo "Error: $PRIVATE_DEPS_DIR/$secret is missing or empty." >&2
+            exit 1
+        }
+    done
+    SECRET_ARGS=(
+        --secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key"
+        --secret "id=rgb_deps_token,src=$PRIVATE_DEPS_DIR/rgb_deps_token"
+    )
+elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ] && [ -n "${RGB_PRIVATE_DEPS_TOKEN:-}" ]; then
+    SECRET_ARGS=(
+        --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY
+        --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN
+    )
 else
-    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa." >&2
-    echo "       Set RGB_LIB_BFA_DEPLOY_KEY, or PRIVATE_DEPS_DIR with a lib_key file." >&2
+    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa" >&2
+    echo "       and a token with read access to the UTEXO-Protocol/<repo>-s-bfa RGB crate mirrors." >&2
+    echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
+    echo "       lib_key and rgb_deps_token files." >&2
     exit 1
 fi
 

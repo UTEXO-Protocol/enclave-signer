@@ -57,7 +57,7 @@ pub(super) fn derived_locks(
 }
 
 /// M6: the receipt of `tx_hash` holds the one deposit the mint derives, on the
-/// pinned chain, after its `afterBlock`. The pins are checked before any RPC.
+/// pinned chain, before its `beforeBlock`. The pins are checked before any RPC.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub(super) fn bind_mint_deposit(
     ctx: &ServerContext,
@@ -82,7 +82,7 @@ pub(super) fn bind_mint_deposit(
         cfg.evm_finality_tag,
         tx_hash,
         &mint.opid,
-        mint.after_block,
+        mint.before_block,
     )?;
     bind_request_deposit(&derived, &paid)
 }

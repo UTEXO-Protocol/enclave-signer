@@ -26,7 +26,7 @@ use crate::proto::SignRightsRefillRequest;
 use crate::test_support::bfa_consignment::{self as gen, Committed as Made, History, Issue, Utxo};
 
 const MINTED: u64 = 100_000;
-const AFTER_BLOCK: u64 = 90;
+const BEFORE_BLOCK: u64 = 110;
 /// Sats on each right's UTXO; they pay the mint's fee.
 const RIGHT_SATS: u64 = 3_000;
 const CHANGE_SATS: u64 = 2_000;
@@ -65,7 +65,7 @@ fn our_input(psbt: &mut Psbt, keys: &KeyManager, index: u32) {
 fn mint_on(history: &mut History, right: Utxo, keys: &KeyManager) -> Made {
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(right, MINTED, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(right, MINTED, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, keys, 1);
     mint
 }
@@ -152,7 +152,7 @@ fn mint_builder(history: &mut History, right: Utxo, issued: u64) -> TransitionBu
         .transition("mint")
         .add_input(right.opout, AllocatedState::Void)
         .unwrap()
-        .add_metadata("afterBlock", rgbstd::stl::BlockNumber::from(AFTER_BLOCK))
+        .add_metadata("beforeBlock", rgbstd::stl::BlockNumber::from(BEFORE_BLOCK))
         .unwrap()
         .add_global_state("issuedSupply", rgbstd::Amount::from(issued))
         .unwrap()
@@ -201,7 +201,7 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     assert_eq!(units.unwrap(), MINTED);
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
-    assert_eq!((bound.issued, bound.after_block), (MINTED, AFTER_BLOCK));
+    assert_eq!((bound.issued, bound.before_block), (MINTED, BEFORE_BLOCK));
     assert_eq!(bound.recipient_seal, recipient().to_string());
 }
 
@@ -231,7 +231,7 @@ fn refuses_a_mint_whose_right_a_mint_made() {
     let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
     let mint = mint_on(&mut history, kept, &keys);
     let err = mint_refusal(&destination(&history, &mint, &old), &history);
-    assert!(err.contains("not a transfer"), "{err}");
+    assert!(err.contains("not a propagate"), "{err}");
 }
 
 /// Review P1: the mined mint's transition in a new tx that spends another of
@@ -321,14 +321,14 @@ fn refuses_extra_global_or_metadata() {
             .insert(schemata::GS_BURNED_ASSET, value)
             .unwrap();
     });
-    assert!(err.contains("issuedSupply and afterBlock only"), "{err}");
+    assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
     let err = edited_mint_refusal(|mint| {
         let extra = rgbstd::MetaType::with(9_999);
         mint.metadata
             .insert(extra, MetaValue::from(blob(&[1])))
             .unwrap();
     });
-    assert!(err.contains("issuedSupply and afterBlock only"), "{err}");
+    assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
 }
 
 #[test]
@@ -348,23 +348,23 @@ fn refuses_zero_issued_supply() {
     let (mut history, seed, rights) = seeded(&keys);
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(&keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(rights[0], 0, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(rights[0], 0, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
     let err = mint_refusal(&destination(&history, &mint, &seed), &history);
     assert!(err.contains("issuedSupply is 0"), "{err}");
 }
 
 #[test]
-fn refuses_after_block_not_8_bytes() {
+fn refuses_before_block_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         mint.metadata
             .insert(
-                schemata::MS_AFTER_BLOCK,
+                schemata::MS_BEFORE_BLOCK,
                 MetaValue::from(blob(&[90, 0, 0, 0])),
             )
             .unwrap();
     });
-    assert!(err.contains("afterBlock is 4 bytes"), "{err}");
+    assert!(err.contains("beforeBlock is 4 bytes"), "{err}");
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn refuses_revealed_asset_leg() {
     let (mut history, seed, rights) = seeded(&keys);
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
     let change = ours(&keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(rights[0], MINTED, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
     let err = mint_refusal(&destination(&history, &mint, &seed), &history);
     assert!(err.contains("revealed seal"), "{err}");
@@ -474,7 +474,7 @@ fn refuses_a_mint_with_a_fee_input() {
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(&keys, 99, CHANGE_SATS);
     let extra = vec![rights[1].outpoint];
-    let mut mint = history.mint(rights[0], MINTED, AFTER_BLOCK, to, extra, vec![change]);
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, extra, vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
     fx::anchor_input(
         &mut mint.psbt,
@@ -595,7 +595,7 @@ fn refuses_a_refill_whose_right_a_mint_made() {
     let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
     let (refill, request) = refill_request(&mut history, kept, &old);
     let err = run_refill(&refill, &request, &history).unwrap_err();
-    assert!(err.to_string().contains("not a transfer"), "{err}");
+    assert!(err.to_string().contains("not a propagate"), "{err}");
 }
 
 #[test]
@@ -713,15 +713,14 @@ fn a_mint_reads_the_same_from_the_psbt_as_from_consensus() {
     let (_, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
     let from_psbt = bound.expect("the mint is valid");
 
-    let terminals = vec![BuilderSeal::Concealed(recipient())];
-    let (validated, anchors) = consensus(&history.consignment(terminals));
+    let (validated, anchors) = consensus(&history.consignment());
     let [anchor] = anchors.as_slice() else {
         panic!("one mint anchor, got {anchors:?}");
     };
     assert_eq!(validated.last_transfer_op_id, Some(from_psbt.opid));
     assert_eq!(anchor.opid, from_psbt.opid);
     assert_eq!(anchor.amount, from_psbt.issued);
-    assert_eq!(anchor.after_block, from_psbt.after_block);
+    assert_eq!(anchor.before_block, from_psbt.before_block);
     let last = validated.last_transition.unwrap();
     assert_eq!(last.asset_output_amount, from_psbt.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
@@ -749,7 +748,7 @@ fn a_refill_reads_the_same_from_the_psbt_as_from_consensus() {
     let vouts = run_refill(&refill, &request, &history).unwrap();
     let committed = psbt_commit::committed_transition(&refill.psbt, history.contract_id).unwrap();
 
-    let (validated, anchors) = consensus(&history.consignment(vec![]));
+    let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());
     assert_eq!(
         validated.last_transfer_op_id,

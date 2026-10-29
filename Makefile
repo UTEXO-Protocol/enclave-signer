@@ -4,9 +4,9 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-# Private dependencies (the parent's proto, the rgb-lib-bfa mirror of both
-# workspaces): the token stays in a BuildKit secret.
-DOCKER_AUTH_ARGS ?= --secret id=github_token,env=GITHUB_TOKEN
+# Private dependencies of both workspaces (the rgb-lib-bfa mirror and the RGB
+# protocol crate mirrors): the key and the token stay in BuildKit secrets.
+DOCKER_AUTH_ARGS ?= --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN
 
 # Pass public values through Docker's environment form, not shell interpolation.
 IMAGE_ENCLAVE_MINT_BACKUP ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(CURRENT_DATE_TIME)-$(LATEST_COMMIT)

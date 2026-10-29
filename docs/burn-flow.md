@@ -1,7 +1,7 @@
 # Burn flow (RGB -> EVM)
 
 **Signer image:** `burn-signer` (`--no-default-features --features vsock,rgb,burn-signer`).
-**Checked against repository code:** 2026-10-12 (RGB 0.11.2-rc.1 port).
+**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move).
 Deployment was not checked.
 
 This document tells how the burn signer checks and signs a release. The
@@ -13,8 +13,10 @@ document differ, investigate the difference. Either can contain an error.
 1. The user burns RGB units on Bitcoin.
 2. The burn records how many units it destroys (`burnedAsset`) and which
    destination gets the tokens (`burnReason`: an EVM address, or the hash of a
-   destination record, see [burn-destination.md](burn-destination.md)). It may
-   return change.
+   destination record, see [burn-destination.md](burn-destination.md)). A
+   burn has no outputs: rgb-lib first splits the units in a transfer of the
+   same bundle, which keeps the change, and the burn destroys the split's
+   other output.
 3. The burn signer checks the burn.
 4. The burn signer signs an EIP-712 release for `MultisigProxy`.
 5. `MultisigProxy` needs M of N such signatures. Then the Bridge contract
@@ -151,9 +153,11 @@ the first step that reads the keys. It refuses an enclave without keys.
 - **B2.6** The contract id must equal the declared `asset_id` and the pinned
   `RGB_ASSET_ID`.
 - **B2.7** The settling transition must be `TS_BURN`: the burn of the last
-  witness, so one tx can also carry a plain transfer. Two burns there are
-  refused. The amount comes from `burnedAsset`, never from the outputs or the
-  host.
+  witness, so one tx also carries rgb-lib's split (or a plain transfer). Two
+  burns there are refused. The amount comes from `burnedAsset`, never from
+  the outputs or the host. The flat summary of each transition (the split's
+  outputs included) comes from our parser, `rgb-consignment`
+  (consignment-utils), as the bridge reads it.
 - **B2.8** Consensus phase 2 resolves every witness, the burn included, on
   chain: the transaction comes from the consignment, its block from the
   request's Merkle proof for it. That proof must pass B3.4 and B3.5 first. A
@@ -211,8 +215,9 @@ tee-spec.md states: TLS authenticates the endpoint, not the answers.
   history: an opout's parents are the inputs of the operation that made it,
   the reachability of rgb-lib's opouts DAG. One walk serves all inputs and
   expands each operation once. An allowed opout stops its branch. A rejected opout on a
-  branch nothing stopped refuses the release. The burn's change is not
-  checked: it is not released.
+  branch nothing stopped refuses the release. The burn's input is the
+  split's output, so the walk goes through the split to the burned units.
+  The change on the split is not checked: it is not released.
 
 ### Stage 4 - Is the calldata correct?
 

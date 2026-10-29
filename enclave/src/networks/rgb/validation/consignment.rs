@@ -1,21 +1,14 @@
 //! Decodes a validated rgbstd `Transfer`.
 //!
 //! Decode only. Nothing here accepts or rejects a consignment. It converts
-//! rgbstd and rgb-lib inspection output into the shapes in [`super::types`]. It fails
+//! rgbstd and parser output into the shapes in [`super::types`]. It fails
 //! closed on data that it cannot read exactly.
 
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::hashes::Hash;
-use rgb_lib::no_wallet::{
-    inspect_consignment, BundleFilter, ConsignmentInspection, RgbOutputInfo, RgbTransitionInfo,
-};
-use rgb_lib::{Assignment, TypeOfTransition};
+use rgb_consignment::{ConsignmentInfo, FungibleEntry, SealInfo, TransitionInfo};
 use rgbstd::containers::{Transfer, WitnessBundle};
 use rgbstd::{
     Assign, Assignments, GraphSeal, KnownTransition, OpId, Operation, Opout, TransitionType,
@@ -172,112 +165,57 @@ fn revealed_seal(
 }
 
 /// The flat transition summary of a consignment that consensus validated:
-/// all transitions grouped by witness tx. rgb-lib's wallet-free inspection
-/// reads it, mapped to our `TransitionSummary`.
+/// all transitions grouped by witness tx, read by our parser (rgb-consignment).
 pub(super) fn extract_transition_summary(
     consignment_bytes: &[u8],
 ) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
-    summary_from_inspection(&inspect(consignment_bytes)?)
-}
-
-/// Runs `inspect_consignment` over `bytes`. It reads only a file, so the bytes
-/// go through a scratch file that is always removed. A panic inside rgb-lib
-/// aborts the enclave (`panic = "abort"`), as one anywhere else does.
-fn inspect(bytes: &[u8]) -> Result<ConsignmentInspection> {
-    inspect_at(&scratch_path(), bytes)
-}
-
-/// [`inspect`] through a new file at `path`. An existing file is refused, not
-/// overwritten or removed.
-pub(super) fn inspect_at(path: &Path, bytes: &[u8]) -> Result<ConsignmentInspection> {
-    let file = File::create_new(path).map_err(|e| scratch_error("create", path, e))?;
-    let inspected = inspect_file(file, path, bytes);
-    match (inspected, std::fs::remove_file(path)) {
-        (inspected, Ok(())) => inspected,
-        (Ok(_), Err(e)) => Err(scratch_error("remove", path, e)),
-        (Err(err), Err(e)) => {
-            tracing::warn!(path = %path.display(), "could not remove the consignment scratch file: {e}");
-            Err(err)
-        }
-    }
-}
-
-fn inspect_file(mut file: File, path: &Path, bytes: &[u8]) -> Result<ConsignmentInspection> {
-    file.write_all(bytes)
-        .map_err(|e| scratch_error("write", path, e))?;
-    drop(file);
-    inspect_consignment(path.to_string_lossy().into_owned(), BundleFilter::All).map_err(|e| {
-        EnclaveError::CrossCheck(format!("rgb-lib consignment inspection failed: {e}"))
-    })
-}
-
-fn scratch_error(action: &str, path: &Path, e: std::io::Error) -> EnclaveError {
-    EnclaveError::CrossCheck(format!(
-        "could not {action} the consignment scratch file {}: {e}",
-        path.display()
-    ))
-}
-
-/// A file name no other request of this or another enclave process uses.
-fn scratch_path() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "utexo-enclave-consignment-{}-{n}.rgb",
-        std::process::id()
-    ))
-}
-
-pub(super) fn summary_from_inspection(
-    inspection: &ConsignmentInspection,
-) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
-    if !inspection.is_transfer {
+    let info = rgb_consignment::parse(consignment_bytes)
+        .map_err(|e| EnclaveError::CrossCheck(format!("rgb-consignment parse failed: {e}")))?;
+    let ConsignmentInfo::Transfer(transfer) = info else {
         return Err(EnclaveError::CrossCheck(
             "consignment is a Contract, expected Transfer".into(),
         ));
-    }
-    let chain_net = &inspection.genesis.chain_net;
+    };
     // One tx can commit many transitions. A bind of only the settling one
     // leaves the other value unbound, so the PSBT cross-check binds the group.
-    inspection
+    transfer
         .witnesses
         .iter()
         .map(|w| {
             let txid = txid_from_display_hex(&w.txid)?;
             let summaries = w
-                .operations
+                .transitions
                 .iter()
-                .flat_map(|op| op.transitions.iter())
-                .map(|t| inspected_summary(t, &w.txid, chain_net))
+                .map(transition_summary)
                 .collect::<Result<Vec<_>>>()?;
             Ok((txid, summaries))
         })
         .collect()
 }
 
-pub(super) fn inspected_summary(
-    t: &RgbTransitionInfo,
-    witness_txid: &str,
-    chain_net: &str,
-) -> Result<TransitionSummary> {
-    let outputs = t
-        .outputs
+/// Only `OS_ASSET` units are outputs, the one fungible type of BFA; the
+/// declarative rights are not.
+pub(super) fn transition_summary(t: &TransitionInfo) -> Result<TransitionSummary> {
+    let outputs: Vec<TransitionOutput> = t
+        .fungible_allocations
         .iter()
-        .filter_map(|o| inspected_output(o, witness_txid, chain_net).transpose())
-        .collect::<Result<Vec<_>>>()?;
+        .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner())
+        .flat_map(|a| a.entries.iter())
+        .map(asset_output)
+        .collect::<Result<_>>()?;
+    // Summed here, not from the parser's unchecked `total`.
     let total = outputs
         .iter()
         .try_fold(0u64, |acc, o| acc.checked_add(o.amount))
         .ok_or_else(|| {
             EnclaveError::CrossCheck(format!(
                 "consignment transition output amount overflow (op_id {})",
-                t.opid
+                t.op_id
             ))
         })?;
     Ok(TransitionSummary {
-        op_id: t.opid.clone(),
-        transition_type: transition_type_id(t.r#type),
-        // Every output is an `OS_ASSET` one, so the two sums are the same.
+        op_id: t.op_id.clone(),
+        transition_type: t.transition_type,
         total_output_amount: total,
         asset_output_amount: total,
         outputs,
@@ -288,69 +226,26 @@ pub(super) fn inspected_summary(
     })
 }
 
-/// rgb-lib names the type; the summary keeps the schema id (the table of
-/// rgb-lib `database/enums.rs`).
-fn transition_type_id(t: TypeOfTransition) -> u16 {
-    match t {
-        TypeOfTransition::Transfer => schemata::TS_TRANSFER,
-        TypeOfTransition::Inflate => schemata::TS_INFLATION,
-        TypeOfTransition::Burn => schemata::TS_BURN,
-        TypeOfTransition::Mint => schemata::TS_MINT,
-    }
-    .to_inner()
-}
-
-/// Only fungible units are outputs: `OS_ASSET` is the one fungible type
-/// rgb-lib reads.
-fn inspected_output(
-    o: &RgbOutputInfo,
-    witness_txid: &str,
-    chain_net: &str,
-) -> Result<Option<TransitionOutput>> {
-    let Assignment::Fungible(amount) = o.assignment else {
-        return Ok(None);
+fn asset_output(e: &FungibleEntry) -> Result<TransitionOutput> {
+    let seal = match &e.seal {
+        SealInfo::Revealed { txid, vout } => OutputSeal::Revealed {
+            txid: txid.as_deref().map(decode_display_txid).transpose()?,
+            vout: *vout,
+        },
+        SealInfo::Confidential { secret_seal } => OutputSeal::Confidential {
+            secret_seal: secret_seal.clone(),
+        },
     };
-    Ok(Some(TransitionOutput {
+    Ok(TransitionOutput {
         assignment_type: schemata::OS_ASSET.to_inner(),
-        amount,
-        seal: inspected_seal(o, witness_txid, chain_net)?,
-    }))
-}
-
-fn inspected_seal(o: &RgbOutputInfo, witness_txid: &str, chain_net: &str) -> Result<OutputSeal> {
-    if o.is_concealed {
-        // rgb-lib prefixes the chain ("bcrt:utxob:..."); the parser gave the bare seal.
-        let secret_seal = o
-            .recipient_id
-            .as_deref()
-            .and_then(|r| r.strip_prefix(chain_net)?.strip_prefix(':'))
-            .ok_or_else(|| {
-                EnclaveError::CrossCheck(format!(
-                    "concealed output has no {chain_net} recipient id (got {:?})",
-                    o.recipient_id
-                ))
-            })?;
-        return Ok(OutputSeal::Confidential {
-            secret_seal: secret_seal.to_string(),
-        });
-    }
-    let (Some(txid), Some(vout)) = (o.txid.as_deref(), o.vout) else {
-        return Err(EnclaveError::CrossCheck(format!(
-            "revealed output has no outpoint (txid {:?}, vout {:?})",
-            o.txid, o.vout
-        )));
-    };
-    // rgb-lib fills a witness-relative seal with the witness txid; the parser
-    // left it `None`. A seal cannot name its own witness tx explicitly.
-    let txid = (txid != witness_txid)
-        .then(|| decode_display_txid(txid))
-        .transpose()?;
-    Ok(OutputSeal::Revealed { txid, vout })
+        amount: e.amount,
+        seal,
+    })
 }
 
 /// Parses a display-order (big-endian) txid hex string into a `bitcoin::Txid`.
 ///
-/// rgb-lib writes txids in display order, and `bitcoin::Txid` stores them
+/// The parser writes txids in display order, and `bitcoin::Txid` stores them
 /// reversed. The reversal is here, not at each comparison.
 pub(super) fn txid_from_display_hex(display_hex: &str) -> Result<bitcoin::Txid> {
     let mut raw = decode_display_txid(display_hex)?;

@@ -20,3 +20,15 @@ lto = true
 strip = true
 panic = "abort"
 codegen-units = 1
+
+# rgb-lib c264e040's root [patch.crates-io]: a dependency's patch does not apply.
+# parent/Cargo.toml carries a copy; build/tests/test_private_deps.py checks they match.
+[patch.crates-io]
+rgb-consensus = { git = "ssh://git@github.com/rgb-tools-devs/rgb-consensus.git", rev = "4a614b72cf9d5fdca4f293ab529a7e342717021a" }
+rgb-ops = { git = "ssh://git@github.com/rgb-tools-devs/rgb-ops.git", rev = "9d831d2f75b076a0f9574678341f3b262a4a7e16" }
+rgb-invoicing = { git = "ssh://git@github.com/rgb-tools-devs/rgb-ops.git", rev = "9d831d2f75b076a0f9574678341f3b262a4a7e16" }
+rgb-psbt-utils = { git = "ssh://git@github.com/rgb-tools-devs/rgb-api.git", rev = "a3333c8fdc4db4743b93943dacc1d5573081d0b1" }
+rgb-schemas = { git = "ssh://git@github.com/rgb-tools-devs/rgb-schemas.git", rev = "aa1e7fd20b33237a020bc37daa71f631e4657fca" }
+rgb-strict-encoding = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "e12b9944b30171950de03778d6666b24bc33d994" }
+rgb-strict-encoding-derive = { git = "https://github.com/rgb-protocol/rgb-strict-encoding", rev = "e12b9944b30171950de03778d6666b24bc33d994" }
+rgb-strict-types = { git = "https://github.com/rgb-protocol/rgb-strict-types", rev = "8714cdcc8af25333c27214cdf9f42a6388d484ff" }

@@ -260,7 +260,7 @@ fn refuses_a_right_a_mint_passed_on() {
     let psbt = send(&mut history, kept, &keys, &Shape::rights(2));
     let ctx = context(&history.contract_id.to_string());
     let err = sign(&ctx, request(&history, &psbt, &mint)).unwrap_err();
-    assert!(err.to_string().contains("not a transfer"), "{err}");
+    assert!(err.to_string().contains("not a propagate"), "{err}");
 }
 
 #[test]

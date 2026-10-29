@@ -40,8 +40,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature). The
-# RGB-Tools BFA release, from crates.io. Exact pins: a caret requirement
-# moves onto the next prerelease, and an rc bump can change the BFA schema id.
+# sources are the root [patch.crates-io] (rgb-lib's protocol crates): a rev bump
+# there can change the BFA schema id. Exact pins keep a newer prerelease out.
 rgb-ops = { version = "=0.11.2-rc.1", default-features = false, features = ["esplora_blocking", "electrum_blocking"], optional = true }
 rgb-schemas = { version = "=0.11.2-rc.1", default-features = false, optional = true }
 # Invoice parsing for the legacy send-RGB recipient bind.
@@ -55,9 +55,12 @@ amplify = { version = "=4.8.1", optional = true }
 # Reads the RGB transitions and MPC entropy rgb-lib stores in a mint or refill
 # PSBT. The mint signer validates those from the PSBT, with no consignment.
 rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false, optional = true }
-# Reads the validated consignment with rgb-lib's wallet-free inspection. Our
-# private mirror of the RGB-Tools release, until it is public.
-rgb-lib = { git = "ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git", rev = "ae859586637c687571e2797d736166af5b32c215", default-features = false, optional = true }
+# Our private mirror of the RGB-Tools release (tag v0.3.0-beta.7-upstream-dev-bfa.4),
+# without the wallet. The root [patch.crates-io] copies its protocol crate revs.
+rgb-lib = { git = "ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git", rev = "c264e040a87c76ac6079d71201c92532fb4c2c46", default-features = false, optional = true }
+# The flat consignment summary, from our parser: rgb-lib's inspect_consignment
+# fails on every BFA at this rev. It turns on rgb-ops `serde`.
+rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "5a4a3df812deb6b8c06028950132f8496d450f49", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -159,7 +162,7 @@ allow-seed-import = []
 # `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
 # Bitcoin. A malicious host can then fake a Bitcoin anchor.
 # `spv` is not in this list because that makes a feature cycle.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-consignment", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
 # When OFF, there is no SPV gate. `rgb-validation` is off too, so

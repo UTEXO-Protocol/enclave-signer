@@ -2,7 +2,8 @@
 # Run Cargo with private dependency credentials, without persisting credentials
 # or Git/SSH config in a builder layer. PRIVATE_DEPS_DIR is outside the checkout.
 # lib_key (deploy key) reads UTEXO-Protocol/rgb-lib-bfa for both workspaces via
-# the github-rgb-lib SSH alias. The parent also uses federated_key for the proto.
+# the github-rgb-lib SSH alias. rgb_deps_token reads our mirrors of the RGB
+# protocol crates (map-rgb-mirrors.sh). The parent also uses federated_key for the proto.
 set -eu
 
 scope=${1:?usage: with-private-deps.sh enclave|parent command [args...]}
@@ -15,6 +16,10 @@ export PRIVATE_DEPS_DIR
     echo "Missing private dependency secret: lib_key (read access to UTEXO-Protocol/rgb-lib-bfa)" >&2
     exit 1
 }
+[ -s "$PRIVATE_DEPS_DIR/rgb_deps_token" ] || {
+    echo "Missing private dependency secret: rgb_deps_token (read access to the UTEXO-Protocol/<repo>-s-bfa mirrors of the RGB protocol crates; RGB_PRIVATE_DEPS_TOKEN in CI)" >&2
+    exit 1
+}
 umask 077
 auth_dir=$(mktemp -d)
 trap 'rm -rf "$auth_dir"' EXIT
@@ -25,6 +30,7 @@ export CARGO_NET_GIT_FETCH_WITH_CLI=true
 export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_GLOBAL="$auth_dir/gitconfig"
 : > "$GIT_CONFIG_GLOBAL"
+sh "$(dirname "$0")/map-rgb-mirrors.sh" "$PRIVATE_DEPS_DIR/rgb_deps_token" "$auth_dir/rgb-deps-credential"
 
 # IdentitiesOnly avoids GitHub accepting another repo's deploy key first.
 cat >> "$auth_dir/ssh_config" <<EOF

@@ -33,11 +33,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
-      # loads every git source of the lock, so every build here fetches it.
-      - name: Set up access to the rgb-lib mirror
+      # rgb-lib and the RGB crates it pins come from private mirrors. Cargo loads
+      # every git source of the lock, so every build here fetches them.
+      - name: Set up access to the rgb-lib and RGB crate mirrors
         env:
           RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
         run: sh build/ci-rgb-lib-access.sh
 
       # The parent's private proto dep uses the SSH Host alias
@@ -58,16 +59,49 @@ jobs:
           SSHCONF
           chmod 600 ~/.ssh/config
 
+      # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
+      # would pack an excluded subdirectory of a listed one.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/git/*/*
+            !~/.cargo/git/*/rgb-lib-bfa-*
+            !~/.cargo/git/*/rgb-consensus-*
+            !~/.cargo/git/*/rgb-ops-*
+            !~/.cargo/git/*/rgb-api-*
+            !~/.cargo/git/*/rgb-schemas-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      # A [patch.crates-io] entry no longer matching its requirement is dropped
+      # with only a warning; one off rgb-lib's revs builds against other RGB crates.
+      - name: Every RGB crate patch is used and copies rgb-lib's
+        run: |
+          for manifest in Cargo.toml parent/Cargo.toml; do
+            cargo metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null 2> metadata.log || { cat metadata.log; exit 1; }
+            if grep -q "was not used in the crate graph" metadata.log; then
+              echo "::error::$manifest has an unused [patch.crates-io] entry"
+              cat metadata.log
+              exit 1
+            fi
+          done
+          cargo metadata --locked --format-version 1 > metadata.json
+          python3 - <<'EOF'
+          import json, tomllib
+          lib = next(p for p in json.load(open('metadata.json'))['packages'] if p['name'] == 'rgb-lib')
+          theirs = tomllib.load(open(lib['manifest_path'], 'rb'))['patch']['crates-io']
+          ours = tomllib.load(open('Cargo.toml', 'rb'))['patch']['crates-io']
+          stale = [name for name in sorted(ours.keys() | theirs.keys())
+                   if name not in ours or name not in theirs
+                   or ours[name]['git'] != theirs[name]['git']
+                   or not ours[name]['rev'].startswith(theirs[name]['rev'])]
+          if stale:
+              raise SystemExit(f"::error::Cargo.toml [patch.crates-io] differs from rgb-lib's: {stale}")
+          EOF
 
       # NOTE: `parent/` is a SEPARATE cargo workspace (see the root Cargo.toml
       # comment), so `--workspace` here covers only enclave / enclave-proto /
@@ -235,11 +269,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
-      # loads every git source of the lock, so every build here fetches it.
-      - name: Set up access to the rgb-lib mirror
+      # rgb-lib and the RGB crates it pins come from private mirrors. Cargo loads
+      # every git source of the lock, so every build here fetches them.
+      - name: Set up access to the rgb-lib and RGB crate mirrors
         env:
           RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
         run: sh build/ci-rgb-lib-access.sh
 
       - name: Set up SSH for private deps
@@ -257,12 +292,19 @@ jobs:
           SSHCONF
           chmod 600 ~/.ssh/config
 
+      # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
+      # would pack an excluded subdirectory of a listed one.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/git/*/*
+            !~/.cargo/git/*/rgb-lib-bfa-*
+            !~/.cargo/git/*/rgb-consensus-*
+            !~/.cargo/git/*/rgb-ops-*
+            !~/.cargo/git/*/rgb-api-*
+            !~/.cargo/git/*/rgb-schemas-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
@@ -301,19 +343,27 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror. Cargo
-      # loads every git source of the lock, so every build here fetches it.
-      - name: Set up access to the rgb-lib mirror
+      # rgb-lib and the RGB crates it pins come from private mirrors. Cargo loads
+      # every git source of the lock, so every build here fetches them.
+      - name: Set up access to the rgb-lib and RGB crate mirrors
         env:
           RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
         run: sh build/ci-rgb-lib-access.sh
 
+      # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
+      # would pack an excluded subdirectory of a listed one.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/git/*/*
+            !~/.cargo/git/*/rgb-lib-bfa-*
+            !~/.cargo/git/*/rgb-consensus-*
+            !~/.cargo/git/*/rgb-ops-*
+            !~/.cargo/git/*/rgb-api-*
+            !~/.cargo/git/*/rgb-schemas-*
             target
             parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}

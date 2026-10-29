@@ -641,22 +641,18 @@ pub fn derived_lock(
     })
 }
 
-/// rgb-lib's MAX_MINT_SCAN_BLOCKS (no_wallet/validation.rs): receivers look no further for a lock.
-#[cfg(feature = "bfa-validation")]
-pub const MAX_MINT_SCAN_BLOCKS: u64 = 500_000;
-
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,
 /// pinned emitter, canonical inclusion below the configured tag), but bound to
 /// the RGB OpId, not to the bridge `operationId` (a different id-space).
 /// `funds_in_contract` and `finality_tag` come from PINNED config. `rgb_opid`
-/// and `after_block` come from the mint's anchor and only select the log that
-/// must exist.
+/// selects the log and `before_block` bounds its block (below); both come from
+/// the committed mint (`MintFacts`).
 ///
-/// The lock must also follow the RGB rule for a mint anchor: a block after
-/// `after_block` and at most [`MAX_MINT_SCAN_BLOCKS`] past it. An RGB receiver
-/// refuses any other lock, so a signed mint would strand the user's deposit.
+/// The lock must also follow the RGB rule for a mint anchor: a block before
+/// `before_block`, with no lower bound (rgb-lib `mint_lock_status`). An RGB
+/// receiver refuses any other lock, so a signed mint would strand the deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
 /// contract. A later `fundsOut` must cite its `operationId` in
@@ -668,7 +664,7 @@ pub fn verify_rgb_funds_in(
     finality_tag: EvmFinalityTag,
     evm_tx_hash: &[u8; 32],
     rgb_opid: &[u8; 32],
-    after_block: u64,
+    before_block: u64,
 ) -> Result<VerifiedLock> {
     let head = fetch_finality_block(provider, finality_tag)?;
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
@@ -702,17 +698,10 @@ pub fn verify_rgb_funds_in(
         )));
     }
 
-    if receipt.block_number <= after_block {
+    if receipt.block_number >= before_block {
         return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn block {} is not after the mint's afterBlock {after_block} - an RGB \
+            "FundsIn block {} is not before the mint's beforeBlock {before_block} - an RGB \
              receiver refuses this lock, refusing to sign",
-            receipt.block_number
-        )));
-    }
-    if receipt.block_number > after_block.saturating_add(MAX_MINT_SCAN_BLOCKS) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn block {} is past the mint's scan window ({MAX_MINT_SCAN_BLOCKS} blocks after \
-             afterBlock {after_block}) - an RGB receiver refuses this lock, refusing to sign",
             receipt.block_number
         )));
     }
@@ -728,7 +717,7 @@ pub fn verify_rgb_funds_in(
         operation_id = %hex::encode(operation_id),
         minted,
         net_amount,
-        after_block,
+        before_block,
         "FundsIn lock for a BFA mint independently verified in-enclave"
     );
     Ok(VerifiedLock {

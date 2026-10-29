@@ -42,8 +42,8 @@ pub struct MintAnchor {
     /// The mint's `issuedSupply`, which consensus made equal to its
     /// `assetOwner` outputs.
     pub amount: u64,
-    /// The mint's `afterBlock`: its lock must be in a later EVM block.
-    pub after_block: u64,
+    /// The mint's `beforeBlock`: its lock must be in an EVM (L2) block < before_block.
+    pub before_block: u64,
     /// The mint is in the last bundle: the one a mint PSBT signs.
     pub in_last_bundle: bool,
 }
@@ -97,12 +97,12 @@ pub(super) fn mint_anchors<'a>(
             let ExternalAnchor::MintEvent {
                 opid,
                 amount,
-                after_block,
+                before_block,
             } = anchor;
             MintAnchor {
                 opid: opid.to_byte_array(),
                 amount: *amount,
-                after_block: *after_block,
+                before_block: *before_block,
                 in_last_bundle: last_bundle.contains(opid),
             }
         })

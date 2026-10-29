@@ -52,7 +52,7 @@ pub struct ValidatedConsignment {
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
-    /// NOT from the flat rgb-lib inspection.
+    /// NOT from the flat parser.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` when the
@@ -96,20 +96,20 @@ impl ValidatedConsignment {
     }
 }
 
-/// Flat summary of one RGB state transition, read by rgb-lib's inspection.
-/// Local types keep rgb-lib out of the public API.
+/// Flat summary of one RGB state transition, read by our parser
+/// (`rgb_consignment::TransitionInfo`). Local types keep it out of the public API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransitionSummary {
     /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from
-    /// rgb-lib. It must be hex, not baid64:
+    /// the parser. It must be hex, not baid64:
     /// `validation::bfa::decode_opid` decodes it to 32 bytes.
     pub op_id: String,
     /// BFA transition-type id. Compare with `schemata::TS_TRANSFER`,
     /// `TS_BURN` or `TS_MINT` to classify the EVM action.
     pub transition_type: u16,
     /// Sum of all fungible amounts in the output assignments. For a Transfer,
-    /// this is recipient plus change. For a Burn, it is its change only: the
-    /// destroyed amount is in [`Self::burned_asset_amount`].
+    /// this is recipient plus change. For a Burn, it is 0: the schema gives it
+    /// no outputs, and the destroyed amount is in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
     /// Sum of the fungible amounts on `OS_ASSET` output assignments only.
     /// BFA has no other fungible type, so this equals

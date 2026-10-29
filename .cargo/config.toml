@@ -2,9 +2,7 @@
 # git dependencies, rather than cargo's bundled libgit2, which does not pick up
 # an SSH agent reliably across platforms.
 #
-# Both workspaces fetch rgb-lib from the private UTEXO-Protocol/rgb-lib-bfa
-# mirror over HTTPS with a token; the parent also resolves its proto through
-# an SSH alias. Docker builds configure both in build/with-private-deps.sh; CI
-# sets up the token (build/ci-rgb-lib-access.sh) and the proto deploy key.
+# The private git deps need that git's SSH and credential setup:
+# build/with-private-deps.sh in Docker, build/ci-rgb-lib-access.sh in CI.
 [net]
 git-fetch-with-cli = true

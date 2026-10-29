@@ -490,7 +490,9 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
 
 **Mint signer (plan B).** The mint signer validates no consignment. It reads
 the transitions, the input map and the MPC entropy rgb-lib stores in the PSBT
-as proprietary keys, and proves that the txid commits exactly one transition
+as proprietary keys (rgb-lib f3975623 strips them, so every mint and refill
+from it fails closed until the enclave reads the fascia), and proves that the
+txid commits exactly one transition
 of the pinned contract ([mint-flow.md](mint-flow.md) Stage 3): every input a
 native SegWit output with `SIGHASH_ALL` / taproot `DEFAULT` only (F2); the
 first `OP_RETURN` or P2TR output an `OP_RETURN` (F3), so consensus reads the
@@ -500,14 +502,14 @@ entropy matches that commitment (F5), so no bundle hides; one disclosed
 transition whose id is recomputed and whose inputs are exactly the input map
 (F6); one Colored key-path input (F7). The transition must be one `TS_MINT`
 that consumes one `mintRight`, assigns asset units only, carries exactly
-`issuedSupply` (> 0) and `afterBlock` as 8-byte little-endian values, pays
+`issuedSupply` (> 0) and `beforeBlock` as 8-byte little-endian values, pays
 `issuedSupply` to one blinded seal, and issues exactly `amount - commission`
 (M1 - M5, M7). The deposit must name this mint's OpId and carry the deposit
 id it derives (M6), and no sat may leave the enclave's outputs (M8).
 
 The parent PSBT, of the tx that made the spent right, passes the same core
-and must show a `TS_TRANSFER` that put that right alone on a witness seal of
-its own tx; the PSBT must spend that output (PP1 - PP7). This pins the one
+and must show a `TS_PROPAGATE` of one right that put that right alone on a
+witness seal of its own tx; the PSBT must spend that output (PP1 - PP7). This pins the one
 UTXO every signature for the mint spends, so replays conflict and no other
 state of ours is spent. The enclave checks no history, genesis, ancestor
 anchor, reject list or witness depth: a bad history makes the mint invalid
@@ -735,7 +737,7 @@ BFA rules come from `rgb-schemas`, and any other schema id, or a reject list
 that is not an EVM contract, is refused. Validation runs in two phases. Phase 1
 (`validate_deterministic`) checks everything that depends on the consignment
 only. It leaves open each witness and each BFA mint anchor (the mint's OpId,
-`issuedSupply` and `afterBlock`). Phase 2 resolves every witness on chain:
+`issuedSupply` and `beforeBlock`). Phase 2 resolves every witness on chain:
 the transaction comes from the consignment, its status from a source the
 enclave trusts, and it must be mined at least `SPV_MIN_CONFIRMATIONS` deep.
 On the burn path that source is the request's Merkle proofs, verified against
@@ -759,7 +761,7 @@ it derives. The mint signer binds its mint the same way from the PSBT (M6):
 the node must report `EVM_CHAIN_ID`, and the receipt of `evm_tx_hash` must
 hold its `FundsIn` (the `rgbOpId` word equals the 32 raw OpId bytes, as a
 big-endian `uint256`) and the derived `BridgeFundsIn`, with
-`destinationChainId == RGB_CHAIN_ID` (827166), in a block after `afterBlock`
+`destinationChainId == RGB_CHAIN_ID` (827166), in a block before `beforeBlock`
 and covered by the `EVM_FINALITY_TAG` head, with the canonical block hash at
 its height. The enclave never calls
 `Consignment::validate` or the unchecked `PendingValidation::resolve_anchor`;
@@ -1016,12 +1018,14 @@ Known limits. Read them before deployment.
 - **Policy coverage.** The commitment does not hold all enforced settings
   (Sec 4). The attestation CLI authenticates the chain, contract and asset
   pins. The caller must compare them with the intended deployment.
-- **Build reproducibility.** The RGB crates are on crates.io (exact
-  `=0.11.2-rc.1` pins). rgb-lib comes from the private
-  `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, so an EIF build needs a
-  GitHub token with read access to it. The token is a BuildKit secret: it is
-  never in a layer, the image or PCR0. Until the RGB-Tools release is public,
-  only a holder of that access can reproduce PCR0. All five EIF recipes pin both base images
+- **Build reproducibility.** rgb-lib comes from the private
+  `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, and the RGB protocol
+  crates it pins from the root `[patch.crates-io]`: private `rgb-tools-devs`
+  repos at full revs, fetched from our `UTEXO-Protocol/<repo>-s-bfa` mirrors.
+  An EIF build needs the deploy key of the first (`lib_key`) and a read token
+  for the mirrors (`rgb_deps_token`). Both are BuildKit secrets: never in a
+  layer, the image or PCR0. Until the RGB-Tools release is public, only a
+  holder of that access can reproduce PCR0. All five EIF recipes pin both base images
   by digest and install packages from the signed Debian snapshot
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,

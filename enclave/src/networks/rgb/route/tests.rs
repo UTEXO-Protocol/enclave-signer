@@ -201,7 +201,7 @@ mod asset_bind {
     /// `psbt_bytes`. PSBT parsing runs after all asset-binding checks, so its
     /// error proves that the binding passed.
     fn destination(asset_id: &str) -> RgbDestination {
-        let consignment = mint().consignment(vec![]);
+        let consignment = mint().consignment();
         RgbDestination {
             operation_idx: 0,
             psbt_bytes: b"not-a-psbt".to_vec(),
@@ -316,7 +316,7 @@ mod asset_bind {
             reject_list: Some(gen::evm_reject_list(42161, [0x4e; 20])),
             ..Issue::new(42161, [0xB1; 20], vec![gen::outpoint(0xA0, 0)])
         });
-        let consignment = history.consignment(vec![]);
+        let consignment = history.consignment();
         let id = history.contract_id.to_string();
         let destination = RgbDestination {
             consignment_hash: Keccak256::digest(&consignment).to_vec(),

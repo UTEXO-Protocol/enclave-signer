@@ -1,6 +1,6 @@
 //! The flat transition summary over every consignment shape the generator
 //! makes. A reference reading of the rgbstd `Transfer` pins each field, and
-//! rgb-lib's inspection must match it.
+//! our parser (rgb-consignment) must match it.
 
 use amplify::Wrapper;
 use rgbstd::containers::Transfer;
@@ -177,72 +177,72 @@ fn rights_refill() -> History {
     history
 }
 
-/// Twenty rights in, twenty out, in one transition.
-fn wide_rights_transfer() -> History {
-    const N: u16 = 20;
-    let outpoints: Vec<OutPoint> = (0..N).map(|i| gen::outpoint(0xA0, i.into())).collect();
-    let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
-    let mut wide = history.transition("transfer");
-    for no in 0..N {
-        let right = history.genesis_right(no, outpoints[no as usize]);
-        wide = wide
-            .add_input(right.opout, AllocatedState::Void)
-            .unwrap()
-            .add_rights(
-                "mintRight",
-                GraphSeal::with_blinded_vout(1u32, 0x3000 + u64::from(no)),
-            )
-            .unwrap();
-    }
-    let wide = wide.complete_transition().unwrap();
-    history.commit(vec![wide], outpoints, vec![gen::dust(6)]);
+/// One right in, twenty out, in one propagate.
+fn wide_rights_propagate() -> History {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let vouts: Vec<u32> = (1..=20).collect();
+    let outputs = vouts.iter().map(|_| gen::dust(6)).collect();
+    history.send_rights(right, &vouts, vec![], outputs);
+    history
+}
+
+/// A refill, a mint on one of its rights, then a burn with change.
+fn split_burn_after_refill() -> History {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let refill = history.send_rights(
+        right,
+        &[1, 2],
+        vec![gen::outpoint(0xF1, 0)],
+        vec![gen::dust(1), gen::dust(2)],
+    );
+    let rights = gen::rights_made(&refill, &[1, 2]);
+    let units = history.mint_owned(rights[1], MINTED, 90);
+    history.burn(
+        units,
+        MINTED,
+        Some(MINTED / 3),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
     history
 }
 
 /// Every shape, by name, as TFR bytes.
 fn generated_shapes() -> Vec<(String, Vec<u8>)> {
     let mut shapes: Vec<(String, Vec<u8>)> = vec![
-        ("genesis only".into(), issue().consignment(vec![])),
-        ("mint, then burn with change".into(), burn_bytes()),
+        ("genesis only".into(), issue().consignment()),
+        ("mint, then split and burn with change".into(), burn_bytes()),
     ];
-    let mut push = |name: &str, history: History, terminals| {
-        shapes.push((name.to_string(), history.consignment(terminals)));
+    let mut push = |name: &str, history: History| {
+        shapes.push((name.to_string(), history.consignment()));
     };
     push(
         "burn of everything",
         burn_history(Some(MINTED), Some(gen::burn_reason_for(PAYEE))).0,
-        vec![],
     );
     push(
         "burn without burnReason",
         burn_history(Some(MINTED), None).0,
-        vec![],
     );
     push(
         "burn beside a transfer, burn first",
         burn_beside_transfer(true),
-        vec![],
     );
     push(
         "burn beside a transfer, transfer first",
         burn_beside_transfer(false),
-        vec![],
     );
-    push("split in halves", minted_in_halves().0, vec![]);
+    push("split in halves", minted_in_halves().0);
     push(
         "hidden transition in the last bundle",
         burn_with_hidden_transition(),
-        vec![],
     );
-    push("burn after a rights send", burn_after_rights_send(), vec![]);
-    push("rights refill", rights_refill(), vec![]);
-    push("wide rights transfer", wide_rights_transfer(), vec![]);
-    push("old-form mint keeping its right", old_form_mint().0, vec![]);
-    push(
-        "listed asset burn",
-        listed_burn().0,
-        vec![BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 1))],
-    );
+    push("burn after a rights send", burn_after_rights_send());
+    push("rights refill", rights_refill());
+    push("wide rights propagate", wide_rights_propagate());
+    push("split burn after a refill", split_burn_after_refill());
+    push("listed asset burn", listed_burn().0);
     for chain_net in [
         ChainNet::BitcoinRegtest,
         ChainNet::BitcoinMainnet,
@@ -251,19 +251,17 @@ fn generated_shapes() -> Vec<(String, Vec<u8>)> {
     ] {
         let to = concealed_seal(0xC0);
         let name = format!("mint to a blinded seal on {}", chain_net.prefix());
-        push(&name, mint_to(chain_net, to), vec![to]);
+        push(&name, mint_to(chain_net, to));
     }
     let to = explicit_seal(0xC1, 3);
     push(
         "mint to an explicit seal",
         mint_to(ChainNet::BitcoinRegtest, to),
-        vec![to],
     );
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 0x52));
     push(
         "mint to a witness seal",
         mint_to(ChainNet::BitcoinRegtest, to),
-        vec![to],
     );
     for (name, recipient) in [
         ("send to a blinded invoice", concealed_seal(0xC2)),
@@ -272,7 +270,7 @@ fn generated_shapes() -> Vec<(String, Vec<u8>)> {
         let (mut history, units) = minted();
         let units = history.transfer(units, MINTED);
         send_to_invoice(&mut history, units, recipient);
-        push(name, history, vec![recipient]);
+        push(name, history);
     }
     shapes
 }
@@ -281,13 +279,12 @@ fn reference_of(bytes: &[u8]) -> Summary {
     reference_summary(&Transfer::load(std::io::Cursor::new(bytes)).unwrap())
 }
 
-/// rgb-lib's inspection, mapped back, equals the rgbstd reading on every
-/// shape.
+/// The parser's summary equals the rgbstd reading on every shape.
 #[test]
 fn the_summary_matches_the_rgbstd_reading_on_every_generated_shape() {
     for (name, bytes) in generated_shapes() {
-        let inspected = extract_transition_summary(&bytes).unwrap();
-        assert_eq!(inspected, reference_of(&bytes), "{name}");
+        let parsed = extract_transition_summary(&bytes).unwrap();
+        assert_eq!(parsed, reference_of(&bytes), "{name}");
     }
 }
 
@@ -314,7 +311,12 @@ fn the_generated_shapes_cover_every_seal_kind_and_transition_type() {
     assert!(seals
         .iter()
         .any(|s| matches!(s, OutputSeal::Revealed { txid: Some(_), .. })));
-    for ty in [schemata::TS_MINT, schemata::TS_BURN, schemata::TS_TRANSFER] {
+    for ty in [
+        schemata::TS_MINT,
+        schemata::TS_BURN,
+        schemata::TS_TRANSFER,
+        schemata::TS_PROPAGATE,
+    ] {
         assert!(
             all.iter().any(|t| t.transition_type == ty.to_inner()),
             "{ty}"

@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-15 (plan B: the mint signer reads the PSBT).
+**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move; plan B: the mint signer reads the PSBT).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -13,8 +13,8 @@ document differ, investigate the difference. Either can contain an error.
 1. The user locks ERC-20 tokens in the Bridge contract on EVM.
 2. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
 3. The backend makes an RGB mint (a BFA `mint` transition) and a Bitcoin
-   PSBT that anchors it. The mint commits to `afterBlock`: the EVM
-   finalized block when it was made. The backend also sends the PSBT of the
+   PSBT that anchors it. The mint commits to `beforeBlock`: its EVM lock
+   must be in an earlier (L2) block. The backend also sends the PSBT of the
    tx that made the right the mint spends (the parent PSBT).
 4. The mint signer checks the deposit, the mint and the PSBT.
 5. The mint signer signs the PSBT with its colored taproot key.
@@ -108,11 +108,11 @@ sequenceDiagram
 | Name | Value | Meaning |
 |------|-------|---------|
 | `TS_MINT` | 8013 | Mint transition. The only transition the mint signer accepts. |
-| `MS_AFTER_BLOCK` | 1003 | Mint metadata: the lock must be in a later EVM block. |
+| `MS_BEFORE_BLOCK` | 1003 | Mint metadata: the lock must be in an earlier EVM (L2) block. |
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. It must equal the one `OS_ASSET` output (M5). |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
-| `TS_TRANSFER` | 10000 | The only transition that may make a right a mint spends (PP4). |
+| `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition that may make a right a mint spends (PP4). |
 | `EVM_FINALITY_TAG` | `safe` (default) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
 | `SPV_MIN_CONFIRMATIONS` | 3 (mint image) | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
@@ -216,7 +216,7 @@ binds checked, on the committed transition.
 - **M3** It assigns `OS_ASSET` only. It passes no `mintRight` on (a mint
   consumes its right) and makes no link.
 - **M4** Its globals are exactly `issuedSupply`: one value of 8 bytes, a
-  little-endian u64 above 0. Its metadata is exactly `afterBlock`: 8 bytes,
+  little-endian u64 above 0. Its metadata is exactly `beforeBlock`: 8 bytes,
   a little-endian u64.
 - **M5** The `OS_ASSET` units must equal `issuedSupply`, and **exactly**
   `amount - commission`. A larger sum is an over-mint.
@@ -232,7 +232,8 @@ signed or not: only its unsigned tx and its RGB keys are read.
 - **PP2** The core (F3 - F6) runs on it, with the same pin. It gives the
   parent's txid, OpId and transition.
 - **PP3** The mint's one input must be an `OS_MINT` output of that transition.
-- **PP4** The parent must be a `TS_TRANSFER`. A mint or genesis parent is
+- **PP4** The parent must be a `TS_PROPAGATE` that closes exactly one right
+  (the schema moves rights only so). A transfer, mint or genesis parent is
   refused. No PSBT commits a genesis, so a genesis right has no parent.
 - **PP5** That right must sit on a witness seal: an output of the parent tx
   itself. The parent's id commits its concealed seal, so the recompute in PP2
@@ -250,8 +251,8 @@ signed or not: only its unsigned tx and its RGB keys are read.
   derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
   burn-flow B2.3). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
   RPC. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`). The receipt
-  block must be after `afterBlock` and at most 500 000 blocks past it
-  (rgb-lib's `MAX_MINT_SCAN_BLOCKS`: receivers look no further), at or below
+  block must be before `beforeBlock`, with no lower bound (rgb-lib
+  `mint_lock_status`: receivers refuse a lock at or after it), at or below
   the RPC's `EVM_FINALITY_TAG` block (`safe` by default), and its
   `blockHash` must match the canonical block at its height. The tagged head
   is read again afterwards to detect a reorg. A receiving rgb-lib wallet
@@ -344,7 +345,8 @@ The listener gRPC has no auth, so the cheap checks run first.
 - **RR5** F2, F3 and F5. F3 matters most here: RR12 admits 0-sat outputs, and
   a 0-sat P2TR before the `OP_RETURN` would switch the close method.
 - **RR3** F4 and F6: the pinned asset.
-- **RR6** F6, and the one transition is a `TS_TRANSFER` (10000).
+- **RR6** F6, and the one transition is a `TS_PROPAGATE` (8014). A transfer
+  moves units only.
 - **RR7** It closes exactly one input, an `OS_MINT`. It assigns `OS_MINT`
   only, each right with no state, and has no globals and no metadata.
   Consensus refuses a right with state, and the spent right would be lost.
@@ -380,8 +382,8 @@ What is not checked, and why that is safe:
   spend of the right: PP7 pins it.
 - **The fee input (accepted residual).** A hostile host can fund a junk tx
   that pays one of our Colored addresses and commits a well-formed but invalid
-  transfer. The parent proof passes on it. A refill then closes the "right"
-  that junk transfer made (nothing) and spends a real right as its fee input,
+  propagate. The parent proof passes on it. A refill then closes the "right"
+  that junk propagate made (nothing) and spends a real right as its fee input,
   destroying it: one right per refill, net. It cannot steal a right: every
   right out is ours (RR9) and every sat stays ours (RR12). The host pays a
   Bitcoin tx for each, and RR15 bounds it at 12 per enclave hour (a restart
@@ -427,11 +429,13 @@ signer checks the amount three times, from the PSBT and the deposit:
 3. The recipient: the one blinded leg (M7) is the depositor's seal when the
    deposit names one (S6.2).
 
-A transfer parent (PP4) keeps every mint out of a mint's history, by
+A propagate parent (PP4) keeps every mint out of a mint's history, by
 induction: rights reach the mint wallet only by issuer sends or refills,
 every refill passed PP4 (or, before plan B, the consensus refusal of mint
-anchors), and M3 stops a mint passing a right on. Rollout needs the mint
-wallet to hold no right whose parent is a mint or the genesis.
+anchors), and M3 stops a mint passing a right on. Since rgb-lib f3975623 the
+BFA schema refuses a mint that assigns a right too, so receivers refuse it
+as well. Rollout needs the mint wallet to hold no right whose parent is a
+mint or the genesis.
 
 Known limits. Each is liveness only: a receiver validates the full history
 when it accepts the mint, and refuses a bad one.
@@ -448,5 +452,6 @@ when it accepts the mint, and refuses a bad one.
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
-mint spends. The `RGB` and `MPC` PSBT keys are rgb-lib 0.11.2-rc.1's. If they
-change, every mint fails closed until a new image.
+mint spends. rgb-lib f3975623 strips the `RGB` and `MPC` keys from the PSBTs
+it returns, so every mint and refill of a connector on it fails closed until
+the enclave reads the transitions from the fascia.
