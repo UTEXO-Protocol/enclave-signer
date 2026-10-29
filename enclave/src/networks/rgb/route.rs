@@ -132,6 +132,7 @@ pub fn validate_destination_anchor(
         ctx,
     )?;
 
+    crate::config::check_psbt_size("psbt_bytes", &destination.psbt_bytes)?;
     let psbt = bitcoin::psbt::Psbt::deserialize(&destination.psbt_bytes)
         .map_err(|e| EnclaveError::CrossCheck(format!("psbt_bytes is not a valid PSBT: {e}")))?;
     // Fail closed. The per-output recipient bind needs the enclave keys to

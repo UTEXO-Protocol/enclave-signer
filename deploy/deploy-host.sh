@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy the matching EIF, Parent, and CLI from S3 for one git_sha.
 # Verify checksums and PCRs before starting the services.
-# Start enclave CIDs 16/18/20 and Parent ports 50051/52/53.
+# Start one enclave on CID 16 and Parent port 50051 by default.
+# Set ENCLAVE_CID=18 or 20 to deploy one of the other supported CIDs.
 #
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
@@ -35,7 +36,24 @@ DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>
 EIF="$DIR/utexo-bridge-enclave.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
-ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-3072}"
+ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-4096}"
+# A release enclave refuses to start below 2688 MiB of usable memory
+# (enclave/src/memory.rs). The kernel keeps part of the launch value for
+# itself, so the launch value must be at least 4096 MiB. Refuse here, where
+# the message is read, instead of on the enclave console.
+case "$ENCLAVE_MEMORY" in
+  ''|0?*|*[!0-9]*|????????*) echo "ENCLAVE_MEMORY must be a whole number of MiB with at most 7 digits and no leading zero, got '$ENCLAVE_MEMORY'" >&2; exit 1 ;;
+esac
+if [ "$ENCLAVE_MEMORY" -lt 4096 ]; then
+  echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is below the 4096 MiB minimum (enclave/src/memory.rs)" >&2
+  exit 1
+fi
+# nitro-cli gives an enclave whole hugepages, 1 GiB pages first. A value that
+# is not a whole number of GiB can take a further 1 GiB page.
+if [ $((ENCLAVE_MEMORY % 1024)) -ne 0 ]; then
+  echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
+  exit 1
+fi
 # DEBUG-MODE (op13 crash hunt): when set to 1, enclaves run with --debug-mode so
 # `nitro-cli console` can attach. This ZEROES runtime PCR0/1/2, so the step-6
 # runtime-PCR check is skipped (the static describe-eif measurement in step 3
@@ -53,7 +71,57 @@ if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
   exit 1
 fi
-CIDS=(16 18 20)
+# Deploy exactly one enclave per invocation. Run the command again with another
+# ENCLAVE_CID when an operator wants another enclave.
+ENCLAVE_CID="${ENCLAVE_CID:-16}"
+case "$ENCLAVE_CID" in
+  16|18|20) ;;
+  *) echo "ENCLAVE_CID must be 16, 18 or 20, got '$ENCLAVE_CID'" >&2; exit 1 ;;
+esac
+CIDS=("$ENCLAVE_CID")
+# The hugepage pool must hold this enclave at the launch value. Refuse here,
+# before the script downloads or stops anything. The allocator applies the file
+# at its next start, and the kernel holds the pool now.
+NITRO_ALLOCATOR_CONFIG="${NITRO_ALLOCATOR_CONFIG:-/etc/nitro_enclaves/allocator.yaml}"
+NITRO_HUGEPAGES_DIR="${NITRO_HUGEPAGES_DIR:-/sys/kernel/mm/hugepages}"
+POOL_NEED=$ENCLAVE_MEMORY
+# memory_mib in the allocator file, read as the control script below reads it.
+POOL_FILE="$NITRO_ALLOCATOR_CONFIG"
+file_pool_mib() {
+  local line value='' data=''
+  while read line; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    [ "$line" = --- ] && { data=1; continue; }
+    [ -n "$data" ] || continue
+    [[ ${line%%:*} =~ ^[-_a-zA-Z0-9]+ ]] && [ "${BASH_REMATCH[0]}" = memory_mib ] || continue
+    value="$(printf '%s\n' "$line" | sed -E 's/^.+://; s/[[:space:]]+"?//; s/"?$//')"
+  done 2>/dev/null < "$POOL_FILE"
+  printf '%s\n' "$value"
+}
+# Under set -e a missing file must reach the message below, not end the script.
+POOL_MIB="$(file_pool_mib)" || POOL_MIB=""
+# The allocator refuses a value that is not a number, and it reads a leading
+# zero as an octal number.
+case "$POOL_MIB" in
+  ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $NITRO_ALLOCATOR_CONFIG, got '$POOL_MIB'" >&2; exit 1 ;;
+esac
+if [ "$POOL_MIB" -lt "$POOL_NEED" ]; then
+  echo "memory_mib in $NITRO_ALLOCATOR_CONFIG is $POOL_MIB MiB, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. Set it to at least $POOL_NEED. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+  exit 1
+fi
+HELD_MIB=0
+for dir in "$NITRO_HUGEPAGES_DIR"/hugepages-*kB; do
+  n="$(cat "$dir/nr_hugepages" 2>/dev/null)" || n=""
+  kb="${dir##*/hugepages-}"
+  kb="${kb%kB}"
+  case "$n" in ''|*[!0-9]*) continue ;; esac
+  case "$kb" in ''|*[!0-9]*) continue ;; esac
+  HELD_MIB=$((HELD_MIB + n * kb / 1024))
+done
+if [ "$HELD_MIB" -lt "$POOL_NEED" ]; then
+  echo "the kernel holds $HELD_MIB MiB of hugepages in $NITRO_HUGEPAGES_DIR, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+  exit 1
+fi
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 # Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
 # a cold deploy that ends before identity bootstrap, so it only provisions the
@@ -150,13 +218,82 @@ EOF
 # in parallel and concurrent run-enclave calls race on the pool -> E36/E39).
 cat > /usr/local/bin/utexo-enclave-ctl.sh <<'EOF'
 #!/usr/bin/env bash
-# start|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
+# start|check|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
+# `check` refuses a launch value or a hugepage pool that cannot hold every
+# enclave of the host, and changes nothing. Run it before a rolling restart:
+# under `systemctl restart` the old enclave stops before `start` runs.
 set -uo pipefail
-ACTION="${1:?usage: utexo-enclave-ctl.sh start|stop <cid>}"
+ACTION="${1:?usage: utexo-enclave-ctl.sh start|check|stop <cid>}"
 CID="${2:?cid required}"
+# systemd gives `start` the values in /etc/utexo/enclave.env. `check` takes
+# the three keys below from this file only, and a key that is not in the file
+# gets its default. A drop-in or the systemd manager can still give `start` a
+# value for such a key, but deploy-host.sh writes all three keys. `check`
+# refuses a file that it cannot read. It reads only these plain lines:
+# - KEY=value. The key has only ASCII letters, digits and `_`, and its first
+#   character is not a digit. The key and the `=` can have blanks around
+#   them. The value has no backslash. A value can have one pair of the same
+#   quotes around it, and no other quote.
+# - A comment line. Its first character that is not a blank is `#` or `;`.
+# - A blank line.
+# A plain line can end with a carriage return. It has no other carriage
+# return, no backslash at its end, and only tabs and printable ASCII.
+# A plain line has at most 4096 bytes, and the file has at most 65536
+# bytes. systemd does not start the unit with some much larger values and
+# files.
+#
+# On plain lines, `check` reads the values as systemd reads them. The last
+# line of a key wins. `check` removes the blanks around the key and the value,
+# and one pair of quotes around the whole value. A comment after a value stays
+# in the value. systemd joins, splits, changes or ignores some other lines, or
+# refuses the file, so `check` refuses a file with them. An empty ENCLAVE_ENV
+# makes `check` use the environment.
+ENV_FILE="${ENCLAVE_ENV-/etc/utexo/enclave.env}"
+if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
+  # The number of the first line that is not plain, or 0. awk can miss a NUL
+  # byte, so tr changes it to a byte that is not plain.
+  bad=
+  if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
+    bad="$(LC_ALL=C tr '\000' '\001' < "$ENV_FILE" | LC_ALL=C awk -v q="'" '
+      bad { next }
+      { size += length($0) + 1; sub(/\r$/, "") }
+      /[^\t -~]/ || /\\$/ || length($0) > 4096 || size > 65536 { bad = NR; next }
+      /^[ \t]*[#;]/ || /^[ \t]*$/ { next }
+      {
+        n = index($0, "="); v = substr($0, n + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+        f = substr(v, 1, 1); w = substr(v, 2, length(v) - 2)
+        if (!n || substr($0, 1, n - 1) !~ /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*$/ || /\\/)
+          bad = NR
+        else if ((index(v, "\"") || index(v, q)) && (length(v) < 2 || (f != "\"" && f != q) ||
+                 substr(v, length(v)) != f || index(w, "\"") || index(w, q)))
+          bad = NR
+      }
+      END { print bad + 0 }')" || bad=
+  fi
+  case "$bad" in
+    0) ;;
+    '') echo "cannot read $ENV_FILE. systemd gives start the values in this file. Run check as root or as a user that can read the file." >&2; exit 1 ;;
+    *) echo "line $bad of $ENV_FILE is not a plain line. Write the file again with plain KEY=value lines, comment lines and blank lines only (README)." >&2; exit 1 ;;
+  esac
+  for key in ENCLAVE_MEMORY NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
+    value="$(awk -v k="$key" -v q="'" '
+      { l = $0; sub(/^[ \t\r]+/, "", l); n = index(l, "=") }
+      n > 0 && substr(l, 1, n - 1) ~ ("^" k "[ \t]*$") {
+        v = substr(l, n + 1); sub(/^[ \t\r]+/, "", v); sub(/[ \t\r]+$/, "", v)
+        f = substr(v, 1, 1)
+        if (length(v) > 1 && (f == "\"" || f == q) && substr(v, length(v)) == f)
+          v = substr(v, 2, length(v) - 2)
+        out = "=" v
+      }
+      END { printf "%s", out }' "$ENV_FILE")" || { echo "cannot read $ENV_FILE." >&2; exit 1; }
+    if [ -n "$value" ]; then export "$key=${value#=}"; else unset "$key"; fi
+  done
+else
+  ENV_FILE="the environment"
+fi
 NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
-MEM="${ENCLAVE_MEMORY:-3072}"
+MEM="${ENCLAVE_MEMORY:-4096}"
 LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
 enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
@@ -198,8 +335,80 @@ verify_launch() {
     "$CLI" --addr "vsock://$CID:5000" verify-launch \
     --pcr-file "$PCR_FILE" --image-env "$IMAGE_ENV" --signer-role "$SIGNER_ROLE"
 }
+# The Nitro allocator reserves hugepages for the enclaves of the host.
+# nitro-cli gives an enclave whole pages, 1 GiB pages first.
+POOL_FILE="${NITRO_ALLOCATOR_CONFIG:-/etc/nitro_enclaves/allocator.yaml}"
+PAGES_DIR="${NITRO_HUGEPAGES_DIR:-/sys/kernel/mm/hugepages}"
+# memory_mib in the allocator file, read with the loop of the allocator. It
+# reads each line with `read`, so it ignores a last line with no newline. It
+# reads only the lines after "---". It edits the value with the same sed
+# commands, so a comment after the value stays in the value. The allocator
+# also refuses other errors in the file, which this function does not check.
+file_pool_mib() {
+  local line value='' data=''
+  while read line; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    [ "$line" = --- ] && { data=1; continue; }
+    [ -n "$data" ] || continue
+    [[ ${line%%:*} =~ ^[-_a-zA-Z0-9]+ ]] && [ "${BASH_REMATCH[0]}" = memory_mib ] || continue
+    value="$(printf '%s\n' "$line" | sed -E 's/^.+://; s/[[:space:]]+"?//; s/"?$//')"
+  done 2>/dev/null < "$POOL_FILE"
+  printf '%s\n' "$value"
+}
+# The MiB in hugepages of all sizes: the kernel holds nr_hugepages, and no
+# enclave uses free_hugepages.
+pages_mib() {
+  total=0
+  for dir in "$PAGES_DIR"/hugepages-*kB; do
+    n="$(cat "$dir/$1" 2>/dev/null)"
+    kb="${dir##*/hugepages-}"
+    kb="${kb%kB}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    case "$kb" in ''|*[!0-9]*) continue ;; esac
+    total=$((total + n * kb / 1024))
+  done
+  echo "$total"
+}
+
 case "$ACTION" in
-  start)
+  start|check)
+    # The enclave refuses to start below 2688 MiB of usable memory
+    # (enclave/src/memory.rs), and the kernel keeps part of the launch value.
+    # Refuse a value under 4096 MiB here, where the message is read.
+    case "$MEM" in
+      ''|0?*|*[!0-9]*|????????*) echo "ENCLAVE_MEMORY must be a whole number of MiB with at most 7 digits and no leading zero, got '$MEM'" >&2; exit 1 ;;
+    esac
+    if [ "$MEM" -lt 4096 ]; then
+      echo "ENCLAVE_MEMORY=$MEM MiB is below the 4096 MiB minimum (enclave/src/memory.rs)" >&2
+      exit 1
+    fi
+    # A value that is not a whole number of GiB can take a further 1 GiB page.
+    if [ $((MEM % 1024)) -ne 0 ]; then
+      echo "ENCLAVE_MEMORY=$MEM MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
+      exit 1
+    fi
+    if [ "$ACTION" = check ]; then
+      # Each control invocation checks exactly one enclave. Operators run the
+      # command again for any other CID.
+      need=$MEM
+      file="$(file_pool_mib)"
+      # The allocator refuses a value that is not a number, and it reads a
+      # leading zero as an octal number.
+      case "$file" in
+        ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $POOL_FILE, got '$file'" >&2; exit 1 ;;
+      esac
+      if [ "$file" -lt "$need" ]; then
+        echo "memory_mib in $POOL_FILE is $file MiB, and one enclave of $MEM MiB needs $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        exit 1
+      fi
+      held="$(pages_mib nr_hugepages)"
+      if [ "$held" -lt "$need" ]; then
+        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and one enclave of $MEM MiB needs $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        exit 1
+      fi
+      echo "CID $CID: one enclave of $MEM MiB fits: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
+      exit 0
+    fi
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # fd 9 closed in nitro-cli children (9>&-) so an orphaned run-enclave can't
@@ -211,6 +420,18 @@ case "$ACTION" in
     DEBUG_ARG=()
     [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && DEBUG_ARG=(--debug-mode)
     old="$(enc_id)"; [ -n "$old" ] && nitro-cli terminate-enclave --enclave-id "$old" 9>&- || true
+    # Refuse with one clear message, not five failed attempts, when the free
+    # hugepages cannot hold this enclave. A stopped enclave frees its pages.
+    free=0
+    for _ in 1 2 3 4 5; do
+      free="$(pages_mib free_hugepages)"
+      [ "$free" -ge "$MEM" ] && break
+      sleep 1
+    done
+    if [ "$free" -lt "$MEM" ]; then
+      echo "only $free MiB of hugepages are free in $PAGES_DIR, and CID $CID needs $MEM MiB" >&2
+      exit 1
+    fi
     for attempt in 1 2 3 4 5; do
       if nitro-cli run-enclave \
         --eif-path "$EIF" --cpu-count "$CPU" --memory "$MEM" \
@@ -231,7 +452,7 @@ case "$ACTION" in
   stop)
     terminate
     ;;
-  *) echo "usage: utexo-enclave-ctl.sh start|stop <cid>" >&2; exit 2 ;;
+  *) echo "usage: utexo-enclave-ctl.sh start|check|stop <cid>" >&2; exit 2 ;;
 esac
 EOF
 chmod 0755 /usr/local/bin/utexo-enclave-ctl.sh
@@ -294,6 +515,8 @@ cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
+NITRO_ALLOCATOR_CONFIG=$NITRO_ALLOCATOR_CONFIG
+NITRO_HUGEPAGES_DIR=$NITRO_HUGEPAGES_DIR
 ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
 PCR_FILE=$DIR/PCR.json

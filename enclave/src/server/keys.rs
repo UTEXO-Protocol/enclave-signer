@@ -11,6 +11,11 @@ use crate::error::{EnclaveError, Result};
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
 
+/// The most bytes of an imported mnemonic. 24 English words are at most 215
+/// bytes, and 24 words of any BIP-39 language fit in 1 KiB.
+#[cfg(feature = "allow-seed-import")]
+const MAX_MNEMONIC_BYTES: usize = 1024;
+
 pub(super) fn handle_initialize(
     ctx: &ServerContext,
     req: InitializeKeyRequest,
@@ -27,6 +32,15 @@ pub(super) fn handle_initialize(
         // Test path: import a BIP-39 mnemonic.
         #[cfg(feature = "allow-seed-import")]
         {
+            // The parser normalizes the whole string before it counts the
+            // words. A normalized character can be 11 times its bytes. So the
+            // size limit runs first.
+            if req.mnemonic.len() > MAX_MNEMONIC_BYTES {
+                return Err(EnclaveError::InvalidRequest(format!(
+                    "mnemonic is {} bytes; the limit is {MAX_MNEMONIC_BYTES}",
+                    req.mnemonic.len()
+                )));
+            }
             // Check the secret before key install. A refused init keeps the phase Initial.
             if !req.cloning_secret.is_empty() {
                 crate::cloning::validate_cloning_secret(&req.cloning_secret)?;

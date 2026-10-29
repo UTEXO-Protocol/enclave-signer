@@ -67,8 +67,11 @@ pub struct ValidatedConsignment {
     /// Empty on the burn path. On the mint path, at most the mint tx being
     /// signed: consensus refuses every other unmined witness.
     pub non_mined_witness_txids: Vec<[u8; 32]>,
-    /// Every transition in the consignment, grouped by the witness tx that
-    /// commits it.
+    /// The transitions of the settling bundle, under the witness tx that
+    /// commits it. Validation reads every bundle, but it keeps no other bundle
+    /// here. The send-RGB cross-check needs only the bundle that the signed tx
+    /// commits, and it refuses a tx that does not commit the settling
+    /// transition.
     ///
     /// One Bitcoin tx commits a bundle, which can hold many transitions. A
     /// bind of only [`Self::last_transition`] lets an attacker put a large
@@ -83,10 +86,12 @@ pub struct ValidatedConsignment {
 }
 
 impl ValidatedConsignment {
-    /// Each transition that the witness tx `txid` commits.
+    /// Each transition that the witness tx `txid` commits, if `txid` is
+    /// [`Self::last_witness_txid`].
     ///
-    /// Empty if the consignment commits nothing to that tx. Callers must treat
-    /// empty as a rejection, not as "nothing to check".
+    /// Empty for any other tx, because [`Self::transitions_by_witness`] holds
+    /// only the settling bundle. Callers must treat empty as a rejection, not
+    /// as "nothing to check".
     pub fn transitions_committed_by(&self, txid: bitcoin::Txid) -> Vec<&TransitionSummary> {
         self.transitions_by_witness
             .iter()

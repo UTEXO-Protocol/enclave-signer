@@ -16,7 +16,9 @@
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-use rgbstd::containers::{ConsignmentExt, FileContent, PendingConsignment, Transfer};
+use rgbstd::containers::{
+    ConsignmentExt, FileContent, PendingConsignment, Transfer, ValidConsignment,
+};
 use rgbstd::validation::{Status, ValidationConfig, ValidationError};
 use rgbstd::vm::WitnessOrd;
 
@@ -50,11 +52,18 @@ impl RgbValidator {
         tracing::info!(bytes_len, "starting RGB consignment validation");
 
         // TFR only: a validated copy (VTF), a contract (CON) and V0 fail here.
-        let transfer = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
+        let decoded = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
             tracing::warn!(bytes_len, "consignment deserialization failed: {e}");
             EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
         })?;
+        // The decoder doubles a list when it grows, so a decoded list can take
+        // twice the heap of its items. A clone keeps each list at its length.
+        // Phase 1 keeps the consignment until it ends, so the clone lowers the
+        // validation peak (`memory.rs`).
+        let transfer = decoded.clone();
+        drop(decoded);
         assert_bfa_genesis(&transfer.genesis)?;
+        assert_terminals_within_limit(&transfer)?;
         let list = reject_list(&transfer.genesis)?;
         let contract_id = transfer.contract_id().to_string();
 
@@ -70,7 +79,7 @@ impl RgbValidator {
         let non_mined = non_mined_witnesses(valid.validation_status());
         let scope = list.map(|list| reject_scope(list, &valid)).transpose()?;
         let validated = summarize(
-            &valid,
+            valid,
             consignment_bytes,
             contract_id,
             mint_locks,
@@ -140,6 +149,40 @@ fn resolve_mint_anchors(
     Ok(bound.locks)
 }
 
+/// The most outputs that the terminals of a consignment can name. Phase 1
+/// keeps an entry of about 130 bytes for each of these outputs. A burn that
+/// rgb-lib makes names one seal, the seal of its recipient. Without this
+/// limit, a consignment can name one seal that tens of thousands of rights
+/// share. Then the entries add about 9 bytes of heap for each byte of
+/// consignment (`memory.rs`).
+pub(crate) const MAX_TERMINAL_OUTPUTS: usize = 4096;
+
+/// Refuses a consignment whose terminals name more than
+/// [`MAX_TERMINAL_OUTPUTS`] outputs, before phase 1. It counts the outputs
+/// as phase 1 does: each output of a bundle whose seal is a terminal of that
+/// bundle. The count reads each output once.
+fn assert_terminals_within_limit(transfer: &Transfer) -> Result<()> {
+    let mut named = 0usize;
+    for wb in transfer.bundles.iter() {
+        let Some(terminals) = transfer.terminals.get(&wb.bundle.bundle_id()) else {
+            continue;
+        };
+        let seals: BTreeSet<_> = terminals.into_iter().collect();
+        for known in wb.bundle.known_transitions.iter() {
+            for (_, assigns) in known.transition.assignments.iter() {
+                named += assigns.seals().filter(|seal| seals.contains(*seal)).count();
+            }
+        }
+        if named > MAX_TERMINAL_OUTPUTS {
+            return Err(EnclaveError::CrossCheck(format!(
+                "consignment terminals name more than {MAX_TERMINAL_OUTPUTS} outputs - refusing \
+                 to validate"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The mint anchors phase 1 left open.
 fn open_anchors(pending: &mut PendingConsignment<true>) -> Vec<MintAnchor> {
     let last_bundle: BTreeSet<_> = pending
@@ -173,13 +216,14 @@ fn bind_anchors(
 
 /// Reads what the rest of the enclave binds from the validated consignment.
 fn summarize(
-    transfer: &Transfer,
+    valid: ValidConsignment<true>,
     consignment_bytes: &[u8],
     contract_id: String,
     mint_locks: Vec<bfa::VerifiedLock>,
     non_mined_witness_txids: Vec<[u8; 32]>,
     reject_scope: Option<RejectScope>,
 ) -> Result<ValidatedConsignment> {
+    let transfer: &Transfer = &valid;
     // Display-order bytes, deduplicated and sorted, as the SPV proofs carry them.
     let witness_txids: Vec<[u8; 32]> = transfer
         .bundles
@@ -193,14 +237,20 @@ fn summarize(
         .into_iter()
         .collect();
 
-    // The flat parser runs only on bytes consensus accepted.
-    let transitions_by_witness = extract_transition_summary(consignment_bytes)?;
     let last = read_last_bundle(transfer)?;
+    let chain_net = transfer.genesis.chain_net.prefix().to_string();
+    // The flat parser reads the bytes a second time, and only those consensus
+    // accepted. Release the decoded copy first, so the two copies never take
+    // memory together (`memory.rs`). The parser decodes every bundle again,
+    // but it summarizes only the settling one.
+    drop(valid);
+    let settling_witness = last.as_ref().map(|l| l.witness_txid);
+    let transitions_by_witness = extract_transition_summary(consignment_bytes, settling_witness)?;
     let last_transition = settling_summary(&transitions_by_witness, last.as_ref())?;
 
     Ok(ValidatedConsignment {
         contract_id,
-        chain_net: transfer.genesis.chain_net.prefix().to_string(),
+        chain_net,
         witness_txids,
         last_transition,
         last_witness_txid: last.as_ref().map(|l| l.witness_txid),
