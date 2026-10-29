@@ -5,4 +5,23 @@ ignore = [
     # fresh RSA key for each KMS call (`kms/mod.rs` `recipient()`), so no key
     # sees the repeated decryptions the attack needs.
     "RUSTSEC-2023-0071",
+    # rustls 0.21 and rustls-webpki 0.101.7 come from rgb-ops esplora-client
+    # -> minreq. minreq loads no CRLs. Remove them when rgb-ops drops minreq.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    # rustls 0.21.12 comes from the same minreq path. The session store and
+    # the post-quantum group do not apply to it.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+    # serde_cbor is unmaintained. aws-nitro-enclaves-nsm-api 0.5.2 needs it.
+    "RUSTSEC-2021-0127",
+    # unsafe-libyaml is unmaintained. serde_yaml brings it under the
+    # rgb-strict-types `serde` feature.
+    "RUSTSEC-2024-0449",
+    # paste is unmaintained. It is a build-time proc-macro under alloy-primitives.
+    "RUSTSEC-2024-0436",
+    # derivative is unmaintained. Only the lockfile has it, through optional
+    # ark-ff of ruint. Nothing compiles it.
+    "RUSTSEC-2024-0388",
 ]

@@ -645,6 +645,20 @@ mod finality {
     }
 
     #[test]
+    fn only_safe_and_finalized_waits_have_the_retryable_wire_code() {
+        for (tag, verify) in cases() {
+            let mut provider = Provider {
+                expected_tag: tag,
+                ..Provider::default()
+            };
+            provider.head.as_mut().unwrap().number = 99;
+            let err = verify(&provider, tag).unwrap_err();
+            let expected = if tag == EvmFinalityTag::Latest { 3 } else { 8 };
+            assert_eq!(err.error_code(), expected, "{tag}: {err}");
+        }
+    }
+
+    #[test]
     fn receipt_at_selected_head_uses_same_tag_for_both_snapshots() {
         for (tag, verify) in cases() {
             let provider = Provider {

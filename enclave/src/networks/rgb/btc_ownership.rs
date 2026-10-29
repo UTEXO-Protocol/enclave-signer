@@ -118,7 +118,8 @@ pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<V
 
 /// Rule (C): the claimed internal key is ours at the claimed BIP-86 path, there
 /// is no script tree, and the empty-tree tweak of that key is the script. It is
-/// the key-path sign job check, applied to an output.
+/// the key-path sign job check, applied to an output. The path must be a wallet
+/// path, so the wallet can find the output again.
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
 pub fn output_is_self_derived(
     psbt: &Psbt,
@@ -149,6 +150,9 @@ pub fn output_is_self_derived(
         return false;
     };
     if allowed_account.is_some_and(|want| account_type != want) {
+        return false;
+    }
+    if !crate::keys::is_wallet_child_path(account_type, &child_path) {
         return false;
     }
     let Ok(child_secret) = keys.derive_btc_child(account_type, &child_path) else {
@@ -504,6 +508,24 @@ pub(crate) mod tests {
     fn accepts_a_fresh_change_index_derived_from_our_key() {
         let keys = km();
         let secp = Secp256k1::new();
+        let (our, path) = our_key(&keys, 0, 3);
+        let spk = ScriptBuf::new_p2tr(&secp, our, None);
+
+        let mut psbt = psbt_with(ScriptBuf::new(), spk);
+        make_input_ours(&mut psbt, &keys);
+        psbt.outputs[0].tap_internal_key = Some(our);
+        psbt.outputs[0]
+            .tap_key_origins
+            .insert(our, (vec![], (*keys.master_fingerprint(), path)));
+
+        assert!(owned(&psbt, &keys));
+    }
+
+    /// The bridge can set rgb-lib's vanilla keychain to 1. Change there is ours.
+    #[test]
+    fn accepts_change_on_vanilla_keychain_one() {
+        let keys = km();
+        let secp = Secp256k1::new();
         let (our, path) = our_key(&keys, 1, 3);
         let spk = ScriptBuf::new_p2tr(&secp, our, None);
 
@@ -541,7 +563,7 @@ pub(crate) mod tests {
     fn rejects_a_derived_claim_under_a_foreign_fingerprint() {
         let keys = km();
         let secp = Secp256k1::new();
-        let (our, path) = our_key(&keys, 1, 3);
+        let (our, path) = our_key(&keys, 0, 3);
         let spk = ScriptBuf::new_p2tr(&secp, our, None);
 
         let mut psbt = psbt_with(ScriptBuf::new(), spk);
@@ -587,7 +609,7 @@ pub(crate) mod tests {
     fn rejects_our_key_under_a_script_tree() {
         let keys = km();
         let secp = Secp256k1::new();
-        let (our, path) = our_key(&keys, 1, 3);
+        let (our, path) = our_key(&keys, 0, 3);
         let leaf = multi_a_2_of_3(&[
             foreign_xonly(0xA1),
             foreign_xonly(0xA2),
@@ -622,7 +644,7 @@ pub(crate) mod tests {
     fn rejects_a_derived_claim_whose_script_does_not_match() {
         let keys = km();
         let secp = Secp256k1::new();
-        let (our, path) = our_key(&keys, 1, 3);
+        let (our, path) = our_key(&keys, 0, 3);
         let spk = ScriptBuf::new_p2tr(&secp, foreign_xonly(0xC2), None);
 
         let mut psbt = psbt_with(ScriptBuf::new(), spk);
@@ -641,7 +663,7 @@ pub(crate) mod tests {
     fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
         let keys = km();
         let secp = Secp256k1::new();
-        let (our, path) = our_key(&keys, 1, 3);
+        let (our, path) = our_key(&keys, 0, 3);
         let spk = ScriptBuf::new_p2tr(&secp, our, None);
 
         let mut psbt = psbt_with(ScriptBuf::new(), spk);

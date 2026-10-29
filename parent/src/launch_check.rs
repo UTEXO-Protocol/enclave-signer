@@ -599,6 +599,15 @@ mod tests {
             }
         ));
         let env = image_env().replace("\"PATH=/usr/bin\"", "\"BITCOIN_NETWORK=testnet4\"");
+        let policy = expected_policy(SignerRole::Combined, &env, &endpoints()).unwrap();
+        assert!(matches!(
+            policy,
+            AttestedPolicy::Production {
+                bitcoin_network: BitcoinNetwork::Testnet4,
+                ..
+            }
+        ));
+        let env = image_env().replace("\"PATH=/usr/bin\"", "\"BITCOIN_NETWORK=testnet9\"");
         let err = expected_policy(SignerRole::Combined, &env, &endpoints()).unwrap_err();
         assert!(err.to_string().contains("not a known network"), "{err}");
     }

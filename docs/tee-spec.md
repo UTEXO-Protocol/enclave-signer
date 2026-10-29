@@ -52,7 +52,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
 | Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the PSBT (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint launch still pins the URL until the image drops the indexer. |
-| EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption | TLS authenticates the endpoint; it does not prove canonical EVM history (Sec 7.1-7.2) |
+| EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
 
@@ -528,7 +528,8 @@ input the enclave signs must spend a seal the signed bundle closes.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
 (the script of the enclave's single Colored input, or a BIP-86 key-path output
-of its Colored account; at most 4 off-PSBT change outpoints), and the recipient
+of its Colored account at a wallet child path `[0, i]`, both steps
+non-hardened; at most 4 off-PSBT change outpoints), and the recipient
 legs MUST sum exactly to `amount - commission`.
 The destination amount the route check uses is this enclave-derived recipient
 total, not the wire `psbt_output_amount`. A pinned fee policy, shared with the
@@ -601,8 +602,10 @@ either of these cases:
   the fingerprint, BIP-86 key derivation, and Taproot tweak. A script tree can
   contain foreign spend paths. For such inputs, the exemption is limited to
   the input value on that script.
-- Its script is a BIP-86 output from an enclave account, with no script tree.
-  The enclave derives the key and reconstructs the output script.
+- Its script is a BIP-86 output from an enclave account, with no script tree,
+  at a wallet child path `[k, i]`, both steps non-hardened, `k` = 0 on Colored,
+  0 or 1 on Vanilla. The enclave derives the key and reconstructs the output
+  script. An enclave key at any other path counts as unowned.
 
 Other outputs must fit the configured unowned-sats budget. An enclave key in
 one Taproot leaf does not prove control of the whole output.
@@ -952,6 +955,8 @@ The production images are the mint signer (`Dockerfile.enclave.mint`) and the
 burn signer (`Dockerfile.enclave.burn`). The tree also has swap, combined and
 CCD builds. The swap flow is retired. The default feature set still has
 `rgb-swap` and `ccd`. A build choice is not evidence of the deployed image.
+`Dockerfile.enclave.ccd` sets no EVM pins, so its release image refuses every
+EVM signature and every plain-BTC PSBT. CI does not build or publish it.
 
 Known limits. Read them before deployment.
 
@@ -982,7 +987,12 @@ Known limits. Read them before deployment.
   `finalized`. A release refuses when the burn's inputs descend from a
   rejected opout. The mint signer reads no list: the connector's rgb-lib
   checks it before `mint_begin`. Any read failure
-  refuses, so the burn signer now depends on the EVM RPC for such an asset. A
+  refuses, so the burn signer now depends on the EVM RPC for such an asset.
+  The reads are `eth_call` answers over TLS. The enclave has no EVM light
+  client, so it cannot check them against a block hash: the pinned RPC is
+  trusted for the list contents, as the trust table states. A provider that
+  hides a reject entry lets a rejected lineage release. A provider that
+  invents entries or fails refuses releases. A
   rejected release stays refused until an allow is finalized, and its units
   are already burned. The list appender can halt every release; the owner
   rotates it. The list is read in full on each request, at most 20,000

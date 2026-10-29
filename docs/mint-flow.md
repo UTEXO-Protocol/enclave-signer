@@ -38,6 +38,14 @@ It checks deposits through the pinned EVM RPC. It trusts that provider for
 receipt, canonical block and selected finality head data. It does not verify EVM
 consensus. It checks that the node reports the pinned chain id.
 
+If the receipt is above the `safe` or `finalized` head, the enclave refuses to
+sign with wire error code **8** (EVM finality pending). The parent translates
+that code to `FailedPrecondition` with the stable `evm event pending finality:`
+prefix, which the bridge already treats as a wait with retry backoff. The
+diagnostic text is not used to identify this state. The enclave and listener
+log this wait at debug level. Other validation failures keep code 3; a receipt
+above the `latest` head also remains a validation failure.
+
 The mint signer validates no RGB consignment. It reads the mint from the
 PSBT that rgb-lib returns: rgb-lib stores each transition, the input map and
 the MPC entropy in the PSBT as proprietary keys. Each step from the signed
@@ -261,8 +269,10 @@ signed or not: only its unsigned tx and its RGB keys are read.
 ### Stage 7 - Sign
 
 - **M8** No sat leaves. Every output is a BIP-86 key-path output the enclave
-  derives, or carries 0 sat, as the `OP_RETURN` must. rgb-lib sends the change
-  to the colored keychain, so an honest mint pays nothing out.
+  derives at a wallet path, or carries 0 sat, as the `OP_RETURN` must. A wallet
+  path is `[k, i]`, both steps non-hardened, and `k` = 0 on Colored, 0 or 1 on Vanilla.
+  rgb-lib sends the change to the colored keychain, so an honest
+  mint pays nothing out.
 - **S7.1** The sats that go to scripts the enclave does not own must not be
   more than `RGB_MAX_UNOWNED_SATS`. M8 makes this redundant.
 - **S7.2** The mint signer signs only inputs of the colored account. It uses

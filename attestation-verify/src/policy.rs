@@ -117,6 +117,9 @@ pub enum BitcoinNetwork {
     Testnet3 = 1,
     Signet = 2,
     Regtest = 3,
+    Testnet4 = 4,
+    /// The UTEXO custom signet (RGB `sbc`).
+    SignetCustom = 5,
 }
 
 impl BitcoinNetwork {
@@ -126,6 +129,8 @@ impl BitcoinNetwork {
             "bitcoin" | "mainnet" => Some(Self::Mainnet),
             "testnet" | "testnet3" => Some(Self::Testnet3),
             "signet" => Some(Self::Signet),
+            "signetcustom" => Some(Self::SignetCustom),
+            "testnet4" => Some(Self::Testnet4),
             "regtest" => Some(Self::Regtest),
             _ => None,
         }
@@ -400,6 +405,8 @@ impl AttestedPolicy {
                     1 => BitcoinNetwork::Testnet3,
                     2 => BitcoinNetwork::Signet,
                     3 => BitcoinNetwork::Regtest,
+                    4 => BitcoinNetwork::Testnet4,
+                    5 => BitcoinNetwork::SignetCustom,
                     _ => return Err(PolicyDecodeError("unknown Bitcoin network")),
                 };
                 let bridge_contract = r.array()?;
@@ -765,6 +772,8 @@ mod tests {
             BitcoinNetwork::Testnet3,
             BitcoinNetwork::Signet,
             BitcoinNetwork::Regtest,
+            BitcoinNetwork::Testnet4,
+            BitcoinNetwork::SignetCustom,
         ]
         .into_iter()
         .map(|network| {
@@ -794,11 +803,13 @@ mod tests {
             ("testnet", BitcoinNetwork::Testnet3),
             ("testnet3", BitcoinNetwork::Testnet3),
             ("signet", BitcoinNetwork::Signet),
+            ("signetcustom", BitcoinNetwork::SignetCustom),
+            ("testnet4", BitcoinNetwork::Testnet4),
             ("regtest", BitcoinNetwork::Regtest),
         ] {
             assert_eq!(BitcoinNetwork::from_env_str(name), Some(want), "{name}");
         }
-        assert_eq!(BitcoinNetwork::from_env_str("testnet4"), None);
+        assert_eq!(BitcoinNetwork::from_env_str("testnet5"), None);
         assert_eq!(BitcoinNetwork::from_env_str(""), None);
     }
 
@@ -978,7 +989,7 @@ mod tests {
         bad.push(role);
         // Byte 15 is the Bitcoin network, after the 8-byte chain id.
         let mut network = good.clone();
-        network[15] = 4;
+        network[15] = 6;
         bad.push(network);
         // EVM source 2 (retired) is no longer valid.
         let mut evm = good.clone();

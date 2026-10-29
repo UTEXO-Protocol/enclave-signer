@@ -130,14 +130,13 @@ pub fn assert_refill_rights(rights: &[OutputSeal]) -> Result<Vec<u32>> {
     Ok(vouts.into_iter().collect())
 }
 
-/// RR9: each new right is on a rule C output of the Colored account at child
-/// path `[0, i]`, the keychain rgb-lib scans. Else the host could take it.
+/// RR9: each new right is on a rule C output of the Colored account. Rule C
+/// accepts only child path `[0, i]`, the keychain rgb-lib scans. Else the host
+/// could take the right, or park it where the wallet cannot find it.
 pub fn assert_refill_rights_owned(psbt: &Psbt, vouts: &[u32], keys: &KeyManager) -> Result<()> {
     for &vout in vouts {
         let index = vout as usize;
-        let colored =
-            btc_ownership::output_is_self_derived(psbt, index, keys, Some(AccountType::Colored));
-        if !colored || !on_colored_keychain(psbt, index, keys) {
+        if !btc_ownership::output_is_self_derived(psbt, index, keys, Some(AccountType::Colored)) {
             return Err(EnclaveError::CrossCheck(format!(
                 "rights refill puts a right on vout {vout}, which is not a Colored key-path \
                  output of this enclave at child path [0, i] - refusing to give a right away"
@@ -145,21 +144,6 @@ pub fn assert_refill_rights_owned(psbt: &Psbt, vouts: &[u32], keys: &KeyManager)
         }
     }
     Ok(())
-}
-
-/// The child path the output claims is `[0, i]` below one of our accounts.
-fn on_colored_keychain(psbt: &Psbt, index: usize, keys: &KeyManager) -> bool {
-    let Some(output) = psbt.outputs.get(index) else {
-        return false;
-    };
-    let origin = output
-        .tap_internal_key
-        .and_then(|key| output.tap_key_origins.get(&key));
-    let Some((_, (_, path))) = origin else {
-        return false;
-    };
-    keys.resolve_account_and_child_path(path)
-        .is_some_and(|(_, child)| crate::keys::is_colored_keychain_path(&child))
 }
 
 #[cfg(test)]

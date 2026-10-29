@@ -165,7 +165,7 @@ policy_commitment =
     u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8
-    u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest
+    u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest | 4 testnet4 | 5 signetcustom
     bridge_contract(20)
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
@@ -213,7 +213,9 @@ measurements. Clone peers must have matching policy commitments.
 `bitcoin_network` is `BITCOIN_NETWORK`, the network of the SPV header chain and
 of the accepted consignments. A verifier declares it (`--expect-bitcoin-network`,
 default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
-`42161`) with another Bitcoin network does not boot.
+`42161`) with another Bitcoin network does not boot. The enclave reads the
+attested value with the same parser as the SPV chain, and an unknown name does
+not boot.
 
 The tuple omits concrete sats budgets, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
@@ -350,7 +352,7 @@ attest-verify \
 # compared). Verification fails on any mismatch:
 # --expect-chain-id <u64> --expect-bridge-contract <hex20> \
 # --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
-# --expect-bitcoin-network <bitcoin|testnet3|signet|regtest>   # default bitcoin
+# --expect-bitcoin-network <bitcoin|testnet3|testnet4|signet|signetcustom|regtest>   # default bitcoin
 
 # Expect the plain-BTC path enabled:
 attest-verify --endpoint https://parent.example:50051 \

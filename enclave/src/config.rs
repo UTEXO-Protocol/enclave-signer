@@ -294,11 +294,12 @@ impl BridgeConfig {
 
         let btc_relay_mode = BtcRelayMode::from_env_value(std::env::var(BTC_RELAY_MODE_ENV).ok());
 
-        // Unknown gives mainnet, as `bootstrap::resolve_bitcoin_network` does.
-        let bitcoin_network = std::env::var("BITCOIN_NETWORK")
-            .ok()
-            .and_then(|s| BitcoinNetwork::from_env_str(&s))
-            .unwrap_or(BitcoinNetwork::Mainnet);
+        // The SPV parser, so the attested network is the one the chain runs.
+        let bitcoin_network = crate::networks::rgb::spv::Network::from_env_str(
+            &crate::bootstrap::bitcoin_network_str(),
+        )
+        .expect("BITCOIN_NETWORK must be a known network")
+        .attested();
 
         // Without both caps every gas tx fails. Show this at boot.
         if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
@@ -662,6 +663,30 @@ fn parse_host(name: &str, host: &str) -> std::result::Result<String, String> {
 mod tests {
     use super::*;
     use crate::proto::SetEndpointsRequest;
+
+    /// Every name the SPV chain runs on attests the network a verifier
+    /// expects for that same name (W-04: testnet4 attested as mainnet).
+    #[test]
+    fn attested_network_matches_the_spv_network() {
+        use crate::networks::rgb::spv::Network;
+        for name in [
+            "bitcoin",
+            "mainnet",
+            "signet",
+            "signetcustom",
+            "testnet",
+            "testnet3",
+            "testnet4",
+            "regtest",
+        ] {
+            let spv = Network::from_env_str(name).unwrap();
+            assert_eq!(
+                Some(spv.attested()),
+                BitcoinNetwork::from_env_str(name),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn finality_tag_env_defaults_only_when_absent() {

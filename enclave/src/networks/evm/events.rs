@@ -471,6 +471,13 @@ fn check_finality_inclusion(
     receipt: &ReceiptData,
 ) -> Result<()> {
     if receipt.block_number > head.number {
+        if matches!(tag, EvmFinalityTag::Safe | EvmFinalityTag::Finalized) {
+            return Err(EnclaveError::EvmFinalityPending {
+                receipt_block: receipt.block_number,
+                tag,
+                finality_block: head.number,
+            });
+        }
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn receipt block {} is above RPC {tag} block {} - refusing to sign",
             receipt.block_number, head.number
