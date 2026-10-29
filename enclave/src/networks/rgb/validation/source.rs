@@ -39,9 +39,8 @@ use std::time::SystemTime;
 /// 4. no input of the settling transition descends from an opout the asset's
 ///    reject list rejects.
 ///
-/// Without `spv`, public-signet builds use the configured indexer for witness
-/// confirmation at the same depth instead of the enclave header chain. They
-/// trust that indexer's chain view and do not pin SPV blocks.
+/// Without SPV, confirmation depth comes from the indexer's trusted chain
+/// view; no SPV blocks are pinned.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,

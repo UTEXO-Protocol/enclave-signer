@@ -154,17 +154,13 @@ The mint signer and the burn signer get their seed in different ways:
   recover the same seed. Peer cloning is off. See
   [`docs/kms-persistence.md`](docs/kms-persistence.md).
 - **Burn signer**: the enclave makes a BIP-39 mnemonic from OS entropy.
-  Replicas get the seed through the attested cloning handshake. Keep a live
-  donor before replacing the last replica; cloning is not permanent storage.
+  Replicas get the seed through the attested cloning handshake.
 
 Both keep the 64-byte seed in a `SecretBox` (zeroized on drop). The enclave
 never exports the plaintext seed. For mint signers, KMS also handles the
 plaintext seed during generation and decryption. Mnemonic or raw-seed import
 exists only with
-`allow-seed-import` (dev builds). The same custody rules apply to
-public-Signet staging: mint uses KMS/S3 recovery, burn
-uses authenticated cloning, and only Bitcoin SPV is omitted. Arbitrum One
-(`42161`) may remain the EVM network.
+`allow-seed-import` (dev builds).
 
 Key paths:
 
@@ -316,7 +312,6 @@ real-attestation mint/burn builds for public Signet;
 exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
 `kms-persistence` requires `mint-signer`;
-`mint-signer` always enables `kms-persistence`;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
 
@@ -596,11 +591,10 @@ after the selected head covers it. Production verification requires
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 (`SetEndpoints`), never in the image. A Production policy commits the Electrum
-host, the EVM RPC host, the SHA-256 of the CA and the four KMS values. The
-Development policy used without SPV does not separately commit these fields;
-those images enforce a measured `ENDPOINTS_SHA256` digest of the network inputs,
-while KMS values remain runtime inputs. Operators must approve these deployment
-inputs. A build requires the values it uses and refuses the others:
+host, the EVM RPC host, the SHA-256 of the CA and the four KMS values.
+Development policy does not commit these fields. Without SPV, the image pins
+network inputs through `ENDPOINTS_SHA256`; operators approve KMS inputs separately.
+A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
@@ -717,7 +711,7 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
-| `rgb-validation` | rgb crates | In-enclave consignment validation. Without `spv`, public-Signet mint/burn builds trust the indexer. |
+| `rgb-validation` | rgb crates | In-enclave consignment validation. Uses SPV or indexer confirmations. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over JSON-RPC, TLS to a pinned host and CA. Without it the enclave refuses every bridge PSBT. |
 | `vsock` | - | vsock listener and forwarders (Linux). |
 | `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |

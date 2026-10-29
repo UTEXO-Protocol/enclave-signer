@@ -107,7 +107,7 @@ pub struct ProductionPolicy {
 /// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
-    /// Real Nitro public-signet staging, with indexer-trusted Bitcoin finality.
+    /// Bitcoin finality is trusted from the indexer.
     IndexerTrusted,
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
@@ -307,12 +307,8 @@ impl SecurityPolicy {
         self.attested().to_bytes()
     }
 
-    /// Fail-closed launch gate. A release `rgb-validation` build MUST resolve
-    /// to a valid [`SecurityPolicy::Production`], or `SetEndpoints` fails.
+    /// Require a valid policy for this build before accepting `SetEndpoints`.
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
-    ///
-    /// Debug, test and non-bridge builds are exempt. An RGB build without SPV
-    /// instead requires its validated public-signet Development policy.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
         // resolve() produces IndexerTrusted only after checking network/pins.
         if ctx.rgb_validation && cfg!(all(feature = "rgb-validation", not(feature = "spv"))) {

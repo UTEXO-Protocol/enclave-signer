@@ -323,10 +323,8 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // Without SPV, public signet trusts indexer confirmations and requires
-    // BTC_RELAY_MODE=none.
-    // Caller-supplied proof bytes are signed without Bitcoin header
-    // verification; contracts must not treat them as SPV evidence.
+    // Without SPV, proof bytes are signed without Bitcoin header verification;
+    // contracts must not treat them as SPV evidence.
     #[cfg(feature = "spv")]
     {
         // Fail on a poisoned lock, as `validate_source` does.

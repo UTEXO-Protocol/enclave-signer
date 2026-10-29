@@ -33,10 +33,8 @@ fn main() {
         .expect("invalid indexer-only configuration");
     bootstrap::log_bridge_config(&bridge_config);
 
-    // Fail closed: a release rgb-validation build without a valid Production
-    // policy does not start. Public signet without SPV uses an indexer-trusted
-    // Development policy. Debug, test and non-bridge SPV builds are exempt.
-    // `SetEndpoints` checks the full policy later.
+    // Validate the build policy before starting the server. SetEndpoints
+    // checks endpoint-dependent invariants later.
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,

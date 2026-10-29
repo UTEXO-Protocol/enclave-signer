@@ -28,8 +28,7 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// Omitting SPV is allowed only for real-Nitro mint/burn builds. Policy and
-// bootstrap restrict them to public signet with indexer-trusted confirmations.
+// Builds without SPV require real attestation and an explicit signer role.
 #[cfg(all(
     feature = "rgb-validation",
     not(feature = "spv"),
@@ -47,9 +46,6 @@ compile_error!("rgb-validation without spv requires real attestation; seed impor
 ))]
 compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
 
-// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The role features
-// enable validation without SPV; use `rgb` for a production signer.
-
 // Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
 // The modules in `networks/rgb/flow/` export the same item names. These guards
 // give a clear message instead of many name-resolution errors.
@@ -58,7 +54,7 @@ compile_error!(
     "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
      ship as separate enclave instances. Build one image per flow - the default feature set \
      carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
-     vsock,rgb,mint-signer` (or `vsock,rgb,burn-signer`)"
+     vsock,rgb,mint-signer` (or `burn-signer`)"
 );
 #[cfg(all(
     feature = "rgb-validation",

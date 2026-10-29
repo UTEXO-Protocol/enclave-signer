@@ -206,8 +206,7 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
-    /// Pins required when RGB validation trusts the indexer for Bitcoin
-    /// finality instead of using SPV. These are baked into the signet EIF.
+    /// Required pins when Bitcoin finality is trusted from the indexer.
     pub fn validate_indexer_only(&self) -> std::result::Result<(), String> {
         if self.bitcoin_network != BitcoinNetwork::Signet {
             return Err(

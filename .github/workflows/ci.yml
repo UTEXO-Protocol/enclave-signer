@@ -153,15 +153,12 @@ jobs:
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
-      # No-SPV Signet keeps production custody: mint uses KMS, burn supports
-      # authenticated cloning. No mock attestation or seed import. Focused
-      # tests do not need a Nitro device; release checks match the EIF.
-      - name: Check release (public-signet stage, mint and burn)
+      - name: Check release (without SPV, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
             cargo check --release -p utexo-bridge-enclave --no-default-features --features vsock,$role
           done
-      - name: Test (public-signet stage, mint and burn)
+      - name: Test (without SPV, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
@@ -170,7 +167,7 @@ jobs:
           done
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_bfa_mint_over_the_wire
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_signing test_sign_btc
-      - name: Clippy (public-signet stage, mint and burn)
+      - name: Clippy (without SPV, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
             cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only -- -D warnings
@@ -306,8 +303,7 @@ jobs:
           fi
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
-  # Unsupported feature combinations must fail at compile time. Public-Signet
-  # mint/burn builds may omit SPV, but cannot enable mock attestation/imports.
+  # Reject unsupported feature combinations at compile time.
   feature-guards:
     runs-on: ubuntu-latest
 
@@ -344,7 +340,7 @@ jobs:
         run: |
           for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
             if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "mint-signer,$forbidden" 2>build.log; then
-              echo "::error::stage unexpectedly compiled with $forbidden"
+              echo "::error::build unexpectedly compiled with $forbidden"
               exit 1
             fi
             if ! grep -q "rgb-validation without spv requires real attestation" build.log; then

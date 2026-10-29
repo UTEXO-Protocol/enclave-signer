@@ -10,9 +10,7 @@ The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
-cloning lifecycle. Public-Signet staging uses this same
-`PersistentSeed` lifecycle even when Bitcoin SPV is omitted. It does not
-replace mint recovery with fresh entropy or peer cloning.
+cloning lifecycle.
 
 The address pin selects one of two initialization modes:
 
@@ -48,9 +46,8 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
 `/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
-carry them. A Production attested policy commits them. The Development policy
-used by public-Signet builds without SPV does not separately commit these KMS
-fields; approve the launch values as deployment inputs:
+carry them. Production policy commits them; Development policy does not.
+Operators must approve the launch values:
 
 | Setting | Value |
 | --- | --- |
@@ -143,11 +140,7 @@ exactly these public encryption-context fields:
 
 The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
-context automatically; policies must match it exactly. For public-Signet
-staging, authorize the independently approved stage mint PCR0 and set
-`bitcoin_network` to `signet`; use its stable staging seed ID and S3 object.
-The KMS recipient attestation remains real even when the signer exports a
-Development security policy.
+context automatically; policies must match it exactly.
 
 Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when

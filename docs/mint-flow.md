@@ -409,11 +409,7 @@ refills per hour.
 ## 10. Seed
 
 The mint signer gets its seed from AWS KMS. The encrypted seed is in S3. Mint
-replicas recover the same seed. `mint-signer` always enables this custody path,
-including public-Signet staging built without SPV. Bootstrap
-uses an empty expected-address pin only for the first saved object; subsequent
-launches recover with the verified address pinned and never fall back to a new
-seed. See [KMS seed persistence](kms-persistence.md).
+replicas recover the same seed. See [KMS seed persistence](kms-persistence.md).
 
 ## 11. The main idea
 
