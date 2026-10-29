@@ -338,15 +338,17 @@ jobs:
 
       - name: Assert indexer-only builds cannot import seeds or mock attestation
         run: |
-          for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
-            if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "mint-signer,$forbidden" 2>build.log; then
-              echo "::error::build unexpectedly compiled with $forbidden"
-              exit 1
-            fi
-            if ! grep -q "rgb-validation without spv requires real attestation" build.log; then
-              cat build.log
-              exit 1
-            fi
+          for role in mint-signer burn-signer; do
+            for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
+              if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$role,$forbidden" 2>build.log; then
+                echo "::error::build unexpectedly compiled with $role,$forbidden"
+                exit 1
+              fi
+              if ! grep -q "rgb-validation without spv requires real attestation" build.log; then
+                cat build.log
+                exit 1
+              fi
+            done
           done
 
       - name: Assert bare rgb-validation without a signer role is rejected

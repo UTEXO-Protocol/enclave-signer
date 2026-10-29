@@ -282,14 +282,26 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
     }
 }
 
+/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
 fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
     use prost::Message;
     use sha2::{Digest, Sha256};
     let mut network = request.clone();
-    network.kms_key_arn.clear();
-    network.kms_region.clear();
-    network.kms_seed_id.clear();
-    network.kms_expected_evm_address.clear();
+    // New schema fields must be explicitly classified as hashed or excluded.
+    let SetEndpointsRequest {
+        electrum_url: _,
+        evm_rpc_host: _,
+        evm_rpc_ca_der: _,
+        evm_rpc_tls_port: _,
+        kms_key_arn,
+        kms_region,
+        kms_seed_id,
+        kms_expected_evm_address,
+    } = &mut network;
+    kms_key_arn.clear();
+    kms_region.clear();
+    kms_seed_id.clear();
+    kms_expected_evm_address.clear();
     Sha256::digest(network.encode_to_vec()).into()
 }
 

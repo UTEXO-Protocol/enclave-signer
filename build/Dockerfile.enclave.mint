@@ -82,13 +82,11 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 
 # The mint signer restores its KMS-protected seed instead of peer cloning.
 
-# Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
-# lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
-# bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
-# boot without these pins (enclave/src/policy.rs). Public
-# identifiers, baked so PCR0 commits to them. Defaults use Bitcoin mainnet +
-# Arbitrum One (chain_id 42161). Electrum is set at launch. The enclave pins its
-# host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
+# (chain_id 42161), SPV and Production policy. Without SPV, Development policy
+# requires BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none and ENDPOINTS_SHA256.
+# Electrum is set at launch. The enclave pins its host to 127.0.0.1 and reaches
+# it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
@@ -103,7 +101,6 @@ ARG FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951
 ARG TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
 ARG BITCOIN_NETWORK=bitcoin
 ARG BTC_RELAY_MODE=required
-# Digest of launch endpoints, required without SPV.
 ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
@@ -124,9 +121,9 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # points FundsIn verification at the wrong contract.
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
-# The Electrum URL and the EVM RPC host, CA and TLS port are not in the
-# image. The operator sets them at launch (SetEndpoints). Production policy
-# commits them; Development policy does not.
+# The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
+# Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
+# pin binds them instead.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).

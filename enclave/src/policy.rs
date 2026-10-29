@@ -25,6 +25,8 @@ pub use attestation_verify::{
 /// production policy pinned to one of them must use Bitcoin mainnet.
 pub const MAINNET_EVM_CHAIN_IDS: [u64; 2] = [1, 42161];
 
+const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature = "spv")));
+
 /// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 // One instance per enclave, so the variant size difference is not important.
@@ -168,7 +170,7 @@ impl SecurityPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
     ) -> Self {
-        if ctx.rgb_validation && cfg!(all(feature = "rgb-validation", not(feature = "spv"))) {
+        if ctx.rgb_validation && INDEXER_TRUSTED {
             return Self::dev(if bridge.validate_indexer_only().is_ok() {
                 DevReason::IndexerTrusted
             } else {
@@ -311,7 +313,7 @@ impl SecurityPolicy {
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
         // resolve() produces IndexerTrusted only after checking network/pins.
-        if ctx.rgb_validation && cfg!(all(feature = "rgb-validation", not(feature = "spv"))) {
+        if ctx.rgb_validation && INDEXER_TRUSTED {
             return match self {
                 Self::Development {
                     reason: DevReason::IndexerTrusted,

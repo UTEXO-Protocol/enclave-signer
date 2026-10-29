@@ -423,14 +423,26 @@ impl BridgeConfig {
 
 /// Commit network inputs without changing the runtime KMS recovery contract.
 /// Hash the decoded request re-encoded with the pinned protobuf schema.
+/// Keep in sync with `parent/src/bin/cli.rs::endpoints_sha256`.
 pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u8; 32] {
     use prost::Message;
     use sha2::{Digest, Sha256};
     let mut network = request.clone();
-    network.kms_key_arn.clear();
-    network.kms_region.clear();
-    network.kms_seed_id.clear();
-    network.kms_expected_evm_address.clear();
+    // New schema fields must be explicitly classified as hashed or excluded.
+    let crate::proto::SetEndpointsRequest {
+        electrum_url: _,
+        evm_rpc_host: _,
+        evm_rpc_ca_der: _,
+        evm_rpc_tls_port: _,
+        kms_key_arn,
+        kms_region,
+        kms_seed_id,
+        kms_expected_evm_address,
+    } = &mut network;
+    kms_key_arn.clear();
+    kms_region.clear();
+    kms_seed_id.clear();
+    kms_expected_evm_address.clear();
     Sha256::digest(network.encode_to_vec()).into()
 }
 
@@ -770,6 +782,43 @@ mod tests {
             format!("{} ", "ab".repeat(32)),
         ] {
             assert!(parse_endpoints_sha256(Some(&value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn endpoints_digest_from_env_installs_or_rejects_the_pin() {
+        const CHILD: &str = "UTEXO_TEST_ENDPOINTS_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let config = BridgeConfig::from_env();
+            assert_eq!(config.endpoints_sha256, Some([0xab; 32]));
+            return;
+        }
+
+        // Isolate environment changes from the other parallel config tests.
+        for (value, valid) in [("ab".repeat(32), true), ("not-a-digest".into(), false)] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::endpoints_digest_from_env_installs_or_rejects_the_pin",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CHILD, "1")
+                .env("ENDPOINTS_SHA256", value)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                valid,
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            if !valid {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("ENDPOINTS_SHA256 must be exactly 64 hex characters"));
+            }
         }
     }
 

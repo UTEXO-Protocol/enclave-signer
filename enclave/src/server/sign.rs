@@ -323,8 +323,8 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // Without SPV, proof bytes are signed without Bitcoin header verification;
-    // contracts must not treat them as SPV evidence.
+    // Without SPV, both proof fields must be empty: the signer must not
+    // endorse host-supplied Bitcoin header claims that it cannot verify.
     #[cfg(feature = "spv")]
     {
         // Fail on a poisoned lock, as `validate_source` does.
@@ -344,7 +344,19 @@ fn apply_funds_out_binding(
         )?;
     }
     #[cfg(not(feature = "spv"))]
-    let _ = (ctx, merkle_proofs, pins);
+    {
+        let _ = (ctx, pins);
+        if !merkle_proofs.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "fundsOut signing without SPV requires empty RGB merkle_proofs".into(),
+            ));
+        }
+        if !release.proof.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "fundsOut signing without SPV requires an empty release proof".into(),
+            ));
+        }
+    }
 
     // Consignment-bound release amount for the RGB flow of this build
     // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
@@ -1080,6 +1092,14 @@ mod indexer_only_bindings {
     }
 
     fn bind(release: &ReleaseIdentity, validated: &ValidatedConsignment) -> Result<()> {
+        bind_with_proofs(release, validated, &[])
+    }
+
+    fn bind_with_proofs(
+        release: &ReleaseIdentity,
+        validated: &ValidatedConsignment,
+        merkle_proofs: &[crate::proto::MerkleProofEntry],
+    ) -> Result<()> {
         let ctx = ServerContext::new(
             EnclaveState::new(bitcoin::Network::Signet),
             BridgeConfig {
@@ -1089,12 +1109,51 @@ mod indexer_only_bindings {
             },
             crate::test_support::regtest_header_chain(),
         );
-        apply_funds_out_binding(&ctx, release, Some(validated), &[], &ChainPins::new(), None)
+        apply_funds_out_binding(
+            &ctx,
+            release,
+            Some(validated),
+            merkle_proofs,
+            &ChainPins::new(),
+            None,
+        )
     }
 
     #[test]
     fn accepts_a_bound_burn_without_headers_or_merkle_proofs() {
         let (release, validated) = fixture();
+        bind(&release, &validated).unwrap();
+    }
+
+    #[test]
+    fn refuses_merkle_proofs_even_with_an_empty_release_proof() {
+        let (release, validated) = fixture();
+        let proofs = [crate::proto::MerkleProofEntry {
+            txid: vec![0x11; 32],
+            block_height: 100,
+            tx_position: 0,
+            merkle_path: vec![vec![0x22; 32]],
+        }];
+        let err = bind_with_proofs(&release, &validated, &proofs).unwrap_err();
+        assert_eq!(err.error_code(), 3);
+        assert_eq!(
+            err.to_string(),
+            "cross-check failed: fundsOut signing without SPV requires empty RGB merkle_proofs"
+        );
+        bind(&release, &validated).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_release_proof_even_without_merkle_proofs() {
+        let (mut release, validated) = fixture();
+        release.proof = vec![0x33; 32];
+        let err = bind(&release, &validated).unwrap_err();
+        assert_eq!(err.error_code(), 3);
+        assert_eq!(
+            err.to_string(),
+            "cross-check failed: fundsOut signing without SPV requires an empty release proof"
+        );
+        release.proof.clear();
         bind(&release, &validated).unwrap();
     }
 
