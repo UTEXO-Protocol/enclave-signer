@@ -98,8 +98,9 @@ aws-nitro-enclaves-nsm-api = "0.5"
 #   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
 #   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
 #   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
-#   Concordium:       `--no-default-features --features vsock,ccd` (no
-#                     bridge-signing path).
+#   Concordium:       `--no-default-features --features vsock,ccd` (CCD -> EVM
+#                     release and SignCcd; a release build refuses EVM signing
+#                     until EVM_CHAIN_ID and the proxy address are pinned).
 # CI builds all of them. A `compile_error!` pair in lib.rs requires exactly one
 # RGB flow.
 default = ["rgb", "rgb-swap", "ccd"]
@@ -160,7 +161,9 @@ allow-seed-import = []
 rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
-# Without it, only public-signet mint/burn builds are allowed (lib.rs/policy.rs).
+# Without it, RGB validation is allowed only for public-signet mint/burn builds
+# (lib.rs/policy.rs). Builds without RGB validation refuse RGB sources; CCD
+# release signing still requires EVM domain pins (networks/evm/validation.rs).
 spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
