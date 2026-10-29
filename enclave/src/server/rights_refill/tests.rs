@@ -233,6 +233,7 @@ fn refuses_a_right_on_a_vanilla_output() {
     assert!(err.contains("not a Colored key-path output"), "{err}");
 }
 
+/// Rule C refuses these paths, so the sats gate refuses first.
 #[test]
 fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
     let hardened = ChildNumber::from_hardened_idx(1).unwrap();
@@ -244,7 +245,7 @@ fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
             first_right: (AccountType::Colored, child),
             ..Shape::rights(2)
         });
-        assert!(err.contains("child path [0, i]"), "{err}");
+        assert!(err.contains("this enclave does not derive"), "{err}");
     }
 }
 

@@ -42,17 +42,20 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: stage   # add required reviewers here to gate deploys
+    environment: stage   # required reviewers gate deploys
     steps:
       - uses: actions/checkout@v4
 
+      # Inputs go through env only, never into the script text.
       - name: Validate git_sha
+        env:
+          GIT_SHA: ${{ inputs.git_sha }}
         run: |
-          echo "${{ inputs.git_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          [[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "::error::git_sha must be a 40-hex commit"; exit 1; }
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_OIDC_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -76,10 +79,10 @@ jobs:
           # Self-contained deploy script: env exports + the executable core (units embedded).
           {
             echo '#!/usr/bin/env bash'
-            echo "export GIT_SHA=$GIT_SHA"
-            echo "export BUCKET=$BUCKET"
-            echo "export AWS_REGION=$REGION"
-            echo "export CLUSTER_DIR=$CLUSTER_DIR"
+            printf 'export GIT_SHA=%q\n' "$GIT_SHA"
+            printf 'export BUCKET=%q\n' "$BUCKET"
+            printf 'export AWS_REGION=%q\n' "$REGION"
+            printf 'export CLUSTER_DIR=%q\n' "$CLUSTER_DIR"
             cat deploy/deploy-host.sh
           } > /tmp/deploy-run.sh
           B64="$(base64 -w0 /tmp/deploy-run.sh)"
@@ -114,8 +117,11 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          GIT_SHA: ${{ inputs.git_sha }}
+          BUCKET: ${{ vars.EIF_S3_BUCKET }}
         run: |
           echo "### Release EIF" >> "$GITHUB_STEP_SUMMARY"
-          echo "- git_sha: \`${{ inputs.git_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- bucket: \`${{ vars.EIF_S3_BUCKET }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- git_sha: \`$GIT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bucket: \`$BUCKET\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap, then deploy/verify-identity.sh with a complete approved EXPECTED_EVM map to verify identities and write the attestation bundles." >> "$GITHUB_STEP_SUMMARY"

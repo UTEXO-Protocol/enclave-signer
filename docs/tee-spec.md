@@ -528,7 +528,8 @@ input the enclave signs must spend a seal the signed bundle closes.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
 (the script of the enclave's single Colored input, or a BIP-86 key-path output
-of its Colored account; at most 4 off-PSBT change outpoints), and the recipient
+of its Colored account at a wallet child path `[0, i]`, both steps
+non-hardened; at most 4 off-PSBT change outpoints), and the recipient
 legs MUST sum exactly to `amount - commission`.
 The destination amount the route check uses is this enclave-derived recipient
 total, not the wire `psbt_output_amount`. A pinned fee policy, shared with the
@@ -601,8 +602,10 @@ either of these cases:
   the fingerprint, BIP-86 key derivation, and Taproot tweak. A script tree can
   contain foreign spend paths. For such inputs, the exemption is limited to
   the input value on that script.
-- Its script is a BIP-86 output from an enclave account, with no script tree.
-  The enclave derives the key and reconstructs the output script.
+- Its script is a BIP-86 output from an enclave account, with no script tree,
+  at a wallet child path `[k, i]`, both steps non-hardened, `k` = 0 on Colored,
+  0 or 1 on Vanilla. The enclave derives the key and reconstructs the output
+  script. An enclave key at any other path counts as unowned.
 
 Other outputs must fit the configured unowned-sats budget. An enclave key in
 one Taproot leaf does not prove control of the whole output.
@@ -952,6 +955,8 @@ The production images are the mint signer (`Dockerfile.enclave.mint`) and the
 burn signer (`Dockerfile.enclave.burn`). The tree also has swap, combined and
 CCD builds. The swap flow is retired. The default feature set still has
 `rgb-swap` and `ccd`. A build choice is not evidence of the deployed image.
+`Dockerfile.enclave.ccd` sets no EVM pins, so its release image refuses every
+EVM signature and every plain-BTC PSBT. CI does not build or publish it.
 
 Known limits. Read them before deployment.
 
