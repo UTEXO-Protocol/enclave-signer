@@ -29,9 +29,10 @@
 //!
 //! Fail-closed: the fee policy and the witness_utxo rule need no config and run
 //! in every build. The amount cap and the unowned budget are operator values.
-//! Non-test `rgb-validation` builds require a non-zero total-input cap.
+//! Non-test builds with `rgb-validation`, and every release build, require a
+//! non-zero total-input cap and a non-zero unowned-output budget.
 //! A zero unowned-output budget rejects unproven outputs but permits self-pay.
-//! Unit tests and builds without `rgb-validation` skip these unset-budget checks.
+//! Unit tests and debug builds without `rgb-validation` skip these checks.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};

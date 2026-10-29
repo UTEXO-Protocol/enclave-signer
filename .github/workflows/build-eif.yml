@@ -100,10 +100,10 @@ jobs:
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Install Rust (for nitro-cli build)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.96.1"
           targets: x86_64-unknown-linux-musl
@@ -121,6 +121,8 @@ jobs:
           git clone --depth 1 --branch "v${NITRO_CLI_VERSION}" \
             https://github.com/aws/aws-nitro-enclaves-cli.git /tmp/nitro-src
           cd /tmp/nitro-src
+          # A tag can move. Pin the commit too.
+          test "$(git rev-parse HEAD)" = 18a5f6f35f110c0f235f193ae3caff9434d64ee1
           make nitro-cli
           mkdir -p ~/nitro-cli-dist/bin ~/nitro-cli-dist/blobs
           # The CLI binary lands under build/nitro_cli/.../release/nitro-cli
@@ -227,7 +229,7 @@ jobs:
       - name: Configure AWS credentials
         id: aws
         if: ${{ env.AWS_ROLE != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}

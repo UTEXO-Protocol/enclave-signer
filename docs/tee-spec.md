@@ -528,7 +528,8 @@ input the enclave signs must spend a seal the signed bundle closes.
 Independently, every `OS_ASSET` output is split into legs: a confidential
 (blinded) leg is the recipient, a revealed leg MUST be proven self-owned
 (the script of the enclave's single Colored input, or a BIP-86 key-path output
-of its Colored account; at most 4 off-PSBT change outpoints), and the recipient
+of its Colored account at a wallet child path `[0, i]`, both steps
+non-hardened; at most 4 off-PSBT change outpoints), and the recipient
 legs MUST sum exactly to `amount - commission`.
 The destination amount the route check uses is this enclave-derived recipient
 total, not the wire `psbt_output_amount`. A pinned fee policy, shared with the
@@ -601,8 +602,10 @@ either of these cases:
   the fingerprint, BIP-86 key derivation, and Taproot tweak. A script tree can
   contain foreign spend paths. For such inputs, the exemption is limited to
   the input value on that script.
-- Its script is a BIP-86 output from an enclave account, with no script tree.
-  The enclave derives the key and reconstructs the output script.
+- Its script is a BIP-86 output from an enclave account, with no script tree,
+  at a wallet child path `[k, i]`, both steps non-hardened, `k` = 0 on Colored,
+  0 or 1 on Vanilla. The enclave derives the key and reconstructs the output
+  script. An enclave key at any other path counts as unowned.
 
 Other outputs must fit the configured unowned-sats budget. An enclave key in
 one Taproot leaf does not prove control of the whole output.
@@ -944,7 +947,7 @@ absolute maximum, or under the relay floor (both PSBT paths); PSBT not
 anchored to the consignment (swap) or not committing exactly one mint or
 refill of the asset, or without a parent PSBT that pins the spent right
 (mint signer); disallowed output script or value cap exceeded
-(plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, repeated-field count, or header batch.
+(plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, or header batch.
 
 ## 13. Implementation status
 

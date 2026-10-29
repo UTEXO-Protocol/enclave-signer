@@ -35,12 +35,12 @@ jobs:
 
     steps:
       # The action loads skills from the PR head and runs in yolo mode. A
-      # comment must never run it on a fork's code.
-      - name: Refuse closed or fork PRs on comment trigger
-        if: github.event_name == 'issue_comment'
+      # comment or manual run must never run it on a fork's code.
+      - name: Refuse closed or fork PRs on comment or manual trigger
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.issue.number }}
+          PR: ${{ inputs.pr_number || github.event.issue.number }}
         run: |
           read -r state head < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" \
             --jq '"\(.state) \(.head.repo.full_name)"')

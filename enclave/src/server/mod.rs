@@ -26,7 +26,6 @@ mod signers;
 #[cfg(feature = "rgb-validation")]
 mod spv;
 mod wire;
-mod wire_caps;
 
 pub use context::ServerContext;
 #[cfg(feature = "rgb-validation")]

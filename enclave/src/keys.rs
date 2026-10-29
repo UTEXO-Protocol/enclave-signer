@@ -32,23 +32,18 @@ const VANILLA_KEYCHAINS: [u32; 2] = [0, 1];
 /// SLIP-44 coin type for Concordium.
 const CONCORDIUM_COIN_TYPE: u32 = 919;
 
-/// Highest child index a wallet path may use. Far above any real gap limit,
-/// small enough that a wallet scan can find every key.
-pub const MAX_WALLET_CHILD_INDEX: u32 = 1 << 20;
-
-/// True only for a child path `[k, i]`, both steps non-hardened,
-/// `i < MAX_WALLET_CHILD_INDEX`, and `k` a keychain rgb-lib scans on `account`.
-/// Value on any other path of our keys is lost to the wallet.
+/// True only for a child path `[k, i]`, both steps non-hardened, and `k` a
+/// keychain rgb-lib scans on `account`. The index is not capped: rgb-lib only
+/// ever takes a new index, so a cap would refuse every mint once a wallet
+/// passed it. Value on any other path of our keys is lost to the wallet.
 pub fn is_wallet_child_path(account: AccountType, child_path: &[ChildNumber]) -> bool {
-    let [ChildNumber::Normal { index: keychain }, ChildNumber::Normal { index }] = child_path
-    else {
+    let [ChildNumber::Normal { index: keychain }, ChildNumber::Normal { .. }] = child_path else {
         return false;
     };
-    let keychain_ok = match account {
+    match account {
         AccountType::Colored => *keychain == COLORED_KEYCHAIN,
         AccountType::Vanilla => VANILLA_KEYCHAINS.contains(keychain),
-    };
-    keychain_ok && *index < MAX_WALLET_CHILD_INDEX
+    }
 }
 
 type HmacSha512 = Hmac<Sha512>;

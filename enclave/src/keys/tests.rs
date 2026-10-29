@@ -567,14 +567,14 @@ fn test_sign_taproot_psbt_schnorr_signature_valid() {
 }
 
 #[test]
-fn wallet_child_path_is_a_scanned_keychain_then_a_bounded_normal_index() {
+fn wallet_child_path_is_a_scanned_keychain_then_a_normal_index() {
     let normal = |i| ChildNumber::from_normal_idx(i).unwrap();
     let hardened = |i| ChildNumber::from_hardened_idx(i).unwrap();
     for account in [AccountType::Colored, AccountType::Vanilla] {
         assert!(is_wallet_child_path(account, &[normal(0), normal(7)]));
         assert!(is_wallet_child_path(
             account,
-            &[normal(0), normal(MAX_WALLET_CHILD_INDEX - 1)]
+            &[normal(0), normal((1 << 31) - 1)]
         ));
         for refused in [
             vec![],
@@ -583,7 +583,6 @@ fn wallet_child_path_is_a_scanned_keychain_then_a_bounded_normal_index() {
             vec![hardened(0), normal(7)],
             vec![normal(0), hardened(7)],
             vec![normal(0), normal(7), normal(0)],
-            vec![normal(0), normal(MAX_WALLET_CHILD_INDEX)],
             vec![hardened(9), hardened(13)],
         ] {
             assert!(

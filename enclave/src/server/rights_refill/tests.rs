@@ -240,7 +240,6 @@ fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
     for child in [
         vec![normal(0), hardened],
         vec![normal(0), normal(1), normal(0)],
-        vec![normal(0), normal(crate::keys::MAX_WALLET_CHILD_INDEX)],
     ] {
         let err = refusal(Shape {
             first_right: (AccountType::Colored, child),

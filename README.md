@@ -350,8 +350,7 @@ A runtime environment override is not the provisioning procedure.
 
 The EIF workflow gets this value from the repository variable `BFA_RGB_ASSET_ID`.
 It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
-This file accompanies the EIF in the Actions artifact and S3 bundle. CCD images
-have no asset pin and record `null`.
+This file accompanies the EIF in the Actions artifact and S3 bundle.
 
 To reproduce a published EIF, use its recorded asset id, not the current
 repository variable. Older bundles may lack this field; obtain the original

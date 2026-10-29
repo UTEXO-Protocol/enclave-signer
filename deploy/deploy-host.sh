@@ -114,16 +114,17 @@ asubuntu "aws s3 cp $SRC/HOST-SHA256SUMS          $DIR/HOST-SHA256SUMS  --region
 asubuntu "chmod +x '$DIR/utexo-bridge-parent' '$DIR/utexo-bridge-parent-cli'"
 
 # --- 2. verify checksums ---------------------------------------------------
-EXP=$(awk '{print $1}' "$DIR/SHA256SUMS.eif")
-ACT=$(sha256sum "$EIF" | awk '{print $1}')
+# Read ubuntu-owned files as ubuntu: root must not follow a symlink there.
+EXP=$(asubuntu "awk '{print \$1}' '$DIR/SHA256SUMS.eif'")
+ACT=$(asubuntu "sha256sum '$EIF'" | awk '{print $1}')
 [ "$EXP" = "$ACT" ] || { log "EIF sha mismatch ($ACT != $EXP)"; exit 1; }
-( cd "$DIR" && sha256sum -c HOST-SHA256SUMS ) || { log "host binary sha mismatch"; exit 1; }
+asubuntu "cd '$DIR' && sha256sum -c HOST-SHA256SUMS" || { log "host binary sha mismatch"; exit 1; }
 log "checksums OK"
 
 # --- 3. pre-flight PCR (static EIF measurement vs manifest) ----------------
 EIF_PCR=$(asubuntu "nitro-cli describe-eif --eif-path $EIF" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["Measurements"]["PCR0"])')
-MAN_PCR=$(python3 -c 'import json;print(json.load(open("'"$DIR"'/PCR.json"))["PCR0"])')
+MAN_PCR=$(asubuntu "cat '$DIR/PCR.json'" | python3 -c 'import json,sys;print(json.load(sys.stdin)["PCR0"])')
 [ "$EIF_PCR" = "$MAN_PCR" ] || { log "PCR0 manifest mismatch ($EIF_PCR != $MAN_PCR)"; exit 1; }
 log "PCR0 (manifest) = $MAN_PCR"
 

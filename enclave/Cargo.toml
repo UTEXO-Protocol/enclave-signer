@@ -162,8 +162,9 @@ allow-seed-import = []
 rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
-# When OFF, there is no SPV gate and no RGB source check. handle_sign_evm still
-# signs (the CCD build). A release build then needs the EVM domain pins
+# When OFF, there is no SPV gate. `rgb-validation` is off too, so
+# `validate_source` refuses every RGB source and only CCD-sourced releases
+# sign (the CCD build). A release build then needs the EVM domain pins
 # (networks/evm/validation.rs).
 spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
