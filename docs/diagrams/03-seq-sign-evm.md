@@ -98,7 +98,7 @@ sequenceDiagram
         Sign->>Sign: structHash TeeFundsOut(9 decoded fields + nonce, deadline)
     end
     Sign->>Sign: digest = keccak256(0x1901 || domSep || structHash)
-    Srv->>Chain: sign_with_chain_pins_unchanged<br/>(lock chain; pinned SPV blocks still in the chain, else REFUSE)
+    Srv->>Chain: sign_with_chain_pins_unchanged<br/>(lock chain; pinned SPV blocks still in the chain<br/>and as deep as their check required, else REFUSE)
     Sign->>Sign: k256 ECDSA sign_prehash_recoverable (r‖s‖v)
     Sign-->>Srv: signature (65 bytes)
     Srv->>Chain: release chain lock

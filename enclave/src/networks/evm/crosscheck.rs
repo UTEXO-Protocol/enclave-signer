@@ -336,8 +336,8 @@ pub fn verify_btc_relay_agreement(
 
     assert_header_present(chain, &latest, "latest")?;
     // Pin the relay's `latest` header too. A reorg that replaces it removes
-    // the freshness this check proved.
-    pins.pin(chain, latest.height)?;
+    // the freshness this check proved. The check proved presence: depth 1.
+    pins.pin(chain, latest.height, 1)?;
 
     // `latest` must be near the tip. Else it proves only that a block existed,
     // and the relay can be far behind.
@@ -353,7 +353,7 @@ pub fn verify_btc_relay_agreement(
     }
 
     let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain, min_confirmations)?;
-    pins.pin(chain, anchor.height)?;
+    pins.pin(chain, anchor.height, min_confirmations)?;
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut source block mismatch: calldata proof cites height {}, but the \

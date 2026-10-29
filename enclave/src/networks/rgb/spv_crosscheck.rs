@@ -14,7 +14,9 @@
 //!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
 //!    Bridge spec section 11 forbids trust in only the most recent anchoring
 //!    transaction. On the testnets, min-difficulty blocks count too: testnets
-//!    carry no production value.
+//!    carry no production value. [`ChainPins`] holds the hash and the depth of
+//!    every block a check used. The signer checks both again under the chain
+//!    lock before it uses the key.
 //!
 //! Consensus runs first, over [`proven_witnesses`]: the same inclusion and depth
 //! checks, so RGB validation sees a witness mined only if its proof holds.
@@ -97,11 +99,12 @@ pub fn validate_source_chain(
         min_confirmations,
     )?;
 
-    // Pin every block this check used, under the caller's lock guard. The guard
-    // ends at return, so `ChainPins::assert_unchanged` checks the blocks again
-    // at signing time (F05-NEW-AF-08).
+    // Pin every block this check used, with the depth it required, under the
+    // caller's lock guard. The guard ends at return, so
+    // `ChainPins::assert_unchanged` checks the blocks again at signing time
+    // (F05-NEW-AF-08).
     for proof in merkle_proofs {
-        pins.pin(chain, proof.block_height)?;
+        pins.pin(chain, proof.block_height, min_confirmations)?;
     }
 
     tracing::info!(
@@ -412,17 +415,30 @@ fn verify_one_proof(
     Ok(())
 }
 
+/// One pinned block: its hash and the depth the check required at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pin {
+    hash: [u8; 32],
+    /// Confirmations the check required. `1` pins presence only.
+    depth: u32,
+}
+
 /// The blocks the SPV checks used, checked again before the key is used.
 ///
 /// Each check releases the header-chain lock when it returns. Another worker
 /// can then accept a reorg before signing (F05-NEW-AF-08).
 ///
-/// A check records every block it used here. `assert_unchanged` reads those
-/// heights again and fails if a hash changed. An extension does not touch a
-/// pinned height, so signing continues.
+/// A check records every block it used here, with the depth it required.
+/// `assert_unchanged` reads those heights again. It fails if a hash changed or
+/// a block is shallower than required. An extension touches no pinned hash
+/// and only deepens the blocks, so signing continues. A replacement chain of
+/// fewer, heavier blocks above a pin keeps the hash and lowers the depth. If
+/// that leaves the block shallower than its check required, the depth check
+/// refuses the signature. The request fails, and the caller must send it
+/// again when the block is deep enough.
 #[derive(Debug, Default)]
 pub struct ChainPins {
-    pinned: std::sync::Mutex<std::collections::BTreeMap<u32, [u8; 32]>>,
+    pinned: std::sync::Mutex<std::collections::BTreeMap<u32, Pin>>,
 }
 
 impl ChainPins {
@@ -430,13 +446,15 @@ impl ChainPins {
         Self::default()
     }
 
-    /// Record the chain hash at `height`. Call it under the check's own lock
-    /// guard, so the pin and the check see one chain.
+    /// Record the chain hash at `height` and the `depth` the check required
+    /// there. Call it under the check's own lock guard, so the pin and the
+    /// check see one chain.
     ///
-    /// A second pin with a different hash means two checks read two chains.
-    /// That is the race this guards, so it fails closed.
+    /// A second pin of the same height keeps the larger depth. A different
+    /// hash means two checks read two chains. That is the race this guards,
+    /// so it fails closed.
     #[cfg(rgb_to_evm)]
-    pub fn pin(&self, chain: &HeaderChain, height: u32) -> Result<()> {
+    pub fn pin(&self, chain: &HeaderChain, height: u32, depth: u32) -> Result<()> {
         let hash = chain.hash_at(height).ok_or_else(|| {
             EnclaveError::Spv(format!(
                 "chain pin: enclave holds no header at height {height} (chain tip = {}) \
@@ -446,32 +464,33 @@ impl ChainPins {
         })?;
 
         let mut pinned = self.lock()?;
-        if let Some(previous) = pinned.insert(height, hash) {
-            if previous != hash {
-                return Err(EnclaveError::Spv(format!(
-                    "chain pin: height {height} was pinned as {} but now reads {} \
-                     - the header chain changed between two validation checks, refusing to sign",
-                    hex::encode(previous),
-                    hex::encode(hash)
-                )));
-            }
+        let pin = pinned.entry(height).or_insert(Pin { hash, depth });
+        if pin.hash != hash {
+            return Err(EnclaveError::Spv(format!(
+                "chain pin: height {height} was pinned as {} but now reads {} \
+                 - the header chain changed between two validation checks, refusing to sign",
+                hex::encode(pin.hash),
+                hex::encode(hash)
+            )));
         }
+        pin.depth = pin.depth.max(depth);
         Ok(())
     }
 
-    /// Check every pinned block against `chain`. Call it under a fresh lock,
-    /// just before the signing key is used.
+    /// Check every pinned block against `chain`: the same hash, and at least
+    /// the required depth. Call it under a fresh lock, just before the signing
+    /// key is used.
     pub fn assert_unchanged(&self, chain: &HeaderChain) -> Result<()> {
         let pinned = self.lock()?;
 
-        for (&height, &expected) in pinned.iter() {
+        for (&height, pin) in pinned.iter() {
             match chain.hash_at(height) {
-                Some(current) if current == expected => {}
+                Some(current) if current == pin.hash => {}
                 Some(current) => {
                     return Err(EnclaveError::Spv(format!(
                         "chain reorg after validation: height {height} was {} when checked but is \
                          now {} (chain tip = {}) - refusing to sign against a replaced block",
-                        hex::encode(expected),
+                        hex::encode(pin.hash),
                         hex::encode(current),
                         chain.tip_height()
                     )));
@@ -480,10 +499,20 @@ impl ChainPins {
                     return Err(EnclaveError::Spv(format!(
                         "chain reorg after validation: height {height} was {} when checked but the \
                          enclave now holds no header there (chain tip = {}) - refusing to sign",
-                        hex::encode(expected),
+                        hex::encode(pin.hash),
                         chain.tip_height()
                     )));
                 }
+            }
+            let depth = chain.tip_height() - height + 1;
+            if depth < pin.depth {
+                return Err(EnclaveError::Spv(format!(
+                    "chain reorg after validation: height {height} was at least {} blocks deep \
+                     when checked but is {depth} deep now (chain tip = {}) - refusing to sign with \
+                     fewer confirmations than the check required",
+                    pin.depth,
+                    chain.tip_height()
+                )));
             }
         }
 
@@ -505,7 +534,7 @@ impl ChainPins {
     }
 
     /// Fail on a poisoned lock. A panic left the pin set in an unknown state.
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, std::collections::BTreeMap<u32, [u8; 32]>>> {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, std::collections::BTreeMap<u32, Pin>>> {
         self.pinned
             .lock()
             .map_err(|e| EnclaveError::Internal(format!("chain pin set lock poisoned: {e}")))
@@ -540,19 +569,26 @@ mod chain_pin_tests {
         )
     }
 
-    fn header_at(prev: bitcoin::BlockHash, height: u32, nonce: u32) -> Header {
+    /// Regtest's maximum target: the chain checks no proof of work there.
+    const REGTEST_BITS: u32 = 0x207fffff;
+    /// Mainnet's genesis target. A header with these bits carries about 2^31
+    /// times the work of a regtest header, and regtest does not check PoW.
+    const HEAVY_BITS: u32 = 0x1d00ffff;
+
+    fn header_at(prev: bitcoin::BlockHash, height: u32, nonce: u32, bits: u32) -> Header {
         Header {
             version: Version::ONE,
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([0xAB; 32]),
             time: 1_700_000_000 + height,
-            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            bits: bitcoin::CompactTarget::from_consensus(bits),
             nonce,
         }
     }
 
-    /// Submit `count` headers from `start`, chained from the block before.
-    fn submit(chain: &mut HeaderChain, start: u32, count: u32, nonce: u32) {
+    /// Submit `count` headers of `bits` from `start`, chained from the block
+    /// before.
+    fn submit_with_bits(chain: &mut HeaderChain, start: u32, count: u32, nonce: u32, bits: u32) {
         let mut prev = if start == 1 {
             bitcoin::BlockHash::from_byte_array([0u8; 32])
         } else {
@@ -562,11 +598,16 @@ mod chain_pin_tests {
         };
         let mut raw = Vec::new();
         for height in start..start + count {
-            let h = header_at(prev, height, nonce);
+            let h = header_at(prev, height, nonce, bits);
             prev = h.block_hash();
             raw.push(serialize(&h));
         }
         chain.submit_headers(start, &raw, ANY_HEADER_CLOCK).unwrap();
+    }
+
+    /// Submit `count` regtest headers from `start`.
+    fn submit(chain: &mut HeaderChain, start: u32, count: u32, nonce: u32) {
+        submit_with_bits(chain, start, count, nonce, REGTEST_BITS);
     }
 
     fn chain_of(count: u32) -> HeaderChain {
@@ -585,7 +626,7 @@ mod chain_pin_tests {
     #[test]
     fn pinning_a_height_the_enclave_has_no_header_for_fails() {
         let chain = chain_of(5);
-        let err = ChainPins::new().pin(&chain, 99).unwrap_err();
+        let err = ChainPins::new().pin(&chain, 99, 1).unwrap_err();
         assert!(err.to_string().contains("cannot pin"), "got: {err}");
     }
 
@@ -593,7 +634,8 @@ mod chain_pin_tests {
     fn extension_leaves_pinned_blocks_alone() {
         let mut chain = chain_of(5);
         let pins = ChainPins::new();
-        pins.pin(&chain, 3).unwrap();
+        // Height 3 is 3 deep, and the check required 3.
+        pins.pin(&chain, 3, 3).unwrap();
 
         submit(&mut chain, 6, 4, 0);
 
@@ -605,7 +647,7 @@ mod chain_pin_tests {
     fn reorg_replacing_a_pinned_block_fails() {
         let mut chain = chain_of(5);
         let pins = ChainPins::new();
-        pins.pin(&chain, 3).unwrap();
+        pins.pin(&chain, 3, 1).unwrap();
 
         // Longer chain from height 3. The normal accept rule takes it.
         submit(&mut chain, 3, 6, 42);
@@ -619,16 +661,66 @@ mod chain_pin_tests {
 
     #[test]
     fn reorg_below_a_pinned_block_that_shortens_the_chain_fails() {
-        let chain = chain_of(20);
+        let mut chain = chain_of(20);
         let pins = ChainPins::new();
-        pins.pin(&chain, 18).unwrap();
+        pins.pin(&chain, 18, 1).unwrap();
 
-        // The work rule forbids a stronger chain that ends below height 18.
-        // So test the other loss case: no header at 18 at all.
-        let mut short = empty_chain();
-        submit(&mut short, 1, 5, 0);
-        let err = pins.assert_unchanged(&short).unwrap_err();
+        // One heavy block from height 10 out-works the eleven regtest blocks
+        // it displaces. The chain then ends below height 18.
+        submit_with_bits(&mut chain, 10, 1, 7, HEAVY_BITS);
+        assert_eq!(chain.tip_height(), 10);
+        let err = pins.assert_unchanged(&chain).unwrap_err();
         assert!(err.to_string().contains("no header there"), "got: {err}");
+    }
+
+    /// A replacement chain of fewer, heavier blocks keeps the pinned block
+    /// and leaves it shallower than the check required. The hash check alone
+    /// passes it. The depth check refuses it.
+    #[test]
+    fn reorg_that_leaves_a_pinned_block_shallower_fails() {
+        let mut chain = chain_of(10);
+        let pins = ChainPins::new();
+        // Height 3 is 8 deep, and the check required 6.
+        pins.pin(&chain, 3, 6).unwrap();
+        let pinned_hash = chain.hash_at(3).unwrap();
+
+        // Two heavy blocks from height 4 out-work the seven regtest blocks
+        // they displace.
+        submit_with_bits(&mut chain, 4, 2, 7, HEAVY_BITS);
+        assert_eq!(chain.tip_height(), 5);
+        assert_eq!(
+            chain.hash_at(3),
+            Some(pinned_hash),
+            "the pinned block stays"
+        );
+        assert_eq!(chain.confirmations(3, 6), 3);
+
+        let err = pins.assert_unchanged(&chain).unwrap_err();
+        assert!(
+            err.to_string().contains("fewer confirmations"),
+            "got: {err}"
+        );
+    }
+
+    /// Two checks that pin one height keep the larger required depth.
+    #[test]
+    fn a_second_pin_of_a_height_keeps_the_larger_depth() {
+        let chain = chain_of(10);
+        let pins = ChainPins::new();
+        pins.pin(&chain, 3, 1).unwrap();
+        pins.pin(&chain, 3, 4).unwrap();
+        pins.pin(&chain, 3, 2).unwrap();
+        assert_eq!(pins.len(), 1);
+        pins.assert_unchanged(&chain).unwrap();
+
+        // The same blocks, five of them: height 3 is 3 deep, one short of 4.
+        let short = chain_of(5);
+        assert_eq!(short.hash_at(3), chain.hash_at(3));
+        let err = pins.assert_unchanged(&short).unwrap_err();
+        assert!(
+            err.to_string().contains("fewer confirmations"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -638,8 +730,8 @@ mod chain_pin_tests {
         submit(&mut chain_b, 1, 5, 42);
 
         let pins = ChainPins::new();
-        pins.pin(&chain_a, 3).unwrap();
-        let err = pins.pin(&chain_b, 3).unwrap_err();
+        pins.pin(&chain_a, 3, 1).unwrap();
+        let err = pins.pin(&chain_b, 3, 1).unwrap_err();
         assert!(err.to_string().contains("was pinned as"), "got: {err}");
     }
 }

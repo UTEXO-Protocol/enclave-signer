@@ -188,6 +188,16 @@ pub enum SpvError {
         now: u64,
     },
 
+    #[error(
+        "header at height {height} has time {time}, at or before the median time past \
+         {median_time_past} of the blocks below it"
+    )]
+    TimeTooOld {
+        height: BlockHeight,
+        time: u32,
+        median_time_past: u32,
+    },
+
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
 

@@ -32,14 +32,19 @@ pub struct Checkpoint {
     /// `nBits` until the next retarget boundary.
     pub bits: u32,
     /// Block timestamp. `from_next_work_required()` needs it when the checkpoint
-    /// is on a retarget boundary.
+    /// is on a retarget boundary, and the 20-minute rule of the testnets needs
+    /// it for the block above the checkpoint. The median-time-past rule reads
+    /// it in the window of the eleventh block above the checkpoint. A genesis
+    /// checkpoint is in the window of each of the eleven blocks above it. A
+    /// value newer than the real block could refuse an honest header.
     pub time: u32,
     /// True when the values are real, not placeholders. Production builds do
     /// not start otherwise.
     pub is_real: bool,
     /// Cumulative work up to and including this block, big-endian (the
     /// `chainwork` of Bitcoin Core `getblockheader`). The enclave needs it to
-    /// rebuild BtcRelay records. `None` means unknown: every `fundsOut` fails.
+    /// rebuild BtcRelay records. `None` means unknown: every RGB-source release
+    /// fails under `BTC_RELAY_MODE=required`.
     pub chain_work: Option<[u8; 32]>,
 }
 
@@ -187,7 +192,7 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 
 /// Env var that moves the boot checkpoint forward in local/dev builds.
 ///
-/// Format: `height:block_hash`, `height:block_hash:bits:time` or
+/// Format: `height:block_hash:bits:time` or
 /// `height:block_hash:bits:time:chainwork`
 ///   * `height` - decimal block height.
 ///   * `block_hash` - 64 hex chars in **display order** (as an explorer or
@@ -198,12 +203,15 @@ pub fn checkpoint_for(network: Network) -> Checkpoint {
 ///   * `chainwork` - 64 hex chars, as `getblockheader` prints it, optional
 ///     `0x` prefix.
 ///
-/// Only the five-field form sets `chain_work`. The shorter forms set `None`,
-/// and then every `fundsOut` fails.
+/// Only the five-field form sets `chain_work`. The four-field form sets
+/// `None`, and then every RGB-source release fails under
+/// `BTC_RELAY_MODE=required`.
 ///
-/// The two-field form takes `bits`/`time` from the compiled-in checkpoint. That
-/// is safe only where `nBits` is not checked. PoW networks (mainnet, testnets)
-/// must give all four.
+/// `bits` and `time` must be those of the block itself, on every network. On
+/// mainnet and the testnets, the `nBits` checks read both. The median-time-past
+/// rule reads `time` too, and the enclave puts it in the BtcRelay records it
+/// rebuilds. Block times can go down, so a time from another block can be
+/// newer than the real one and refuse an honest header.
 pub const CHECKPOINT_ENV: &str = "SPV_CHECKPOINT";
 
 /// Source of the boot checkpoint. The log shows it, so an operator value is
@@ -229,8 +237,9 @@ pub fn checkpoint_override_allowed() -> bool {
 /// when this build allows it.
 ///
 /// All errors stop the boot (`main` panics): the var set in a production
-/// build, a malformed spec, or no `bits`/`time` on a PoW network. A silent
-/// fallback would hide a dev mistake or an ignored operator value.
+/// build, or a malformed spec. A spec without `bits` and `time` is malformed
+/// on every network. A silent fallback would hide a dev mistake or an ignored
+/// operator value.
 pub fn resolve_checkpoint(
     network: Network,
 ) -> std::result::Result<(Checkpoint, CheckpointSource), String> {
@@ -246,29 +255,25 @@ pub fn resolve_checkpoint(
              enclave/src/networks/rgb/spv/checkpoint.rs and rebuild."
         ));
     }
-    let checkpoint = parse_checkpoint_spec(&spec, network, &compiled)?;
+    let checkpoint = parse_checkpoint_spec(&spec)?;
     Ok((checkpoint, CheckpointSource::Env))
 }
 
-/// Parses a [`CHECKPOINT_ENV`] spec. `base` is the compiled-in checkpoint for
-/// `network`. It gives `bits`/`time` in the two-field form.
+/// Parses a [`CHECKPOINT_ENV`] spec.
 ///
 /// Pure, for unit tests. [`resolve_checkpoint`] adds the env read and the
 /// build-profile gate.
-pub fn parse_checkpoint_spec(
-    spec: &str,
-    network: Network,
-    base: &Checkpoint,
-) -> std::result::Result<Checkpoint, String> {
+pub fn parse_checkpoint_spec(spec: &str) -> std::result::Result<Checkpoint, String> {
     let fields: Vec<&str> = spec.trim().split(':').map(str::trim).collect();
-    let (height_s, hash_s, bits_time, work_s) = match fields.as_slice() {
-        [h, hash] => (*h, *hash, None, None),
-        [h, hash, bits, time] => (*h, *hash, Some((*bits, *time)), None),
-        [h, hash, bits, time, work] => (*h, *hash, Some((*bits, *time)), Some(*work)),
+    let (height_s, hash_s, bits_s, time_s, work_s) = match fields.as_slice() {
+        [h, hash, bits, time] => (*h, *hash, *bits, *time, None),
+        [h, hash, bits, time, work] => (*h, *hash, *bits, *time, Some(*work)),
         _ => {
             return Err(format!(
-                "{CHECKPOINT_ENV} must be `height:block_hash`, `height:block_hash:bits:time` or \
-                 `height:block_hash:bits:time:chainwork`, got {} field(s) in {spec:?}",
+                "{CHECKPOINT_ENV} must be `height:block_hash:bits:time` or \
+                 `height:block_hash:bits:time:chainwork`, got {} field(s) in {spec:?}. The \
+                 bits and time must be those of the checkpoint block: the median-time-past \
+                 rule reads that time",
                 fields.len()
             ))
         }
@@ -296,32 +301,17 @@ pub fn parse_checkpoint_spec(
         ));
     }
 
-    let (bits, time) = match bits_time {
-        Some((bits_s, time_s)) => {
-            let bits_hex = bits_s.strip_prefix("0x").ok_or_else(|| {
-                format!(
-                    "{CHECKPOINT_ENV}: bits {bits_s:?} must be hex with an explicit `0x` prefix \
-                     (an Esplora JSON body reports bits in decimal - convert it)"
-                )
-            })?;
-            let bits = u32::from_str_radix(bits_hex, 16)
-                .map_err(|e| format!("{CHECKPOINT_ENV}: bits {bits_s:?} is not hex u32: {e}"))?;
-            let time: u32 = time_s.parse().map_err(|e| {
-                format!("{CHECKPOINT_ENV}: time {time_s:?} is not a timestamp: {e}")
-            })?;
-            (bits, time)
-        }
-        None => {
-            if network.enforces_pow() {
-                return Err(format!(
-                    "{CHECKPOINT_ENV}: {network:?} enforces PoW, so bits and time must be given \
-                     explicitly (`height:block_hash:bits:time`) - inheriting them from the \
-                     compiled checkpoint would make every nBits and retarget check wrong"
-                ));
-            }
-            (base.bits, base.time)
-        }
-    };
+    let bits_hex = bits_s.strip_prefix("0x").ok_or_else(|| {
+        format!(
+            "{CHECKPOINT_ENV}: bits {bits_s:?} must be hex with an explicit `0x` prefix \
+             (an Esplora JSON body reports bits in decimal - convert it)"
+        )
+    })?;
+    let bits = u32::from_str_radix(bits_hex, 16)
+        .map_err(|e| format!("{CHECKPOINT_ENV}: bits {bits_s:?} is not hex u32: {e}"))?;
+    let time: u32 = time_s
+        .parse()
+        .map_err(|e| format!("{CHECKPOINT_ENV}: time {time_s:?} is not a timestamp: {e}"))?;
 
     let chain_work = match work_s {
         Some(work_s) => {

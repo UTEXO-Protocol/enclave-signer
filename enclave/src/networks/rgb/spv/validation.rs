@@ -1,8 +1,9 @@
 //! Per-header validation functions. They hold no chain state.
 //!
-//! `HeaderChain` gives the prior-header context. These functions check
-//! linkage to the predecessor, the time against the enclave clock, PoW, the
-//! `nBits` for the height and, on testnet4, the BIP94 timewarp rule.
+//! `HeaderChain` gives the prior-header context. These functions check the
+//! linkage to the predecessor, PoW and the `nBits` for the height. They also
+//! check the time against the enclave clock and against the median time past
+//! of the blocks below. On testnet4 they also check the BIP94 timewarp rule.
 //!
 //! Per network:
 //!
@@ -14,9 +15,11 @@
 //!   the retarget starts from the first block of the period, and that block
 //!   may not be more than 600 s older than its parent.
 //! - Signet: this implementation skips PoW and `nBits` checks. It also cannot
-//!   verify the BIP-325 challenge because the request has no coinbase witness.
-//!   Per-header validation checks only chain linkage and the clock bound.
-//! - Regtest: chain linkage and the clock bound only.
+//!   check the BIP-325 challenge because the request has no coinbase witness.
+//!   Per-header validation checks only chain linkage, the clock bound and the
+//!   median-time-past rule.
+//! - Regtest: chain linkage, the clock bound and the median-time-past rule
+//!   only.
 
 use bitcoin::block::Header;
 use bitcoin::pow::CompactTarget;
@@ -32,6 +35,9 @@ pub const MAX_TIMEWARP_SECS: u32 = 600;
 /// How far a header may be ahead of the enclave clock, as Bitcoin Core's
 /// `MAX_FUTURE_BLOCK_TIME`.
 pub const MAX_FUTURE_BLOCK_TIME_SECS: u64 = 2 * 60 * 60;
+
+/// Blocks in Bitcoin Core's median-time-past window (`nMedianTimeSpan`).
+pub const MEDIAN_TIME_SPAN: usize = 11;
 
 /// Returns true when `height` is the start of a new retarget epoch.
 pub fn is_retarget_height(height: BlockHeight) -> bool {
@@ -159,21 +165,61 @@ pub fn check_future_time(height: BlockHeight, time: u32, now_unix: u64) -> Resul
     Ok(())
 }
 
-/// Checks linkage, the timewarp rule, the clock bound, then `nBits` (if
-/// given), then PoW (if the network enforces it).
-/// `HeaderChain::submit_headers` calls it.
+/// The median time past of one window of block times, as Bitcoin Core
+/// computes it: the middle value of the sorted times. `times` holds at most
+/// [`MEDIAN_TIME_SPAN`] values and at least one.
+pub fn median_time_past(times: &mut [u32]) -> u32 {
+    times.sort_unstable();
+    times[times.len() / 2]
+}
+
+/// Core's `time-too-old` rule: a block's time is newer than the median time
+/// past of the [`MEDIAN_TIME_SPAN`] blocks below it. Near genesis a block has
+/// fewer blocks below it, and Core takes the median of those. The rule applies
+/// on every network, as in Core. `None` skips the rule. Above a checkpoint
+/// that is not genesis, the chain has no times below the checkpoint. A median
+/// of fewer blocks could then be stricter than Core's. So there the rule
+/// starts where the chain holds all eleven times.
+pub fn check_time_too_old(
+    height: BlockHeight,
+    time: u32,
+    median_time_past: Option<u32>,
+) -> Result<()> {
+    if let Some(median_time_past) = median_time_past {
+        if time <= median_time_past {
+            return Err(SpvError::TimeTooOld {
+                height,
+                time,
+                median_time_past,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The block below a header: its hash (internal byte order) and time.
+#[derive(Debug, Clone, Copy)]
+pub struct Predecessor {
+    pub hash: [u8; 32],
+    pub time: u32,
+}
+
+/// Checks linkage, the timewarp rule, the clock bound, the median-time-past
+/// bound (if given), then `nBits` (if given), then PoW (if the network
+/// enforces it). `HeaderChain::submit_headers` calls it.
 pub fn validate_header_full(
     header: &Header,
     height: BlockHeight,
-    expected_prev_hash: &[u8; 32],
-    prev_time: u32,
+    prev: Predecessor,
+    median_time_past: Option<u32>,
     expected_bits_value: Option<u32>,
     network: Network,
     now_unix: u64,
 ) -> Result<()> {
-    check_linkage(header, expected_prev_hash, height)?;
-    check_timewarp(height, header.time, prev_time, network)?;
+    check_linkage(header, &prev.hash, height)?;
+    check_timewarp(height, header.time, prev.time, network)?;
     check_future_time(height, header.time, now_unix)?;
+    check_time_too_old(height, header.time, median_time_past)?;
 
     if let Some(expected) = expected_bits_value {
         let got = header.bits.to_consensus();
@@ -409,6 +455,35 @@ mod tests {
                 now: 1_000_000
             }
         ));
+    }
+
+    #[test]
+    fn the_median_time_past_is_the_sixth_smallest_of_eleven() {
+        let mut times = [11, 1, 10, 2, 9, 3, 8, 4, 7, 5, 6];
+        assert_eq!(median_time_past(&mut times), 6);
+        let mut flat = [100; MEDIAN_TIME_SPAN];
+        assert_eq!(median_time_past(&mut flat), 100);
+        // A chain from genesis has fewer blocks: Core takes the middle one.
+        assert_eq!(median_time_past(&mut [7]), 7);
+        assert_eq!(median_time_past(&mut [9, 7]), 9);
+        assert_eq!(median_time_past(&mut [3, 1, 2, 5, 4]), 3);
+    }
+
+    #[test]
+    fn a_header_at_or_before_the_median_time_past_is_refused() {
+        check_time_too_old(12, 101, Some(100)).unwrap();
+        let err = check_time_too_old(12, 100, Some(100)).unwrap_err();
+        assert!(matches!(
+            err,
+            SpvError::TimeTooOld {
+                height: 12,
+                time: 100,
+                median_time_past: 100
+            }
+        ));
+        assert!(check_time_too_old(12, 50, Some(100)).is_err());
+        // No median: the rule does not apply.
+        check_time_too_old(5, 0, None).unwrap();
     }
 
     #[test]
