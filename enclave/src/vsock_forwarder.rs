@@ -272,6 +272,8 @@ mod tests {
         assert_eq!(upstream.read(&mut [0]).unwrap(), 0);
         // A canceled reverse copy may observe EOF or NotConnected, depending
         // on the OS. It must terminate instead of retaining either socket.
-        let _ = receive.recv_timeout(TIMEOUT).unwrap();
+        if let Err(error) = receive.recv_timeout(TIMEOUT).unwrap() {
+            assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        }
     }
 }
