@@ -182,6 +182,37 @@ mod mint {
     }
 
     #[test]
+    fn binds_the_mint_among_other_deposits_in_one_tx() {
+        // (a) A second RGB deposit: its FundsIn and its BridgeFundsIn.
+        let other_rgb = paid([3; 32], 50).receipt.unwrap().logs;
+        // (b) A deposit on another route: one BridgeFundsIn to chain 42161.
+        let mut data = bridge_funds_in_data(50, 50, 0, "");
+        let dest_chain = 192..224;
+        assert_eq!(
+            data[dest_chain.clone()],
+            abi_word(crate::networks::evm::RGB_CHAIN_ID)
+        );
+        data[dest_chain].copy_from_slice(&abi_word(42161));
+        let other_route = vec![LogEntry {
+            address: BRIDGE,
+            topics: vec![topic0(BRIDGE_FUNDS_IN_SIG), [0xd3; 32]],
+            data,
+        }];
+        let refused: Vec<_> = [("rgb", other_rgb), ("other route", other_route)]
+            .into_iter()
+            .filter_map(|(case, other)| {
+                let mut node = paid([2; 32], 100);
+                let logs = &mut node.receipt.as_mut().unwrap().logs;
+                logs.splice(0..0, other);
+                let ctx = context(config(), Box::new(node));
+                let err = bind_mint_deposit(&ctx, &TX, &mint(100)).err()?;
+                Some(format!("{case}: {err}"))
+            })
+            .collect();
+        assert!(refused.is_empty(), "{refused:#?}");
+    }
+
+    #[test]
     fn refuses_a_shadow_deposit_for_the_same_mint() {
         let ctx = context(config(), Box::new(deposit([2; 32], 100, [0xd2; 32])));
         let err = bind(&ctx, &mint(100));
