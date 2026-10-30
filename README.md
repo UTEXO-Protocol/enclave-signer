@@ -594,6 +594,10 @@ Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
 host, the EVM RPC host, the SHA-256 of the CA and the four KMS values.
 Development policy does not commit these fields. Without SPV, the image pins
 network inputs through `ENDPOINTS_SHA256`; operators approve KMS inputs separately.
+The digest implementations in `enclave/src/config.rs` (`chain_endpoints_sha256`)
+and `parent/src/bin/cli.rs` (`endpoints_sha256`) must stay in sync. Both exclude
+runtime KMS fields; a shared golden vector and exhaustive field matching guard
+against encoding drift and unreviewed schema additions.
 A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |

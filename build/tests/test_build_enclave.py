@@ -149,6 +149,39 @@ class BuildArgumentsTests(unittest.TestCase):
                 ])
                 self.assertNotIn('build override:', result.stdout)
 
+    def test_non_signet_roles_require_rgb_before_docker(self):
+        for role in ('mint', 'burn'):
+            for network in (None, '', 'bitcoin', 'testnet', 'testnet4', 'regtest'):
+                with self.subTest(role=role, network=network):
+                    overrides = {} if network is None else {'BITCOIN_NETWORK': network}
+                    result = self.invoke(f'Dockerfile.enclave.{role}',
+                                         RGB_ASSET_ID='rgb:test-bfa-asset',
+                                         ENCLAVE_FEATURES=f'vsock,{role}-signer', **overrides)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('requires the rgb feature', result.stderr)
+                    self.assertFalse(self.argv.exists())
+
+    def test_related_feature_names_do_not_satisfy_rgb_guard(self):
+        for feature in ('rgb-validation', 'rgb-mint-burn', 'bfa-mint'):
+            with self.subTest(feature=feature):
+                result = self.invoke('Dockerfile.enclave.burn',
+                                     RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     ENCLAVE_FEATURES=f'vsock,{feature},burn-signer')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('requires the rgb feature', result.stderr)
+                self.assertFalse(self.argv.exists())
+
+    def test_non_signet_roles_accept_explicit_rgb(self):
+        for role in ('mint', 'burn'):
+            for features in (f'rgb,vsock,{role}-signer', f'vsock,rgb,{role}-signer',
+                             f'vsock,{role}-signer,rgb', f'vsock rgb {role}-signer'):
+                with self.subTest(role=role, features=features):
+                    result = self.invoke(f'Dockerfile.enclave.{role}',
+                                         RGB_ASSET_ID='rgb:test-bfa-asset',
+                                         BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES=features)
+                    self.assertEqual(result.returncode, 42, result.stderr)
+                    self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
+
     def test_combined_forwards_asset_and_explicit_debug_together(self):
         result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
                              ENCLAVE_DEBUG_FEATURES='allow-debug-pcrs')

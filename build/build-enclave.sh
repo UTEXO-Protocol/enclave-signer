@@ -93,6 +93,15 @@ fi
 # Optional measured configuration for the mint/burn recipes. Unset values
 # retain each Dockerfile's production defaults.
 if declares_build_arg ENCLAVE_FEATURES; then
+    # Match Docker's effective defaults when an override is unset or empty.
+    build_features="${ENCLAVE_FEATURES:-$(sed -n 's/^ARG ENCLAVE_FEATURES=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    bitcoin_network="${BITCOIN_NETWORK:-$(sed -n 's/^ARG BITCOIN_NETWORK=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    if [ "$bitcoin_network" != signet ] && \
+        ! grep -qE '(^|[[:space:],])rgb([[:space:],]|$)' <<< "$build_features"; then
+        echo "Error: $DOCKERFILE requires the rgb feature when BITCOIN_NETWORK=$bitcoin_network." >&2
+        echo "       Include rgb in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
+        exit 1
+    fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
         EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS ENDPOINTS_SHA256; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
