@@ -396,6 +396,8 @@ fn non_default_port_reaches_listener_with_host_header() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
+        &OP_ID,
+        950,
         AFTER_BLOCK,
     )
     .unwrap();
@@ -428,6 +430,8 @@ fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
+        &OP_ID,
+        950,
         AFTER_BLOCK,
     )
     .unwrap();
@@ -454,7 +458,17 @@ fn pinned_rpc_uses_latest_safe_and_finalized_tags() {
         );
         #[cfg(evm_to_rgb)]
         verify_funds_in_event(&*client, &BRIDGE, tag, &TX, &OP_ID, 1000, 50).unwrap();
-        verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, AFTER_BLOCK).unwrap();
+        verify_rgb_funds_in(
+            &*client,
+            &BRIDGE,
+            tag,
+            &TX,
+            &MINT_OPID,
+            &OP_ID,
+            950,
+            AFTER_BLOCK,
+        )
+        .unwrap();
     }
 }
 
@@ -478,7 +492,7 @@ fn pinned_rpc_requires_configured_tag_and_matching_canonical_block() {
                 "a receipt above the {tag} head or outside the canonical chain must not authorize signing"
             );
             assert!(
-                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, AFTER_BLOCK).is_err(),
+                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, &OP_ID, 950, AFTER_BLOCK).is_err(),
                 "a receipt above the {tag} head or outside the canonical chain must not authorize a mint lock"
             );
         }
@@ -525,6 +539,8 @@ fn tls_failure_refuses_to_sign() {
                 EvmFinalityTag::Safe,
                 &TX,
                 &MINT_OPID,
+                &OP_ID,
+                950,
                 AFTER_BLOCK
             )
             .is_err(),
@@ -548,6 +564,8 @@ fn proxy_env_has_no_effect() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
+        &OP_ID,
+        950,
         AFTER_BLOCK,
     )
     .unwrap();
@@ -569,6 +587,8 @@ fn pinned_ca_is_the_only_trusted_root() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
+            &OP_ID,
+            950,
             AFTER_BLOCK
         )
         .is_err(),
@@ -588,6 +608,8 @@ fn timeout_refuses_to_sign() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
+        &OP_ID,
+        950,
         AFTER_BLOCK,
     );
     assert!(got.is_err(), "a hung RPC must refuse to sign");
@@ -610,6 +632,8 @@ fn pinned_host_redirect_is_not_followed() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
+            &OP_ID,
+            950,
             AFTER_BLOCK
         )
         .is_err(),
@@ -642,6 +666,8 @@ fn host_forged_receipt_is_refused() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
+            &OP_ID,
+            950,
             AFTER_BLOCK,
         )
     });

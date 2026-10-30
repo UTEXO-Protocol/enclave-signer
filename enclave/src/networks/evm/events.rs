@@ -180,9 +180,13 @@ pub struct VerifiedFundsIn {
 
 /// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
-/// Fails closed on: a missing or failed receipt, no matching log, an ambiguous
-/// match, a field mismatch, an on-chain value above `u64`, a receipt above the configured
-/// finality head, or a noncanonical receipt block. The caller then refuses to sign.
+/// Selects the `BridgeFundsIn` with the request's operationId. Other deposits in
+/// the tx are ignored.
+///
+/// Fails closed on: a missing or failed receipt, no log with that operationId,
+/// two logs with that operationId, a field mismatch, an on-chain value above
+/// `u64`, a receipt above the configured finality head, or a noncanonical
+/// receipt block. The caller then refuses to sign.
 ///
 /// `bridge_contract` and `finality_tag` come from PINNED config, never the request.
 /// `expected_*` are the listener request fields that this function
@@ -201,26 +205,29 @@ pub fn verify_funds_in_event(
     expected_gross_amount: u64,
     expected_commission: u64,
 ) -> Result<VerifiedFundsIn> {
-    if expected_operation_id.len() != 32 {
-        return Err(EnclaveError::CrossCheck(format!(
+    let expected_id = <&[u8; 32]>::try_from(expected_operation_id).map_err(|_| {
+        EnclaveError::CrossCheck(format!(
             "FundsIn expected operationId must be exactly 32 bytes (the contract-derived \
              BridgeFundsIn.operationId from indexed topic1), got {}",
             expected_operation_id.len()
-        )));
-    }
+        ))
+    })?;
     // Snapshot the configured head before reading the receipt, so an advancing
     // head cannot make an earlier receipt from another fork eligible.
     let head = fetch_finality_block(provider, finality_tag)?;
     // 1/2. The receipt must exist and the deposit tx must have succeeded.
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
 
-    // 3/4. Find the one log from the pinned bridge contract. No fallback to
+    // 3/4. Find the one log from the pinned bridge contract with the request's
+    //      operationId. Other deposits in the tx are ignored. No fallback to
     //      plain `FundsIn`: it carries an RGB OpId, a different id-space.
-    //      Two deposits in one tx refuse.
     let log = select_unique_log(
         &receipt,
         bridge_contract,
         &BRIDGE_FUNDS_IN_TOPIC0,
+        BFI_OPERATION_ID_TOPIC,
+        expected_id,
+        None,
         "BridgeFundsIn",
         evm_tx_hash,
     )?;
@@ -236,7 +243,7 @@ pub fn verify_funds_in_event(
         ..
     } = decode_bridge_funds_in(log)?;
 
-    if expected_operation_id != operation_id.as_slice() {
+    if expected_id != &operation_id {
         return Err(EnclaveError::CrossCheck(format!(
             "FundsIn operationId mismatch: on-chain 0x{} != request 0x{}",
             hex::encode(operation_id),
@@ -418,31 +425,43 @@ fn fetch_successful_receipt(
     Ok(receipt)
 }
 
-/// The one log in `receipt` from `emitter` with `topic0`. A look-alike
-/// contract cannot match. Two matches are two deposits, so zero or many refuse.
+/// The one log from `emitter` with `topic0`, `id` at `topics[id_topic]` and
+/// `data` when given. A look-alike contract cannot match. Zero or many matches
+/// refuse.
+#[allow(clippy::too_many_arguments)]
 fn select_unique_log<'a>(
     receipt: &'a ReceiptData,
     emitter: &[u8; 20],
     topic0: &[u8; 32],
+    id_topic: usize,
+    id: &[u8; 32],
+    data: Option<&[u8]>,
     event: &str,
     evm_tx_hash: &[u8; 32],
 ) -> Result<&'a LogEntry> {
     let candidates: Vec<&LogEntry> = receipt
         .logs
         .iter()
-        .filter(|log| log.address == *emitter && log.topics.first().is_some_and(|t| t == topic0))
+        .filter(|log| {
+            log.address == *emitter
+                && log.topics.first() == Some(topic0)
+                && log.topics.get(id_topic) == Some(id)
+                && data.is_none_or(|d| log.data == d)
+        })
         .collect();
     if candidates.len() > 1 {
         return Err(EnclaveError::CrossCheck(format!(
-            "ambiguous: multiple {event} logs from bridge contract 0x{} in tx 0x{} - \
-             refusing to guess which authorises this release",
+            "ambiguous: multiple {event} logs with topic{id_topic} 0x{} from bridge contract \
+             0x{} in tx 0x{} - refusing to guess which authorises this release",
+            hex::encode(id),
             hex::encode(emitter),
             hex::encode(evm_tx_hash)
         )));
     }
     candidates.first().copied().ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
-            "no {event} log from bridge contract 0x{} in tx 0x{}",
+            "no {event} log with topic{id_topic} 0x{} from bridge contract 0x{} in tx 0x{}",
+            hex::encode(id),
             hex::encode(emitter),
             hex::encode(evm_tx_hash)
         ))
@@ -550,6 +569,10 @@ fn check_finality_snapshot(
     Ok(())
 }
 
+/// `FundsIn` topic that holds the indexed `rgbOpId`.
+#[cfg(feature = "bfa-validation")]
+const FUNDS_IN_OPID_TOPIC: usize = 2;
+
 /// Decodes a `FundsIn` log, binds it to `expected_rgb_opid`, and returns the amount.
 ///
 /// Only one layout is accepted: topic0, the indexed sender and the indexed
@@ -566,7 +589,7 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "unexpected FundsIn event layout".into(),
         ));
     }
-    let rgb_op_id = log.topics[2];
+    let rgb_op_id = log.topics[FUNDS_IN_OPID_TOPIC];
     let amount = extract_uint256_as_u64(&log.data, 0)?;
     if &rgb_op_id != expected_rgb_opid {
         return Err(EnclaveError::CrossCheck(format!(
@@ -644,34 +667,46 @@ pub fn derived_lock(
 /// Verifies the `FundsIn` lock that a BFA mint commits to. Returns the deposit.
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,
-/// pinned emitter, canonical inclusion below the configured tag), but bound to
-/// the RGB OpId, not to the bridge `operationId` (a different id-space).
-/// `funds_in_contract` and `finality_tag` come from PINNED config. `rgb_opid`
-/// and `after_block` come from the mint's anchor and only select the log that
-/// must exist.
+/// pinned emitter, canonical inclusion below the configured tag). The
+/// `FundsIn` is selected by the RGB OpId, not by the bridge `operationId` (a
+/// different id-space). `funds_in_contract` and `finality_tag` come from PINNED
+/// config. `rgb_opid`, `minted` and `after_block` come from the mint and only
+/// select the log that must exist.
 ///
 /// The lock must also follow the RGB rule for a mint anchor: a block after
 /// `after_block`. An RGB receiver refuses any other lock, so a signed mint
 /// would strand the user's deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
-/// contract. A later `fundsOut` must cite its `(operationId, netAmount)` in
-/// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
+/// contract with `operation_id` (from [`rgb_mint_deposit_id`]), and exactly one
+/// `FundsIn` with `rgb_opid` and `minted` as amount. Other deposits in the tx
+/// are ignored. A later `fundsOut` must cite its
+/// `(operationId, netAmount)` in `settlementData` (see `crosscheck::validate_funds_out_settlement`).
 #[cfg(feature = "bfa-validation")]
+#[allow(clippy::too_many_arguments)]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
     funds_in_contract: &[u8; 20],
     finality_tag: EvmFinalityTag,
     evm_tx_hash: &[u8; 32],
     rgb_opid: &[u8; 32],
+    operation_id: &[u8; 32],
+    minted: u64,
     after_block: u64,
 ) -> Result<VerifiedLock> {
     let head = fetch_finality_block(provider, finality_tag)?;
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
+    // The Bridge keys a deposit by OpId and net amount, so one tx can hold
+    // several FundsIn with the mint's OpId. The minted amount tells them apart.
+    let mut amount_word = [0u8; 32];
+    amount_word[24..].copy_from_slice(&minted.to_be_bytes());
     let log = select_unique_log(
         &receipt,
         funds_in_contract,
         &FUNDS_IN_TOPIC0,
+        FUNDS_IN_OPID_TOPIC,
+        rgb_opid,
+        Some(&amount_word),
         "FundsIn",
         evm_tx_hash,
     )?;
@@ -681,6 +716,9 @@ pub fn verify_rgb_funds_in(
         &receipt,
         funds_in_contract,
         &BRIDGE_FUNDS_IN_TOPIC0,
+        BFI_OPERATION_ID_TOPIC,
+        operation_id,
+        None,
         "BridgeFundsIn",
         evm_tx_hash,
     )?;

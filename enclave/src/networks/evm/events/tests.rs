@@ -356,7 +356,8 @@ fn rejects_operation_id_mismatch() {
         ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("operationId mismatch"), "got: {e}");
+    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
+    assert!(e.contains(&hex::encode(op_id(7))), "got: {e}");
 }
 
 #[cfg(evm_to_rgb)]
@@ -430,7 +431,7 @@ fn rejects_log_without_operation_id_topic() {
         ..FakeEvm::default()
     };
     let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("operationId is expected in topic1"), "got: {e}");
+    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
 /// A full-width 32-byte id must bind.
@@ -443,7 +444,7 @@ fn binds_full_width_operation_id() {
     let e = verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(9), 1000, 50)
         .unwrap_err()
         .to_string();
-    assert!(e.contains("operationId mismatch"), "got: {e}");
+    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
 /// Regression guard: an absent id must refuse, not skip the bind.
@@ -602,8 +603,17 @@ mod finality {
             },
             #[cfg(feature = "bfa-validation")]
             |provider, tag| {
-                verify_rgb_funds_in(provider, &BRIDGE, tag, &TX, &word(0xab), AFTER_BLOCK)
-                    .map(|_| ())
+                verify_rgb_funds_in(
+                    provider,
+                    &BRIDGE,
+                    tag,
+                    &TX,
+                    &word(0xab),
+                    &op_id(7),
+                    950,
+                    AFTER_BLOCK,
+                )
+                .map(|_| ())
             },
         ]
     }
@@ -1035,6 +1045,8 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
             EvmFinalityTag::Safe,
             &TX,
             &word(0xab),
+            &op_id(7),
+            100,
             AFTER_BLOCK
         )
         .unwrap(),
@@ -1059,13 +1071,25 @@ fn verify_rgb_funds_in_refuses_a_lock_at_or_before_after_block() {
             EvmFinalityTag::Safe,
             &TX,
             &word(0xab),
+            &op_id(7),
+            100,
             after_block,
         )
         .unwrap_err()
         .to_string();
         assert!(e.contains("is not after the mint's afterBlock"), "got: {e}");
     }
-    assert!(verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 99).is_ok());
+    assert!(verify_rgb_funds_in(
+        &p,
+        &BRIDGE,
+        EvmFinalityTag::Safe,
+        &TX,
+        &word(0xab),
+        &op_id(7),
+        100,
+        99
+    )
+    .is_ok());
 }
 
 #[cfg(feature = "bfa-validation")]
@@ -1096,6 +1120,8 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
+        &op_id(7),
+        100,
         AFTER_BLOCK,
     )
     .unwrap_err()
@@ -1118,6 +1144,8 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
+        &op_id(7),
+        100,
         AFTER_BLOCK,
     )
     .unwrap_err()
@@ -1142,6 +1170,8 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
+        &op_id(7),
+        100,
         AFTER_BLOCK,
     )
     .unwrap_err()

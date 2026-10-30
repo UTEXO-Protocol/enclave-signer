@@ -156,7 +156,9 @@ host. TLS ends inside the enclave. Each call has a 15 s timeout.
 - **S2.1** `evm_tx_hash` and `funds_in_operation_id` must each be 32 bytes.
 - **S2.2** The receipt must exist and must be a success.
 - **S2.3** The receipt must have exactly one `BridgeFundsIn` event from the
-  pinned `FUNDS_IN_CONTRACT`. Zero or two events: refuse.
+  pinned `FUNDS_IN_CONTRACT` whose `operationId` (topic 1) is the request's
+  `funds_in_operation_id`. Zero or two such events: refuse. Other deposits in
+  the tx are ignored.
 - **S2.4** The event `operationId` (topic 1) must equal the request's
   `funds_in_operation_id`. All 32 bytes must match.
 - **S2.5** The event `amount` must equal the request amount. The event
@@ -245,7 +247,10 @@ signed or not: only its unsigned tx and its RGB keys are read.
 
 - **M6** The EVM node must report `EVM_CHAIN_ID` (`eth_chainId`). The receipt
   of `evm_tx_hash` must have exactly one `FundsIn` event with this mint's
-  OpId and exactly one `BridgeFundsIn` event, both from `FUNDS_IN_CONTRACT`.
+  OpId and `issuedSupply` as amount, and exactly one `BridgeFundsIn` event
+  with the derived `operationId`, both from `FUNDS_IN_CONTRACT`. Other
+  deposits in the tx are ignored. The derived `operationId` must be the
+  request's `funds_in_operation_id` that S2.3 bound.
   The `operationId` and the net amount must be the deposit id the mint
   derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
   burn-flow B2.3). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any

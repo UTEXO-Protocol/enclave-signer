@@ -171,14 +171,29 @@ mod mint {
         }
     }
 
-    fn bind(ctx: &ServerContext, mint: &MintFacts) -> String {
-        bind_mint_deposit(ctx, &TX, mint).unwrap_err().to_string()
+    /// The deposit id that S2.3 bound for this mint.
+    fn request_id(mint: &MintFacts) -> [u8; 32] {
+        rgb_mint_deposit_id(&config(), &mint.opid, mint.issued).unwrap()
     }
 
+    fn bind(ctx: &ServerContext, mint: &MintFacts) -> String {
+        bind_mint_deposit(ctx, &TX, &request_id(mint), mint)
+            .unwrap_err()
+            .to_string()
+    }
+
+    /// The Bridge keys a deposit by OpId and net amount, so another amount under
+    /// the mint's OpId can share the tx.
     #[test]
     fn binds_the_mint_to_its_receipt() {
         let ctx = context(config(), Box::new(paid([2; 32], 100)));
-        bind_mint_deposit(&ctx, &TX, &mint(100)).unwrap();
+        bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100)).unwrap();
+
+        let mut node = paid([2; 32], 100);
+        let other = paid([2; 32], 50).receipt.unwrap().logs;
+        node.receipt.as_mut().unwrap().logs.splice(0..0, other);
+        let ctx = context(config(), Box::new(node));
+        bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100)).unwrap();
     }
 
     #[test]
@@ -198,39 +213,43 @@ mod mint {
             topics: vec![topic0(BRIDGE_FUNDS_IN_SIG), [0xd3; 32]],
             data,
         }];
-        let refused: Vec<_> = [("rgb", other_rgb), ("other route", other_route)]
-            .into_iter()
-            .filter_map(|(case, other)| {
-                let mut node = paid([2; 32], 100);
-                let logs = &mut node.receipt.as_mut().unwrap().logs;
-                logs.splice(0..0, other);
-                let ctx = context(config(), Box::new(node));
-                let err = bind_mint_deposit(&ctx, &TX, &mint(100)).err()?;
-                Some(format!("{case}: {err}"))
-            })
-            .collect();
-        assert!(refused.is_empty(), "{refused:#?}");
+        for (case, other) in [("rgb", other_rgb), ("other route", other_route)] {
+            let mut node = paid([2; 32], 100);
+            node.receipt.as_mut().unwrap().logs.splice(0..0, other);
+            let ctx = context(config(), Box::new(node));
+            bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100))
+                .unwrap_or_else(|e| panic!("{case}: {e}"));
+        }
+    }
+
+    #[test]
+    fn refuses_a_request_id_that_is_not_the_mints() {
+        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        let err = bind_mint_deposit(&ctx, &TX, &[0xd3; 32], &mint(100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("funds_in_operation_id"), "{err}");
     }
 
     #[test]
     fn refuses_a_shadow_deposit_for_the_same_mint() {
         let ctx = context(config(), Box::new(deposit([2; 32], 100, [0xd2; 32])));
         let err = bind(&ctx, &mint(100));
-        assert!(err.contains("not the one mint"), "{err}");
+        assert!(err.contains("no BridgeFundsIn log"), "{err}");
     }
 
     #[test]
     fn refuses_deposit_of_other_amount() {
         let ctx = context(config(), Box::new(paid([2; 32], 99)));
         let err = bind(&ctx, &mint(100));
-        assert!(err.contains("not the one mint"), "{err}");
+        assert!(err.contains("no FundsIn log"), "{err}");
     }
 
     #[test]
     fn refuses_deposit_of_other_opid() {
         let ctx = context(config(), Box::new(paid([3; 32], 100)));
         let err = bind(&ctx, &mint(100));
-        assert!(err.contains("rgbOpId mismatch"), "{err}");
+        assert!(err.contains("no FundsIn log"), "{err}");
     }
 
     /// An RGB receiver refuses a lock at or before the mint's `afterBlock`.
@@ -301,7 +320,10 @@ mod mint {
                 covered: tag,
             };
             let ctx = context(cfg.clone(), Box::new(covered));
-            assert!(bind_mint_deposit(&ctx, &TX, &mint(100)).is_ok(), "{tag}");
+            assert!(
+                bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100)).is_ok(),
+                "{tag}"
+            );
 
             let other = if tag == EvmFinalityTag::Safe {
                 EvmFinalityTag::Finalized
