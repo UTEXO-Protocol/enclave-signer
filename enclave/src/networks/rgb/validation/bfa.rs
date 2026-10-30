@@ -197,7 +197,7 @@ impl ResolveAnchor for BindingResolver<'_> {
     }
 }
 
-/// Decodes one OpId hex string from the flat parser into 32 bytes.
+/// Decodes one OpId hex string from the flat summary into 32 bytes.
 pub(super) fn decode_opid(hex_opid: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(hex_opid).map_err(|e| {
         EnclaveError::CrossCheck(format!("opid hex decode failed: {e} ({hex_opid:?})"))

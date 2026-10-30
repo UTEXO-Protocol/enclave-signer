@@ -748,10 +748,12 @@ work in rgb-lib would pass one of three caps (`validation/cost.rs`, burn-flow
 B2.2 and section 10): the checks of each transition against its bundle's
 whole witness tx, anchor and input map, which rgb-lib runs for every BFA
 before it checks any witness, and, for a listed asset, its reject walk; or
-whose modeled rgb-lib time, file bytes, opouts, genesis hashes (every
-genesis global and assignment, once per operation) and those three costs
-together, would pass 18 s (`MAX_RGB_LIB_NS`). The rest of rgb-lib's work is
-linear in the file (Known limits). The
+whose modeled rgb-lib time would pass 18 s (`MAX_RGB_LIB_NS`): for
+validation its file bytes, opouts, genesis hashes (every genesis global and
+assignment, once per operation) and those three costs, and for the
+inspection that reads the summary after it its file bytes, opouts,
+operations and witness checks. The rest of rgb-lib's work is linear in the
+file (Known limits). The
 asset bind also runs before rgb-lib, so a foreign genesis never reaches it
 and only the pinned asset's list is ever read. rgb-lib runs two phases. Phase 1 (`validate_deterministic`) checks everything that depends on
 the consignment only. It leaves open each witness and each BFA mint anchor
@@ -789,9 +791,13 @@ its height. The enclave never calls
 `Consignment::validate` or the unchecked `PendingValidation::resolve_anchor`;
 `clippy.toml` refuses both. Last, for an asset whose genesis names a reject
 list, rgb-lib checks the inputs and outputs of every terminal operation
-against the list the enclave's reader returns (Known limits). rgb-lib returns
-no amounts or burn facts, so the enclave reads them from the same bytes once
-they pass. The validated contract id must then equal the
+against the list the enclave's reader returns (Known limits). rgb-lib's
+validation returns no amounts or burn facts, so the enclave reads them from
+the same bytes once they pass: the burn facts from the validated rgbstd
+transfer, and the flat summary of every transition from rgb-lib's
+`inspect_consignment` over every bundle, on the file rgb-lib just validated.
+The two readings must name the same settling transition. The validated
+contract id must then equal the
 declared asset id and the pinned `RGB_ASSET_ID` (on the `fundsOut` path this
 last leg applies once the bridge is configured; on the PSBT paths it is
 unconditional). The RGB-source path then checks the SPV proofs again, with
@@ -1031,26 +1037,37 @@ Known limits. Read them before deployment.
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
 - **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
-  work that grow faster than the file (burn-flow section 10). The rest, about
-  1.1 us per byte plus 35 to 55 us per opout on an M1 Pro, plus 13.7 us per
-  genesis global or assignment for each operation (rgb-consensus hashes the
-  whole genesis once per operation), is bounded by `MAX_CONSIGNMENT_BYTES` and
-  the time budget. The genesis part depends on the pinned asset: on a genesis
-  of 255 mint rights an operation costs rgb-lib 3.6 ms, so the budget admits
-  about 4,000 operations; an honest 2810-mint burn there takes 12.0 s in
-  rgb-lib and 12.7 s end to end, and with 3 transfers a line it is refused
-  (46 s in rgb-lib). On a genesis of 1 right a forged history of
-  transfers near the 12 MiB default that passes every cap takes about 15 to
-  17 s, and an honest 2810-mint burn with 3 transfers a line about 10 s. A forged
-  chain of propagates, 14 bytes an opout, at the size cap took 43 s: the
-  budget counts its opouts and refuses it. The caps' parts add up with it, so
-  `MAX_RGB_LIB_NS` holds the modeled sum to 18 s, against a 30 s deadline that
-  does not stop a worker (4 workers). The model's rates are rounded-up Mac
-  timings, not a proof: their margin is about the spread between runs, and a
-  shape slower per byte, per opout or per genesis leaf would run past it. The
-  enclave CPU may be slower. rgb-lib reads a consignment only from a path, so
-  the request bytes are written to a scratch file in the enclave's temp dir,
-  which is RAM, up to `MAX_CONSIGNMENT_BYTES` per request, and removed after.
+  work that grow faster than the file (burn-flow section 10). The rest is
+  bounded by `MAX_CONSIGNMENT_BYTES` and the time budget. Validation costs
+  about 1.1 us per byte plus 35 to 55 us per opout on an M1 Pro, plus 13.7 us
+  per genesis global or assignment for each operation (rgb-consensus hashes
+  the whole genesis once per operation). The inspection that reads the
+  summary once validation passed costs about as much again per opout: about
+  0.5 us per byte, 46 to 60 us per opout and up to about 130 us per
+  operation. So a file alone models at 1.75 us per byte, and the budget
+  refuses any file past about 10.3 MB, below the 12 MiB default. On the
+  pinned asset's genesis of 10 mint rights an honest 2810-mint burn takes
+  2.7 to 2.8 s to validate and 1.9 to 2.2 s to inspect, 5.0 to 6.3 s end to
+  end; with 3 transfers a line it takes 15.9 to 16.2 s end to end and models
+  at 17.9 s, so a longer history is refused. The genesis part depends on the
+  pinned asset: on a genesis of 255 mint rights an operation costs rgb-lib
+  3.6 ms, so the budget admits about 4,000 operations; the 2810-mint burn
+  there models at 16.5 s and takes 15.3 to 16.2 s end to end. A forged
+  chain of propagates, 14 bytes an opout, at the size cap took 44 s to
+  validate and 51 s to inspect: the budget counts its opouts and refuses it.
+  The caps' parts add up with it, so `MAX_RGB_LIB_NS` holds the modeled sum
+  to 18 s, against a 30 s deadline that does not stop a worker (4 workers).
+  The budget is rgb-lib's alone: the enclave's own parse, gate and reads of
+  the validated transfer take the rest of the deadline, 1.1 to 1.6 s more end
+  to end on the 2810-mint burn with 3 transfers a line (2.3 s at a load of 5.6).
+  The model's rates are rounded-up Mac timings, not a proof: their margin is
+  about the spread between runs (8 percent on the honest 2810-mint burn's
+  inspection, the closest), and a shape slower per byte, per opout, per
+  operation or per genesis leaf would run past it. The enclave CPU may be
+  slower. rgb-lib reads a consignment only from a path, so the request bytes
+  are written to a scratch file in the enclave's temp dir, which is RAM, up
+  to `MAX_CONSIGNMENT_BYTES` per request, and removed once rgb-lib
+  validated and inspected it, or refused it.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
   after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response.

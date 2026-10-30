@@ -1,8 +1,8 @@
 //! The caps on the work rgb-lib does, checked before it runs, and the
 //! release-mode timings their values come from: `cargo test --release -p
 //! utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib
-//! caps -- --ignored --nocapture --test-threads=1`, with `GENESIS_RIGHTS` set
-//! to the pinned asset's genesis mint rights (default 1).
+//! caps -- --ignored --nocapture --test-threads=1`. The honest burns run with
+//! `GENESIS_RIGHTS=10`, the pinned BFA's mint rights; the forged shapes leave it at 1.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -22,11 +22,13 @@ use rgbstd::validation::DbcProof;
 use rgbstd::{ChainNet, Operation, Opout};
 
 use super::super::cost::{
-    assert_bounded_for_rgb_lib, assert_within, bundle_id_cost, genesis_hash_cost, opout_count,
-    reject_walk_cost, rgb_lib_ns, uncapped_costs, witness_check_cost, MAX_BUNDLE_ID_COST,
-    MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
+    assert_bounded_for_rgb_lib, assert_within, bundle_id_cost, genesis_hash_cost, inspection_ns,
+    operation_count, opout_count, reject_walk_cost, rgb_lib_ns, uncapped_costs, validation_ns,
+    witness_check_cost, MAX_BUNDLE_ID_COST, MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS,
+    MAX_WITNESS_CHECK_COST,
 };
 use super::super::scratch::with_scratch_file;
+use super::summary::inspected;
 use super::*;
 
 fn load(bytes: &[u8]) -> Transfer {
@@ -447,6 +449,31 @@ fn a_bundle_of_many_transitions_with_a_wide_anchor_is_refused_before_rgb_lib() {
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
+/// The inspection scans a bundle once per listed copy of a transition; rgb-lib
+/// refuses the copy, whose inputs the first spent, so the inspection never sees it.
+#[test]
+fn a_bundle_that_repeats_a_transition_is_refused_by_rgb_lib() {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let (rights, at) = propagate_rights(&mut history, right, 1);
+    let burn = history
+        .transition("burn")
+        .add_input(
+            Opout::new(rights, schemata::OS_MINT, 0),
+            AllocatedState::Void,
+        )
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let bundle = gen::bundle_of(vec![burn.clone(), burn]);
+    assert_eq!(bundle.known_transitions.len(), 2);
+    history.commit_bundle(bundle, vec![at], vec![gen::dust(4)]);
+    let bytes = history.consignment();
+    gate(&bytes, false).unwrap();
+    let err = error_of(validate(&bytes));
+    assert!(err.contains("references previous state"), "{err}");
+}
+
 /// t one-right burns in one bundle cost (t + 1) t + 2 bundle-id steps: they
 /// pass at the cap and are refused before rgb-lib one burn over it.
 #[test]
@@ -479,25 +506,51 @@ fn a_listed_asset_caps_the_reject_walk_and_an_unlisted_one_does_not() {
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
-/// The file costs its bytes at one rate, its opouts and genesis leaf hashes
-/// at others and each cost its steps at its own; the sum saturates.
+/// Validation costs the file its bytes at one rate, its opouts and genesis
+/// leaf hashes at others and each cost its steps at its own; the sum saturates.
 #[test]
-fn the_rgb_lib_time_adds_the_file_to_each_cost() {
+fn the_validation_time_adds_the_file_to_each_cost() {
     let costs = [1_000, 10, 1_000];
-    assert_eq!(rgb_lib_ns(0, [0; 2], [0; 3]), 0);
-    assert_eq!(rgb_lib_ns(1_000, [0; 2], [0; 3]), 1_100_000);
-    assert_eq!(rgb_lib_ns(0, [10, 0], [0; 3]), 550_000);
-    assert_eq!(rgb_lib_ns(0, [0, 10], [0; 3]), 150_000);
-    assert_eq!(rgb_lib_ns(0, [0; 2], costs), 14_000 + 45_000 + 75_000);
+    assert_eq!(validation_ns(0, [0; 3], [0; 3]), 0);
+    assert_eq!(validation_ns(1_000, [0; 3], [0; 3]), 1_100_000);
+    assert_eq!(validation_ns(0, [10, 0, 0], [0; 3]), 550_000);
+    assert_eq!(validation_ns(0, [0, 10, 0], [0; 3]), 150_000);
+    assert_eq!(validation_ns(0, [0, 0, 10], [0; 3]), 0);
+    assert_eq!(validation_ns(0, [0; 3], costs), 14_000 + 45_000 + 75_000);
     assert_eq!(
-        rgb_lib_ns(1_000, [10, 10], costs),
-        rgb_lib_ns(1_000, [0; 2], [0; 3])
-            + rgb_lib_ns(0, [10, 10], [0; 3])
-            + rgb_lib_ns(0, [0; 2], costs)
+        validation_ns(1_000, [10, 10, 10], costs),
+        validation_ns(1_000, [0; 3], [0; 3])
+            + validation_ns(0, [10, 10, 10], [0; 3])
+            + validation_ns(0, [0; 3], costs)
     );
-    assert_eq!(rgb_lib_ns(usize::MAX, [0; 2], costs), u64::MAX);
-    assert_eq!(rgb_lib_ns(0, [u64::MAX, 0], costs), u64::MAX);
-    assert_eq!(rgb_lib_ns(0, [0, u64::MAX], costs), u64::MAX);
+    assert_eq!(validation_ns(usize::MAX, [0; 3], costs), u64::MAX);
+    assert_eq!(validation_ns(0, [u64::MAX, 0, 0], costs), u64::MAX);
+    assert_eq!(validation_ns(0, [0, u64::MAX, 0], costs), u64::MAX);
+}
+
+/// The inspection costs the file its bytes, opouts, operations and witness
+/// steps at its own rates, and no genesis hash, bundle id or walk.
+#[test]
+fn the_inspection_time_adds_the_file_to_its_operations_and_witness_checks() {
+    assert_eq!(inspection_ns(0, [0; 3], [0; 3]), 0);
+    assert_eq!(inspection_ns(1_000, [0; 3], [0; 3]), 650_000);
+    assert_eq!(inspection_ns(0, [10, 0, 0], [0; 3]), 650_000);
+    assert_eq!(inspection_ns(0, [0, 10, 0], [0; 3]), 0);
+    assert_eq!(inspection_ns(0, [0, 0, 10], [0; 3]), 900_000);
+    assert_eq!(inspection_ns(0, [0; 3], [1_000, 10, 1_000]), 8_000);
+    assert_eq!(inspection_ns(usize::MAX, [0; 3], [0; 3]), u64::MAX);
+    assert_eq!(inspection_ns(0, [0, 0, u64::MAX], [0; 3]), u64::MAX);
+}
+
+/// The budget holds validation and inspection together.
+#[test]
+fn the_rgb_lib_time_is_validation_then_inspection() {
+    let (uncapped, capped) = ([10, 20, 30], [1_000, 10, 1_000]);
+    assert_eq!(
+        rgb_lib_ns(1_000, uncapped, capped),
+        validation_ns(1_000, uncapped, capped) + inspection_ns(1_000, uncapped, capped)
+    );
+    assert_eq!(rgb_lib_ns(usize::MAX, uncapped, capped), u64::MAX);
 }
 
 /// Each link of a propagate chain spends one opout and creates its rights.
@@ -512,6 +565,16 @@ fn the_opout_count_is_every_opout_created_and_spent() {
         opout_count(&transfer) - count(0),
         (1 + 1) + (1 + 3) + (3 + 3)
     );
+}
+
+/// The genesis is one operation, each transition another.
+#[test]
+fn the_operation_count_is_the_genesis_and_every_transition() {
+    let count = |links| operation_count(&load(&propagate_chain(issue(), 3, links)));
+    assert_eq!(count(0), 1);
+    assert_eq!(count(3), 4);
+    // The mint, the fan-out and the transfer.
+    assert_eq!(operation_count(&load(&wide_transfer(issue(), 3))), 4);
 }
 
 /// Each operation hashes every genesis global and assignment: 5 globals and
@@ -543,8 +606,8 @@ fn a_file_is_refused_when_its_opouts_leave_too_little_time() {
     let uncapped = uncapped_costs(&transfer);
     let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
     let left = MAX_RGB_LIB_NS - rgb_lib_ns(0, uncapped, costs);
-    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 2], [0; 3])).unwrap();
-    assert!(rgb_lib_ns(largest + 1, [0; 2], costs) <= MAX_RGB_LIB_NS);
+    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 3], [0; 3])).unwrap();
+    assert!(rgb_lib_ns(largest + 1, [0; 3], costs) <= MAX_RGB_LIB_NS);
     assert_bounded_for_rgb_lib(&transfer, largest, false).unwrap();
     let err = assert_bounded_for_rgb_lib(&transfer, largest + 1, false).unwrap_err();
     assert!(err.to_string().contains("rgb-lib time"), "{err}");
@@ -563,7 +626,7 @@ fn a_listed_walk_is_refused_when_its_file_leaves_too_little_time() {
         walk,
     ];
     let left = MAX_RGB_LIB_NS - rgb_lib_ns(0, uncapped_costs(&transfer), costs);
-    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 2], [0; 3])).unwrap();
+    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 3], [0; 3])).unwrap();
     assert_bounded_for_rgb_lib(&transfer, largest, true).unwrap();
     let err = assert_bounded_for_rgb_lib(&transfer, largest + 1, true).unwrap_err();
     assert!(err.to_string().contains("rgb-lib time"), "{err}");
@@ -571,23 +634,42 @@ fn a_listed_walk_is_refused_when_its_file_leaves_too_little_time() {
 }
 
 /// CI keeps every cap above the largest honest burn: 2810 mints, all
-/// burned by one transition of a listed asset. Its costs leave the time
-/// budget room for a file at the default size cap.
+/// burned by one transition of a listed asset with the pinned asset's 10
+/// genesis rights. Validation and inspection model at under half the budget.
 #[test]
 fn the_burn_of_2810_mints_passes_every_cap() {
-    let bytes = honest_burn(listed(), 2_810, 0);
+    let bytes = honest_burn(issue_of(10, true), 2_810, 0);
     gate(&bytes, true).unwrap();
-    let size_cap = crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
-    assert_bounded_for_rgb_lib(&load(&bytes), size_cap, true).unwrap();
+    let transfer = load(&bytes);
+    let walk = reject_walk_cost(&transfer, MAX_REJECT_WALK_COST);
+    let costs = [
+        witness_check_cost(&transfer),
+        bundle_id_cost(&transfer),
+        walk,
+    ];
+    let model = rgb_lib_ns(bytes.len(), uncapped_costs(&transfer), costs);
+    assert!(model <= MAX_RGB_LIB_NS / 2, "{model}");
 }
 
-/// A listed merge of 1400 lines after 21,000 transfers, within the size cap
-/// and every other cap: unlisted it passes the time budget, and its walk on
-/// top refuses it before rgb-lib. After 23,900 it took rgb-lib 19.5 s.
+/// A forged burn of 65,535 rights passes every cap and its validation models at
+/// 16.3 s; with its inspection it is refused before rgb-lib.
 #[test]
-#[ignore = "builds an 11 MB history; run it in release on request"]
-fn a_listed_merge_at_the_size_and_walk_caps_is_refused_before_rgb_lib() {
-    let bytes = merged_chain(listed(), 1_400, 21_000);
+fn a_forged_burn_of_65535_rights_is_refused_before_rgb_lib() {
+    let bytes = rights_burn(issue(), u16::MAX);
+    let transfer = load(&bytes);
+    let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
+    assert!(costs[0] <= MAX_WITNESS_CHECK_COST && costs[1] <= MAX_BUNDLE_ID_COST);
+    let uncapped = uncapped_costs(&transfer);
+    assert!(validation_ns(bytes.len(), uncapped, costs) <= MAX_RGB_LIB_NS);
+    assert_capped(&bytes, "rgb-lib time");
+}
+
+/// A listed merge of 1400 lines after 11,500 transfers, within every cap: unlisted
+/// it passes the time budget, and its walk on top refuses it before rgb-lib.
+#[test]
+#[ignore = "builds a 6 MB history; run it in release on request"]
+fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
+    let bytes = merged_chain(listed(), 1_400, 11_500);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
     let walk = reject_walk_cost(&load(&bytes), MAX_REJECT_WALK_COST);
     assert!(walk <= MAX_REJECT_WALK_COST, "{walk}");
@@ -595,8 +677,8 @@ fn a_listed_merge_at_the_size_and_walk_caps_is_refused_before_rgb_lib() {
     assert_capped(&bytes, "rgb-lib time");
 }
 
-/// A chain of 13 propagates of 65535 rights: 11.9 MB, 852k opouts, within
-/// every cap, took rgb-lib 42.8 s. Its opouts refuse it before rgb-lib.
+/// 13 propagates of 65535 rights: 11.9 MB and 852k opouts within every cap. rgb-lib took
+/// 44 s to validate it and 51 s to inspect. Its opouts refuse it, and so does its file alone.
 #[test]
 #[ignore = "builds a 12 MB history; run it in release on request"]
 fn a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib() {
@@ -604,7 +686,8 @@ fn a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib() {
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
     let transfer = load(&bytes);
     let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
-    assert!(rgb_lib_ns(bytes.len(), [0; 2], costs) <= MAX_RGB_LIB_NS);
+    assert!(validation_ns(bytes.len(), [0; 3], costs) <= MAX_RGB_LIB_NS);
+    assert!(rgb_lib_ns(bytes.len(), [0; 3], [0; 3]) > MAX_RGB_LIB_NS);
     assert_capped(&bytes, "rgb-lib time");
 }
 
@@ -617,8 +700,8 @@ fn sizes(var: &str, default: &[u64]) -> Vec<u64> {
         .unwrap_or_else(|_| default.to_vec())
 }
 
-/// The genesis of a timing: `GENESIS_RIGHTS` mint rights (default 1), as
-/// the pinned asset has.
+/// The genesis of a timing: `GENESIS_RIGHTS` mint rights, 1 when unset; the
+/// pinned asset has 10.
 fn timed(listed: bool) -> History {
     let rights = std::env::var("GENESIS_RIGHTS").map_or(1, |r| r.trim().parse().unwrap());
     issue_of(rights, listed)
@@ -721,22 +804,34 @@ fn time_file_load(bytes: &[u8]) -> Duration {
     start.elapsed()
 }
 
-/// One line of a timing: `name`, the file, our pre-checks and the modeled
-/// rgb-lib time they hold to `MAX_RGB_LIB_NS`.
+/// rgb-lib's inspection of `bytes`, which validation runs once rgb-lib passed.
+fn time_inspection(bytes: &[u8]) -> Duration {
+    let start = Instant::now();
+    inspected(bytes).unwrap();
+    start.elapsed()
+}
+
+/// One line of a timing: `name`, the file, our pre-checks, the modeled
+/// rgb-lib time they hold to `MAX_RGB_LIB_NS` and the inspection's own time.
 fn describe(name: &str, bytes: &[u8]) -> String {
     let (costs, passed, pre, walk_took) = time_pre_checks(bytes);
     let [witness, ids, walk] = costs;
     let uncapped = uncapped_costs(&load(bytes));
-    let [opouts, genesis] = uncapped;
+    let [opouts, genesis, operations] = uncapped;
+    let len = bytes.len();
     format!(
-        "{name}: {} bytes, opouts {opouts}, genesis leaf hashes {genesis}, witness {witness}, ids \
-         {ids}, walk {walk}, model {} ms, gate {}, pre-checks {} ms (walk {} ms), file load {} ms",
-        bytes.len(),
-        rgb_lib_ns(bytes.len(), uncapped, costs) / 1_000_000,
+        "{name}: {len} bytes, opouts {opouts}, genesis leaf hashes {genesis}, operations \
+         {operations}, witness {witness}, ids {ids}, walk {walk}, model {} ms (validation {} ms, \
+         inspection {} ms), gate {}, pre-checks {} ms (walk {} ms), file load {} ms, inspection \
+         {} ms",
+        rgb_lib_ns(len, uncapped, costs) / 1_000_000,
+        validation_ns(len, uncapped, costs) / 1_000_000,
+        inspection_ns(len, uncapped, costs) / 1_000_000,
         if passed { "passes" } else { "refuses" },
         pre.as_millis(),
         walk_took.as_millis(),
-        time_file_load(bytes).as_millis()
+        time_file_load(bytes).as_millis(),
+        time_inspection(bytes).as_millis()
     )
 }
 
@@ -869,7 +964,7 @@ fn a_chain_from_a_255_right_genesis_is_modeled_at_or_above_its_time() {
     assert_reached_the_witnesses(err);
     let transfer = load(&bytes);
     let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
-    let model = rgb_lib_ns(bytes.len(), uncapped_costs(&transfer), costs);
+    let model = validation_ns(bytes.len(), uncapped_costs(&transfer), costs);
     println!(
         "model {} ms, rgb-lib {} ms",
         model / 1_000_000,
@@ -989,8 +1084,8 @@ fn honest_burn(mut history: History, n: u16, transfers: usize) -> Vec<u8> {
 }
 
 /// Honest burns over `MINTS` mints (default 1404, 2810), each line with
-/// `HISTORY` transfers (default 0, 3), validate end to end, listed and not.
-/// The asset has `GENESIS_RIGHTS` rights (default 1).
+/// `HISTORY` transfers (default 0, 3), validate end to end, listed and not,
+/// inspection included. The asset has `GENESIS_RIGHTS` rights: 10 for the pinned one.
 #[test]
 #[ignore = "release-mode timing; run on request"]
 fn times_honest_burns_over_many_mints() {

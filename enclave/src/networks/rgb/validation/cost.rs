@@ -3,8 +3,10 @@
 //! whole witness tx, anchor and input map of its bundle, hashes every opout
 //! into its operation id more than once, and the whole genesis once per
 //! operation. For a listed asset it walks the operations DAG once per origin.
-//! Each superlinear part has its cap, and all of them with the file, its opouts
-//! and the genesis hashes have one time budget.
+//! Once validation passed, its inspection reads the summary from the same file:
+//! it hashes each operation id three times more and each witness tx once per
+//! transition. Each superlinear part has its cap, and all of them with the
+//! file, its opouts, operations and genesis hashes have one time budget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -27,18 +29,25 @@ pub(super) const MAX_BUNDLE_ID_COST: u64 = 256 * 1_024;
 /// 2810 mints costs 14k (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_REJECT_WALK_COST: u64 = 64 * 1_024 * 1_024;
 
-/// A 12 MiB history of transfers takes rgb-lib 15 s alone, and the caps add up.
-/// So the modeled time of file, opouts, genesis hashes and costs is held to 18 s.
+/// A 12 MiB history of transfers takes rgb-lib 15 s to validate alone, and the
+/// caps add up. So the modeled time of validation and inspection is held to 18 s.
 pub(super) const MAX_RGB_LIB_NS: u64 = 18_000_000_000;
 
-/// rgb-lib's ns per file byte, per opout, per genesis leaf hashed and per step
-/// of each cost, rounded up from release timings on an M-series Mac (`tests/caps.rs`).
+/// rgb-lib validation's ns per file byte, per opout, per genesis leaf hashed and per
+/// step of each cost, rounded up from release timings on an M-series Mac (`tests/caps.rs`).
 const NS_PER_FILE_BYTE: u64 = 1_100;
 const NS_PER_OPOUT: u64 = 55_000;
 const NS_PER_GENESIS_LEAF: u64 = 15_000;
 const NS_PER_WITNESS_STEP: u64 = 14;
 const NS_PER_BUNDLE_ID_STEP: u64 = 4_500;
 const NS_PER_WALK_STEP: u64 = 75;
+
+/// rgb-lib inspection's ns per file byte, per opout, per operation and per
+/// witness step, rounded up the same way.
+const INSPECT_NS_PER_FILE_BYTE: u64 = 650;
+const INSPECT_NS_PER_OPOUT: u64 = 65_000;
+const INSPECT_NS_PER_OPERATION: u64 = 90_000;
+const INSPECT_NS_PER_WITNESS_STEP: u64 = 8;
 
 /// Refuses a consignment of `file_len` bytes whose witness checks, bundle ids,
 /// or reject walk when `listed`, pass a cap, or whose total time would.
@@ -86,28 +95,60 @@ fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 3]> {
     Ok([witness, ids, walk])
 }
 
-/// The opouts and genesis leaf hashes, which only the time budget bounds.
-pub(super) fn uncapped_costs(transfer: &Transfer) -> [u64; 2] {
-    [opout_count(transfer), genesis_hash_cost(transfer)]
+/// The opouts, genesis leaf hashes and operations, which only the time budget
+/// bounds.
+pub(super) fn uncapped_costs(transfer: &Transfer) -> [u64; 3] {
+    [
+        opout_count(transfer),
+        genesis_hash_cost(transfer),
+        operation_count(transfer),
+    ]
 }
 
-/// rgb-lib's modeled time on a file of `file_len` bytes with `costs`.
-pub(super) fn rgb_lib_ns(
+/// rgb-lib's modeled time on a file of `file_len` bytes with `costs`: its
+/// validation, then its inspection.
+pub(super) fn rgb_lib_ns(file_len: usize, uncapped: [u64; 3], capped: [u64; 3]) -> u64 {
+    validation_ns(file_len, uncapped, capped)
+        .saturating_add(inspection_ns(file_len, uncapped, capped))
+}
+
+/// rgb-lib validation's modeled time.
+pub(super) fn validation_ns(
     file_len: usize,
-    [opouts, genesis]: [u64; 2],
+    [opouts, genesis, _]: [u64; 3],
     [witness, ids, walk]: [u64; 3],
 ) -> u64 {
-    [
+    weighted_sum([
         (file_len as u64, NS_PER_FILE_BYTE),
         (opouts, NS_PER_OPOUT),
         (genesis, NS_PER_GENESIS_LEAF),
         (witness, NS_PER_WITNESS_STEP),
         (ids, NS_PER_BUNDLE_ID_STEP),
         (walk, NS_PER_WALK_STEP),
-    ]
-    .into_iter()
-    .map(|(units, ns)| units.saturating_mul(ns))
-    .fold(0, u64::saturating_add)
+    ])
+}
+
+/// rgb-lib inspection's modeled time. It hashes no genesis per operation and
+/// walks nothing; its bundle scans cost a few ns per bundle id step.
+pub(super) fn inspection_ns(
+    file_len: usize,
+    [opouts, _, operations]: [u64; 3],
+    [witness, _, _]: [u64; 3],
+) -> u64 {
+    weighted_sum([
+        (file_len as u64, INSPECT_NS_PER_FILE_BYTE),
+        (opouts, INSPECT_NS_PER_OPOUT),
+        (operations, INSPECT_NS_PER_OPERATION),
+        (witness, INSPECT_NS_PER_WITNESS_STEP),
+    ])
+}
+
+/// The sum of units times their ns, saturating.
+fn weighted_sum<const N: usize>(terms: [(u64, u64); N]) -> u64 {
+    terms
+        .into_iter()
+        .map(|(units, ns)| units.saturating_mul(ns))
+        .fold(0, u64::saturating_add)
 }
 
 /// Refuses a `cost` above `cap`; `what` costs it, `why` names the shape.
@@ -141,8 +182,12 @@ pub(super) fn genesis_hash_cost(transfer: &Transfer) -> u64 {
     let globals = genesis.globals.values().map(|g| g.len() as u64);
     let assigns = genesis.assignments.values().map(|a| u64::from(a.len_u16()));
     let leaves: u64 = globals.chain(assigns).sum();
-    let operations = known_transitions(transfer).count() as u64 + 1;
-    operations.saturating_mul(leaves)
+    operation_count(transfer).saturating_mul(leaves)
+}
+
+/// The genesis and every transition.
+pub(super) fn operation_count(transfer: &Transfer) -> u64 {
+    known_transitions(transfer).count() as u64 + 1
 }
 
 /// Per transition, rgb-consensus `validate_transition` clones, hashes and

@@ -241,17 +241,17 @@ mod source_burn {
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
     }
 
-    /// The bind reads the OpId that consensus validated, not the flat parser's
-    /// copy. A summary whose validated OpId differs from the parser's is
-    /// refused when the calldata cites the parser's value.
+    /// The bind reads the OpId that consensus validated, not the flat summary's
+    /// copy. A summary whose validated OpId differs from its own is refused
+    /// when the calldata cites the summary's value.
     #[test]
-    fn binds_to_the_validated_op_id_not_the_parser_copy() {
+    fn binds_to_the_validated_op_id_not_the_summary_copy() {
         let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
         let mut other = op_id_bytes();
         other[0] ^= 0x80;
         validated.last_transfer_op_id = Some(other);
 
-        // The calldata cites the flat parser's OpId.
+        // The calldata cites the flat summary's OpId.
         let cd = calldata_with("", op_id_bytes());
         let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
         assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");

@@ -13,7 +13,7 @@ flowchart TD
         p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>reject list EVM-only"]
         p1a --> p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
-        p1c -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file<br/>- within?"}
+        p1c -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
         p1k -->|no| p1kr[REFUSE - work cap]:::refuse
         p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{valid?}

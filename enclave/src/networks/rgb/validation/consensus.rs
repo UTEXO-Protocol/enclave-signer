@@ -12,8 +12,8 @@
 //!   [`AnchorBinder`] binds to it, with no RPC;
 //! - the reject list comes from the enclave's reader, after the asset bind.
 //!
-//! rgb-lib returns no amounts or burn facts, so the summary is read from the
-//! same bytes once they pass.
+//! Validation returns no amounts or burn facts, so rgb-lib's
+//! `inspect_consignment` reads the summary from the same file once it passed.
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
@@ -32,7 +32,7 @@ use super::indexer::RgbValidator;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
 use super::schema::{assert_bfa_genesis, reject_list};
 use super::scratch::with_scratch_file;
-use super::types::ValidatedConsignment;
+use super::types::{TransitionSummary, ValidatedConsignment};
 use super::witness::{OnChainResolver, WitnessCheck};
 use crate::error::{EnclaveError, Result};
 
@@ -68,8 +68,8 @@ impl RgbValidator {
                 .zip(lists.read)
                 .map(|(l, read)| ListResolver::new(l, read)),
         };
-        let validation = self.run_rgb_lib(consignment_bytes, &resolvers, list.as_ref())?;
-        check_validation(&validation, &transfer)?;
+        let (validation, transitions_by_witness) =
+            self.run_rgb_lib(consignment_bytes, &resolvers, list.as_ref(), &transfer)?;
         let mint_locks = match resolvers.anchors {
             Some(anchors) => anchors.into_locks()?,
             None => Vec::new(),
@@ -77,7 +77,7 @@ impl RgbValidator {
 
         let mint_anchors = mint_locks.len();
         let non_mined = non_mined_witnesses(&validation)?;
-        let validated = summarize(&transfer, consignment_bytes, mint_locks, non_mined)?;
+        let validated = summarize(&transfer, transitions_by_witness, mint_locks, non_mined)?;
         tracing::info!(
             contract_id = %validated.contract_id,
             chain_net = %validated.chain_net,
@@ -89,14 +89,15 @@ impl RgbValidator {
         Ok(validated)
     }
 
-    /// rgb-lib reads only a file. No `safe_height`: the witness resolver
-    /// already marks a witness mined only at the required depth.
+    /// rgb-lib reads only a file: it validates `transfer`, then reads its summary.
+    /// No `safe_height`: the witness resolver marks a witness mined only deep enough.
     fn run_rgb_lib(
         &self,
         consignment_bytes: &[u8],
         resolvers: &Resolvers<'_>,
         list: Option<&RejectListContract>,
-    ) -> Result<ConsignmentValidation> {
+        transfer: &Transfer,
+    ) -> Result<(ConsignmentValidation, Summary)> {
         let options = ValidationOptions {
             bitcoin_network: BitcoinNetwork::try_from(self.chain_net).map_err(|e| {
                 EnclaveError::CrossCheck(format!("unsupported RGB chain {}: {e}", self.chain_net))
@@ -115,7 +116,10 @@ impl RgbValidator {
                 None,
                 &options,
             );
-            resolver_failure_first(validation, resolvers.take_failure(), list)
+            let validation = resolver_failure_first(validation, resolvers.take_failure(), list)?;
+            check_validation(&validation, transfer)?;
+            // Only what validation passed; the gate counted the inspection too.
+            Ok((validation, extract_transition_summary(path)?))
         })
     }
 }
@@ -173,6 +177,9 @@ impl Resolvers<'_> {
     }
 }
 
+/// Every transition, grouped by the witness tx that commits it.
+type Summary = Vec<(bitcoin::Txid, Vec<TransitionSummary>)>;
+
 /// rgb-lib validated the transfer we parsed, and warned about nothing.
 pub(super) fn check_validation(
     validation: &ConsignmentValidation,
@@ -199,7 +206,7 @@ pub(super) fn check_validation(
 /// Reads what the rest of the enclave binds from the validated consignment.
 fn summarize(
     transfer: &Transfer,
-    consignment_bytes: &[u8],
+    transitions_by_witness: Summary,
     mint_locks: Vec<bfa::VerifiedLock>,
     non_mined_witness_txids: Vec<[u8; 32]>,
 ) -> Result<ValidatedConsignment> {
@@ -216,8 +223,6 @@ fn summarize(
         .into_iter()
         .collect();
 
-    // The flat parser runs only on bytes consensus accepted.
-    let transitions_by_witness = extract_transition_summary(consignment_bytes)?;
     let last = read_last_bundle(transfer)?;
     let last_transition = settling_summary(&transitions_by_witness, last.as_ref())?;
 
@@ -271,11 +276,11 @@ fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32
 
 /// The flat summary of the settling transition, with the burn facts of the
 /// validated one. The two walks must name the same transition: a mismatch is
-/// a parser change or a bug, so no bind may mix the fields of two transitions.
-fn settling_summary(
-    by_witness: &[(bitcoin::Txid, Vec<super::types::TransitionSummary>)],
+/// an rgb-lib change or a bug, so no bind may mix the fields of two transitions.
+pub(super) fn settling_summary(
+    by_witness: &[(bitcoin::Txid, Vec<TransitionSummary>)],
     last: Option<&LastBundle>,
-) -> Result<Option<super::types::TransitionSummary>> {
+) -> Result<Option<TransitionSummary>> {
     let Some(last) = last else {
         return Ok(None);
     };
@@ -289,18 +294,18 @@ fn settling_summary(
         })
         .ok_or_else(|| {
             EnclaveError::CrossCheck(format!(
-                "consignment settling transition 0x{} is missing from the flat parser's last \
-                 bundle - refusing to sign",
+                "consignment settling transition 0x{} is missing from the inspected last bundle \
+                 - refusing to sign",
                 hex::encode(last.settling.opid)
             ))
         })?;
     if flat.transition_type != last.settling.transition_type {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment settling transition type {} disagrees with the parsed type {}",
+            "consignment settling transition type {} disagrees with the inspected type {}",
             last.settling.transition_type, flat.transition_type
         )));
     }
-    Ok(Some(super::types::TransitionSummary {
+    Ok(Some(TransitionSummary {
         burned_asset_amount: last.settling.burned_asset,
         burn_reason: last.settling.burn_reason,
         ..flat.clone()

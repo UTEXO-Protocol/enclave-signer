@@ -1,11 +1,15 @@
 //! The flat transition summary over every consignment shape the generator
 //! makes. A reference reading of the rgbstd `Transfer` pins each field, and
-//! our parser (rgb-consignment) must match it.
+//! rgb-lib's inspection must match it, as must the parser the bridge reads
+//! burns with (consignment-utils).
 
 use amplify::Wrapper;
+use rgb_consignment::{ConsignmentInfo, SealInfo};
 use rgbstd::containers::Transfer;
-use rgbstd::{ChainNet, TypedAssigns};
+use rgbstd::contract::TransitionBuilder;
+use rgbstd::{ChainNet, ContractId, Operation, TypedAssigns};
 
+use super::super::scratch::with_scratch_file;
 use super::super::transition::output_seal;
 use super::*;
 
@@ -208,6 +212,71 @@ fn split_burn_after_refill() -> History {
     history
 }
 
+fn link_utxo() -> OutPoint {
+    gen::outpoint(0xAB, 0)
+}
+
+/// An asset whose genesis also holds a link right.
+fn issue_with_link() -> History {
+    History::issue(Issue {
+        link_right: Some(link_utxo()),
+        ..Issue::new(EVM_CHAIN_ID, BRIDGE, vec![right_utxo()])
+    })
+}
+
+/// A transition of `name` that spends the genesis link right.
+fn spending_the_link(history: &mut History, name: &'static str) -> TransitionBuilder {
+    let link = rgbstd::Opout::new(history.genesis.id(), schemata::OS_LINK, 0);
+    history
+        .transition(name)
+        .add_input(link, AllocatedState::Void)
+        .unwrap()
+}
+
+/// The link right moved on to vout 1 of its witness.
+fn link_right_transfer() -> History {
+    let mut history = issue_with_link();
+    let moved = spending_the_link(&mut history, "transferLink")
+        .add_rights("linkRight", GraphSeal::with_blinded_vout(1u32, 0x61))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    history.commit(vec![moved], vec![link_utxo()], vec![gen::dust(1)]);
+    history
+}
+
+/// The link right spent to name the contract this asset links to.
+fn link_to_another_contract() -> History {
+    let mut history = issue_with_link();
+    let link = spending_the_link(&mut history, "link")
+        .add_global_state("linkedToContract", ContractId::from([0x77; 32]))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    history.commit(vec![link], vec![link_utxo()], vec![gen::dust(2)]);
+    history
+}
+
+/// A mint, then a burn of its units that also spends the link right.
+fn burn_with_the_link_right() -> History {
+    let mut history = issue_with_link();
+    let right = history.genesis_right(0, right_utxo());
+    let units = history.mint_owned(right, MINTED, 90);
+    let burn = spending_the_link(&mut history, "burn")
+        .add_input(
+            units.opout,
+            AllocatedState::from(RevealedValue::from(MINTED)),
+        )
+        .unwrap()
+        .add_global_state("burnedAsset", rgbstd::Amount::from(MINTED))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let inputs = vec![units.outpoint, link_utxo()];
+    history.commit(vec![burn], inputs, vec![gen::dust(3)]);
+    history
+}
+
 /// Every shape, by name, as TFR bytes.
 fn generated_shapes() -> Vec<(String, Vec<u8>)> {
     let mut shapes: Vec<(String, Vec<u8>)> = vec![
@@ -243,6 +312,9 @@ fn generated_shapes() -> Vec<(String, Vec<u8>)> {
     push("wide rights propagate", wide_rights_propagate());
     push("split burn after a refill", split_burn_after_refill());
     push("listed asset burn", listed_burn().0);
+    push("link right transfer", link_right_transfer());
+    push("link to another contract", link_to_another_contract());
+    push("burn with the link right", burn_with_the_link_right());
     for chain_net in [
         ChainNet::BitcoinRegtest,
         ChainNet::BitcoinMainnet,
@@ -279,12 +351,78 @@ fn reference_of(bytes: &[u8]) -> Summary {
     reference_summary(&Transfer::load(std::io::Cursor::new(bytes)).unwrap())
 }
 
-/// The parser's summary equals the rgbstd reading on every shape.
+/// The summary validation reads: rgb-lib's inspection of the file.
+pub(super) fn inspected(bytes: &[u8]) -> Result<Summary> {
+    with_scratch_file(bytes, |path| {
+        extract_transition_summary(path.to_str().unwrap())
+    })
+}
+
+/// The bridge's reading of the same fields with consignment-utils.
+fn bridge_summary(bytes: &[u8]) -> Summary {
+    let ConsignmentInfo::Transfer(info) = rgb_consignment::parse(bytes).unwrap() else {
+        panic!("a transfer");
+    };
+    let display = |hex: &str| -> [u8; 32] { hex::decode(hex).unwrap().try_into().unwrap() };
+    info.witnesses
+        .iter()
+        .map(|w| {
+            let txid = w.txid.parse::<bitcoin::Txid>().unwrap();
+            let summaries = w
+                .transitions
+                .iter()
+                .map(|t| {
+                    let outputs: Vec<TransitionOutput> = t
+                        .fungible_allocations
+                        .iter()
+                        .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner())
+                        .flat_map(|a| a.entries.iter())
+                        .map(|e| TransitionOutput {
+                            assignment_type: schemata::OS_ASSET.to_inner(),
+                            amount: e.amount,
+                            seal: match &e.seal {
+                                SealInfo::Revealed { txid, vout } => OutputSeal::Revealed {
+                                    txid: txid.as_deref().map(display),
+                                    vout: *vout,
+                                },
+                                SealInfo::Confidential { secret_seal } => {
+                                    OutputSeal::Confidential {
+                                        secret_seal: secret_seal.clone(),
+                                    }
+                                }
+                            },
+                        })
+                        .collect();
+                    let total = outputs.iter().map(|o| o.amount).sum();
+                    TransitionSummary {
+                        op_id: t.op_id.clone(),
+                        transition_type: t.transition_type,
+                        total_output_amount: total,
+                        asset_output_amount: total,
+                        outputs,
+                        burned_asset_amount: None,
+                        burn_reason: None,
+                    }
+                })
+                .collect();
+            (txid, summaries)
+        })
+        .collect()
+}
+
+/// The inspected summary equals the rgbstd reading on every shape.
 #[test]
 fn the_summary_matches_the_rgbstd_reading_on_every_generated_shape() {
     for (name, bytes) in generated_shapes() {
-        let parsed = extract_transition_summary(&bytes).unwrap();
-        assert_eq!(parsed, reference_of(&bytes), "{name}");
+        assert_eq!(inspected(&bytes).unwrap(), reference_of(&bytes), "{name}");
+    }
+}
+
+/// The bridge reads the same summary from every shape as the enclave.
+#[test]
+fn the_bridge_parser_reads_the_same_summary_on_every_generated_shape() {
+    for (name, bytes) in generated_shapes() {
+        assert_eq!(bridge_summary(&bytes), inspected(&bytes).unwrap(), "{name}");
     }
 }
 
@@ -316,6 +454,8 @@ fn the_generated_shapes_cover_every_seal_kind_and_transition_type() {
         schemata::TS_BURN,
         schemata::TS_TRANSFER,
         schemata::TS_PROPAGATE,
+        schemata::TS_LINK,
+        schemata::TS_TRANSFER_LINK,
     ] {
         assert!(
             all.iter().any(|t| t.transition_type == ty.to_inner()),

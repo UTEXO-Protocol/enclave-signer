@@ -51,13 +51,13 @@ pub struct ValidatedConsignment {
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
-    /// NOT from the flat parser.
+    /// NOT from the flat summary.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` when the
     /// settling transition is the type this flow signs on a deposit, or a burn.
     /// `None` for a consignment with no bundles or another transition type.
-    /// Validation refuses a consignment where this OpId and the flat parser's
+    /// Validation refuses a consignment where this OpId and the flat summary's
     /// `last_transition.op_id` differ.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that are **not mined**, in **display (big-endian) byte
@@ -93,12 +93,12 @@ impl ValidatedConsignment {
     }
 }
 
-/// Flat summary of one RGB state transition, read by our parser
-/// (`rgb_consignment::TransitionInfo`). Local types keep it out of the public API.
+/// Flat summary of one RGB state transition, read by rgb-lib's inspection
+/// (`rgb_lib::no_wallet::RgbTransitionInfo`). Local types keep it out of the public API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransitionSummary {
     /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from
-    /// the parser. It must be hex, not baid64:
+    /// rgb-lib. It must be hex, not baid64:
     /// `validation::bfa::decode_opid` decodes it to 32 bytes.
     pub op_id: String,
     /// BFA transition-type id. Compare with `schemata::TS_TRANSFER`,

@@ -3961,19 +3961,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rgb-consignment"
-version = "0.1.0"
-source = "git+https://github.com/UTEXO-Protocol/consignment-utils.git?rev=5a4a3df812deb6b8c06028950132f8496d450f49#5a4a3df812deb6b8c06028950132f8496d450f49"
-dependencies = [
- "amplify",
- "rgb-ops",
- "rgb-strict-types",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "rgb-invoicing"
 version = "0.11.2-rc.1"
 source = "git+ssh://git@github.com/rgb-tools-devs/rgb-ops.git?rev=ed1d60df69f9e4db65640c0ac61a5779ba9c018c#ed1d60df69f9e4db65640c0ac61a5779ba9c018c"
@@ -5391,7 +5378,6 @@ dependencies = [
  "prost",
  "rgb-aluvm",
  "rgb-consensus",
- "rgb-consignment",
  "rgb-invoicing",
  "rgb-lib",
  "rgb-ops",

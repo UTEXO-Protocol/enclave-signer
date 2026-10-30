@@ -301,7 +301,7 @@ fn disclosed_group<'a>(
              ({psbt_txid}) - refusing to sign an unbound witness"
         )));
     }
-    // Canary: this tx must commit the settling transition. Else the flat parser
+    // Canary: this tx must commit the settling transition. Else the flat summary
     // and the rgbstd walk disagree, and the binds below check a different
     // operation.
     if !committed.iter().any(|t| t.op_id == last.op_id) {

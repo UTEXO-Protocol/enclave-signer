@@ -56,11 +56,9 @@ amplify = { version = "=4.8.1", optional = true }
 # RGB data (rgb-lib strips it from the PSBT). The version rgb-ops pins.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.5", optional = true }
 # Our private mirror of RGB-Tools bfa 1ae1c160 (tag v0.3.0-beta.7-upstream-dev-bfa.5),
-# without the wallet. The root [patch.crates-io] copies its protocol crate revs.
+# without the wallet. It validates a consignment and reads its flat summary
+# (`inspect_consignment`). The root [patch.crates-io] copies its protocol crate revs.
 rgb-lib = { git = "ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git", rev = "0a9d352f2690902df2b6fae9bca1a6c13c3354d4", default-features = false, optional = true }
-# The flat consignment summary, from our parser: rgb-lib's inspect_consignment
-# failed on every BFA at f3975623. It turns on rgb-ops `serde`.
-rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "5a4a3df812deb6b8c06028950132f8496d450f49", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -162,7 +160,7 @@ allow-seed-import = []
 # `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
 # Bitcoin. A malicious host can then fake a Bitcoin anchor.
 # `spv` is not in this list because that makes a feature cycle.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-consignment", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
 # When OFF, there is no SPV gate. `rgb-validation` is off too, so
@@ -223,3 +221,6 @@ strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.5" }
 # The generator commits its PSBTs with psbtu's `rgb_commit` and strips their
 # RGB keys, as rgb-lib does.
 rgb-psbt-utils = { version = "=0.11.2-rc.1", default-features = false }
+# The parser the bridge and fsn read burns with. The parity tests compare the
+# enclave's summary with it.
+rgb-consignment = { git = "https://github.com/UTEXO-Protocol/consignment-utils.git", rev = "5a4a3df812deb6b8c06028950132f8496d450f49", default-features = false }

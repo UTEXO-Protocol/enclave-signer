@@ -123,10 +123,12 @@ pub struct Issue {
     pub rights: Vec<OutPoint>,
     pub reject_list: Option<RejectListLocation>,
     pub chain_net: ChainNet,
+    /// The outpoint of the genesis link right, if the asset has one.
+    pub link_right: Option<OutPoint>,
 }
 
 impl Issue {
-    /// One mint right per outpoint, on regtest, without a reject list.
+    /// One mint right per outpoint, on regtest, without a reject list or link right.
     pub fn new(chain_id: u64, bridge: [u8; 20], rights: Vec<OutPoint>) -> Self {
         Self {
             chain_id,
@@ -134,6 +136,7 @@ impl Issue {
             rights,
             reject_list: None,
             chain_net: ChainNet::BitcoinRegtest,
+            link_right: None,
         }
     }
 }
@@ -203,6 +206,10 @@ impl History {
         for (i, right) in issue.rights.iter().enumerate() {
             let seal = GenesisSeal::with_blinding(right.txid, right.vout, 0x1000 + i as u64);
             builder = builder.add_rights("mintRight", seal).unwrap();
+        }
+        if let Some(link) = issue.link_right {
+            let seal = GenesisSeal::with_blinding(link.txid, link.vout, 0x1100);
+            builder = builder.add_rights("linkRight", seal).unwrap();
         }
         let genesis = builder
             .issue_contract_raw(ISSUED_AT)

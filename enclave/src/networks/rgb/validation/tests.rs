@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use amplify::Wrapper;
 use bitcoin::OutPoint;
-use rgb_consignment::{FungibleAllocation, FungibleEntry, SealInfo, TransitionInfo};
+use rgb_lib::no_wallet::{RgbOutputInfo, RgbTransitionInfo};
+use rgb_lib::{Assignment, TypeOfTransition};
 use rgbstd::containers::FileContent;
 use rgbstd::contract::AllocatedState;
 use rgbstd::vm::WitnessPos;
@@ -858,13 +859,20 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
 #[test]
 fn burn_facts_agree_with_the_bridge_parser() {
     let bytes = burn_bytes();
-    let last = validate(&bytes).unwrap().last_transition.unwrap();
+    let validated = validate(&bytes).unwrap();
+    let last = validated.last_transition.unwrap();
 
     let rgb_consignment::ConsignmentInfo::Transfer(info) = rgb_consignment::parse(&bytes).unwrap()
     else {
         panic!("a transfer");
     };
-    let burn = info.witnesses.last().unwrap().transitions.last().unwrap();
+    let anchor = info.witnesses.last().unwrap();
+    let burn = anchor.transitions.last().unwrap();
+    assert_eq!(burn.op_id, last.op_id);
+    assert_eq!(
+        Some(anchor.txid.parse::<bitcoin::Txid>().unwrap()),
+        validated.last_witness_txid
+    );
     let global = |ty: u16| {
         let entry = burn.globals.iter().find(|g| g.global_type == ty).unwrap();
         hex::decode(&entry.value_hex).unwrap()
@@ -1447,47 +1455,60 @@ fn settling_index_takes_the_burn_beside_a_transfer() {
     assert_eq!(settling_index::<u16>(&[], burn), None);
 }
 
-fn entry(amount: u64, seal: SealInfo) -> FungibleEntry {
-    FungibleEntry { amount, seal }
-}
+/// The display-order txid of the witness the inspected transitions sit in.
+const WITNESS: [u8; 32] = [0x77; 32];
 
-fn witness_seal(vout: u32) -> SealInfo {
-    SealInfo::Revealed { txid: None, vout }
-}
-
-fn allocation(assignment_type: u16, entries: Vec<FungibleEntry>) -> FungibleAllocation {
-    FungibleAllocation {
-        assignment_type,
-        total: entries.iter().map(|e| e.amount).fold(0, u64::wrapping_add),
-        entries,
+fn output(assignment: Assignment, txid: [u8; 32], vout: u32) -> RgbOutputInfo {
+    RgbOutputInfo {
+        txid: Some(hex::encode(txid)),
+        vout: Some(vout),
+        assignment,
+        is_concealed: false,
+        recipient_id: None,
+        is_ours: None,
+        is_terminal: Some(true),
     }
 }
 
-fn parsed_transition(
-    transition_type: u16,
-    fungible_allocations: Vec<FungibleAllocation>,
-) -> TransitionInfo {
-    TransitionInfo {
-        op_id: "mint-op".into(),
-        transition_type,
-        input_count: 1,
-        fungible_allocations,
-        metadata: vec![],
+fn concealed(amount: u64, recipient: Option<&str>) -> RgbOutputInfo {
+    RgbOutputInfo {
+        txid: None,
+        vout: None,
+        is_concealed: true,
+        recipient_id: recipient.map(str::to_string),
+        ..output(Assignment::Fungible(amount), WITNESS, 0)
+    }
+}
+
+fn inspected_transition(ty: TypeOfTransition, outputs: Vec<RgbOutputInfo>) -> RgbTransitionInfo {
+    RgbTransitionInfo {
+        r#type: ty,
+        opid: "mint-op".into(),
+        inputs: vec![],
+        outputs,
         globals: vec![],
+        metadata: vec![],
     }
 }
 
-/// Only `OS_ASSET` units are outputs: another fungible type is not.
+/// The summary of `outputs` in a transfer on regtest.
+fn summary_of(outputs: Vec<RgbOutputInfo>) -> Result<TransitionSummary> {
+    let t = inspected_transition(TypeOfTransition::Transfer, outputs);
+    transition_summary(&t, WITNESS, "bcrt:")
+}
+
+/// Only `OS_ASSET` units are outputs: the rights are not.
 #[test]
 fn transition_summary_lists_only_asset_units() {
-    let t = parsed_transition(
-        8013,
+    let t = inspected_transition(
+        TypeOfTransition::Mint,
         vec![
-            allocation(4000, vec![entry(500, witness_seal(2))]),
-            allocation(4999, vec![entry(1_000_000, witness_seal(3))]),
+            output(Assignment::Fungible(500), WITNESS, 2),
+            output(Assignment::MintRight, WITNESS, 3),
+            output(Assignment::InflationRight(1_000_000), WITNESS, 4),
         ],
     );
-    let summary = transition_summary(&t).unwrap();
+    let summary = transition_summary(&t, WITNESS, "bcrt:").unwrap();
     assert_eq!(
         summary.outputs,
         vec![TransitionOutput {
@@ -1504,59 +1525,50 @@ fn transition_summary_lists_only_asset_units() {
     assert_eq!(summary.op_id, "mint-op");
 }
 
-/// The sum is checked here: the parser's own `total` wraps.
+/// rgb-lib lists amounts per output: their sum is checked here.
 #[test]
 fn transition_summary_refuses_an_overflowing_total() {
-    let t = parsed_transition(
-        10000,
-        vec![allocation(
-            4000,
-            vec![entry(u64::MAX, witness_seal(1)), entry(1, witness_seal(2))],
-        )],
-    );
-    let err = transition_summary(&t).unwrap_err().to_string();
+    let err = summary_of(vec![
+        output(Assignment::Fungible(u64::MAX), WITNESS, 1),
+        output(Assignment::Fungible(1), WITNESS, 2),
+    ])
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("output amount overflow"), "{err}");
 }
 
-/// The schema id passes through, the propagate rgb-lib's inspection cannot read
-/// included.
+/// Each inspected type reads as the BFA schema id rgb-lib maps it from.
 #[test]
 fn transition_summary_keeps_the_schema_transition_type() {
     for ty in [
         schemata::TS_TRANSFER,
+        schemata::TS_INFLATION,
         schemata::TS_BURN,
+        schemata::TS_LINK,
         schemata::TS_MINT,
         schemata::TS_PROPAGATE,
+        schemata::TS_TRANSFER_INFLATION,
+        schemata::TS_TRANSFER_LINK,
     ] {
-        let summary = transition_summary(&parsed_transition(ty.to_inner(), vec![])).unwrap();
+        let inspected = TypeOfTransition::try_from(ty).unwrap();
+        let t = inspected_transition(inspected, vec![]);
+        let summary = transition_summary(&t, WITNESS, "bcrt:").unwrap();
         assert_eq!(summary.transition_type, ty.to_inner(), "{ty}");
     }
 }
 
-/// A revealed txid reads as display-order bytes; none means the witness tx.
+/// A seal on the witness reads as `None`, another txid as display-order
+/// bytes, a concealed seal without its chain prefix.
 #[test]
 fn transition_summary_reads_each_seal_kind() {
-    let explicit = "11".repeat(31) + "22";
-    let mut display = [0x11; 32];
-    display[31] = 0x22;
-    let seals = vec![
-        entry(1, witness_seal(1)),
-        entry(
-            2,
-            SealInfo::Revealed {
-                txid: Some(explicit),
-                vout: 3,
-            },
-        ),
-        entry(
-            3,
-            SealInfo::Confidential {
-                secret_seal: "utxob:abc".into(),
-            },
-        ),
-    ];
-    let summary =
-        transition_summary(&parsed_transition(10000, vec![allocation(4000, seals)])).unwrap();
+    let mut explicit = [0x11; 32];
+    explicit[31] = 0x22;
+    let summary = summary_of(vec![
+        output(Assignment::Fungible(1), WITNESS, 1),
+        output(Assignment::Fungible(2), explicit, 3),
+        concealed(3, Some("bcrt:utxob:abc")),
+    ])
+    .unwrap();
     let got: Vec<OutputSeal> = summary.outputs.into_iter().map(|o| o.seal).collect();
     assert_eq!(
         got,
@@ -1566,7 +1578,7 @@ fn transition_summary_reads_each_seal_kind() {
                 vout: 1
             },
             OutputSeal::Revealed {
-                txid: Some(display),
+                txid: Some(explicit),
                 vout: 3
             },
             OutputSeal::Confidential {
@@ -1577,14 +1589,32 @@ fn transition_summary_reads_each_seal_kind() {
 }
 
 #[test]
-fn transition_summary_refuses_a_seal_txid_that_is_not_32_bytes() {
-    let seal = SealInfo::Revealed {
+fn transition_summary_refuses_a_concealed_seal_of_another_chain_or_none() {
+    for recipient in [Some("bc:utxob:abc"), Some("utxob:abc"), None] {
+        let err = summary_of(vec![concealed(1, recipient)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("is not a bcrt: recipient"),
+            "{recipient:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn transition_summary_refuses_a_seal_it_cannot_read_exactly() {
+    let short = RgbOutputInfo {
         txid: Some("abcd".into()),
-        vout: 0,
+        ..output(Assignment::Fungible(1), WITNESS, 0)
     };
-    let t = parsed_transition(10000, vec![allocation(4000, vec![entry(1, seal)])]);
-    let err = transition_summary(&t).unwrap_err().to_string();
+    let err = summary_of(vec![short]).unwrap_err().to_string();
     assert!(err.contains("not 32 bytes"), "{err}");
+    let no_vout = RgbOutputInfo {
+        vout: None,
+        ..output(Assignment::Fungible(1), WITNESS, 0)
+    };
+    let err = summary_of(vec![no_vout]).unwrap_err().to_string();
+    assert!(err.contains("without a txid and vout"), "{err}");
 }
 
 #[test]
@@ -1592,16 +1622,14 @@ fn the_flat_summary_refuses_a_contract() {
     let contract = issue().as_transfer().into_contract();
     let mut bytes = Vec::new();
     contract.save(&mut bytes).unwrap();
-    let err = extract_transition_summary(&bytes).unwrap_err().to_string();
+    let err = summary::inspected(&bytes).unwrap_err().to_string();
     assert!(err.contains("expected Transfer"), "{err}");
 }
 
 #[test]
 fn the_flat_summary_refuses_random_bytes() {
-    let err = extract_transition_summary(&[0u8; 64])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("rgb-consignment parse failed"), "{err}");
+    let err = summary::inspected(&[0u8; 64]).unwrap_err().to_string();
+    assert!(err.contains("rgb-lib inspect_consignment failed"), "{err}");
 }
 
 /// A BFA `mint` is the only mint shape. It is a signing shape only in the
@@ -1781,6 +1809,53 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
             .to_string();
         assert!(err.contains("with the warning"), "{err}");
     }
+}
+
+/// The burn's last bundle as validation reads it, and rgb-lib's inspection.
+fn settling_readings() -> (LastBundle, Vec<(bitcoin::Txid, Vec<TransitionSummary>)>) {
+    let bytes = burn_bytes();
+    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes[..])).unwrap();
+    let last = read_last_bundle(&transfer).unwrap().unwrap();
+    (last, summary::inspected(&bytes).unwrap())
+}
+
+/// The settling transition must be in the last inspected bundle: else the
+/// binds would read the fields of another transition.
+#[test]
+fn a_settling_transition_missing_from_the_inspected_last_bundle_is_refused() {
+    use super::consensus::settling_summary;
+    let (last, inspected) = settling_readings();
+    let settling = settling_summary(&inspected, Some(&last)).unwrap().unwrap();
+    assert_eq!(settling.burned_asset_amount, Some(60_000));
+    let mut without_it = inspected.clone();
+    let (_, summaries) = without_it.last_mut().unwrap();
+    summaries.retain(|t| t.op_id != settling.op_id);
+    let mut under_another_witness = inspected.clone();
+    under_another_witness.last_mut().unwrap().0 = inspected[0].0;
+    for by_witness in [without_it, under_another_witness] {
+        let err = settling_summary(&by_witness, Some(&last))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("missing from the inspected last bundle"),
+            "{err}"
+        );
+    }
+}
+
+/// The inspection must read the settling transition as the type validation did.
+#[test]
+fn a_settling_transition_the_inspection_types_otherwise_is_refused() {
+    use super::consensus::settling_summary;
+    let (last, mut inspected) = settling_readings();
+    let (_, summaries) = inspected.last_mut().unwrap();
+    for t in summaries.iter_mut() {
+        t.transition_type = schemata::TS_TRANSFER.to_inner();
+    }
+    let err = settling_summary(&inspected, Some(&last))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disagrees with the inspected type"), "{err}");
 }
 
 /// The rgb-lib refusals no resolver of ours can raise still read as what they

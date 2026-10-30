@@ -151,7 +151,7 @@ pub fn validate_funds_out_source_burn_tx_id(
             "fundsOut requires a consignment with at least one transition".into(),
         ));
     }
-    // The OpId that RGB consensus validated, not the flat parser's copy.
+    // The OpId that RGB consensus validated, not the flat summary's copy.
     // Validation fills it for a burn and refuses a consignment where the two
     // walks disagree, so this bind cannot name one burn and pay another.
     let expected = validated.last_transfer_op_id.ok_or_else(|| {

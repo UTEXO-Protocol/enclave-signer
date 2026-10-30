@@ -154,11 +154,15 @@ the first step that reads the keys. It refuses an enclave without keys.
   the budget counts those leaves times the operations. If the genesis names a
   reject list, the enclave also
   counts rgb-lib's reject walk (B3.10), one walk per origin with no list entry
-  to cut it short, which must be at most `MAX_REJECT_WALK_COST`. The caps add
-  up on top of the file's own cost, so the modeled rgb-lib time of the file
-  bytes, its opouts, the genesis hashes and the three costs together must be at most
-  `MAX_RGB_LIB_NS` (18 s). The caps and the timings behind them are in
-  [Work caps](#10-work-caps).
+  to cut it short, which must be at most `MAX_REJECT_WALK_COST`. Once
+  validation passed, rgb-lib's inspection reads the summary from the same file
+  (B2.8): it reads the file again, hashes every operation id three times more
+  and each witness tx once per transition. The caps add up on top of the
+  file's own cost, so the modeled rgb-lib time of validation (the file bytes,
+  its opouts, the genesis hashes and the three costs) and of the inspection
+  (the file bytes, its opouts, its operations and the witness checks) together
+  must be at most `MAX_RGB_LIB_NS` (18 s). The caps and the timings behind
+  them are in [Work caps](#10-work-caps).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   consensus phase 1 over the whole history under the BFA rules from
   `rgb-schemas`, then phase 2 through three resolvers of the enclave: the
@@ -190,9 +194,14 @@ the first step that reads the keys. It refuses an enclave without keys.
   witness, so one tx also carries rgb-lib's split (or a plain transfer). Two
   burns there are refused. The amount comes from `burnedAsset`, never from
   the outputs or the host. The flat summary of each transition (the split's
-  outputs included) comes from our parser, `rgb-consignment`
-  (consignment-utils), as the bridge reads it. rgb-lib returns no amounts or
-  burn facts, so these are read from the same bytes once rgb-lib passed them.
+  outputs included) comes from rgb-lib's `inspect_consignment` over every
+  bundle (`BundleFilter::All`), run on the scratch file rgb-lib just validated,
+  which is removed after it. rgb-lib's validation returns no amounts or burn
+  facts, so these are read from the same bytes once it passed them. The burn
+  facts themselves (`burnedAsset`, `burnReason`, the OpId) come from the
+  validated rgbstd transition, and the summary must name the same settling
+  transition. The bridge reads the same fields with consignment-utils, and the
+  tests compare both readings on every generated shape.
 - **B2.9** The witness resolver resolves every witness, the burn included, on
   chain: the transaction comes from the consignment, its block from the
   request's Merkle proof for it. That proof must pass B3.4 and B3.5 first. A
@@ -409,25 +418,33 @@ they are the deposits behind this burn (B5.9). Each half needs the other.
 The request deadline is 30 s (`TOTAL_REQUEST_TIMEOUT`), and a worker is not
 interrupted when it passes. So before rgb-lib runs, the burn signer bounds the
 three parts of rgb-lib's work that grow faster than the file (B2.2,
-`validation/cost.rs`), and then their sum with the file, its opouts and the
-genesis hashes:
+`validation/cost.rs`), and then their sum with the file, its opouts, its
+operations and the genesis hashes, for rgb-lib's validation and for its
+inspection, which reads the summary from the same file once validation
+passed (B2.8):
 
 | Cap | Cost of a consignment | Value | Honest burn of 2810 mints |
 |-----|-----------------------|-------|---------------------------|
 | `MAX_WITNESS_CHECK_COST` | per bundle: transitions x (tx bytes + Tapret partner leaf bytes) + seals x tx inputs | 134,217,728 (128 Mi) | 8,539,773 |
 | `MAX_BUNDLE_ID_COST` | per bundle: (transitions + 1) x input map entries | 262,144 (256 Ki) | 11,242 |
 | `MAX_REJECT_WALK_COST` | listed asset only: the steps of rgb-lib's walk from each origin | 67,108,864 (64 Mi) | 14,050 |
-| `MAX_RGB_LIB_NS` | modeled rgb-lib time: 1100 ns per file byte, 55,000 per opout (each one the genesis or a transition creates, and each one a transition spends), 15,000 per genesis leaf hash (each genesis global and assignment, once for the genesis and once per transition), 14 per witness step, 4500 per bundle id step, 75 per walk step | 18,000,000,000 (18 s) | 3.3 s (2.4 s measured) on a genesis of 1 mint right; 14.1 s on one of 255 (12.0 s measured) |
+| `MAX_RGB_LIB_NS` | modeled rgb-lib time. Validation: 1100 ns per file byte, 55,000 per opout (each one the genesis or a transition creates, and each one a transition spends), 15,000 per genesis leaf hash (each genesis global and assignment, once for the genesis and once per transition), 14 per witness step, 4500 per bundle id step, 75 per walk step. Inspection: 650 per file byte, 65,000 per opout, 90,000 per operation (the genesis and each transition), 8 per witness step | 18,000,000,000 (18 s) | 6.1 s on the pinned genesis of 10 mint rights, listed: 3.7 s of validation and 2.4 s of inspection (5.0 to 6.3 s measured end to end) |
 
 Each cap alone holds its part to a few seconds, but the parts add up with
 the file's own cost: a listed merge of 1400 lines after 23,900 transfers is
 12.1 MB, within the size cap and each cap (its walk at 66.98M), and took
-rgb-lib 19.5 to 19.8 s, 15.0 to 15.2 s of it without the walk. So the gate
-also models rgb-lib's whole time, from release timings rounded up, and
-refuses past 18 s. A file at the 12 MiB default alone is modeled at 13.8 s,
-which leaves an honest history its few costs; on a genesis of 1 mint right the
-2810-mint burn's opouts, genesis hashes and costs model at 1.1 s. On a genesis
-of 255 its genesis hashes alone model at 11.0 s (below).
+rgb-lib 19.5 to 19.9 s to validate, 15.0 to 15.2 s of it without the walk. So
+the gate also models rgb-lib's whole time, from release timings rounded up,
+and refuses past 18 s. A file alone models at 1.75 us per byte (1.1 to
+validate, 0.65 to inspect), so the budget holds a file to about 10.3 MB,
+below the 12 MiB default, whatever it holds. On the pinned genesis of 10 mint
+rights the 2810-mint burn's opouts, operations, genesis hashes and costs model
+at 2.5 s besides its file. On a genesis of 255 its genesis hashes alone model
+at 11.0 s (below). The budget is rgb-lib's alone: the burn signer's own parse,
+gate and reads of the validated transfer run outside it, in the rest of the
+30 s. End to end, the 2810-mint burn with 3 transfers a line took 1.1 to 1.6 s
+more than rgb-lib's validation and inspection timed alone (2.3 s at a load of
+5.6).
 
 The opout term closes a gap the per-byte model had before the rgb-lib
 1ae1c160 move. rgb-consensus merklizes every opout an operation creates or
@@ -438,8 +455,8 @@ rgb-lib's time). So an opout costs rgb-lib about 35 to 55 us beyond its
 bytes, however few they are: a right of a propagate is 14 bytes. A forged
 chain of 13 propagates of 65,535 rights each is 11.9 MB with 852k opouts,
 within the size cap and every cap, and the old model (1300 ns per byte) let it
-through at 15.5 s. It took rgb-lib 42.8 s, and our pre-checks 4.0 s more. The
-model counts it at 60 s now and refuses it.
+through at 15.5 s. It took rgb-lib 42.8 to 44.3 s, and its inspection 51.3 s
+more. The model counts 123.1 s now and refuses it.
 
 The genesis term counts the work that grows with the pinned asset's genesis.
 For every operation it validates, rgb-consensus `validate_state` takes the
@@ -448,29 +465,61 @@ and assignment again (`logic.rs`, unchanged since 4a614b72). A BFA genesis has
 5 globals (up to 8 with details, a reject list and the contract it is linked
 from) and one assignment per mint right (one more with a link right).
 Chains of 2000 one-right propagates, nothing mined, took rgb-lib 0.94 to
-0.95 s from a genesis of 1 right, 2.66 to 2.67 s from 64 and 7.89 to 7.92 s
-from 255: 13.6 to 13.7 us per genesis leaf and operation, linear in both. The model counts 15,000 ns and puts the 255-right chain at
-9.1 s. On a genesis of 1 right this adds about 0.1 ms an operation, part of
-which the per-byte and per-opout rates already held. On a genesis of 255
-rights an operation costs rgb-lib 3.6 ms and the model 3.9 ms, so the 18 s
-budget admits about 4,000 operations, whatever their size: a chain of 5000
-one-right propagates (2.3 MB) is refused (`tests/caps.rs`). Before this term
-the gate let through about 27,000 such propagates under the size cap, which
-would have taken rgb-lib about 110 s. Rights a propagate or a refill makes
-later do not widen the genesis.
+0.97 s from a genesis of 1 right, 2.68 to 2.73 s from 64 and 7.83 to 7.86 s
+from 255: 13.6 to 13.7 us per genesis leaf and operation, linear in both. The
+model counts 15,000 ns and puts the 255-right chain's validation at 9.1 s. On
+the pinned genesis of 10 rights (15 leaves, 16 with a reject list) this adds
+about 0.23 ms an operation, part of which the per-byte and per-opout rates
+already held. On a genesis of 255 rights an operation costs rgb-lib 3.6 ms and
+the model 3.9 ms, so the 18 s budget admits about 4,000 operations, whatever
+their size: a chain of 5000 one-right propagates (2.3 MB) is refused
+(`tests/caps.rs`). Before this term the gate let through about 27,000 such
+propagates under the size cap, which would have taken rgb-lib about 110 s.
+Rights a propagate or a refill makes later do not widen the genesis. The
+inspection hashes the genesis a fixed few times per call, not per operation.
 
 rgb-consensus af0b751d ("restructure dag for performance") builds the
 operations DAG with one edge per spent opout and no scan of the edges already
 there, so the DAG has no cap of its own any more (it had `MAX_OPOUTS_DAG_COST`,
 the sum of k^2 over transitions of k inputs, at 8192^2). A forged burn of n
-rights now costs rgb-lib the same per byte at every n (1.15 to 1.21 us per byte
+rights now costs rgb-lib the same per byte at every n (1.16 to 1.24 us per byte
 at 4096, 16,384 and 65,535 rights), and the 65,535-right burn that took 17.7 s
-on rgb-consensus 4a614b72 takes 8.9 to 9.1 s; it passes the gate at 16.3 s.
+on rgb-consensus 4a614b72 takes 9.0 to 9.3 s to validate and 9.7 to 9.8 s to
+inspect. Its validation models at 16.3 s, so it passed the gate before the
+inspection counted; with it, it models at 29.9 s and is refused before rgb-lib.
+
+The inspection term. rgb-lib's validation returns no amounts, so the summary
+is read by its `inspect_consignment` over every bundle, on the scratch file
+validation just read (B2.8). No cap bounds it, and it costs about as much per
+opout as validation: it strict-decodes the file again through an unbuffered
+`File` (about 0.46 us per byte of `read` calls), computes each transition id
+three times more (about 15 us per opout and pass at opt-level z), serializes
+every bundle again for the consignment id and formats every output. Two of its
+steps are superlinear, and the witness cap holds both: it hashes the bundle's
+witness tx once per transition (about 6.4 ns per byte) and scans its inputs
+once per input (about 2 ns a step), the two terms of the witness cost, so
+under 1.1 s at the cap. A third, its scan of the bundle's transitions once per
+input, is at most the bundle id cost at a few ns a step, as long as no bundle
+lists a transition twice. A bundle may (its transitions are a list, and every
+copy passes the inspection's commitment check), but rgb-lib refuses the copy:
+its inputs are already spent by the first ("references previous state"), and
+the inspection runs only on what validation passed (`tests/caps.rs`). Measured
+on the shapes below, the inspection takes 0.46 to 0.5 us per byte, about 46 to
+54 us per right and 60 us per asset output beyond the bytes, and up to about
+130 us more per operation of one small transition per bundle. The model's
+rates (650 ns per byte, 65 us per opout, 90 us per operation, 8 ns per witness
+step) hold every shape measured at a load under 4 by 8 percent or more: the
+honest 2810-mint burn closest (2.2 s at a load of 4 against 2.4 s), then the
+fan-outs (11 to 13 percent). On the burn path every witness of what the
+inspection reads is mined. In the swap flow (`allow_unbroadcast_last` in
+`networks/rgb/route.rs`) the last bundle need not be, so a host can forge one
+within the caps at no chain cost; the gate counts its inspection the same way.
 
 The honest burn here is 2810 mints, each on its own right, all burned by one
-transition (2810 allocations in one tx), the widest the bridge expects; the
-timings below also run it with 3 transfers a line. rgb-lib's own burn (a
-split, then the burn of the split's output) has one origin.
+transition (2810 allocations in one tx), the widest the bridge expects, on the
+pinned asset's genesis of 10 mint rights; the timings below also run it with
+3 transfers a line. rgb-lib's own burn (a split, then the burn of the split's
+output) has one origin.
 
 rgb-consensus checks each transition against its bundle: it clones, hashes
 and compares the whole witness tx and the anchor's Tapret partner leaf (a
@@ -486,78 +535,83 @@ long each line's history; only origins that share a long history cost much.
 Measured in release mode on an Apple M1 Pro (`cargo test --release -p
 utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib
 caps -- --ignored --nocapture --test-threads=1`, `validation/tests/caps.rs`),
-on rgb-lib 1ae1c160, 2026-10-30, with the machine otherwise idle (load under
-5), one to six runs each. The enclave's CPU may be slower; the times scale
-with it. Each history is on a genesis of 1 mint right (`GENESIS_RIGHTS`
-unset) unless its row names more, and each model includes the genesis hashes.
-The end-to-end times include our read of the last bundle, 3 to 20 ms on these
-burns.
+on rgb-lib 1ae1c160, 2026-10-30, at a load under 4 unless a cell names more,
+two runs each; a row marked "one run" ran once. The enclave's CPU may be
+slower; the times scale with it. The honest burns are on the pinned genesis of
+10 mint rights (`GENESIS_RIGHTS=10`) unless their row names more; each forged
+history is on a genesis of 1 right (`GENESIS_RIGHTS` unset) unless its row
+names more. Each model is validation plus inspection, the genesis hashes
+included, and the honest rows give the listed asset's. The end-to-end times
+include our parse of the transfer and the gate (0.1 to 0.5 s), the inspection
+and our read of the last bundle, 3 to 21 ms on these burns.
 
-| Consignment | Bytes | Opouts | Cost against its cap | rgb-lib time (of which its file load) |
-|-------------|-------|--------|----------------------|----------------------------------------|
-| Honest burn, 1404 mints | 1.0 MB | 5.6k | witness 2.3M, walk 7k, model 1.6 s | 1.2 s (0.4 s); 1.5 to 1.7 s end to end |
-| Honest burn, 1404 mints, 3 transfers a line | 3.0 MB | 14k | witness 2.8M, walk 15k, model 4.8 s | 3.6 to 3.8 s (1.3 s); 4.6 to 4.9 s end to end |
-| Honest burn, 2810 mints | 2.0 MB | 11k | witness 8.5M, walk 14k, model 3.3 s | 2.3 to 2.4 s (0.9 s); 3.0 to 3.4 s end to end |
-| Honest burn, 2810 mints, 3 transfers a line | 6.0 MB | 28k | witness 9.6M, walk 31k, model 9.6 s | 7.2 to 8.0 s (2.5 s); 9.2 to 10.1 s end to end |
-| Honest burn, 1404 mints, genesis of 255 rights | 1.0 MB | 5.9k | model 7.0 s | 6.0 to 6.2 s (0.4 s); 6.3 to 6.5 s end to end |
-| Honest burn, 1404 mints, 3 transfers a line, genesis of 255 rights (refused) | 3.0 MB | 14k | model 26.2 s | 22.6 to 22.7 s (1.3 s) |
-| Honest burn, 2810 mints, genesis of 255 rights | 2.1 MB | 11k | model 14.1 s | 11.8 to 12.0 s (0.9 s); 12.5 to 12.7 s end to end, 25.0 s before our read of the last bundle hashed the genesis once |
-| Honest burn, 2810 mints, 3 transfers a line, genesis of 255 rights (refused) | 6.0 MB | 28k | model 52.4 s | 45.6 to 45.9 s (2.5 s) |
-| Forged chain of 2000 one-right propagates | 0.9 MB | 4k | model 1.4 s | 0.94 to 0.95 s (0.4 s) |
-| Forged chain of 2000 one-right propagates, genesis of 64 rights | 0.9 MB | 4k | model 3.3 s | 2.66 to 2.67 s (0.4 s) |
-| Forged chain of 2000 one-right propagates, genesis of 255 rights | 0.9 MB | 4k | model 9.1 s | 7.89 to 7.92 s (0.4 s) |
-| Forged burn of 4096 rights | 0.5 MB | 8k | ids 8k | 0.6 s (0.2 s) |
-| Forged burn of 16,384 rights | 1.9 MB | 33k | ids 33k | 2.2 to 2.3 s (0.9 s) |
-| Forged burn of 65,535 rights | 7.7 MB | 131k | ids 131k, model 16.3 s | 8.9 to 9.1 s (3.5 s) |
-| Forged fan-out to 16,384 outputs | 0.4 MB | 16k | model 1.3 s | 1.2 s (0.1 s) |
-| Forged fan-out to 65,535 outputs | 1.5 MB | 66k | model 5.3 s | 4.6 to 4.7 s (0.5 s) |
-| Forged chain of 13 propagates of 65,535 rights (refused) | 11.9 MB | 852k | model 60.0 s | 42.8 s (5.5 s), plus 4.0 s of our pre-checks |
-| Forged chain of 217 propagates of 4096 rights (refused) | 12.5 MB | 889k | model 62.7 s | 44.9 s (6.0 s), plus 4.2 s of our pre-checks |
-| Forged file at the size cap: 150 burns of 700 rights, genesis of 150 rights (refused) | 12.5 MB | 210k | model 27.0 s | 16.1 to 16.3 s (5.7 to 5.8 s) |
-| Forged file at the size cap: 13 burns of 8192 rights, genesis of 13 rights (refused) | 12.6 MB | 213k | model 26.5 s | 14.6 to 14.9 s (5.8 to 6.0 s) |
-| Forged bundle of 64 burns, tx of 49,900 dummy inputs | 2.4 MB | 130 | witness 134.1M (at the cap) | 1.9 to 2.0 s (0.9 to 1.2 s) |
-| Forged bundle of 256 burns, tx of 12,480 dummy inputs (refused) | 0.7 MB | 514 | witness 134.2M (126 over the cap) | 1.6 s (0.2 s) |
-| Forged bundle of 64 burns, Tapret partner leaf of 2.09 MB | 2.1 MB | 130 | witness 133.8M (at the cap) | 2.2 to 2.4 s (0.9 s) |
-| Forged bundle of 256 burns, Tapret partner leaf of 523 KB | 0.6 MB | 514 | witness 133.9M (at the cap) | 1.9 s (0.3 s) |
-| Forged bundle of 511 burns, Tapret partner leaf of 262 KB | 0.4 MB | 1k | witness 133.9M (at the cap), ids 261,634 | 2.5 to 2.6 s (0.2 s) |
-| Forged burn of 8192 rights, tx of 16,000 dummy inputs | 1.7 MB | 16k | witness 131.7M (seal scans) | 1.5 s (0.7 to 0.8 s) |
-| Forged bundle of 512 burns (one over the bundle id cap) | 0.1 MB | 1k | ids 262,658 | 1.2 s (0.05 s) |
-| Forged bundle of 2048 burns (refused) | 0.4 MB | 4k | ids 4.2M | 15.5 to 15.6 s (0.2 s) |
-| Forged fan-out of 65,535 after 500 transfers, listed | 1.7 MB | 67k | walk 65.9M | 9.4 to 9.6 s, of which the walk 4.5 to 4.6 s |
-| Forged merge of 4096 lines after 8180 transfers, listed | 6.6 MB | 33k | walk 67.1M (at the cap), model 15.8 s | 12.7 to 12.9 s, of which the walk 4.8 to 5.0 s (one run of nine: 16.2 s) |
-| Forged merge of 1400 lines after 23,900 transfers, listed (refused) | 12.1 MB | 53k | walk 67.0M, model 24.3 s | 19.5 to 19.8 s, of which the walk 4.5 s (5.2 s) |
-| Forged merge of 600 lines after 23,900 transfers, listed (refused since the genesis term) | 11.6 MB | 50k | walk 28.7M, model 20.5 s | 16.6 to 16.8 s, of which the walk 2.1 to 2.3 s (4.9 to 5.0 s) |
+| Consignment | Bytes | Opouts | Cost against its cap, model (validation + inspection) | rgb-lib validation (of which its file load) | rgb-lib inspection |
+|-------------|-------|--------|--------------------------------------------------------|---------------------------------------------|--------------------|
+| Honest burn, 1404 mints | 1.0 MB | 5.6k | witness 2.3M, walk 7k, model 3.0 s (1.8 + 1.2) | 1.37 to 1.45 s (0.4 s) | 0.94 to 0.98 s; 2.5 to 2.6 s end to end |
+| Honest burn, 1404 mints, 3 transfers a line | 3.0 MB | 14k | witness 2.8M, walk 15k, model 8.9 s (5.5 + 3.4) | 4.5 to 4.7 s (1.3 s) | 2.8 to 2.9 s; 7.9 to 8.3 s end to end |
+| Honest burn, 2810 mints | 2.0 MB | 11k | witness 8.5M, walk 14k, model 6.1 s (3.7 + 2.4) | 2.7 to 2.8 s (0.9 to 1.1 s), one run 3.5 s | 1.9 to 2.2 s; 5.0 to 6.3 s end to end |
+| Honest burn, 2810 mints, 3 transfers a line | 6.0 MB | 28k | witness 9.6M, walk 31k, model 17.9 s (11.1 + 6.8) | 8.8 to 9.2 s (2.5 to 2.6 s) | 5.7 to 5.8 s; 15.9 to 16.2 s end to end |
+| Honest burn, 2810 mints, genesis of 255 rights (one run) | 2.1 MB | 11k | model 16.5 s (14.1 + 2.4) | 12.5 to 13.4 s (0.9 s) | 2.0 s (3.7 s at a load of 11); 15.3 to 16.2 s end to end |
+| Forged chain of 2000 one-right propagates | 0.9 MB | 4k | model 2.5 s (1.4 + 1.0) | 0.94 to 0.97 s (0.4 s) | 0.87 to 0.89 s |
+| Forged chain of 2000 one-right propagates, genesis of 64 rights | 0.9 MB | 4k | model 4.4 s (3.3 + 1.0) | 2.68 to 2.73 s (0.4 s) | 0.88 to 0.90 s |
+| Forged chain of 2000 one-right propagates, genesis of 255 rights | 0.9 MB | 4k | model 10.1 s (9.1 + 1.1) | 7.83 to 7.86 s (0.4 s) | 0.88 to 0.89 s |
+| Forged burn of 4096 rights | 0.5 MB | 8k | ids 8k, model 1.9 s (1.0 + 0.8) | 0.59 to 0.60 s (0.2 s) | 0.60 to 0.61 s |
+| Forged burn of 16,384 rights | 1.9 MB | 33k | ids 33k, model 7.5 s (4.1 + 3.4) | 2.28 to 2.34 s (0.9 s) | 2.42 to 2.44 s (2.9 s at a load of 4.5) |
+| Forged burn of 65,535 rights (refused since the inspection counts) | 7.7 MB | 131k | ids 131k, model 29.9 s (16.3 + 13.5) | 9.0 to 9.3 s (3.5 s) | 9.7 to 9.8 s (14.2 s at a load of 4.5) |
+| Forged fan-out to 16,384 outputs | 0.4 MB | 16k | model 2.6 s (1.3 + 1.3) | 1.18 to 1.22 s (0.1 s) | 1.15 to 1.16 s |
+| Forged fan-out to 65,535 outputs | 1.5 MB | 66k | model 10.5 s (5.3 + 5.2) | 4.69 to 4.70 s (0.5 s) | 4.65 to 4.67 s |
+| Forged chain of 13 propagates of 65,535 rights (refused, one run) | 11.9 MB | 852k | model 123.1 s (60.0 + 63.1) | 44.3 s (5.5 s), plus 4.0 s of our pre-checks | 51.3 s |
+| Forged chain of 217 propagates of 4096 rights (refused) | 12.5 MB | 889k | model 128.7 s (62.7 + 66.0) | 44.9 to 46.1 s (6.0 to 7.2 s), plus 4.2 s of our pre-checks | 54.3 s (one run) |
+| Forged file at the size cap: 150 burns of 700 rights, genesis of 150 rights (refused) | 12.5 MB | 210k | model 48.8 s (27.0 + 21.8) | 16.1 to 16.5 s (5.7 to 5.8 s) | 16.8 s (one run, at a load of 5) |
+| Forged file at the size cap: 13 burns of 8192 rights, genesis of 13 rights (refused) | 12.6 MB | 213k | model 48.5 s (26.5 + 22.0) | 14.6 to 14.9 s (5.8 to 6.0 s) | 15.9 s (one run, at a load of 5) |
+| Forged bundle of 64 burns, tx of 49,900 dummy inputs | 2.4 MB | 130 | witness 134.1M (at the cap), model 7.2 s (4.6 + 2.7) | 1.94 to 1.95 s (0.9 s) | 1.96 to 1.97 s |
+| Forged bundle of 256 burns, tx of 12,480 dummy inputs (refused) | 0.7 MB | 514 | witness 134.2M (126 over the cap) | 1.58 to 1.59 s (0.2 s) | 1.16 s |
+| Forged bundle of 64 burns, Tapret partner leaf of 2.09 MB | 2.1 MB | 130 | witness 133.8M (at the cap), model 6.7 s (4.2 + 2.5) | 2.26 to 2.27 s (0.9 s) | 1.00 to 1.03 s |
+| Forged bundle of 256 burns, Tapret partner leaf of 523 KB | 0.6 MB | 514 | witness 133.9M (at the cap), model 4.4 s (2.9 + 1.5) | 1.89 s (0.3 s) | 0.31 s |
+| Forged bundle of 511 burns, Tapret partner leaf of 262 KB | 0.4 MB | 1k | witness 133.9M (at the cap), ids 261,634, model 5.0 s (3.6 + 1.4) | 2.57 to 2.58 s (0.2 s) | 0.26 s |
+| Forged burn of 8192 rights, tx of 16,000 dummy inputs | 1.7 MB | 16k | witness 131.7M (seal scans), model 8.0 s (4.7 + 3.2) | 1.54 s (0.7 s) | 1.82 s |
+| Forged bundle of 512 burns (one over the bundle id cap) | 0.1 MB | 1k | ids 262,658 | 1.16 s (0.05 s) | 0.14 s |
+| Forged bundle of 2048 burns (refused) | 0.4 MB | 4k | ids 4.2M | 15.5 to 15.8 s (0.2 s) | 0.55 to 0.56 s |
+| Forged fan-out of 65,535 after 500 transfers, listed | 1.7 MB | 67k | walk 65.9M, model 16.1 s (10.6 + 5.5) | 9.5 to 9.6 s, of which the walk 4.4 to 4.7 s | 4.86 s |
+| Forged merge of 4096 lines after 8180 transfers, listed (refused since the inspection counts) | 6.6 MB | 33k | walk 67.1M (at the cap), model 23.5 s (15.8 + 7.7) | 12.8 to 12.9 s, of which the walk 4.8 s | 6.29 to 6.32 s |
+| Forged merge of 1400 lines after 23,900 transfers, listed (refused) | 12.1 MB | 53k | walk 67.0M, model 38.0 s (24.3 + 13.7) | 19.5 to 19.9 s, of which the walk 4.5 to 4.6 s (5.2 s) | 11.6 s (14.0 s at a 5-minute load of 10) |
+| Forged merge of 600 lines after 23,900 transfers, listed (refused) | 11.6 MB | 50k | walk 28.7M, model 33.5 s (20.5 + 13.0) | 16.6 to 16.8 s, of which the walk 2.1 to 2.3 s (4.9 to 5.0 s) | 11.0 s |
 
 The forged burns are schema-valid, with no witness mined, so rgb-lib refuses
-them only after phase 1 ran in full. The walk runs only once every witness
-passed, so a forged walk needs mined transactions. One rgb-lib walk step
-takes 45 to 73 ns, so the walk cap holds a walk under about 5 s; the
-enclave's own count of it took 0.2 s at the cap. One bundle id entry takes
-about 3.5 to 4 us, one byte of a forged tx or partner leaf about 7 to 11 ns,
-one seal scan about 2 ns. Every measured shape stays within its model, on
-the genesis of its row, but one run: one of nine runs of the 4096-line merge
-took 16.2 s against its model of 15.8 s, while the machine was still settling
-from other load. The other eight took 12.7 to 12.9 s, three of them re-run at
-a load under 3.1. So the rates' margin is about the spread between runs, and
-a busy or slower host runs past the model by that much.
+them only after phase 1 ran in full. The inspection runs only once validation
+passed, so it is timed on the forged files directly; it checks no witness. The
+walk runs only once every witness passed, so a forged walk needs mined
+transactions. One rgb-lib walk step takes 45 to 73 ns, so the walk cap holds a
+walk under about 5 s; the enclave's own count of it took 0.2 s at the cap. One
+bundle id entry takes about 3.5 to 4 us, one byte of a forged tx or partner
+leaf about 7 to 11 ns, one seal scan about 2 ns. Every shape measured at a
+load under 4 stays within its model, on the genesis of its row. The validation rates' margin is
+about the spread between runs: one of nine runs of the 4096-line merge, while
+the machine was still settling from other load, took 16.2 s against the 15.8 s
+its validation models. A busy or slower host runs past the model by that much:
+at a load of 4.5 the 65,535-right burn's inspection took 14.2 s, 5 percent
+over its 13.5 s.
 
 What the caps do not bound: rgb-lib's work that is linear in the file, its
-opouts and its operations, about 0.8 to 1.1 us per byte (strict-decoding the
-file through an unbuffered `File` takes about 0.45 us per byte of `read`
-calls), about 35 to 55 us per opout beyond its bytes, and 13.7 us per genesis
-leaf for each operation. That part is bounded by `MAX_CONSIGNMENT_BYTES`
-(12 MiB by default) and by `MAX_RGB_LIB_NS`, which holds the modeled sum of
-file, opouts, genesis hashes and capped parts to 18 s: at most about 2.5 s of
-witness checks, 1.2 s of bundle ids and 5 s of walk on top of the file. It is
-what dominates an honest burn with a long history: on a genesis of 1 right the
-2810-mint burn with 3 transfers a line takes 9.2 to 10.1 s end to end. The
-model's rates are rounded up from the shapes above, 5 to 12 percent above the
-costliest per opout (fan-outs) and per byte (merges of transfers and honest
-burns), and 9 percent above the genesis chains; a shape that costs rgb-lib
-more per byte, per opout or per genesis leaf than those measured would run
-past it by that much. The genesis rate double counts on a genesis of 1 right:
-its 6 or 7 leaves an operation were already in the measured shapes the other
-rates come from.
+opouts and its operations. Validation takes about 0.8 to 1.1 us per byte
+(strict-decoding the file through an unbuffered `File` takes about 0.45 us per
+byte of `read` calls), about 35 to 55 us per opout beyond its bytes, and
+13.7 us per genesis leaf for each operation; the inspection about 0.5 us per
+byte, 46 to 60 us per opout and up to 130 us per operation. That part is
+bounded by `MAX_CONSIGNMENT_BYTES` (12 MiB by default) and by
+`MAX_RGB_LIB_NS`, which holds the modeled sum of file, opouts, operations,
+genesis hashes and capped parts to 18 s: at most about 2.5 s of witness checks
+in validation and 1.1 s in the inspection, 1.2 s of bundle ids and 5 s of walk
+on top of the file. It is what dominates an honest burn with a long history:
+on the pinned genesis the 2810-mint burn with 3 transfers a line takes 15.9 to
+16.2 s end to end. The validation rates are rounded up from the shapes above,
+5 to 12 percent above the costliest per opout (fan-outs) and per byte (merges
+of transfers and honest burns), and 9 percent above the genesis chains; the
+inspection rates 8 percent above the costliest, the honest 2810-mint burn. A
+shape that costs rgb-lib more per byte, per opout, per operation or per genesis
+leaf than those measured would run past it by that much. The genesis rate
+double counts on a small genesis: its leaves an operation were already in the
+measured shapes the other rates come from.
 
 What the caps can refuse in an honest history. The walk cap (listed asset
 only) can refuse an exact-amount burn: with no change there is no split, so
@@ -567,11 +621,13 @@ costs 2kD + k^2 + 4k steps: k = 3478 (2 allocations per input) and D = 8000
 cost 67.8M. At one allocation per input (k <= 1739) it needs D of at least
 18.4k, more witnesses than `MAX_MERKLE_PROOFS`. A burn with change has one
 origin, the split's output, which walks its ancestry once. The time budget
-refuses an honest history past about 18 s of modeled work. On a genesis of 1
-right that is near the size cap: a history of transfers alone is about 230
-bytes per opout, so it reaches 18 s at about 11.5 MB, just under the 12 MiB
-default. On a genesis of 255 rights each operation adds 3.9 ms, so the budget
-refuses a history past about 4,000 operations, whatever its size. The
-2810-mint burn passes there at 14.1 s, 11.8 s of it besides its file.
-1404 or 2810 mints with 3 transfers a line are refused; they would take
-rgb-lib 22.7 and 45.9 s, the second past the 30 s deadline.
+refuses an honest history past about 18 s of modeled work, validation and
+inspection together. On the pinned genesis of 10 rights a history of
+transfers alone is about 230 bytes per opout, and each opout models at about
+0.7 ms, so it reaches 18 s at about 6 MB: the 2810-mint burn with 3 transfers
+a line (6.0 MB) passes at 17.9 s, and a longer history is refused. On a
+genesis of 255 rights each operation adds 3.9 ms, so the budget refuses a
+history past about 4,000 operations, whatever its size. The 2810-mint burn
+passes there at 16.5 s, 14.1 s of it validation. 1404 or 2810 mints with 3
+transfers a line are refused there; they would take rgb-lib 22.7 and 45.9 s
+to validate, the second past the 30 s deadline.
