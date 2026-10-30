@@ -1,10 +1,9 @@
 //! Plain data extracted from a validated consignment.
 //!
-//! All of it passed rgbstd validation. The rest of the enclave reads these
+//! All of it passed rgb-lib validation. The rest of the enclave reads these
 //! shapes and does not parse RGB again.
 
 use super::bfa::VerifiedLock;
-use super::reject_list::RejectScope;
 
 /// Data extracted from a successfully validated RGB consignment.
 #[derive(Debug, Clone, Default)]
@@ -78,8 +77,6 @@ pub struct ValidatedConsignment {
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
     pub mint_locks: Vec<VerifiedLock>,
-    /// What the reject-list check walks. `None` for an asset without a list.
-    pub reject_scope: Option<RejectScope>,
 }
 
 impl ValidatedConsignment {

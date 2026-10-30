@@ -1,23 +1,13 @@
-//! The schema rules a consignment is validated under, and the genesis gate.
+//! The genesis gate, and the reject list the genesis names.
 //!
-//! The rules come from the `rgb-schemas` crate, never from the consignment.
-//! A V1 consignment carries no schema, types or scripts, so nothing in it can
-//! redefine the meaning of its bytes.
+//! rgb-lib validates under the BFA rules of the `rgb-schemas` crate, never
+//! under rules from the consignment. A V1 consignment carries no schema, types
+//! or scripts, so nothing in it can redefine the meaning of its bytes.
 
-use std::sync::LazyLock;
-
-use rgbstd::contract::IssuerWrapper;
-use rgbstd::validation::SchemaRules;
 use rgbstd::Genesis;
-use schemata::BridgedFungibleAsset;
 
 use super::reject_list::RejectListContract;
 use crate::error::{EnclaveError, Result};
-
-/// The BFA rules, built once. Boot forces them, so an inconsistent built-in
-/// schema stops the launch, not a request.
-pub(crate) static BFA_RULES: LazyLock<SchemaRules> =
-    LazyLock::new(BridgedFungibleAsset::schema_rules);
 
 /// BFA is the only accepted schema. The exact asset is pinned separately
 /// (`contract_id` -> `RGB_ASSET_ID`).

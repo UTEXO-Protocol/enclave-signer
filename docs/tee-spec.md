@@ -385,7 +385,7 @@ The response returns the calldata unchanged.
 `abi.encode(bytes32[] operationIds)`, the deposits the release settles. Each
 id hashes its deposit's netAmount, so no amounts are cited. For each mint in
 the burn's ancestry, the enclave derives the `operationId` of the one deposit
-that can back it (burn-flow B2.3). It reads nothing from the chain. It then
+that can back it (burn-flow B2.4). It reads nothing from the chain. It then
 requires the cited ids to equal those derived locks exactly: set equality, canonical encoding,
 strictly ascending `operationId` order (so no duplicates), and at least one
 verified lock. `burnId` does not hash `settlementData`, so these rules decide
@@ -739,13 +739,25 @@ The consignment pipeline runs on the burn path and in the swap flow; the mint
 signer runs none (Sec 7.2). Cheap checks first: non-empty payload within
 `MAX_CONSIGNMENT_BYTES`, proof count and bytes within `MAX_MERKLE_PROOFS` /
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
-(integrity only), asset id declared; then full `rgb-ops` 0.11.2 validation of
-a V1 transfer file. A V1 consignment carries no schema, types or scripts: the
-BFA rules come from `rgb-schemas`, and any other schema id, or a reject list
-that is not an EVM contract, is refused. Validation runs in two phases. Phase 1
-(`validate_deterministic`) checks everything that depends on the consignment
-only. It leaves open each witness and each BFA mint anchor (the mint's OpId,
-`issuedSupply` and `beforeBlock`). Phase 2 resolves every witness on chain:
+(integrity only), asset id declared; then full validation of a V1 transfer
+file by one call of rgb-lib's `validate_consignment_with_resolver` (rgb-ops
+0.11.2). A V1 consignment carries no schema, types or scripts: the BFA rules
+come from `rgb-schemas`, and any other schema id, or a reject list that is
+not an EVM contract, is refused before rgb-lib runs. So is a transfer whose
+work in rgb-lib would pass one of four caps (`validation/cost.rs`, burn-flow
+B2.2 and section 10): its opouts DAG and the checks of each transition
+against its bundle's whole witness tx, anchor and input map, which rgb-lib
+runs for every BFA before it checks any witness, and, for a listed asset, its
+reject walk; or whose modeled rgb-lib time, file bytes and those four costs
+together, would pass 18 s (`MAX_RGB_LIB_NS`). The rest of rgb-lib's work is
+linear in the file (Known limits). The
+asset bind also runs before rgb-lib, so a foreign genesis never reaches it
+and only the pinned asset's list is ever read. rgb-lib runs two phases. Phase 1 (`validate_deterministic`) checks everything that depends on
+the consignment only. It leaves open each witness and each BFA mint anchor
+(the mint's OpId, `issuedSupply` and `beforeBlock`). Phase 2 asks the
+enclave's three resolvers, and no `safe_height` is passed: every refusal of
+the resolvers is a refusal of the request, and so is any rgb-lib warning. It
+resolves every witness on chain:
 the transaction comes from the consignment, its status from a source the
 enclave trusts, and it must be mined at least `SPV_MIN_CONFIRMATIONS` deep.
 On the burn path that source is the request's Merkle proofs, verified against
@@ -761,8 +773,9 @@ witness, in the swap flow; the PSBT bind then requires it to be the PSBT's
 own transaction. A proof the consignment carries is never used: the
 resolver offers no block headers, so rgb-ops asks the resolver instead. Phase 2 also
 confirms each anchor only
-against a lock bound to its exact `(OpId, amount)`, through the checked
-resolver that compares the bound chain id with the genesis `bridgeLocation`.
+against a lock bound to its exact `(OpId, amount)`, through rgb-lib's checked
+resolver, which compares the bound chain id with the genesis `bridgeLocation`;
+rgb-lib makes no RPC for an anchor.
 The binder first requires `bridgeLocation` to name the pinned
 `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`, and binds every anchor to the deposit id
 it derives. The mint signer binds its mint the same way from the fascia (M6):
@@ -773,7 +786,11 @@ big-endian `uint256`) and the derived `BridgeFundsIn`, with
 and covered by the `EVM_FINALITY_TAG` head, with the canonical block hash at
 its height. The enclave never calls
 `Consignment::validate` or the unchecked `PendingValidation::resolve_anchor`;
-`clippy.toml` refuses both. The validated contract id must then equal the
+`clippy.toml` refuses both. Last, for an asset whose genesis names a reject
+list, rgb-lib checks the inputs and outputs of every terminal operation
+against the list the enclave's reader returns (Known limits). rgb-lib returns
+no amounts or burn facts, so the enclave reads them from the same bytes once
+they pass. The validated contract id must then equal the
 declared asset id and the pinned `RGB_ASSET_ID` (on the `fundsOut` path this
 last leg applies once the bridge is configured; on the PSBT paths it is
 unconditional). The RGB-source path then checks the SPV proofs again, with
@@ -994,8 +1011,11 @@ Known limits. Read them before deployment.
 - **Reject list.** A genesis may name an `IRgbRejectList` contract on
   `EVM_CHAIN_ID`. The burn signer reads it over the pinned EVM RPC, with rgb-lib
   98a8af6 rules: a pending reject counts at once, an allow only once
-  `finalized`. A release refuses when the burn's inputs descend from a
-  rejected opout. The mint signer reads no list: the connector's rgb-lib
+  `finalized`. rgb-lib then refuses a release when an input or output of a
+  terminal operation descends from a rejected opout: the burn's inputs, and
+  also a companion transfer in the burn's bundle, so a rejected line there
+  refuses a burn whose own units are clean. The change on rgb-lib's split is
+  not checked: the burn spends the split. The mint signer reads no list: the connector's rgb-lib
   checks it before `mint_begin`. Any read failure
   refuses, so the burn signer now depends on the EVM RPC for such an asset.
   The reads are `eth_call` answers over TLS. The enclave has no EVM light
@@ -1009,6 +1029,18 @@ Known limits. Read them before deployment.
   entries (about 25 RPC calls). The read also stops before the 30 s request
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
+- **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
+  work that grow faster than the file (burn-flow section 10). The rest, about
+  1.3 s per MB on an M-series Mac, is bounded by `MAX_CONSIGNMENT_BYTES`:
+  a forged file near the 12 MiB default that passes every cap takes about
+  16 s there, and an honest 2810-mint burn with 3 transfers a line about
+  10 s. The caps' parts add up with it, so `MAX_RGB_LIB_NS` holds the modeled
+  sum to 18 s there (17.1 s measured at its edge), against a 30 s deadline
+  that does not stop a worker (4 workers). The model's rates are rounded-up
+  Mac timings, not a proof: a shape slower per byte would run past it. The
+  enclave CPU may be slower. rgb-lib reads a consignment only from a path, so
+  the request bytes are written to a scratch file in the enclave's temp dir,
+  which is RAM, up to `MAX_CONSIGNMENT_BYTES` per request, and removed after.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
   after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response.

@@ -119,17 +119,20 @@ N signatures.
 
 Before it signs, the burn signer:
 
-1. Validates the RGB consignment (full RGB consensus over the whole history).
-   Each mint in the history is confirmed only against the deposit it
-   derives. The last transition must be a BFA `burn`.
+1. Validates the RGB consignment with one call of rgb-lib's
+   `validate_consignment_with_resolver` (full RGB consensus over the whole
+   history), after the asset bind and caps on the work it would do. Each
+   mint in the history is confirmed only against the deposit it derives. The
+   last transition must be a BFA `burn`. If the genesis names a reject list
+   (an `IRgbRejectList` contract on `EVM_CHAIN_ID`), the enclave reads it
+   over the pinned EVM RPC when rgb-lib asks during this validation, before
+   step 2, and rgb-lib refuses a burn whose terminal operations (the burn,
+   and any companion transfer of its bundle) descend from a rejected output.
+   The mint signer reads no list. Any read failure refuses, so burn hosts
+   need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 2. Checks that each Bitcoin transaction of the consignment is in its own
    header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
    The chain tip must be less than 2 hours old.
-   If the genesis names a reject list (an `IRgbRejectList` contract on
-   `EVM_CHAIN_ID`), it reads the list over the pinned EVM RPC and refuses a
-   burn whose inputs descend from a rejected output. The mint signer checks
-   the mint's inputs and outputs the same way. Any read failure refuses, so
-   burn hosts need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
 4. Checks `sourceChainId`, `sourceAddress` and `burnId`.

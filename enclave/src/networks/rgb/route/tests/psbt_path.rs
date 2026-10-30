@@ -710,8 +710,8 @@ fn refuses_two_propagates_in_the_signed_bundle() {
 
 // ===== parity with the consensus path, while both compile =====
 
-/// Consensus over `bytes` with every witness mined. Returns what it derived
-/// and the mint anchors it asked to bind.
+/// rgb-lib's `validate_consignment_with_resolver` over `bytes`, with every
+/// witness mined. Returns what it derived and the mint anchors it asked to bind.
 fn consensus(
     bytes: &[u8],
 ) -> (
@@ -757,8 +757,12 @@ fn consensus(
                 .collect(),
         })
     };
+    let lists = validation::ListAccess {
+        bind_asset: &|_: &str| Ok(()),
+        read: None,
+    };
     let validated = validator
-        .validate_consignment(bytes, Some(&bind), &witnesses)
+        .validate_consignment(bytes, Some(&bind), &witnesses, &lists)
         .unwrap();
     (validated, anchors.into_inner())
 }

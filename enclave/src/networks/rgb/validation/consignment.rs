@@ -50,7 +50,6 @@ pub(super) struct SettlingFacts {
     pub burned_asset: Option<u64>,
     pub burn_reason: Option<[u8; 32]>,
     pub mint_rights: Vec<OutputSeal>,
-    pub inputs: Vec<Opout>,
 }
 
 /// Reads the last bundle. `None` for a transfer with no bundles.
@@ -101,7 +100,6 @@ fn settling_facts(known: &KnownTransition) -> Result<SettlingFacts> {
         burned_asset,
         burn_reason,
         mint_rights,
-        inputs: transition.inputs.iter().copied().collect(),
     })
 }
 

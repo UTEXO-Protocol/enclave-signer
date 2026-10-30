@@ -279,7 +279,7 @@ it is signed.
   OpId and exactly one `BridgeFundsIn` event, both from `FUNDS_IN_CONTRACT`.
   The `operationId` and the net amount must be the deposit id the mint
   derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
-  burn-flow B2.3). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
+  burn-flow B2.4). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
   RPC. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`). The receipt
   block must be before `beforeBlock`, with no lower bound (rgb-lib
   `mint_lock_status`: receivers refuse a lock at or after it), at or below

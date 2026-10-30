@@ -11,11 +11,13 @@ flowchart TD
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
         p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>reject list EVM-only"]
-        p1a --> p1b["phase 1: validate_deterministic(BFA rules)<br/>mint anchors bound to derived locks<br/>(pinned bridge, no RPC); phase 2 confirms each<br/>against its own lock; each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS), else refuse"]
+        p1a --> p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
+        p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
+        p1c -->|yes| p1k{"work caps (cost.rs): opouts DAG,<br/>witness checks, bundle ids,<br/>reject walk if listed, and their<br/>modeled time with the file - within?"}
+        p1k -->|no| p1kr[REFUSE - work cap]:::refuse
+        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
-        p1q -->|yes| p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
-        p1c -->|no| p1cr[REFUSE — asset mismatch]:::refuse
     end
     start --> p1w
 
@@ -28,7 +30,7 @@ flowchart TD
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
-    p1c -->|yes| p3stale
+    p1q -->|yes| p3stale
 
     subgraph P2 ["P3 — EVM destination (validate_destination)"]
         p2len{"calldata ≥ 4 bytes AND ≤ 96 KiB?"}
@@ -95,9 +97,9 @@ flowchart TD
   burn can use it: its record binds `dstEid` and `destinationChainId`.
 - The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
-  the asset bind. It derives the lock of each mint in the history inside RGB
-  validation (P1), and never confirms an anchor or calls plain `validate()`
-  without a bound lock.
+  the asset bind. It derives the lock of each mint in the history inside
+  rgb-lib's validation (P1), and never confirms an anchor or calls plain
+  `validate()` without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
   release builds. A release bridge build refuses to boot, and `SetEndpoints`
   refuses, without a valid `Production` policy.

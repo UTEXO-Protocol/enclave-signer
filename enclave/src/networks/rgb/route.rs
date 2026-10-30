@@ -1,7 +1,7 @@
 //! Route-level RGB validation: the entry points that `networks::route` calls.
 //!
 //! This layer only selects the check for this build. The checks are in the
-//! sibling modules: consignment parsing and rgbstd validation in
+//! sibling modules: consignment parsing and rgb-lib validation in
 //! [`super::validation`], PSBT anchoring in [`super::psbt_validation`], the
 //! mint signer's PSBT core in [`super::psbt_commit`] and
 //! [`super::parent_proof`], and per-flow rules in [`super::flow`].
@@ -196,7 +196,7 @@ fn validated_destination_consignment(
     validation::assert_consignment_size(consignment, ctx.bridge_config, "send-RGB")?;
     // Integrity, not authorization. The listener controls both `consignment`
     // and `consignment_hash`, so a match only proves the wire copy is intact.
-    // Authorization comes from rgbstd validation and the witness-txid bind.
+    // Authorization comes from rgb-lib validation and the witness-txid bind.
     if consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),
@@ -227,25 +227,27 @@ fn validated_destination_consignment(
         allow_unbroadcast_last: true,
         infer_spent_ancestors: true,
     };
-    // The binder derives the lock of each mint in the history.
-    let validated = validator.validate_consignment(consignment, ctx.anchor_binder, &witnesses)?;
-
     // Fail closed on a missing pin, unlike the source direction. An enclave
     // with rgb-validation but no config must not trust the listener.
     // Same as the EVM funds-out `!is_configured()` gate.
-    validation::assert_asset_binding(
-        &validated.contract_id,
-        asset_id,
-        ctx.bridge_config,
-        validation::AssetBindMode::Destination,
-    )?;
-    // After the bind, so only the pinned asset's list is read. The recipient
-    // refuses a transfer whose outputs the list reaches.
-    validation::assert_not_rejected(
-        &validated,
-        ctx.reject_list_reader,
-        validation::RejectCheck::SettlingInputsAndOutputs,
-    )?;
+    let bind_asset = |contract_id: &str| {
+        validation::assert_asset_binding(
+            contract_id,
+            asset_id,
+            ctx.bridge_config,
+            validation::AssetBindMode::Destination,
+        )
+    };
+    // rgb-lib reads the list only after the bind, and refuses a transfer
+    // whose inputs or outputs the list reaches, as the recipient does.
+    let lists = validation::ListAccess {
+        bind_asset: &bind_asset,
+        read: ctx.reject_list_reader,
+    };
+    // The binder derives the lock of each mint in the history.
+    let validated =
+        validator.validate_consignment(consignment, ctx.anchor_binder, &witnesses, &lists)?;
+    bind_asset(&validated.contract_id)?;
     Ok(validated)
 }
 

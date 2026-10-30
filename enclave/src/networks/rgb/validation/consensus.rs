@@ -1,30 +1,37 @@
-//! Runs RGB consensus over a consignment.
+//! Runs RGB consensus over a consignment: one call of rgb-lib's
+//! `validate_consignment_with_resolver`.
 //!
 //! This is the only place where raw consignment bytes become a
-//! [`super::types::ValidatedConsignment`]. Validation has two phases:
+//! [`super::types::ValidatedConsignment`]. rgb-lib runs both phases and the
+//! reject-list check, and asks three resolvers for what is outside the file:
 //!
-//! 1. `validate_deterministic`: everything that depends on the consignment
-//!    only. It leaves open the witnesses and the BFA mint anchors.
-//! 2. The anchors resolve only against the locks an [`AnchorBinder`] bound to
-//!    them. Each witness takes its tx from the consignment and its on-chain
-//!    status from a [`WitnessCheck`]: it must be mined, at
-//!    `SPV_MIN_CONFIRMATIONS` depth. Then `finalize`.
+//! - each witness takes its tx from the consignment and its on-chain status
+//!   from a [`WitnessCheck`]: it must be mined, at `SPV_MIN_CONFIRMATIONS`
+//!   depth from the enclave's tip;
+//! - each BFA mint anchor is confirmed only against the lock an
+//!   [`AnchorBinder`] binds to it, with no RPC;
+//! - the reject list comes from the enclave's reader, after the asset bind.
 //!
-//! The enclave never calls `Consignment::validate`, and never confirms an
-//! anchor without a bound lock (`PendingValidation::resolve_anchor`).
+//! rgb-lib returns no amounts or burn facts, so the summary is read from the
+//! same bytes once they pass.
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-use rgbstd::containers::{ConsignmentExt, FileContent, PendingConsignment, Transfer};
-use rgbstd::validation::{Status, ValidationConfig, ValidationError};
-use rgbstd::vm::WitnessOrd;
+use rgb_lib::no_wallet::{
+    validate_consignment_with_resolver, ConsignmentValidation, ResolveRejectList,
+    ValidationOptions, WitnessValidationStatus,
+};
+use rgb_lib::BitcoinNetwork;
+use rgbstd::containers::{ConsignmentExt, FileContent, ResolveAnchor, Transfer};
 
-use super::bfa::{self, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor};
+use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
+use super::cost::assert_bounded_for_rgb_lib;
 use super::indexer::RgbValidator;
-use super::reject_list::{RejectListContract, RejectScope};
-use super::schema::{assert_bfa_genesis, reject_list, BFA_RULES};
+use super::reject_list::{ListAccess, ListResolver, RejectListContract};
+use super::schema::{assert_bfa_genesis, reject_list};
+use super::scratch::with_scratch_file;
 use super::types::ValidatedConsignment;
 use super::witness::{OnChainResolver, WitnessCheck};
 use crate::error::{EnclaveError, Result};
@@ -35,150 +42,166 @@ impl RgbValidator {
     /// `bind` binds every mint anchor to a lock. Builds without
     /// `bfa-validation` pass `None`, and then a consignment with any mint in
     /// its history is refused. `witnesses` says which witness txs are mined.
+    /// `lists` binds the asset before rgb-lib runs, and reads its reject list.
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
         bind: Option<AnchorBinder<'_>>,
         witnesses: &WitnessCheck<'_>,
+        lists: &ListAccess<'_>,
     ) -> Result<ValidatedConsignment> {
         #[cfg(test)]
         if let Some(validated) = &self.canned {
             return Ok(validated.clone());
         }
         let start = std::time::Instant::now();
-        let bytes_len = consignment_bytes.len();
-        tracing::info!(bytes_len, "starting RGB consignment validation");
+        tracing::info!(
+            bytes_len = consignment_bytes.len(),
+            "starting RGB consignment validation"
+        );
 
-        // TFR only: a validated copy (VTF), a contract (CON) and V0 fail here.
-        let transfer = Transfer::load(Cursor::new(consignment_bytes)).map_err(|e| {
-            tracing::warn!(bytes_len, "consignment deserialization failed: {e}");
-            EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
-        })?;
-        assert_bfa_genesis(&transfer.genesis)?;
-        let list = reject_list(&transfer.genesis)?;
-        let contract_id = transfer.contract_id().to_string();
+        let (transfer, list) = load_bounded(consignment_bytes, lists)?;
+        let resolvers = Resolvers {
+            witnesses: OnChainResolver::new(&transfer, self.chain_net, witnesses),
+            anchors: bind.map(|bind| BindingResolver::new(&transfer, bind)),
+            list: list
+                .zip(lists.read)
+                .map(|(l, read)| ListResolver::new(l, read)),
+        };
+        let validation = self.run_rgb_lib(consignment_bytes, &resolvers, list.as_ref())?;
+        check_validation(&validation, &transfer)?;
+        let mint_locks = match resolvers.anchors {
+            Some(anchors) => anchors.into_locks()?,
+            None => Vec::new(),
+        };
 
-        let mut pending = self.phase_one(transfer, &contract_id)?;
-        let anchors = open_anchors(&mut pending);
-        let mint_locks = resolve_mint_anchors(&mut pending, &anchors, bind)?;
-        self.resolve_witnesses(&mut pending, &contract_id, witnesses)?;
-        let valid = pending.finalize();
-        for warning in &valid.validation_status().warnings {
-            tracing::warn!(%contract_id, "RGB validation warning: {warning}");
-        }
-
-        let non_mined = non_mined_witnesses(valid.validation_status());
-        let scope = list.map(|list| reject_scope(list, &valid)).transpose()?;
-        let validated = summarize(
-            &valid,
-            consignment_bytes,
-            contract_id,
-            mint_locks,
-            non_mined,
-            scope,
-        )?;
+        let mint_anchors = mint_locks.len();
+        let non_mined = non_mined_witnesses(&validation)?;
+        let validated = summarize(&transfer, consignment_bytes, mint_locks, non_mined)?;
         tracing::info!(
             contract_id = %validated.contract_id,
             chain_net = %validated.chain_net,
             witness_txids_count = validated.witness_txids.len(),
-            mint_anchors = anchors.len(),
+            mint_anchors,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "RGB consignment validated successfully"
         );
         Ok(validated)
     }
 
-    /// Builds no opouts DAG: its edges are inputs x outputs per transition.
-    fn phase_one(&self, transfer: Transfer, contract_id: &str) -> Result<PendingConsignment<true>> {
-        let config = ValidationConfig {
-            chain_net: self.chain_net,
-            safe_height: None,
-            build_opouts_dag: false,
-        };
-        transfer
-            .validate_deterministic(&BFA_RULES, &config)
-            .map_err(|e| validation_error(contract_id, e))
-    }
-}
-
-impl RgbValidator {
-    /// Phase 2 for the witnesses: each must be confirmed on chain. Leaves
-    /// nothing open: `finalize` panics on that, and the enclave aborts.
-    fn resolve_witnesses(
+    /// rgb-lib reads only a file. No `safe_height`: the witness resolver
+    /// already marks a witness mined only at the required depth.
+    fn run_rgb_lib(
         &self,
-        pending: &mut PendingConsignment<true>,
-        contract_id: &str,
-        witnesses: &WitnessCheck<'_>,
-    ) -> Result<()> {
-        let resolver = OnChainResolver::new(pending.consignment(), self.chain_net, witnesses);
-        pending
-            .pending()
-            .resolve_all(&resolver)
-            .map_err(|e| validation_error(contract_id, e))?;
-        if !pending.pending().is_resolved() {
-            return Err(EnclaveError::CrossCheck(
-                "RGB validation left a witness or mint anchor unresolved - refusing to sign".into(),
-            ));
-        }
-        Ok(())
+        consignment_bytes: &[u8],
+        resolvers: &Resolvers<'_>,
+        list: Option<&RejectListContract>,
+    ) -> Result<ConsignmentValidation> {
+        let options = ValidationOptions {
+            bitcoin_network: BitcoinNetwork::try_from(self.chain_net).map_err(|e| {
+                EnclaveError::CrossCheck(format!("unsupported RGB chain {}: {e}", self.chain_net))
+            })?,
+            offchain_txid: None,
+        };
+        with_scratch_file(consignment_bytes, |path| {
+            let path = path.to_str().ok_or_else(|| {
+                EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
+            })?;
+            let validation = validate_consignment_with_resolver(
+                path,
+                &resolvers.witnesses,
+                resolvers.anchors.as_ref().map(|a| a as &dyn ResolveAnchor),
+                resolvers.list.as_ref().map(|l| l as &dyn ResolveRejectList),
+                None,
+                &options,
+            );
+            resolver_failure_first(validation, resolvers.take_failure(), list)
+        })
     }
 }
 
-/// Phase 2 for the mint anchors: bind each to a lock, then confirm it
-/// against that lock only. Returns the locks.
-fn resolve_mint_anchors(
-    pending: &mut PendingConsignment<true>,
-    anchors: &[MintAnchor],
-    bind: Option<AnchorBinder<'_>>,
-) -> Result<Vec<bfa::VerifiedLock>> {
-    if anchors.is_empty() {
-        return Ok(Vec::new());
+/// A resolver's own failure refuses, even if rgb-lib went on past it.
+pub(super) fn resolver_failure_first<T>(
+    validation: std::result::Result<T, rgb_lib::Error>,
+    failure: Option<EnclaveError>,
+    list: Option<&RejectListContract>,
+) -> Result<T> {
+    match (validation, failure) {
+        (_, Some(failure)) => Err(failure),
+        (Ok(validation), None) => Ok(validation),
+        (Err(e), None) => Err(validation_error(e, list)),
     }
-    let bridge = BfaBridge::from_genesis(pending.consignment().genesis())?;
-    let bound = bind_anchors(&bridge, anchors, bind)?;
-    bfa::resolve_anchors(pending, &bridge, &bound)?;
-    Ok(bound.locks)
 }
 
-/// The mint anchors phase 1 left open.
-fn open_anchors(pending: &mut PendingConsignment<true>) -> Vec<MintAnchor> {
-    let last_bundle: BTreeSet<_> = pending
-        .consignment()
-        .bundles
-        .iter()
-        .last()
-        .map(|wb| wb.bundle.known_transitions.iter().map(|k| k.opid).collect())
-        .unwrap_or_default();
-    bfa::mint_anchors(pending.pending().unresolved_anchors(), &last_bundle)
+/// Parses the transfer and runs every check that needs no resolver, so a
+/// foreign or oversized history never reaches rgb-lib. Returns its list.
+fn load_bounded(
+    bytes: &[u8],
+    lists: &ListAccess<'_>,
+) -> Result<(Transfer, Option<RejectListContract>)> {
+    // TFR only: a validated copy (VTF), a contract (CON) and V0 fail here.
+    let transfer = Transfer::load(Cursor::new(bytes)).map_err(|e| {
+        tracing::warn!(
+            bytes_len = bytes.len(),
+            "consignment deserialization failed: {e}"
+        );
+        EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
+    })?;
+    assert_bfa_genesis(&transfer.genesis)?;
+    (lists.bind_asset)(&transfer.contract_id().to_string())?;
+    let list = reject_list(&transfer.genesis)?;
+    assert_bounded_for_rgb_lib(&transfer, bytes.len(), list.is_some())?;
+    Ok((transfer, list))
 }
 
-/// Asks the binder for the anchors' locks. A build with no binder refuses
-/// anchors rather than confirming them blind.
-fn bind_anchors(
-    bridge: &BfaBridge,
-    anchors: &[MintAnchor],
-    bind: Option<AnchorBinder<'_>>,
-) -> Result<BoundAnchors> {
-    let Some(bind) = bind else {
+/// The three resolvers rgb-lib asks, over one parsed transfer.
+struct Resolvers<'a> {
+    witnesses: OnChainResolver<'a>,
+    anchors: Option<BindingResolver<'a>>,
+    list: Option<ListResolver<'a>>,
+}
+
+impl Resolvers<'_> {
+    /// Our own error behind an rgb-lib one, so the refusal says what failed.
+    fn take_failure(&self) -> Option<EnclaveError> {
+        let list = self.list.as_ref().and_then(ListResolver::take_failure);
+        list.or_else(|| {
+            self.anchors
+                .as_ref()
+                .and_then(BindingResolver::take_failure)
+        })
+    }
+}
+
+/// rgb-lib validated the transfer we parsed, and warned about nothing.
+pub(super) fn check_validation(
+    validation: &ConsignmentValidation,
+    transfer: &Transfer,
+) -> Result<()> {
+    let ours = transfer.consignment_id().to_string();
+    if !validation.is_transfer || validation.consignment_id != ours {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment carries {} BFA mint anchor(s), but this build binds none (built \
-             without bfa-validation) - refusing to validate",
-            anchors.len()
+            "rgb-lib validated consignment {} (transfer: {}), not the transfer {ours} - refusing \
+             to sign",
+            validation.consignment_id, validation.is_transfer
         )));
-    };
-    let bound = bind(bridge, anchors)?;
-    bfa::check_bijection(anchors, &bound.locks)?;
-    Ok(bound)
+    }
+    // Neither rgb-lib warning can arise with no headers and no safe_height:
+    // one that does means the setup changed, so it refuses.
+    if let Some(warning) = validation.warnings.first() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "rgb-lib validated the consignment with the warning {warning:?} - refusing to sign"
+        )));
+    }
+    Ok(())
 }
 
 /// Reads what the rest of the enclave binds from the validated consignment.
 fn summarize(
     transfer: &Transfer,
     consignment_bytes: &[u8],
-    contract_id: String,
     mint_locks: Vec<bfa::VerifiedLock>,
     non_mined_witness_txids: Vec<[u8; 32]>,
-    reject_scope: Option<RejectScope>,
 ) -> Result<ValidatedConsignment> {
     // Display-order bytes, deduplicated and sorted, as the SPV proofs carry them.
     let witness_txids: Vec<[u8; 32]> = transfer
@@ -199,7 +222,7 @@ fn summarize(
     let last_transition = settling_summary(&transitions_by_witness, last.as_ref())?;
 
     Ok(ValidatedConsignment {
-        contract_id,
+        contract_id: transfer.contract_id().to_string(),
         chain_net: transfer.genesis.chain_net.prefix().to_string(),
         witness_txids,
         last_transition,
@@ -221,38 +244,29 @@ fn summarize(
         non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
-        reject_scope,
     })
 }
 
-/// The reject-list scope of the settling transition. Built after consensus,
-/// and linear in the consignment, so an unpinned asset costs no more.
-fn reject_scope(list: RejectListContract, valid: &Transfer) -> Result<RejectScope> {
-    let settling = read_last_bundle(valid)?
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "consignment has no transition for the reject list to check".into(),
-            )
-        })?
-        .settling;
-    let inputs = settling.inputs.into_iter().map(Into::into).collect();
-    Ok(RejectScope::new(list, valid, settling.opid, inputs))
-}
-
-/// Witnesses consensus did not see mined: at most the mint's own tx.
-fn non_mined_witnesses(status: &Status) -> Vec<[u8; 32]> {
-    status
-        .tx_ord_map
-        .iter()
-        .filter(|(_, ord)| !matches!(ord, WitnessOrd::Mined(_)))
-        .map(|(txid, _)| {
-            let mut bytes = bitcoin::hashes::Hash::to_byte_array(*txid);
-            bytes.reverse();
-            bytes
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+/// Witnesses rgb-lib did not see mined, in display order: at most the one the
+/// swap flow signs.
+fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32]>> {
+    let mut txids = BTreeSet::new();
+    for witness in &validation.witnesses {
+        if matches!(witness.status, WitnessValidationStatus::Mined { .. }) {
+            continue;
+        }
+        let txid: [u8; 32] = hex::decode(&witness.txid)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| {
+                EnclaveError::CrossCheck(format!(
+                    "rgb-lib reported a witness txid {:?} that is not 32-byte hex",
+                    witness.txid
+                ))
+            })?;
+        txids.insert(txid);
+    }
+    Ok(txids.into_iter().collect())
 }
 
 /// The flat summary of the settling transition, with the burn facts of the
@@ -293,13 +307,51 @@ fn settling_summary(
     }))
 }
 
-/// The `ValidationError` Display drops the failure, so log and keep it.
-fn validation_error(contract_id: &str, e: ValidationError) -> EnclaveError {
-    let detail = match &e {
-        ValidationError::InvalidConsignment(failure) => failure.to_string(),
-        ValidationError::ResolverError(resolver) => resolver.to_string(),
-        other => other.to_string(),
+/// rgb-lib's refusal, with what it means for this enclave.
+pub(super) fn validation_error(
+    e: rgb_lib::Error,
+    list: Option<&RejectListContract>,
+) -> EnclaveError {
+    use rgb_lib::Error as E;
+    let text = match &e {
+        E::NoAnchorResolver => "consignment carries BFA mint anchors, but this build binds none \
+                                (built without bfa-validation) - refusing to validate"
+            .to_string(),
+        E::NoRejectListResolver => "the asset declares a reject list, but this build cannot read \
+                                    it - refusing to sign"
+            .to_string(),
+        // The bridge gateway answers 422 on "descends from an opout the reject list".
+        // One origin only: a wide burn can reject thousands.
+        E::ConsignmentRejected { opouts } => format!(
+            "RGB consignment validation failed: Consignment rejected by the reject list, {} \
+             rejected opouts, the first {} - reject list: an opout this consignment proves \
+             descends from an opout the reject list{} rejects - refusing to sign",
+            opouts.len(),
+            opouts.first().map_or("none", String::as_str),
+            list.map(|l| format!(" 0x{} on chain {}", hex::encode(l.address), l.chain_id))
+                .unwrap_or_default()
+        ),
+        E::EvmChainIdMismatch { expected, actual } => format!(
+            "RGB consignment validation failed: the mint anchors were bound on EVM chain \
+             {actual}, but the asset's bridge lives on chain {expected} - refusing to validate"
+        ),
+        E::MintEventNotFound { opid } => format!(
+            "RGB consignment validation failed: mint {opid} has no bound lock that confirms it - \
+             refusing to validate"
+        ),
+        E::MintEventExpired { opid, before_block } => format!(
+            "RGB consignment validation failed: the lock of mint {opid} was not included before \
+             EVM block {before_block}, so the mint is never backed - refusing to validate"
+        ),
+        E::InvalidBeforeBlock { details } => format!(
+            "RGB consignment validation failed: a mint's beforeBlock leaves no block for its \
+             lock ({details}) - refusing to validate"
+        ),
+        E::Network { details } => format!(
+            "RGB consignment validation failed: a witness is not proven on chain: {details}"
+        ),
+        e => format!("RGB consignment validation failed: {e}"),
     };
-    tracing::warn!(%contract_id, %detail, "RGB validation failed: {e}");
-    EnclaveError::CrossCheck(format!("RGB consignment validation failed: {e}: {detail}"))
+    tracing::warn!("RGB validation failed: {text}");
+    EnclaveError::CrossCheck(text)
 }

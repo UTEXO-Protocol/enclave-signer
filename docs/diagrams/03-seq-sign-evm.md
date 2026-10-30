@@ -30,14 +30,21 @@ sequenceDiagram
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
     Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, reject list EVM-only
-    Rgb->>Rgb: phase 1: validate_deterministic(BFA rules, chain_net)<br/>leaves the witnesses and the mint anchors open
-    Rgb->>Bind: AnchorBinder(genesis bridgeLocation, mint anchors)
+    Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
+    Rgb->>Rgb: work caps (cost.rs): opouts DAG, witness checks,<br/>bundle ids, reject walk (listed asset only),<br/>then their modeled time with the file
+    Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
+    Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(mint OpId, minted units; no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock;<br/>each witness: tx from the consignment, Mined(height) only<br/>from a proven SPV proof (OnChainResolver), else REFUSE; finalize
+    Rgb->>Rgb: witness resolver: tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
+    opt genesis names a reject list
+        Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
+        Rgb->>Rgb: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
+    end
+    Rgb->>Rgb: the bound locks are the anchors, one for one
     Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId; flat parser must agree
-    Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
+    Rgb->>Rgb: contract_id == declared asset_id, again
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source, feature spv)
@@ -54,11 +61,6 @@ sequenceDiagram
     end
     Spv->>Chain: pin each proof block (ChainPins)
     Spv-->>Srv: Ok / Spv err
-    opt genesis names a reject list (after the asset bind)
-        Srv->>Srv: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID
-        Srv->>Srv: length() at finalized and latest, entries pages at latest
-        Srv->>Srv: burn inputs reach a rejected opout<br/>before an allowed one => REFUSE
-    end
     Srv->>Srv: source amount := TS_BURN burnedAsset<br/>(other settling transition => REFUSE, host rgb_amount NOT used)
 
     Note over Srv,Evm: 2 — validate_destination (EVM)

@@ -345,7 +345,10 @@ mod asset_bind {
         let (history, ..) = listed_mint();
         let right = history.genesis_right(0, gen::outpoint(0xA0, 0)).opout;
         let msg = run_rejecting(right);
-        assert!(msg.contains("reject list: opout"), "{msg}");
+        assert!(
+            msg.contains("Consignment rejected by the reject list"),
+            "{msg}"
+        );
     }
 
     /// The recipient would refuse it, which strands the deposit.
@@ -354,7 +357,10 @@ mod asset_bind {
         let (history, ..) = listed_mint();
         let minted = rgbstd::Opout::new(history.mints[0].opid, schemata::OS_ASSET, 0);
         let msg = run_rejecting(minted);
-        assert!(msg.contains("reject list: opout"), "{msg}");
+        assert!(
+            msg.contains("Consignment rejected by the reject list"),
+            "{msg}"
+        );
     }
 
     #[test]

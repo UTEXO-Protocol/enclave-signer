@@ -52,7 +52,7 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs swap-path witness status + tx fetch,<br/>consensus.rs two-phase rgb-ops validation,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs BFA rules]
+            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs swap-path witness status + tx fetch,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver,<br/>cost.rs work caps before rgb-lib,<br/>scratch.rs the file rgb-lib reads,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs genesis gate]
             NRF["flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule"]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP["psbt_validation.rs<br/>swap: PSBT to consignment anchor, per-output legs;<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs + parent_proof.rs<br/>mint signer: the transition a PSBT commits, its parent"]

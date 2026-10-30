@@ -4,7 +4,7 @@
 #[cfg(rgb_to_evm)]
 use super::asset_bind::{assert_asset_binding, AssetBindMode};
 #[cfg(rgb_to_evm)]
-use super::reject_list::{assert_not_rejected, RejectCheck};
+use super::reject_list::ListAccess;
 #[cfg(rgb_to_evm)]
 use super::types::ValidatedConsignment;
 #[cfg(rgb_to_evm)]
@@ -36,8 +36,10 @@ use std::time::SystemTime;
 ///    configured, the operator-pinned `RGB_ASSET_ID`;
 /// 3. the proofs cover exactly the witness txs, and the blocks they use are
 ///    pinned until signing (`rgb-validation` requires `spv`);
-/// 4. no input of the settling transition descends from an opout the asset's
-///    reject list rejects.
+/// 4. for an asset with a reject list, rgb-lib refuses a consignment whose
+///    terminal operations (the burn, and any companion transfer of its
+///    bundle) descend from a rejected opout. The list is read after the
+///    asset bind.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -64,17 +66,28 @@ pub fn validate_source(
         allow_unbroadcast_last: false,
         infer_spent_ancestors: false,
     };
+    let bind_asset = |contract_id: &str| {
+        assert_asset_binding(
+            contract_id,
+            &source.asset_id,
+            ctx.bridge_config,
+            AssetBindMode::Source,
+        )
+    };
+    let lists = ListAccess {
+        bind_asset: &bind_asset,
+        read: ctx.reject_list_reader,
+    };
     // A burn consignment contains its full mint ancestry. Each mint leaves an
     // anchor that only a bound lock confirms.
-    let validated =
-        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &witnesses)?;
-
-    assert_asset_binding(
-        &validated.contract_id,
-        &source.asset_id,
-        ctx.bridge_config,
-        AssetBindMode::Source,
+    let validated = validator.validate_consignment(
+        &source.consignment,
+        ctx.anchor_binder,
+        &witnesses,
+        &lists,
     )?;
+
+    bind_asset(&validated.contract_id)?;
 
     {
         let chain = lock_chain(ctx)?;
@@ -87,13 +100,6 @@ pub fn validate_source(
             ctx.bridge_config.spv_min_confirmations,
         )?;
     }
-
-    // Last: it reads the EVM RPC, and only after the asset bind.
-    assert_not_rejected(
-        &validated,
-        ctx.reject_list_reader,
-        RejectCheck::SettlingInputs,
-    )?;
 
     Ok(validated)
 }
@@ -108,7 +114,7 @@ fn lock_chain<'a>(
 }
 
 /// Total size cap (`MAX_CONSIGNMENT_BYTES`, set by the operator). It runs
-/// before the keccak hash and the rgbstd parse. Thus a request under each
+/// before the keccak hash and the RGB parse. Thus a request under each
 /// per-field cap cannot force too much work.
 ///
 /// `label` names the direction in the rejection, for example `"RGB source"`

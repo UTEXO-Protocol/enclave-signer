@@ -86,6 +86,22 @@ fn bind_all(bridge: &BfaBridge, anchors: &[MintAnchor]) -> Result<BoundAnchors> 
     })
 }
 
+fn any_asset(_: &str) -> Result<()> {
+    Ok(())
+}
+
+fn empty_list(_: &RejectListContract) -> Result<Decisions> {
+    Ok(Decisions::default())
+}
+
+/// Any asset binds, and a listed one reads an empty list.
+fn open_lists() -> ListAccess<'static> {
+    ListAccess {
+        bind_asset: &any_asset,
+        read: Some(&empty_list),
+    }
+}
+
 fn validate(bytes: &[u8]) -> Result<ValidatedConsignment> {
     validate_bound(bytes, Some(&bind_all))
 }
@@ -93,7 +109,7 @@ fn validate(bytes: &[u8]) -> Result<ValidatedConsignment> {
 /// Validates on the burn path's terms, with every witness of `bytes` mined.
 fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<ValidatedConsignment> {
     let chain = mined(&witness_ids(bytes));
-    validator().validate_consignment(bytes, bind, &on_chain(&chain))
+    validator().validate_consignment(bytes, bind, &on_chain(&chain), &open_lists())
 }
 
 /// The burn path's check: no witness may be unmined.
@@ -176,6 +192,68 @@ fn rejects_a_non_bfa_schema() {
     assert!(err.contains("validates only the bridged fungible"), "{err}");
 }
 
+/// A scratch path of its own for each test.
+fn scratch(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "utexo-enclave-test-{name}-{}.rgb",
+        std::process::id()
+    ))
+}
+
+/// The file rgb-lib read is gone after a pass, and after a refusal.
+#[test]
+fn the_scratch_file_is_removed_after_rgb_lib_reads_it() {
+    use super::scratch::with_file_at;
+    for (name, pass) in [("removed-ok", true), ("removed-err", false)] {
+        let path = scratch(name);
+        let result = with_file_at(&path, b"bytes", |at| {
+            assert_eq!(std::fs::read(at).unwrap(), b"bytes");
+            if pass {
+                Ok(())
+            } else {
+                Err(crate::error::EnclaveError::CrossCheck("refused".into()))
+            }
+        });
+        assert_eq!(result.is_ok(), pass, "{name}");
+        assert!(!path.exists(), "{name}");
+    }
+}
+
+/// A file already at the scratch path is refused and left in place.
+#[test]
+fn the_scratch_file_never_reuses_an_existing_file() {
+    use super::scratch::with_file_at;
+    let path = scratch("existing");
+    std::fs::write(&path, b"someone else's").unwrap();
+    let err = with_file_at(&path, &burn_bytes(), |_| Ok(())).unwrap_err();
+    let kept = std::fs::read(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        matches!(err, crate::error::EnclaveError::Internal(_)),
+        "an enclave fault: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("could not create the consignment scratch file"),
+        "{err}"
+    );
+    assert_eq!(kept.unwrap(), b"someone else's");
+}
+
+/// A debug build unwinds a panic in the reader: the file is removed then too.
+#[test]
+fn the_scratch_file_is_removed_when_the_reader_panics() {
+    use super::scratch::with_file_at;
+    let path = scratch("panicked");
+    let panicked = std::panic::catch_unwind(|| {
+        with_file_at(&path, b"bytes", |_| -> Result<()> {
+            panic!("rgb-lib panicked")
+        })
+    });
+    assert!(panicked.is_err());
+    assert!(!path.exists());
+}
+
 // ===== reject list =====
 
 const LIST: [u8; 20] = [0x4e; 20];
@@ -239,142 +317,315 @@ fn url_reject_list_is_refused() {
     assert!(err.contains("not an EVM contract"), "{err}");
 }
 
-#[test]
-fn scope_is_none_without_a_list() {
-    assert!(validate(&burn_bytes()).unwrap().reject_scope.is_none());
-}
-
-#[test]
-fn burn_scope_checks_burned_inputs() {
-    let (history, right, units, burn) = listed_burn();
-    let scope = validate(&history.consignment())
-        .unwrap()
-        .reject_scope
-        .unwrap();
-    assert_eq!(
-        scope.list,
-        RejectListContract {
-            chain_id: EVM_CHAIN_ID,
-            address: LIST
-        }
-    );
-    // rgb-lib's bundle: the split, then the burn of the split's output.
-    let known = &history.bundles.last().unwrap().bundle.known_transitions;
-    assert_eq!(known[1].opid, burn.opid);
-    let burned: Vec<OpoutKey> = known[1]
-        .transition
-        .inputs
+/// Validates `bytes` with every witness mined, against a list of `entries`
+/// whose first `finalized` are final. Returns the result and the reads.
+fn validate_listed(
+    bytes: &[u8],
+    entries: &[(rgbstd::Opout, bool)],
+    finalized: usize,
+) -> (Result<ValidatedConsignment>, usize) {
+    let entries: Vec<RejectListEntry> = entries
         .iter()
-        .copied()
-        .map(key)
+        .map(|(opout, reject)| RejectListEntry {
+            opout: key(*opout),
+            reject: *reject,
+        })
         .collect();
-    assert_eq!(scope.settling_inputs, burned);
-    assert_eq!(burned[0].op, gen::opid_bytes(known[0].opid));
-    assert!(scope.settling_outputs.is_empty(), "a burn has no outputs");
-    // The split spent the units, which descend from the mint, which spent the
-    // genesis right.
-    assert_eq!(scope.history.inputs_of(&burned[0].op), &[key(units.opout)]);
-    assert_eq!(
-        scope.history.inputs_of(&key(units.opout).op),
-        &[key(right.opout)]
-    );
-    assert!(scope.history.inputs_of(&key(right.opout).op).is_empty());
-}
-
-/// One transfer of `n` units to `n` units is n x n edges in the consensus
-/// opouts DAG. The scope keeps only the n inputs.
-#[test]
-fn a_wide_transition_keeps_the_scope_linear() {
-    const N: u16 = 200;
-    let mut history = listed();
-    let right = history.genesis_right(0, right_utxo());
-    let units = history.mint_owned(right, u64::from(N), 90);
-    let vouts = 1..=u32::from(N);
-    let mut spread = history.transition("transfer").add_input(
-        units.opout,
-        AllocatedState::from(RevealedValue::from(u64::from(N))),
-    );
-    for vout in vouts.clone() {
-        let seal = GraphSeal::with_blinded_vout(vout, 0x4000 + u64::from(vout));
-        spread = spread.unwrap().add_fungible_state("assetOwner", seal, 1u64);
-    }
-    let spread = spread.unwrap().complete_transition().unwrap();
-    let spread_op = rgbstd::Operation::id(&spread);
-    let outputs = vouts.clone().map(|_| gen::dust(6)).collect();
-    let spread_tx = history.commit(vec![spread], vec![units.outpoint], outputs);
-
-    let mut wide = history.transition("transfer");
-    for no in 0..N {
-        let seal = GraphSeal::with_blinded_vout(1u32, 0x3000 + u64::from(no));
-        wide = wide
-            .add_input(
-                rgbstd::Opout::new(spread_op, schemata::OS_ASSET, no),
-                AllocatedState::from(RevealedValue::from(1u64)),
-            )
-            .unwrap()
-            .add_fungible_state("assetOwner", seal, 1u64)
-            .unwrap();
-    }
-    let wide = wide.complete_transition().unwrap();
-    let wide_op = gen::opid_bytes(rgbstd::Operation::id(&wide));
-    let spent = vouts
-        .map(|vout| OutPoint::new(spread_tx.compute_txid(), vout))
-        .collect();
-    history.commit(vec![wide], spent, vec![gen::dust(7)]);
-
-    let scope = validate(&history.consignment())
-        .unwrap()
-        .reject_scope
-        .unwrap();
-    assert_eq!(scope.settling_inputs.len(), usize::from(N));
-    assert_eq!(scope.settling_outputs.len(), usize::from(N));
-    assert_eq!(scope.history.inputs_of(&wide_op).len(), usize::from(N));
-    let list = Decisions {
-        reject: [key(units.opout)].into(),
-        ..Decisions::default()
+    let reads = RefCell::new(0);
+    let read = |list: &RejectListContract| {
+        *reads.borrow_mut() += 1;
+        assert_eq!(list.address, LIST);
+        Ok(decisions(&entries, finalized))
     };
-    let got = first_rejected(&scope.history, &list, &scope.settling_outputs).unwrap();
-    assert_eq!(got, Some(scope.settling_outputs[0]));
+    let lists = ListAccess {
+        bind_asset: &any_asset,
+        read: Some(&read),
+    };
+    let chain = mined(&witness_ids(bytes));
+    let result =
+        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &lists);
+    (result, reads.into_inner())
 }
 
+/// [`validate_listed`] with every entry final.
+fn listed_result(bytes: &[u8], entries: &[(rgbstd::Opout, bool)]) -> Result<ValidatedConsignment> {
+    validate_listed(bytes, entries, entries.len()).0
+}
+
+fn assert_rejected(result: Result<ValidatedConsignment>) {
+    let err = error_of(result);
+    assert!(
+        err.contains("Consignment rejected by the reject list"),
+        "{err}"
+    );
+    assert!(err.contains(REJECT_LIST_REFUSAL), "{err}");
+    assert!(err.contains(&hex::encode(LIST)), "{err}");
+}
+
+/// bridge-utexo's gateway (`unlock.go` rejectListRefusalMsg) answers HTTP 422
+/// on this text, so it must not drift.
+const REJECT_LIST_REFUSAL: &str = "descends from an opout the reject list";
+
+/// (a) The burned units descend from a rejected opout: the genesis right, or
+/// the mint's units.
 #[test]
-fn mint_scope_checks_inputs_and_outputs() {
+fn a_burn_of_a_rejected_lineage_is_refused() {
+    let (history, right, units, _) = listed_burn();
+    let bytes = history.consignment();
+    for rejected in [right.opout, units.opout] {
+        let (result, reads) = validate_listed(&bytes, &[(rejected, true)], 1);
+        assert_rejected(result);
+        assert_eq!(reads, 1);
+    }
+}
+
+/// (b) An allowed opout on the path stops the walk before the reject.
+#[test]
+fn an_allowed_ancestor_shields_the_burn() {
+    let (history, right, units, _) = listed_burn();
+    listed_result(
+        &history.consignment(),
+        &[(right.opout, true), (units.opout, false)],
+    )
+    .expect("the allowed units shield the rejected right");
+}
+
+/// (c) An allow counts only once finalized; a pending one shields nothing.
+#[test]
+fn a_pending_allow_does_not_shield_the_burn() {
+    let (history, right, units, _) = listed_burn();
+    let entries = [(right.opout, true), (units.opout, false)];
+    assert_rejected(validate_listed(&history.consignment(), &entries, 1).0);
+}
+
+/// (d) The change stays on the split, which the burn spends, so the split is
+/// not terminal and a list entry on its change does not block.
+#[test]
+fn a_rejected_split_change_does_not_block_the_release() {
+    let (history, ..) = listed_burn();
+    let split = &history.bundles.last().unwrap().bundle.known_transitions[0];
+    let outputs = split
+        .transition
+        .assignments
+        .get(&schemata::OS_ASSET)
+        .unwrap()
+        .as_fungible();
+    let no = outputs
+        .iter()
+        .position(|a| a.as_state().as_u64() == MINTED - 60_000)
+        .expect("the split's change");
+    let change = rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap());
+    listed_result(&history.consignment(), &[(change, true)]).expect("the change is not released");
+}
+
+/// A listed mint, then a transfer that splits the units into two halves on
+/// vout 1 and vout 2 of its witness tx.
+fn listed_halves() -> (History, [Utxo; 2]) {
     let mut history = listed();
     let right = history.genesis_right(0, right_utxo());
     let units = history.mint_owned(right, MINTED, 90);
-    let scope = validate(&history.consignment())
+    split_in_halves(history, units)
+}
+
+/// (e) rgb-lib checks every terminal operation: a rejected line in a companion
+/// transfer of the burn's bundle refuses the release, unlike the burn's alone.
+#[test]
+fn a_rejected_line_in_a_companion_transfer_refuses_the_burn() {
+    let (mut history, [kept, burned]) = listed_halves();
+    let half = MINTED / 2;
+    let companion = history
+        .transition("transfer")
+        .add_input(kept.opout, AllocatedState::from(RevealedValue::from(half)))
         .unwrap()
-        .reject_scope
+        .add_fungible_state("assetOwner", GraphSeal::with_blinded_vout(1u32, 3), half)
+        .unwrap()
+        .complete_transition()
         .unwrap();
-    assert_eq!(scope.settling_inputs, vec![key(right.opout)]);
-    assert_eq!(scope.settling_outputs, vec![key(units.opout)]);
+    let burn = history.burn_transition(burned, half, Some(half), Some(gen::burn_reason_for(PAYEE)));
+    history.commit(
+        vec![companion, burn],
+        vec![kept.outpoint, burned.outpoint],
+        vec![gen::dust(3)],
+    );
+    let bytes = history.consignment();
+    listed_result(&bytes, &[]).expect("control: nothing rejected");
+    assert_rejected(listed_result(&bytes, &[(kept.opout, true)]));
+}
+
+/// An allowed opout shields only its own branch: the burn of both halves is
+/// refused while one half still reaches the rejected units.
+#[test]
+fn an_allowed_opout_shields_only_its_own_branch() {
+    let (mut history, halves) = listed_halves();
+    let units = history.bundles[0].bundle.known_transitions[0].opid;
+    let units = rgbstd::Opout::new(units, schemata::OS_ASSET, 0);
+    let mut burn = history.transition("burn");
+    for half in &halves {
+        burn = burn
+            .add_input(
+                half.opout,
+                AllocatedState::from(RevealedValue::from(MINTED / 2)),
+            )
+            .unwrap();
+    }
+    let burn = burn
+        .add_global_state("burnedAsset", rgbstd::Amount::from(MINTED))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let inputs = halves.iter().map(|half| half.outpoint).collect();
+    history.commit(vec![burn], inputs, vec![gen::dust(3)]);
+    let bytes = history.consignment();
+    let one_shield = [(units, true), (halves[0].opout, false)];
+    assert_rejected(listed_result(&bytes, &one_shield));
+    let both = [one_shield[0], one_shield[1], (halves[1].opout, false)];
+    listed_result(&bytes, &both).expect("both halves are shielded");
+}
+
+/// A terminal transition's outputs are checked as well as its inputs: a
+/// listed mint with its own units rejected is refused.
+#[test]
+fn the_outputs_of_a_terminal_transition_are_checked() {
+    let mut history = listed();
+    let right = history.genesis_right(0, right_utxo());
+    let units = history.mint_owned(right, MINTED, 90);
+    let bytes = history.consignment();
+    listed_result(&bytes, &[]).expect("control: nothing rejected");
+    assert_rejected(listed_result(&bytes, &[(units.opout, true)]));
 }
 
 /// A right from a rights send still descends from the genesis right, so a
 /// rejected genesis right reaches the mint through the send.
 #[test]
-fn mint_scope_reaches_the_genesis_right_through_a_rights_send() {
+fn a_rights_send_carries_a_rejected_genesis_right_to_the_mint() {
     let mut history = listed();
     let genesis_right = history.genesis_right(0, right_utxo());
     let rights = history.duplicate_right(genesis_right, 3);
     history.mint_owned(rights[1], MINTED, 90);
-    let scope = validate(&history.consignment())
-        .unwrap()
-        .reject_scope
-        .unwrap();
-    assert_eq!(scope.settling_inputs, vec![key(rights[1].opout)]);
-    let list = Decisions {
-        reject: [key(genesis_right.opout)].into(),
-        ..Decisions::default()
-    };
-    let got = first_rejected(&scope.history, &list, &scope.settling_inputs).unwrap();
-    assert_eq!(got, Some(key(rights[1].opout)));
+    assert_rejected(listed_result(
+        &history.consignment(),
+        &[(genesis_right.opout, true)],
+    ));
 }
 
-/// The reject-list rules, ported from rgb-lib `api/evm.rs` and `check_dag`.
+/// (f) The reader runs only for a listed asset, and only after the asset
+/// bind passed: a foreign genesis never reaches rgb-lib, listed or not.
+#[test]
+fn the_list_is_read_only_for_a_listed_asset_after_the_bind() {
+    let reads = RefCell::new(0);
+    let read = |_: &RejectListContract| {
+        *reads.borrow_mut() += 1;
+        Ok(Decisions::default())
+    };
+    let foreign = |_: &str| -> Result<()> {
+        Err(crate::error::EnclaveError::CrossCheck(
+            "not the pinned asset".into(),
+        ))
+    };
+    let run = |bytes: &[u8], bind_asset: &dyn Fn(&str) -> Result<()>| {
+        let lists = ListAccess {
+            bind_asset,
+            read: Some(&read),
+        };
+        let chain = mined(&witness_ids(bytes));
+        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &lists)
+    };
+    let listed = listed_burn().0.consignment();
+    for bytes in [&listed, &burn_bytes()] {
+        assert!(error_of(run(bytes, &foreign)).contains("not the pinned asset"));
+    }
+    assert_eq!(*reads.borrow(), 0);
+    run(&burn_bytes(), &any_asset).unwrap();
+    assert_eq!(*reads.borrow(), 0);
+    run(&listed, &any_asset).unwrap();
+    assert_eq!(*reads.borrow(), 1);
+}
+
+/// A build with no reader refuses a listed asset, and a failing reader's own
+/// error is the refusal, not an rgb-lib network error.
+#[test]
+fn a_listed_asset_is_refused_when_its_list_cannot_be_read() {
+    let bytes = listed_burn().0.consignment();
+    let chain = mined(&witness_ids(&bytes));
+    let failing = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("evm-rpc")) };
+    let run = |read| {
+        let lists = ListAccess {
+            bind_asset: &any_asset,
+            read,
+        };
+        validator()
+            .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &lists)
+            .expect_err("a listed asset needs its list")
+    };
+    let err = run(None).to_string();
+    assert!(err.contains("cannot read it"), "{err}");
+    assert_own_error(run(Some(&failing)), "evm-rpc");
+}
+
+/// A failure that is not a cross-check, so its variant shows it came through.
+fn not_ready(what: &str) -> crate::error::EnclaveError {
+    crate::error::EnclaveError::NotReady {
+        state: format!("{what} down"),
+    }
+}
+
+/// `err` is the resolver's own error, not rgb-lib's network error about it.
+fn assert_own_error(err: crate::error::EnclaveError, what: &str) {
+    let text = err.to_string();
+    assert!(
+        matches!(&err, crate::error::EnclaveError::NotReady { state } if *state == format!("{what} down")),
+        "{text}"
+    );
+    assert!(!text.contains("witness is not proven"), "{text}");
+}
+
+/// The resolver reads only the genesis list: any other source rgb-lib names
+/// is refused unread, and the refusal is ours.
+#[test]
+fn the_list_resolver_refuses_a_source_other_than_the_genesis_list() {
+    use rgb_lib::no_wallet::{RejectListSource, ResolveRejectList};
+    let reads = RefCell::new(0);
+    let read = |_: &RejectListContract| {
+        *reads.borrow_mut() += 1;
+        Ok(Decisions::default())
+    };
+    let genesis_list = RejectListContract {
+        chain_id: EVM_CHAIN_ID,
+        address: LIST,
+    };
+    let resolver = ListResolver::new(genesis_list, &read);
+    for other in [
+        RejectListSource::from(gen::evm_reject_list(EVM_CHAIN_ID, [0x77; 20])),
+        RejectListSource::from(gen::evm_reject_list(1, LIST)),
+        RejectListSource::Url("https://example.com/list".into()),
+    ] {
+        assert!(resolver.get_reject_list(&other).is_err(), "{other:?}");
+        let failure = resolver
+            .take_failure()
+            .expect("our own refusal")
+            .to_string();
+        assert!(failure.contains("not the genesis list"), "{failure}");
+    }
+    assert_eq!(*reads.borrow(), 0);
+    let genesis = RejectListSource::from(gen::evm_reject_list(EVM_CHAIN_ID, LIST));
+    resolver
+        .get_reject_list(&genesis)
+        .expect("the genesis list is read");
+    assert_eq!(*reads.borrow(), 1);
+}
+
+#[test]
+fn an_opout_key_converts_to_the_same_opout() {
+    let (_, right, units, _) = listed_burn();
+    for opout in [right.opout, units.opout] {
+        assert_eq!(rgbstd::Opout::from(key(opout)), opout);
+    }
+}
+
+/// The reject-list decisions, ported from rgb-lib `api/evm.rs`.
 mod reject_list_rules {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     fn op(n: u8) -> OpoutKey {
         OpoutKey {
@@ -441,115 +692,6 @@ mod reject_list_rules {
         assert!(got.reject.contains(&op(1)));
         assert!(!got.reject.contains(&sibling));
     }
-
-    /// `child -> [parents]`, each node the only opout of its own op.
-    fn graph(edges: &[(u8, &[u8])]) -> OpoutGraph {
-        let mut parents: BTreeMap<u8, Vec<OpoutKey>> = BTreeMap::new();
-        for (child, ups) in edges {
-            for up in *ups {
-                parents.entry(*up).or_default();
-            }
-            parents
-                .entry(*child)
-                .or_default()
-                .extend(ups.iter().map(|u| op(*u)));
-        }
-        let mut graph = OpoutGraph::default();
-        for (n, inputs) in parents {
-            graph.add([n; 32], inputs, [op(n)]);
-        }
-        graph
-    }
-
-    fn rejected(edges: &[(u8, &[u8])], entries: &[(u8, bool)], check: u8) -> bool {
-        first_rejected(&graph(edges), &log(entries, entries.len()), &[op(check)])
-            .unwrap()
-            .is_some()
-    }
-
-    #[test]
-    fn listed_opout_is_rejected() {
-        assert!(rejected(&[(1, &[])], &[(1, true)], 1));
-    }
-
-    #[test]
-    fn rejected_ancestor_taints_the_opout() {
-        assert!(rejected(&[(3, &[2]), (2, &[1])], &[(1, true)], 3));
-        assert!(!rejected(&[(3, &[2]), (2, &[1])], &[(9, true)], 3));
-    }
-
-    #[test]
-    fn allowed_ancestor_shields_its_branch() {
-        assert!(!rejected(
-            &[(3, &[2]), (2, &[1])],
-            &[(1, true), (2, false)],
-            3
-        ));
-    }
-
-    #[test]
-    fn shield_does_not_cover_a_second_path() {
-        let edges: &[(u8, &[u8])] = &[(4, &[2, 3]), (2, &[1]), (3, &[1])];
-        assert!(rejected(edges, &[(1, true), (2, false)], 4));
-        assert!(!rejected(edges, &[(1, true), (2, false), (3, false)], 4));
-    }
-
-    #[test]
-    fn missing_opout_is_an_error() {
-        let err = first_rejected(&graph(&[(1, &[])]), &Decisions::default(), &[op(7)])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("not in the consignment's history graph"),
-            "{err}"
-        );
-    }
-
-    /// The walk is shared across start opouts: a shield seen first must not
-    /// hide a second, unshielded path to the same reject.
-    #[test]
-    fn shared_walk_still_finds_a_second_path() {
-        let edges: &[(u8, &[u8])] = &[(1, &[]), (2, &[1]), (3, &[2]), (4, &[1])];
-        let got = first_rejected(
-            &graph(edges),
-            &log(&[(1, true), (2, false)], 2),
-            &[op(3), op(4)],
-        )
-        .unwrap();
-        assert_eq!(got, Some(op(4)));
-    }
-
-    /// Every output of one op has the same parents: one reject among the
-    /// inputs taints them all, and outputs outside the history are skipped.
-    #[test]
-    fn outputs_of_one_op_share_its_inputs() {
-        let mut history = OpoutGraph::default();
-        let input = |no| OpoutKey { no, ..op(1) };
-        let output = |no| OpoutKey { no, ..op(2) };
-        history.add([1; 32], vec![], (0..3).map(input));
-        let inputs = (0..3).map(input).chain([op(9)]).collect();
-        history.add([2; 32], inputs, (0..3).map(output));
-        let check: Vec<_> = (0..3).map(output).collect();
-        let none = first_rejected(&history, &log(&[(9, true)], 1), &check).unwrap();
-        assert_eq!(none, None);
-        let list = decisions(
-            &[RejectListEntry {
-                opout: input(2),
-                reject: true,
-            }],
-            1,
-        );
-        let got = first_rejected(&history, &list, &check).unwrap();
-        assert_eq!(got, Some(output(0)));
-    }
-
-    /// The first failing opout is named.
-    #[test]
-    fn names_the_first_rejected_opout() {
-        let parents = graph(&[(2, &[]), (3, &[1]), (1, &[])]);
-        let got = first_rejected(&parents, &log(&[(1, true)], 1), &[op(2), op(3)]).unwrap();
-        assert_eq!(got, Some(op(3)));
-    }
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
@@ -560,7 +702,9 @@ fn bfa_schema_id_is_pinned() {
         schemata::BFA_SCHEMA_ID.to_string(),
         "rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture"
     );
-    assert_eq!(BFA_RULES.schema().schema_id(), schemata::BFA_SCHEMA_ID);
+    use rgbstd::contract::IssuerWrapper;
+    let rules = schemata::BridgedFungibleAsset::schema_rules();
+    assert_eq!(rules.schema().schema_id(), schemata::BFA_SCHEMA_ID);
 }
 
 /// The ids the bridge also uses (consignment-utils readers, mint ancestry),
@@ -830,7 +974,13 @@ fn refuses_a_burn_that_misstates_what_it_destroyed() {
 /// A mint, then a transfer that splits the units into two halves on vout 1
 /// and vout 2 of its witness tx.
 fn minted_in_halves() -> (History, [Utxo; 2]) {
-    let (mut history, units) = minted();
+    let (history, units) = minted();
+    split_in_halves(history, units)
+}
+
+/// A transfer that splits `units` (holding `MINTED`) into two halves on vout 1
+/// and vout 2 of its witness tx.
+fn split_in_halves(mut history: History, units: Utxo) -> (History, [Utxo; 2]) {
     let half = MINTED / 2;
     let split = history
         .transition("transfer")
@@ -1124,11 +1274,10 @@ fn refuses_mint_anchors_without_a_binder() {
 
 #[test]
 fn passes_a_binder_error_through() {
-    let refuse = |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> {
-        Err(crate::error::EnclaveError::CrossCheck("no deposit".into()))
-    };
-    let err = error_of(validate_bound(&burn_bytes(), Some(&refuse)));
-    assert!(err.contains("no deposit"), "{err}");
+    let refuse =
+        |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
+    let err = validate_bound(&burn_bytes(), Some(&refuse)).expect_err("the binder refused");
+    assert_own_error(err, "binder");
 }
 
 /// Every anchor needs exactly its own lock: one too few, one too many, or one
@@ -1144,15 +1293,19 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
     };
     let extra = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
         let mut bound = bind_all(bridge, anchors)?;
-        bound.locks.push(VerifiedLock {
-            mint_opid: [0x77; 32],
-            ..lock_for(&anchors[0])
-        });
+        if let Some(anchor) = anchors.first() {
+            bound.locks.push(VerifiedLock {
+                mint_opid: [0x77; 32],
+                ..lock_for(anchor)
+            });
+        }
         Ok(bound)
     };
     let other_amount = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
         let mut bound = bind_all(bridge, anchors)?;
-        bound.locks[0].minted += 1;
+        if let Some(lock) = bound.locks.first_mut() {
+            lock.minted += 1;
+        }
         Ok(bound)
     };
     let binders: [AnchorBinder<'_>; 3] = [&none, &extra, &other_amount];
@@ -1162,18 +1315,99 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
     }
 }
 
-/// The bound chain id must be the genesis one, or the checked resolver
+/// The bound chain id must be the genesis one, or rgb-lib's checked resolver
 /// refuses before it confirms anything.
 #[test]
 fn refuses_locks_bound_on_another_chain() {
+    let asked = RefCell::new(0);
     let other_chain = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+        *asked.borrow_mut() += anchors.len();
         Ok(BoundAnchors {
             evm_chain_id: 1,
             ..bind_all(bridge, anchors)?
         })
     };
     let err = error_of(validate_bound(&burn_bytes(), Some(&other_chain)));
-    assert!(err.contains("anchor not confirmed"), "{err}");
+    assert!(err.contains("bound on EVM chain 1"), "{err}");
+    assert!(
+        err.contains(&format!("lives on chain {EVM_CHAIN_ID}")),
+        "{err}"
+    );
+    assert_eq!(*asked.borrow(), 0, "no anchor is bound on the wrong chain");
+}
+
+/// rgb-lib asks the binder once with no anchor, for the pins and the chain
+/// id, then once for each mint of the history.
+#[test]
+fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+    let outpoints = vec![right_utxo(), gen::outpoint(0xA1, 0)];
+    let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
+    let rights = [0, 1].map(|no| history.genesis_right(no, outpoints[usize::from(no)]));
+    let units = rights.map(|right| history.mint_owned(right, MINTED, 90));
+    let mut burn = history.transition("burn");
+    for unit in &units {
+        burn = burn
+            .add_input(
+                unit.opout,
+                AllocatedState::from(RevealedValue::from(MINTED)),
+            )
+            .unwrap();
+    }
+    let burn = burn
+        .add_global_state("burnedAsset", rgbstd::Amount::from(2 * MINTED))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let inputs = units.iter().map(|unit| unit.outpoint).collect();
+    history.commit(vec![burn], inputs, vec![gen::dust(4)]);
+
+    let calls = RefCell::new(Vec::new());
+    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+        calls.borrow_mut().push(anchors.to_vec());
+        bind_all(bridge, anchors)
+    };
+    let validated = validate_bound(&history.consignment(), Some(&record)).unwrap();
+    let calls = calls.into_inner();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(calls[0].is_empty());
+    let mut asked: Vec<[u8; 32]> = calls[1..].iter().map(|c| c[0].opid).collect();
+    asked.sort();
+    let mut minted: Vec<[u8; 32]> = history
+        .mints
+        .iter()
+        .map(|m| gen::opid_bytes(m.opid))
+        .collect();
+    minted.sort();
+    assert_eq!(asked, minted);
+    assert!(calls[1..].iter().all(|c| c.len() == 1));
+    assert_eq!(validated.mint_locks.len(), 2);
+}
+
+/// The locks must be the anchors one for one: a missing, an extra or a twice
+/// bound pair is refused.
+#[test]
+fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
+    let anchor = |n: u8| MintAnchor {
+        opid: [n; 32],
+        amount: MINTED,
+        before_block: 90,
+        in_last_bundle: false,
+    };
+    let anchors = [anchor(1), anchor(2)];
+    let locks: Vec<VerifiedLock> = anchors.iter().map(lock_for).collect();
+    check_bijection(&anchors, &locks).unwrap();
+    let cases: [(&[MintAnchor], Vec<VerifiedLock>); 3] = [
+        (&anchors, locks[..1].to_vec()),
+        (&anchors[..1], locks.clone()),
+        (
+            &[anchor(1), anchor(1)],
+            vec![locks[0].clone(), locks[0].clone()],
+        ),
+    ];
+    for (anchors, locks) in cases {
+        let err = check_bijection(anchors, &locks).unwrap_err().to_string();
+        assert!(err.contains("exactly its own lock"), "{err}");
+    }
 }
 
 /// A bundle that commits a transition the consignment does not show.
@@ -1411,7 +1645,8 @@ fn refuses_a_consignment_of_another_network() {
     let v = RgbValidator::new("tcp://indexer.invalid:1".into(), "testnet4").unwrap();
     let bytes = burn_bytes();
     let chain = mined(&witness_ids(&bytes));
-    let err = error_of(v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain)));
+    let err =
+        error_of(v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &open_lists()));
     assert!(err.contains("validation failed"), "{err}");
 }
 
@@ -1490,9 +1725,156 @@ fn burn_path_validation_makes_no_indexer_call() {
     let chain = mined(&witness_ids(&bytes));
     let start = std::time::Instant::now();
     validator
-        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain))
+        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &open_lists())
         .unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
+}
+
+/// The rgb-lib report of the transfer we parsed, as it gives it for `bytes`.
+fn rgb_lib_report(bytes: &[u8]) -> rgb_lib::no_wallet::ConsignmentValidation {
+    use rgbstd::containers::ConsignmentExt;
+    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes)).unwrap();
+    rgb_lib::no_wallet::ConsignmentValidation {
+        consignment_id: transfer.consignment_id().to_string(),
+        is_transfer: true,
+        asset_id: transfer.contract_id().to_string(),
+        asset_schema: rgb_lib::AssetSchema::Bfa,
+        safe_height: None,
+        witnesses: vec![],
+        warnings: vec![],
+    }
+}
+
+/// rgb-lib must have validated our transfer, and any warning refuses: none
+/// can arise with our resolver, so one means the setup changed.
+#[test]
+fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
+    use super::consensus::check_validation;
+    use rgb_lib::no_wallet::ValidationWarning;
+    let bytes = burn_bytes();
+    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes[..])).unwrap();
+    check_validation(&rgb_lib_report(&bytes), &transfer).unwrap();
+    let other = rgb_lib_report(&listed_burn().0.consignment());
+    let err = check_validation(&other, &transfer).unwrap_err().to_string();
+    assert!(err.contains("not the transfer"), "{err}");
+    let contract = rgb_lib::no_wallet::ConsignmentValidation {
+        is_transfer: false,
+        ..rgb_lib_report(&bytes)
+    };
+    assert!(check_validation(&contract, &transfer).is_err());
+    for warning in [
+        ValidationWarning::UnsafeHistory { txids: vec![] },
+        ValidationWarning::InvalidSpvProof {
+            bundle_id: "b".into(),
+            txid: "t".into(),
+        },
+        ValidationWarning::Other {
+            details: "d".into(),
+        },
+    ] {
+        let warned = rgb_lib::no_wallet::ConsignmentValidation {
+            warnings: vec![warning],
+            ..rgb_lib_report(&bytes)
+        };
+        let err = check_validation(&warned, &transfer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("with the warning"), "{err}");
+    }
+}
+
+/// The rgb-lib refusals no resolver of ours can raise still read as what they
+/// mean for a release.
+#[test]
+fn each_rgb_lib_refusal_names_what_failed() {
+    use super::consensus::validation_error;
+    use rgb_lib::Error as E;
+    let list = RejectListContract {
+        chain_id: EVM_CHAIN_ID,
+        address: LIST,
+    };
+    let cases = [
+        (
+            E::MintEventExpired {
+                opid: "op".into(),
+                before_block: 77,
+            },
+            "not included before EVM block 77",
+        ),
+        (
+            E::InvalidBeforeBlock {
+                details: "zero".into(),
+            },
+            "leaves no block for its lock",
+        ),
+        (E::MintEventNotFound { opid: "op".into() }, "no bound lock"),
+        (E::NoAnchorResolver, "binds none"),
+        (E::NoRejectListResolver, "cannot read it"),
+        (
+            E::ConsignmentRejected { opouts: vec![] },
+            "Consignment rejected by the reject list",
+        ),
+        (
+            E::EvmChainIdMismatch {
+                expected: 1,
+                actual: 2,
+            },
+            "bound on EVM chain 2",
+        ),
+        (
+            E::ConsignmentValidationFailed {
+                details: "bad".into(),
+            },
+            "RGB consignment validation failed",
+        ),
+    ];
+    for (e, expected) in cases {
+        let err = validation_error(e, Some(&list)).to_string();
+        assert!(err.contains(expected), "{err}");
+    }
+    let rejected = validation_error(E::ConsignmentRejected { opouts: vec![] }, Some(&list));
+    assert!(
+        rejected.to_string().contains(&hex::encode(LIST)),
+        "{rejected}"
+    );
+}
+
+/// The reject refusal counts the rejected origins and names only the first:
+/// a wide burn can reject thousands, and the gateway returns the whole text.
+#[test]
+fn a_reject_refusal_names_one_rejected_origin_of_many() {
+    use super::consensus::validation_error;
+    let opouts = ["a/4000/0", "b/4000/1", "c/4000/2"]
+        .map(String::from)
+        .to_vec();
+    let err = validation_error(rgb_lib::Error::ConsignmentRejected { opouts }, None).to_string();
+    assert!(
+        err.contains("3 rejected opouts, the first a/4000/0"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("b/4000/1") && !err.contains("c/4000/2"),
+        "{err}"
+    );
+    assert!(err.contains(REJECT_LIST_REFUSAL), "{err}");
+}
+
+/// A failure a resolver recorded refuses, even when rgb-lib returned Ok past it.
+#[test]
+fn a_recorded_resolver_failure_wins_over_rgb_libs_result() {
+    use super::consensus::resolver_failure_first;
+    let recorded = || {
+        Some(crate::error::EnclaveError::CrossCheck(
+            "the list read failed".into(),
+        ))
+    };
+    for rgb_lib in [Ok(()), Err(rgb_lib::Error::NoRejectListResolver)] {
+        let err = resolver_failure_first(rgb_lib, recorded(), None).unwrap_err();
+        assert!(err.to_string().contains("the list read failed"), "{err}");
+    }
+    resolver_failure_first(Ok(()), None, None).unwrap();
+    let err = resolver_failure_first::<()>(Err(rgb_lib::Error::NoRejectListResolver), None, None);
+    assert!(err.unwrap_err().to_string().contains("cannot read it"));
 }
 
 // ===== on-chain witnesses =====
@@ -1533,7 +1915,7 @@ fn validate_without(
         allow_unbroadcast_last,
         infer_spent_ancestors: allow_unbroadcast_last,
     };
-    validator().validate_consignment(bytes, Some(&bind_all), &check)
+    validator().validate_consignment(bytes, Some(&bind_all), &check, &open_lists())
 }
 
 fn display_bytes(txid: bitcoin::Txid) -> [u8; 32] {
@@ -1594,6 +1976,71 @@ fn burn_path_refuses_an_unmined_last_witness() {
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
+/// A proof the consignment carries does not stand in for the enclave's own:
+/// the resolver serves no headers, so a witness it cannot prove is refused.
+#[test]
+fn a_consignment_spv_proof_does_not_prove_a_witness() {
+    use bitcoin::hashes::Hash;
+    let (mut history, _) = burn_history(Some(MINTED), Some(gen::burn_reason_for(PAYEE)));
+    for bundle in &mut history.bundles {
+        bundle.spv_proof = Some(rgbstd::validation::SpvProof {
+            block_height: std::num::NonZeroU32::new(900_000).unwrap(),
+            pos: 1,
+            merkle: amplify::confinement::Confined::try_from(vec![
+                bitcoin::TxMerkleNode::from_byte_array([0x5a; 32]),
+            ])
+            .unwrap(),
+        });
+    }
+    let bytes = history.consignment();
+    let burn = *witness_ids(&bytes).last().unwrap();
+    let err = error_of(validate_without(&bytes, burn, false));
+    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains(&burn.to_string()), "{err}");
+    // No header, so rgb-consensus never checks the carried proof itself.
+    use rgbstd::validation::{ResolveWitness, WitnessResolverError};
+    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes)).unwrap();
+    let chain = mined(&witness_ids(&bytes));
+    let check = on_chain(&chain);
+    let resolver = OnChainResolver::new(&transfer, rgbstd::ChainNet::BitcoinRegtest, &check);
+    let header = resolver.get_block_header(std::num::NonZeroU32::new(900_000).unwrap());
+    assert!(
+        matches!(header, Err(WitnessResolverError::NotSupported)),
+        "{header:?}"
+    );
+}
+
+/// A failing witness source, binder or list reader refuses with its own
+/// error; none of them is ever read as a pass.
+#[test]
+fn a_failing_resolver_refuses_with_its_own_error() {
+    struct Down;
+    impl ConfirmedWitnesses for Down {
+        fn confirmed(&self, _: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
+            Err("witness source down".into())
+        }
+    }
+    let binder =
+        |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
+    let reader = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("reader")) };
+    let read_failing = ListAccess {
+        bind_asset: &any_asset,
+        read: Some(&reader),
+    };
+    let bytes = listed_burn().0.consignment();
+    let chain = mined(&witness_ids(&bytes));
+    let v = validator();
+    let err =
+        error_of(v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&Down), &open_lists()));
+    assert!(err.contains("witness source down"), "{err}");
+    let binder_down =
+        v.validate_consignment(&bytes, Some(&binder), &on_chain(&chain), &open_lists());
+    assert_own_error(binder_down.expect_err("the binder is down"), "binder");
+    let reader_down =
+        v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &read_failing);
+    assert_own_error(reader_down.expect_err("the reader is down"), "reader");
+}
+
 /// The mint tx being signed is the one witness that may be unbroadcast, and
 /// the result names it so the PSBT bind can check it.
 #[test]
@@ -1622,6 +2069,7 @@ fn mint_path_refuses_history_an_unreachable_indexer_cannot_confirm() {
         &mint_after_a_rights_send(),
         Some(&bind_all),
         &check,
+        &open_lists(),
     ));
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
@@ -1641,7 +2089,7 @@ fn a_first_mint_needs_no_indexer() {
     let bytes = mint_spending(issue().genesis_right(0, right_utxo()), vec![]).consignment();
     let start = std::time::Instant::now();
     validator
-        .validate_consignment(&bytes, Some(&bind_all), &check)
+        .validate_consignment(&bytes, Some(&bind_all), &check, &open_lists())
         .unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
@@ -1685,7 +2133,7 @@ fn mint_path_asks(
         allow_unbroadcast_last: true,
         infer_spent_ancestors: true,
     };
-    let result = validator().validate_consignment(bytes, Some(&bind_all), &check);
+    let result = validator().validate_consignment(bytes, Some(&bind_all), &check, &open_lists());
     (result, source.asked.into_inner())
 }
 
@@ -1719,7 +2167,7 @@ fn burn_path_asks_about_every_witness() {
         asked: RefCell::new(Vec::new()),
     };
     validator()
-        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&source))
+        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
         .unwrap();
     let mut asked = source.asked.into_inner();
     asked.sort();
@@ -2482,15 +2930,14 @@ mod source_path {
     fn burn_with_rejected_ancestry_is_refused() {
         let (_, right, ..) = listed_burn();
         let (result, reads) = run_listed(None, &[(right.opout, true)]);
-        let err = error_of(result);
-        assert!(err.contains("reject list: opout"), "{err}");
+        assert_rejected(result);
         assert_eq!(reads, 1);
     }
 
     #[test]
     fn burn_with_unrelated_entries_is_signed() {
         let (result, reads) = run_listed(None, &[(unrelated(), true)]);
-        assert!(result.unwrap().reject_scope.is_some());
+        result.unwrap();
         assert_eq!(reads, 1);
     }
 
@@ -2660,4 +3107,5 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     );
 }
 
+mod caps;
 mod summary;
