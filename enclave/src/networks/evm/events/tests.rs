@@ -240,21 +240,21 @@ fn rejects_rgb_companion_event_alone() {
 
 #[cfg(evm_to_rgb)]
 #[test]
-fn rejects_two_real_deposits_in_one_tx() {
-    // Uniqueness also applies WITHIN a shape: two BridgeFundsIn logs are two
-    // deposits, and a selection is a guess.
+fn binds_the_requested_deposit_of_two_in_one_tx() {
+    // The operationId selects the log. The other deposit comes first and has
+    // other amounts.
     let p = FakeEvm {
         receipt: Some(receipt_with(
             vec![
+                bridge_log(op_id(8), 500, 475, 25),
                 bridge_log(op_id(7), 1000, 950, 50),
-                bridge_log(op_id(8), 1000, 950, 50),
             ],
             100,
         )),
         ..FakeEvm::default()
     };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("ambiguous"), "got: {e}");
+    verify(&p).unwrap();
+    verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(8), 500, 25).unwrap();
 }
 
 // ---- receipt-level rejections ----
