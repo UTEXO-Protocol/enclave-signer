@@ -395,7 +395,7 @@ fn bind_mint(
             "a mint is bound to an EVM deposit only".into(),
         ));
     };
-    super::bfa::bind_mint_deposit(ctx, &evm_tx_hash(evm)?, mint)
+    super::bfa::bind_mint_deposit(ctx, &evm_tx_hash(evm)?, &evm.funds_in_operation_id, mint)
 }
 
 /// The deposit tx hash of an EVM source: exactly 32 bytes.

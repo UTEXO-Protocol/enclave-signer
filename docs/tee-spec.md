@@ -471,9 +471,10 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   `blockHash` MUST match the canonical block fetched at that height. The
   selected head snapshot is revalidated to detect a reorg during verification;
 - it must carry exactly **one** `BridgeFundsIn` event from the pinned
-  `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`). Zero or two
-  such events refuse. There is no fallback to the plain `FundsIn` event: it
-  carries an RGB OpId, a different id space;
+  `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`) whose
+  `operationId` (topic 1) is the request's. Zero or two such events refuse.
+  Other deposits in the tx are ignored. There is no fallback to the plain
+  `FundsIn` event: it carries an RGB OpId, a different id space;
 - the event MUST bind the on-chain `operationId` (the full 32-byte word,
   indexed topic 1) to the request's 32-byte `funds_in_operation_id` -- not the
   hub's `operation_idx` -- plus the gross `amount` and `tokenCommission`;

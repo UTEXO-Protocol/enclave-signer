@@ -44,7 +44,7 @@ sequenceDiagram
     Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(EVM_FINALITY_TAG, false) / block at receipt height (15 s per call)
     Rpc-->>Evt: receipt / selected head / canonical block
     Evt->>Evt: receipt exists + status success
-    Evt->>Evt: exactly ONE BridgeFundsIn from FUNDS_IN_CONTRACT<br/>(zero or two ⇒ REFUSE, no plain FundsIn fallback)
+    Evt->>Evt: the ONE BridgeFundsIn from FUNDS_IN_CONTRACT with topic1 == funds_in_operation_id<br/>(none or two ⇒ REFUSE; other deposits ignored, no plain FundsIn fallback)
     Evt->>Evt: topic1 operationId == funds_in_operation_id<br/>gross == amount, tokenCommission == commission<br/>netAmount ≤ gross − commission, u64 only
     Evt->>Evt: receipt height ≤ selected head, canonical blockHash matches,<br/>revalidate head snapshot; missing head or receipt above head ⇒ REFUSE
     Evt-->>Srv: destinationAddress (may be empty)
@@ -59,7 +59,7 @@ sequenceDiagram
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; one FundsIn (rgbOpId == mint OpId)<br/>+ one BridgeFundsIn, block > afterBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; the FundsIn with rgbOpId == mint OpId and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block > afterBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
 
     Note over Srv,Inv: 5 — route and recipient
     Srv->>Srv: amount ≥ minted units + commission

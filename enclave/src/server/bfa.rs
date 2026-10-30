@@ -62,12 +62,22 @@ pub(super) fn derived_locks(
 pub(super) fn bind_mint_deposit(
     ctx: &ServerContext,
     tx_hash: &[u8; 32],
+    request_operation_id: &[u8],
     mint: &crate::networks::rgb::psbt_validation::MintFacts,
 ) -> Result<()> {
     use crate::networks::evm::events::{check_node_chain_id, verify_rgb_funds_in};
 
     let cfg = &ctx.bridge_config;
     let derived = derived_lock(cfg, mint.opid, mint.issued)?;
+    // S2.3 bound the request's id. The mint must use the same deposit.
+    if request_operation_id != derived.operation_id {
+        return Err(EnclaveError::CrossCheck(format!(
+            "the request's funds_in_operation_id 0x{} is not the deposit id 0x{} that mint 0x{} derives, refusing to sign",
+            hex::encode(request_operation_id),
+            hex::encode(derived.operation_id),
+            hex::encode(mint.opid),
+        )));
+    }
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
@@ -82,6 +92,8 @@ pub(super) fn bind_mint_deposit(
         cfg.evm_finality_tag,
         tx_hash,
         &mint.opid,
+        &derived.operation_id,
+        mint.issued,
         mint.after_block,
     )?;
     bind_request_deposit(&derived, &paid)
