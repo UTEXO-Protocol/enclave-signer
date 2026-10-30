@@ -85,7 +85,8 @@ Before it signs, the mint signer:
 1. Gets the EVM deposit receipt itself. The receipt must be a success, be at
    or below the RPC head selected by `EVM_FINALITY_TAG` (`finalized`), and
    have the canonical block hash at its height.
-2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
+2. Finds the one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT` whose
+   `operationId` is the request's. Other deposits in the transaction are ignored.
    The `operationId`, amount and commission must match the request.
 3. Reads the mint from the fascia rgb-lib wrote for the PSBT's tx (`fascia`),
    with no consignment: rgb-lib strips the RGB data from the PSBT. The fascia
