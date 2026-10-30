@@ -1026,8 +1026,8 @@ Known limits. Read them before deployment.
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,
   but Docker, Buildx and BuildKit versions are not pinned.
-  The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
-  so the gas and mint PSBT paths refuse until a rebuilt image sets them.
+  The supplied images leave the gas limits unset, so the gas path refuses
+  until a rebuilt image sets them.
 - **Protocol integration.** The enclave derives each mint's deposit id. The
   Bridge must derive RGB deposit ids the same way. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.

@@ -105,6 +105,26 @@ pub(super) fn handle_sign_evm(
     })
 }
 
+/// M8: a mint pays no sat out, so it needs no unowned-sats budget.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+fn check_sats_gate(
+    psbt: &bitcoin::psbt::Psbt,
+    _cfg: &crate::config::BridgeConfig,
+    keys: &crate::keys::KeyManager,
+) -> Result<()> {
+    crate::networks::rgb::psbt_validation::assert_keeps_all_sats(psbt, keys, "mint")
+}
+
+/// Bounds the sats that leave to outputs the enclave cannot prove it owns.
+#[cfg(all(not(feature = "bfa-mint"), evm_to_rgb))]
+fn check_sats_gate(
+    psbt: &bitcoin::psbt::Psbt,
+    cfg: &crate::config::BridgeConfig,
+    keys: &crate::keys::KeyManager,
+) -> Result<()> {
+    crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(psbt, cfg, keys)
+}
+
 #[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_psbt(
     ctx: &ServerContext,
@@ -114,16 +134,8 @@ pub(super) fn handle_sign_psbt(
     // Sats gate. All other send-RGB binds use RGB asset units. Without this
     // gate, a witness tx can satisfy the ledger and still take the BTC backing.
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
-    ctx.state.with_keys(|keys| {
-        // M8: a mint pays no sat out. The budget below stays a second gate.
-        #[cfg(feature = "bfa-mint")]
-        crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")?;
-        crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
-            &psbt,
-            &ctx.bridge_config,
-            keys,
-        )
-    })?;
+    ctx.state
+        .with_keys(|keys| check_sats_gate(&psbt, &ctx.bridge_config, keys))?;
 
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.

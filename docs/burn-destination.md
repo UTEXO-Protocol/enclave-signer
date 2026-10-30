@@ -1,6 +1,6 @@
 # Burn destination record
 
-Status: V1 draft. This file is the normative format. The enclave code is
+Status: V1. This file is the normative format. The enclave code is
 `enclave/src/networks/evm/burn_destination.rs`.
 
 ## Why

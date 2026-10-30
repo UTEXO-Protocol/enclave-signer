@@ -74,7 +74,7 @@ sequenceDiagram
     Srv->>State: reserve (rolled back on error)
 
     Note over Srv,Km: 7 — sign
-    Srv->>Srv: M8 no unowned output sats; then ≤ RGB_MAX_UNOWNED_SATS
+    Srv->>Srv: mint: M8 no unowned output sats; send-RGB: ≤ RGB_MAX_UNOWNED_SATS
     Srv->>Km: sign_psbt_scoped(psbt, Colored)
     Km->>Km: per input: P2TR, origin fp == ours,<br/>derived key == tap_internal_key,<br/>tweak(internal, merkle_root) == output key<br/>⇒ Schnorr key-path signature
     Km-->>Srv: signed PSBT, inputs_signed

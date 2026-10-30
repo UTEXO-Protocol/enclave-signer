@@ -122,7 +122,7 @@ ENV EVM_CHAIN_ID=42161 \
 # derive from a post-boot seed, and enclave env is measured into PCR0. The
 # enclave derives output ownership. Unproven outputs need an unowned-sats budget.
 # Gas signing also needs fee/gas ceilings and allowed selectors, unset here.
-# Bridge PSBTs need RGB_MAX_UNOWNED_SATS, also unset here.
+# Send-RGB PSBTs need RGB_MAX_UNOWNED_SATS, also unset here. Mint builds do not.
 # The operator sets the Electrum URL and EVM RPC host, CA, and TLS port at launch.
 # The policy commits the hosts and CA hash, but not ports or the Electrum scheme.
 # See docs/tee-spec.md.
