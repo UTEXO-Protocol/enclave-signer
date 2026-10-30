@@ -111,19 +111,14 @@ pub(super) fn handle_sign_psbt(
     req: RgbDestination,
     #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
-    // Sats gate. All other send-RGB binds use RGB asset units. Without this
-    // gate, a witness tx can satisfy the ledger and still take the BTC backing.
-    let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
-    ctx.state.with_keys(|keys| {
-        // M8: a mint pays no sat out. The budget below stays a second gate.
-        #[cfg(feature = "bfa-mint")]
-        crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")?;
-        crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
-            &psbt,
-            &ctx.bridge_config,
-            keys,
-        )
-    })?;
+    // M8: a mint pays no sat out.
+    #[cfg(feature = "bfa-mint")]
+    {
+        let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
+        ctx.state.with_keys(|keys| {
+            crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")
+        })?;
+    }
 
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.

@@ -283,7 +283,7 @@ instead of trusting the operator's configuration. An unset pin commits as its ze
 
 Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum/Esplora URL
 scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
-`BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
+`BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
 
 The scheme needs no commitment: a release image accepts only TLS
@@ -564,11 +564,8 @@ another PSBT for the deposit after restart, expiry, eviction, or on another encl
 witness transaction can satisfy the RGB ledger exactly and still route the
 bridge's Bitcoin backing to an attacker output that carries no RGB assignment.
 The fee-rate cap does not catch it -- a diverted sat is an output, not a fee, so
-diversion *lowers* the implied rate. Outputs that do not pay back into the
-custody their inputs were in are therefore bounded by `RGB_MAX_UNOWNED_SATS`,
-fail-closed while unset. The budget is a bound rather than an identity check
-because the recipient's seal is blinded: the enclave cannot tell which output is
-the payout, only how much may leave. Signing is scoped to the **colored** BIP-86
+diversion *lowers* the implied rate. A mint PSBT may therefore pay no sat to
+any script the enclave does not own (M8). Signing is scoped to the **colored** BIP-86
 account, key-path spends only: the bridge wallet is singlesig, and a script-path
 input is never signed.
 
@@ -1026,8 +1023,8 @@ Known limits. Read them before deployment.
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,
   but Docker, Buildx and BuildKit versions are not pinned.
-  The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
-  so the gas and mint PSBT paths refuse until a rebuilt image sets them.
+  The supplied images leave the gas limits unset, so the gas path refuses
+  until a rebuilt image sets them.
 - **Protocol integration.** The enclave derives each mint's deposit id. The
   Bridge must derive RGB deposit ids the same way. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.

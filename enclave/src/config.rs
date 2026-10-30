@@ -88,10 +88,6 @@ pub struct BridgeConfig {
     /// There is no output script allowlist: the scripts come from a seed that
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
-    /// Budget in sats for send-RGB outputs the enclave cannot prove it owns
-    /// (`RGB_MAX_UNOWNED_SATS`). The recipient output is blinded, so the enclave
-    /// bounds the value that leaves. `0` = unset: production refuses send-RGB.
-    pub rgb_max_unowned_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
     /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
     /// each, 5 by default). `0` = unset: production refuses plain-BTC signing.
@@ -186,7 +182,6 @@ impl Default for BridgeConfig {
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
-            rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Safe,
@@ -269,11 +264,6 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let rgb_max_unowned_sats = std::env::var("RGB_MAX_UNOWNED_SATS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
         let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -339,7 +329,6 @@ impl BridgeConfig {
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,
             btc_max_total_sats,
-            rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
             evm_finality_tag,

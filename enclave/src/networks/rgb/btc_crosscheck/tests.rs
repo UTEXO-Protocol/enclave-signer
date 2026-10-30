@@ -1,11 +1,8 @@
 use super::*;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
-use bitcoin::blockdata::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
-use bitcoin::blockdata::script::Builder as ScriptBuilder;
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
 use bitcoin::{
     Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, WPubkeyHash,
     Witness, XOnlyPublicKey,
@@ -22,21 +19,6 @@ fn foreign_xonly(b: u8) -> XOnlyPublicKey {
     let secp = Secp256k1::new();
     let sk = SecretKey::from_slice(&[b; 32]).unwrap();
     XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &sk)).0
-}
-
-fn multi_a_2_of_3(keys: &[XOnlyPublicKey; 3]) -> ScriptBuf {
-    let mut sorted = *keys;
-    sorted.sort();
-    ScriptBuilder::new()
-        .push_x_only_key(&sorted[0])
-        .push_opcode(OP_CHECKSIG)
-        .push_x_only_key(&sorted[1])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_x_only_key(&sorted[2])
-        .push_opcode(OP_CHECKSIGADD)
-        .push_int(2)
-        .push_opcode(OP_NUMEQUAL)
-        .into_script()
 }
 
 /// Our BIP-86 key-path address at m/86'/1'/0'/0/0, with the key and origin
@@ -148,115 +130,6 @@ fn cfg_with_cap(cap: u64) -> BridgeConfig {
         btc_max_unowned_sats: 5_000,
         ..Default::default()
     }
-}
-
-/// Budget config for the send-RGB sats gate.
-fn rgb_cfg(budget: u64) -> BridgeConfig {
-    BridgeConfig {
-        rgb_max_unowned_sats: budget,
-        ..Default::default()
-    }
-}
-
-// --- send-RGB unowned-output budget (BTC value-diversion PoC) ---
-
-/// **The attack.** The PSBT spends two 5_000_000-sat bridge UTXOs. The RGB
-/// legs are correct (recipient dust, change dust on a self-owned vout). The
-/// rest goes to an attacker output with no RGB assignment, so no
-/// asset-unit bind sees it. Only the budget catches it.
-#[test]
-fn rgb_sats_gate_rejects_a_treasury_sweep() {
-    let keys = km();
-    let ours = our_address(&keys);
-    let psbt_bytes = psbt_from_our_address(
-        &keys,
-        &[5_000_000, 5_000_000],
-        &[
-            (foreign_address(), 546),       // recipient witness dust
-            (ours.spk.clone(), 546),        // bridge change, self-owned
-            (foreign_address(), 9_997_908), // the sweep
-        ],
-    );
-    let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
-    let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
-    assert!(
-        err.to_string().contains("cannot prove it controls"),
-        "got: {err}"
-    );
-}
-
-/// The correct shape signs: recipient dust is in the budget and the bridge
-/// change pays back to an input script (rule (A)).
-#[test]
-fn rgb_sats_gate_accepts_recipient_dust_with_self_owned_change() {
-    let keys = km();
-    let ours = our_address(&keys);
-    let psbt_bytes = psbt_from_our_address(
-        &keys,
-        &[5_000_000],
-        &[(foreign_address(), 1_500), (ours.spk.clone(), 4_998_000)],
-    );
-    let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
-    assert!(validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).is_ok());
-}
-
-/// The budget counts the sum of unowned outputs, so a sweep split across
-/// many outputs still fails.
-#[test]
-fn rgb_sats_gate_sums_unowned_outputs() {
-    let keys = km();
-    let outputs: Vec<_> = (0..6).map(|_| (foreign_address(), 1_000)).collect();
-    let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &outputs);
-    let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).unwrap();
-    // 6 x 1_000 = 6_000 > 5_000, but each output is under it.
-    let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("6000 sats"), "got: {err}");
-}
-
-/// No rule (B): a taproot tree that names one of our keys is NOT proof of
-/// control. The rest of the tree and its internal key are foreign. The output
-/// counts against the budget.
-#[test]
-fn rgb_sats_gate_does_not_trust_a_leaf_mentioning_our_key() {
-    use bitcoin::psbt::Psbt;
-    let keys = km();
-    let ours = our_address(&keys);
-
-    // A foreign script with one leaf: our key and two attacker keys.
-    let secp = Secp256k1::new();
-    let leaf = multi_a_2_of_3(&[ours.xonly, foreign_xonly(0xC1), foreign_xonly(0xC2)]);
-    let internal = foreign_xonly(0xC3);
-    let info = TaprootBuilder::new()
-        .add_leaf(0, leaf.clone())
-        .unwrap()
-        .finalize(&secp, internal)
-        .unwrap();
-    let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
-
-    let psbt_bytes = psbt_from_our_address(&keys, &[5_000_000], &[(spk, 4_999_000)]);
-    let mut psbt = Psbt::deserialize(&psbt_bytes).unwrap();
-    // Full BIP-371 output metadata for the leaf.
-    psbt.outputs[0].tap_internal_key = Some(internal);
-    psbt.outputs[0].tap_tree = Some(
-        TaprootBuilder::new()
-            .add_leaf(0, leaf.clone())
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    );
-    psbt.outputs[0].tap_key_origins.insert(
-        ours.xonly,
-        (
-            vec![TapLeafHash::from_script(&leaf, LeafVersion::TapScript)],
-            (*keys.master_fingerprint(), ours.path.clone()),
-        ),
-    );
-
-    let err = validate_rgb_psbt_sats(&psbt, &rgb_cfg(5_000), &keys).unwrap_err();
-    assert!(
-        err.to_string().contains("cannot prove it controls"),
-        "a leaf naming our key must not count as control; got: {err}"
-    );
 }
 
 #[test]

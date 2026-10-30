@@ -260,7 +260,6 @@ fn a_retry_is_signed_when_the_first_response_never_reached_the_caller() {
         bridge_contract: BRIDGE_CONTRACT,
         funds_in_contract: FUNDS_IN_CONTRACT,
         rgb_asset_id: ASSET_ID.into(),
-        rgb_max_unowned_sats: 5_000,
         ..Default::default()
     };
     let policy = SecurityPolicy::resolve(
