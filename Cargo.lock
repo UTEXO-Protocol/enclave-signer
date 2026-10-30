@@ -4671,7 +4671,7 @@ dependencies = [
 [[package]]
 name = "rgb-consensus"
 version = "0.11.2-rc.1"
-source = "git+ssh://git@github.com/rgb-tools-devs/rgb-consensus.git?rev=4a614b72cf9d5fdca4f293ab529a7e342717021a#4a614b72cf9d5fdca4f293ab529a7e342717021a"
+source = "git+ssh://git@github.com/rgb-tools-devs/rgb-consensus.git?rev=af0b751dc9e51547cd57e025fdc3508e120ddf8a#af0b751dc9e51547cd57e025fdc3508e120ddf8a"
 dependencies = [
  "amplify",
  "baid64",
@@ -4710,7 +4710,7 @@ dependencies = [
 [[package]]
 name = "rgb-invoicing"
 version = "0.11.2-rc.1"
-source = "git+ssh://git@github.com/rgb-tools-devs/rgb-ops.git?rev=9d831d2f75b076a0f9574678341f3b262a4a7e16#9d831d2f75b076a0f9574678341f3b262a4a7e16"
+source = "git+ssh://git@github.com/rgb-tools-devs/rgb-ops.git?rev=ed1d60df69f9e4db65640c0ac61a5779ba9c018c#ed1d60df69f9e4db65640c0ac61a5779ba9c018c"
 dependencies = [
  "amplify",
  "baid64",
@@ -4727,7 +4727,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.7"
-source = "git+ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git?rev=c264e040a87c76ac6079d71201c92532fb4c2c46#c264e040a87c76ac6079d71201c92532fb4c2c46"
+source = "git+ssh://git@github-rgb-lib/UTEXO-Protocol/rgb-lib-bfa.git?rev=0a9d352f2690902df2b6fae9bca1a6c13c3354d4#0a9d352f2690902df2b6fae9bca1a6c13c3354d4"
 dependencies = [
  "amplify",
  "hex",
@@ -4743,7 +4743,7 @@ dependencies = [
 [[package]]
 name = "rgb-ops"
 version = "0.11.2-rc.1"
-source = "git+ssh://git@github.com/rgb-tools-devs/rgb-ops.git?rev=9d831d2f75b076a0f9574678341f3b262a4a7e16#9d831d2f75b076a0f9574678341f3b262a4a7e16"
+source = "git+ssh://git@github.com/rgb-tools-devs/rgb-ops.git?rev=ed1d60df69f9e4db65640c0ac61a5779ba9c018c#ed1d60df69f9e4db65640c0ac61a5779ba9c018c"
 dependencies = [
  "amplify",
  "baid64",
@@ -4765,7 +4765,7 @@ dependencies = [
 [[package]]
 name = "rgb-psbt-utils"
 version = "0.11.2-rc.1"
-source = "git+ssh://git@github.com/rgb-tools-devs/rgb-api.git?rev=a3333c8fdc4db4743b93943dacc1d5573081d0b1#a3333c8fdc4db4743b93943dacc1d5573081d0b1"
+source = "git+ssh://git@github.com/rgb-tools-devs/rgb-api.git?rev=8e2f515d0f6445e88d3c794a4b592f7bdd3a12df#8e2f515d0f6445e88d3c794a4b592f7bdd3a12df"
 dependencies = [
  "amplify",
  "getrandom 0.3.4",
@@ -4778,7 +4778,7 @@ dependencies = [
 [[package]]
 name = "rgb-schemas"
 version = "0.11.2-rc.1"
-source = "git+ssh://git@github.com/rgb-tools-devs/rgb-schemas.git?rev=aa1e7fd20b33237a020bc37daa71f631e4657fca#aa1e7fd20b33237a020bc37daa71f631e4657fca"
+source = "git+ssh://git@github.com/rgb-tools-devs/rgb-schemas.git?rev=641a06f31cd277c42222504c8040055c8cbafca5#641a06f31cd277c42222504c8040055c8cbafca5"
 dependencies = [
  "amplify",
  "rgb-aluvm",

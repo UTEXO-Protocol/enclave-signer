@@ -695,7 +695,7 @@ mod reject_list_rules {
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib c264e040 `SCHEMA_ID_BFA`.
+/// it must fail loudly here. rgb-lib 0a9d352f `SCHEMA_ID_BFA`.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(

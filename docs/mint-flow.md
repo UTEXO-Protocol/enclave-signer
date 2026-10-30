@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move; plan B: the mint signer reads the rgb-lib fascia).
+**Checked against repository code:** 2026-10-30 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -219,7 +219,9 @@ does not sign the parent.
   out a tapret.
 - **F6** The bundle holds exactly one transition, stored under its own id, of
   the pinned contract. The input map must close exactly its inputs, each for
-  that transition.
+  that transition. rgb-lib 1ae1c160 moves any other allocation of the spent
+  UTXO by a transition of its own in the same bundle, so a link right must
+  not share a UTXO with mint rights: F6 refuses that mint or refill.
 - **F7** The PSBT spends exactly one input (`MINT_INPUTS`), a Colored
   key-path input of the enclave. A mint above about 15 sat/vB needs a fee
   input and is refused, so the right's UTXO must cover the fee.
@@ -490,6 +492,6 @@ after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
 mint spends.
 
-The fascia is read in the strict encoding of rgb-ops 9d831d2 (the pinned
+The fascia is read in the strict encoding of rgb-ops ed1d60d (the pinned
 `rgb-ops` rev). A change of that encoding fails F4 and PP1 closed: every mint
 and refill is refused until the enclave moves with rgb-lib.

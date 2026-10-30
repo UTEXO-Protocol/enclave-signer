@@ -689,7 +689,7 @@ impl ResolveAnchor for LockedOnChain {
         _: &BridgeLocation,
         anchor: &ExternalAnchor,
     ) -> Result<bool, AnchorResolverError> {
-        let ExternalAnchor::MintEvent { opid, amount, .. } = anchor;
+        let ExternalAnchor::Mint { opid, amount, .. } = anchor;
         Ok(*opid == self.0 && *amount == MINTED)
     }
 }
@@ -701,7 +701,7 @@ fn consumer_validates(deposit: &Deposit, chain: Vec<Transaction>) -> Result<(), 
     let config = ValidationConfig {
         chain_net: ChainNet::BitcoinRegtest,
         safe_height: None,
-        build_opouts_dag: true,
+        build_ops_dag: true,
     };
     let mut pending =
         transfer.validate_deterministic(&BridgedFungibleAsset::schema_rules(), &config)?;

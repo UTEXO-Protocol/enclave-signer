@@ -84,7 +84,7 @@ pub type AnchorBinder<'a> = &'a dyn Fn(&BfaBridge, &[MintAnchor]) -> Result<Boun
 /// One anchor consensus left open. `last_bundle` holds the OpIds of the
 /// bundle a mint PSBT signs.
 fn mint_anchor(anchor: &ExternalAnchor, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
-    let ExternalAnchor::MintEvent {
+    let ExternalAnchor::Mint {
         opid,
         amount,
         before_block,
