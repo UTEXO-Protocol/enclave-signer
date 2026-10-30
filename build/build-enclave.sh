@@ -77,7 +77,10 @@ mkdir -p "$OUT_DIR"
 # Reject a missing asset before the build starts. (F06-AF-38)
 # A fixed ENV asset does not need a build argument.
 BUILD_ARGS=()
-if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
+declares_build_arg() {
+    grep -qE "^[[:space:]]*ARG[[:space:]]+$1([=[:space:]]|$)" "$SCRIPT_DIR/$DOCKERFILE"
+}
+if declares_build_arg RGB_ASSET_ID; then
     if [ -z "${RGB_ASSET_ID:-}" ]; then
         echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
         echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; the image build fails without it." >&2
@@ -85,6 +88,27 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     fi
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
     echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# Optional measured configuration for the mint/burn recipes. Unset values
+# retain each Dockerfile's production defaults.
+if declares_build_arg ENCLAVE_FEATURES; then
+    # Match Docker's effective defaults when an override is unset or empty.
+    build_features="${ENCLAVE_FEATURES:-$(sed -n 's/^ARG ENCLAVE_FEATURES=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    bitcoin_network="${BITCOIN_NETWORK:-$(sed -n 's/^ARG BITCOIN_NETWORK=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    if [ "$bitcoin_network" != signet ] && \
+        ! grep -qE '(^|[[:space:],])rgb([[:space:],]|$)' <<< "$build_features"; then
+        echo "Error: $DOCKERFILE requires the rgb feature when BITCOIN_NETWORK=$bitcoin_network." >&2
+        echo "       Include rgb in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
+        exit 1
+    fi
+    for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS ENDPOINTS_SHA256; do
+        if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
+            BUILD_ARGS+=(--build-arg "$arg=${!arg}")
+            echo "    build override: $arg=${!arg}"
+        fi
+    done
 fi
 
 if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then

@@ -1,7 +1,6 @@
 //! `Health`: the readiness probe for deploy orchestration.
 //!
-//! All builds answer it. A build without `rgb-validation` always reports
-//! SPV as synced.
+//! All builds answer it. Builds without active SPV report zero SPV diagnostics.
 
 use super::context::ServerContext;
 use crate::error::Result;
@@ -10,7 +9,7 @@ use crate::proto::*;
 
 /// SPV part of the readiness answer:
 /// `(synced, tip_height, tip_time, tip_age_secs, max_tip_age_secs)`.
-#[cfg(feature = "rgb-validation")]
+#[cfg(feature = "spv")]
 fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     use crate::networks::rgb::spv_crosscheck::{assert_chain_ready, SPV_MAX_TIP_AGE_SECS};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,9 +39,10 @@ fn spv_health(ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     )
 }
 
-/// A `ccd`-only build has no header chain, so it has nothing to sync.
-/// Zero values mean "not applicable".
-#[cfg(not(feature = "rgb-validation"))]
+/// A build without SPV has nothing to sync. Zero diagnostics
+/// mean "not applicable" and tell the parent's header-sync worker to stop.
+/// `synced` is true only in the readiness sense: no SPV work is pending.
+#[cfg(not(feature = "spv"))]
 fn spv_health(_ctx: &ServerContext) -> (bool, u32, u32, u32, u32) {
     (true, 0, 0, 0, 0)
 }

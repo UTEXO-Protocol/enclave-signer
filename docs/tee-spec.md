@@ -154,15 +154,18 @@ indexer and the EVM RPC are reached through in-enclave loopback forwarders
 that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
 and 8002); the enclave has no direct network stack.
 
-**Launch endpoints.** The endpoints are not in the image, so a rebuild of the
-EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
+**Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. The burn signer still requires and pins the indexer URL
-although its RGB-source path never calls it; dropping it changes the
-`SetEndpoints` and attested-policy shape, so that waits until after the RGB
-0.11.2 cutover. The enclave refuses a second set; changing them needs a
-restart, which loses the keys. Until the set, the enclave refuses `Sign`,
+expected EVM address. Production images keep these values outside the image
+and commit them through the attested policy. Without SPV, `ENDPOINTS_SHA256`
+binds network inputs to the image; KMS fields remain runtime inputs.
+The burn signer requires the indexer URL; without SPV, it queries the indexer
+for confirmations.
+The enclave refuses a second set; changing launch values needs a restart,
+which clears the in-memory keys. Mint recovers its saved KMS identity; burn
+recovery requires a live approved donor with matching PCRs. Until the set, the
+enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
 `InitializeKey`. It starts no Electrum or
@@ -244,8 +247,12 @@ SecurityPolicy = Production {
   an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
   Independently, each
   dev feature is a `compile_error!` in any shipped release binary (non-test
-  build with debug assertions off); `rgb-validation` without `spv` is a
-  `compile_error!` in every profile, as is `rgb-validation` with both RGB flows
+  build with debug assertions off); `rgb-validation` without `spv` requires
+  a mint/burn role, real attestation, `BITCOIN_NETWORK=signet` and
+  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
+  `SetEndpoints` enforces the measured network digest, and operators approve
+  KMS inputs separately.
+  A build fails with both RGB flows
   (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
   both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
@@ -895,10 +902,10 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   in any AWS account; PCR3 binds the peer to the operator's role (#270). Each
   side compares the peer's PCR3 with its own (`GetClone` and `SetClone`) and
   refuses a missing or different PCR3, and refuses to clone at all when its own
-  PCR3 is all zero (no IAM role). A role that clones (burn, combined) commits
-  its PCR3 in the attested policy (`clone_peer_pcr3`) and refuses
-  `SetEndpoints` when it is all zero, so such an enclave does not start on an
-  instance without an IAM role. Recovery onto an instance with another role
+  PCR3 is all zero (no IAM role). A Production policy for a role that clones
+  (burn, combined) commits its PCR3 (`clone_peer_pcr3`) and refuses
+  `SetEndpoints` when it is all zero. The handshake enforces nonzero, matching
+  PCR3 regardless of policy. Recovery onto an instance with another role
   fails by design. The mint signer does not clone and does not read PCR3. The DH exchange rejects small-order points; the seed
   ciphertext is bound to both handshake keys via HKDF; replay-guard nonces are
   recorded only **after** authentication succeeds, and the guard

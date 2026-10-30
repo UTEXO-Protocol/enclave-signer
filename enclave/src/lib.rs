@@ -28,20 +28,23 @@ dev_feature_release_guard!(
      it accepts zero-PCR attestation documents."
 );
 
-// Without `spv`, the host-controlled indexer tells if witness txs are mined.
-// A malicious host can then get a `fundsOut` signed against a fake anchor.
-// `spv` checks every witness tx against the enclave's own header chain.
-// Unsafe in every profile, so this guard is not release-gated (M-01).
-#[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
-compile_error!(
-    "rgb-validation requires spv: without spv, consignment anchoring trusts only \
-     the host-controlled indexer - build with `--features spv` (which \
-     pulls in rgb-validation)"
-);
-
-// `rgb` enables `spv`, and `spv` enables `rgb-validation`. The guard requires
-// `spv` when `rgb-validation` is selected directly. The stack uses the
-// `rgb-validation` gate; the `rgb` alias itself need not be enabled.
+// Builds without SPV require real attestation and an explicit signer role.
+#[cfg(all(
+    feature = "rgb-validation",
+    not(feature = "spv"),
+    any(
+        feature = "allow-seed-import",
+        feature = "mock-attestation",
+        feature = "allow-debug-pcrs"
+    )
+))]
+compile_error!("rgb-validation without spv requires real attestation; seed import and mock/debug attestation features are forbidden");
+#[cfg(all(
+    feature = "rgb-validation",
+    not(feature = "spv"),
+    not(any(feature = "mint-signer", feature = "burn-signer"))
+))]
+compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
 
 // Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
 // The modules in `networks/rgb/flow/` export the same item names. These guards

@@ -132,7 +132,7 @@ ccd = []
 rgb-swap = ["rgb"]
 # `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
 # with BFA `mint`, withdrawals destroy with BFA `burn`.
-rgb-mint-burn = ["rgb"]
+rgb-mint-burn = ["rgb-validation"]
 
 # Seed custody is a separate capability, enabled only by the mint signer.
 kms-persistence = [
@@ -155,17 +155,14 @@ kms-persistence = [
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# In-enclave RGB consignment validation via rgbstd. REQUIRES `spv` (a
-# `compile_error!` in lib.rs). Without SPV, nothing anchors the witness txs in
-# Bitcoin. A malicious host can then fake a Bitcoin anchor.
-# `spv` is not in this list because that makes a feature cycle.
+# In-enclave RGB consignment validation via rgbstd. Without `spv`, only
+# public-signet mint/burn builds are allowed (lib.rs/policy.rs); Bitcoin
+# confirmations are trusted from the TLS indexer.
 rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
-# When OFF, there is no SPV gate. `rgb-validation` is off too, so
-# `validate_source` refuses every RGB source and only CCD-sourced releases
-# sign (the CCD build). A release build then needs the EVM domain pins
-# (networks/evm/validation.rs).
+# Builds without RGB validation refuse RGB sources; CCD release signing
+# still requires EVM domain pins (networks/evm/validation.rs).
 spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
