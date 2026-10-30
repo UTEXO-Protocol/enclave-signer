@@ -270,7 +270,7 @@ signed or not: only its unsigned tx and its RGB keys are read.
   path is `[k, i]`, both steps non-hardened, and `k` = 0 on Colored, 0 or 1 on Vanilla.
   rgb-lib sends the change to the colored keychain, so an honest
   mint pays nothing out.
-- **S7.1** The mint build has no unowned-sats budget. M8 is the only sats gate.
+- **S7.1** There is no unowned-sats budget. M8 is the only sats gate.
 - **S7.2** The mint signer signs only inputs of the colored account. It uses
   Taproot key-path signatures with BIP-86 account keys. A Tapret or script-tree
   root can be part of the tweak. It never produces script-path signatures.

@@ -542,7 +542,6 @@ Value bounds (fail closed while unset in a production build):
 |----------|---------|-------------|
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
 | `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls. Outputs repaying a signed input or landing on the enclave's own BIP-86 key-path addresses (singlesig change, `create_utxo` allocations) are proven and do not count. |
-| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. Mint builds ignore it: M8 allows no sat out. |
 | `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
 | `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling (wei) on `maxFeePerGas` / `maxPriorityFeePerGas` / legacy `gasPrice`. |

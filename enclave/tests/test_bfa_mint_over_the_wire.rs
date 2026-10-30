@@ -381,7 +381,6 @@ fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
         funds_in_contract: FUNDS_IN_CONTRACT,
         token_contract: TOKEN_CONTRACT,
         rgb_asset_id: contract_id.to_string(),
-        rgb_max_unowned_sats: 1_000,
         ..Default::default()
     }
 }
