@@ -1,7 +1,8 @@
 //! The caps on the work rgb-lib does, checked before it runs, and the
 //! release-mode timings their values come from: `cargo test --release -p
 //! utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib
-//! caps -- --ignored --nocapture`.
+//! caps -- --ignored --nocapture --test-threads=1`, with `GENESIS_RIGHTS` set
+//! to the pinned asset's genesis mint rights (default 1).
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -21,9 +22,9 @@ use rgbstd::validation::DbcProof;
 use rgbstd::{ChainNet, Operation, Opout};
 
 use super::super::cost::{
-    assert_bounded_for_rgb_lib, assert_within, bundle_id_cost, opouts_dag_cost, reject_walk_cost,
-    rgb_lib_ns, witness_check_cost, MAX_BUNDLE_ID_COST, MAX_OPOUTS_DAG_COST, MAX_REJECT_WALK_COST,
-    MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
+    assert_bounded_for_rgb_lib, assert_within, bundle_id_cost, genesis_hash_cost, opout_count,
+    reject_walk_cost, rgb_lib_ns, uncapped_costs, witness_check_cost, MAX_BUNDLE_ID_COST,
+    MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
 };
 use super::super::scratch::with_scratch_file;
 use super::*;
@@ -43,7 +44,7 @@ fn walk_cost(bytes: &[u8]) -> u64 {
 }
 
 /// A propagate of the genesis right to `n` rights, then a burn of all of
-/// them: schema-valid, no mint, about n^2 steps of DAG.
+/// them in one transition: schema-valid, no mint.
 fn rights_burn(mut history: History, n: u16) -> Vec<u8> {
     let right = history.genesis_right(0, right_utxo());
     burn_rights_of(&mut history, right, n, 0);
@@ -95,6 +96,26 @@ fn propagate_rights(history: &mut History, right: Utxo, n: u16) -> (rgbstd::OpId
     (rights, OutPoint::new(tx.compute_txid(), 1))
 }
 
+/// An asset of `rights` genesis mint rights, right 0 on [`right_utxo`].
+fn issue_of(rights: u32, listed: bool) -> History {
+    let outpoints = (0..rights).map(|i| gen::outpoint(0xA0, i)).collect();
+    History::issue(Issue {
+        reject_list: listed.then(|| gen::evm_reject_list(EVM_CHAIN_ID, LIST)),
+        ..Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints)
+    })
+}
+
+/// `links` propagates of `n` rights each, each from a right of the one before.
+fn propagate_chain(mut history: History, n: u16, links: u16) -> Vec<u8> {
+    let mut right = history.genesis_right(0, right_utxo());
+    for _ in 0..links {
+        let (rights, outpoint) = propagate_rights(&mut history, right, n);
+        let opout = Opout::new(rights, schemata::OS_MINT, 0);
+        right = Utxo { opout, outpoint };
+    }
+    history.consignment()
+}
+
 /// `t` rights, then one bundle of `t` one-right burns in a tx with `d` dummy
 /// inputs before the real one: rgb-lib checks each burn against the whole tx.
 fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
@@ -104,8 +125,7 @@ fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
 
 /// [`many_burns`] committed in a Tapret output instead, whose script tree
 /// has a partner leaf of `leaf` bytes.
-fn many_tapret_burns(t: u16, leaf: usize) -> Vec<u8> {
-    let mut history = issue();
+fn many_tapret_burns(mut history: History, t: u16, leaf: usize) -> Vec<u8> {
     commit_many_burns(&mut history, t, 0);
     tapret_last_bundle(&mut history, leaf);
     history.consignment()
@@ -315,10 +335,6 @@ fn largest_within(cap: u64, cost: impl Fn(u64) -> u64) -> u16 {
     u16::try_from(n).unwrap()
 }
 
-fn rights_burn_cost(n: u64) -> u64 {
-    n * n + 1
-}
-
 fn wide_walk_cost(k: u64) -> u64 {
     2 * k * (k + 5)
 }
@@ -326,7 +342,6 @@ fn wide_walk_cost(k: u64) -> u64 {
 #[test]
 fn each_cap_admits_its_own_value_and_refuses_one_more() {
     for cap in [
-        MAX_OPOUTS_DAG_COST,
         MAX_WITNESS_CHECK_COST,
         MAX_BUNDLE_ID_COST,
         MAX_REJECT_WALK_COST,
@@ -338,14 +353,6 @@ fn each_cap_admits_its_own_value_and_refuses_one_more() {
     }
 }
 
-#[test]
-fn the_dag_cost_is_the_square_of_each_transitions_inputs() {
-    let bytes = rights_burn(issue(), 3);
-    assert_eq!(opouts_dag_cost(&load(&bytes)), rights_burn_cost(3));
-    let bytes = wide_transfer(issue(), 3);
-    assert_eq!(opouts_dag_cost(&load(&bytes)), 1 + 1 + 9);
-}
-
 /// Per bundle: its transitions times its tx size and Tapret partner leaf,
 /// plus its seals times its tx inputs.
 #[test]
@@ -355,7 +362,7 @@ fn the_witness_cost_is_each_transition_over_its_whole_tx_and_anchor() {
     let propagate = size(0) + 1;
     let burns = 3 * size(1) + 3 * 6;
     assert_eq!(witness_check_cost(&transfer), propagate + burns);
-    let transfer = load(&many_tapret_burns(3, 1_000));
+    let transfer = load(&many_tapret_burns(issue(), 3, 1_000));
     let size = |no: usize| transfer.bundles[no].tx.total_size() as u64;
     let propagate = size(0) + 1;
     let burns = 3 * (size(1) + 1_000) + 3;
@@ -392,16 +399,16 @@ fn the_walk_cost_stops_past_its_cap() {
     assert!(reject_walk_cost(&transfer, 1) > 1);
 }
 
-/// A burn of n rights from one propagate passes the gate at the cap and is
-/// refused before rgb-lib at the next n, listed or not.
+/// rgb-consensus af0b751d builds its DAG in linear time, so a burn of 8193
+/// rights (8192^2 was the cap before) passes the gate and reaches rgb-lib.
 #[test]
-fn a_burn_of_too_many_rights_is_refused_before_rgb_lib() {
-    let n = largest_within(MAX_OPOUTS_DAG_COST, rights_burn_cost);
-    let at_cap = rights_burn(issue(), n);
-    assert_eq!(opouts_dag_cost(&load(&at_cap)), rights_burn_cost(n.into()));
-    gate(&at_cap, false).unwrap();
-    assert_capped(&rights_burn(issue(), n + 1), "opouts DAG");
-    assert_capped(&rights_burn(listed(), n + 1), "opouts DAG");
+fn a_burn_of_8193_rights_passes_the_gate_and_reaches_rgb_lib() {
+    gate(&rights_burn(listed(), 8_193), true).unwrap();
+    let bytes = rights_burn(issue(), 8_193);
+    gate(&bytes, false).unwrap();
+    let (err, asked) = validate_unmined(&bytes);
+    assert!(err.contains("not proven on chain"), "{err}");
+    assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
 /// The dummy inputs that bring 256 one-right burns to about `cost`: each
@@ -420,7 +427,6 @@ fn a_bundle_of_many_transitions_in_a_wide_tx_is_refused_before_rgb_lib() {
     let over = many_burns(issue(), 256, dummies_for(MAX_WITNESS_CHECK_COST / 8 * 9));
     let cost = witness_check_cost(&load(&over));
     assert!(cost > MAX_WITNESS_CHECK_COST, "{cost}");
-    assert!(opouts_dag_cost(&load(&over)) <= MAX_OPOUTS_DAG_COST);
     assert_capped(&over, "witness txs");
 }
 
@@ -430,13 +436,13 @@ fn a_bundle_of_many_transitions_in_a_wide_tx_is_refused_before_rgb_lib() {
 #[test]
 fn a_bundle_of_many_transitions_with_a_wide_anchor_is_refused_before_rgb_lib() {
     let leaf = |cost: u64| usize::try_from(cost / 256).unwrap();
-    let under = many_tapret_burns(256, leaf(MAX_WITNESS_CHECK_COST / 8 * 7));
+    let under = many_tapret_burns(issue(), 256, leaf(MAX_WITNESS_CHECK_COST / 8 * 7));
     gate(&under, false).unwrap();
-    let over = many_tapret_burns(256, leaf(MAX_WITNESS_CHECK_COST / 8 * 9));
+    let over = many_tapret_burns(issue(), 256, leaf(MAX_WITNESS_CHECK_COST / 8 * 9));
     let cost = witness_check_cost(&load(&over));
     assert!(cost > MAX_WITNESS_CHECK_COST, "{cost}");
     assert_capped(&over, "witness txs");
-    let (err, asked) = validate_unmined(&many_tapret_burns(2, 64));
+    let (err, asked) = validate_unmined(&many_tapret_burns(issue(), 2, 64));
     assert!(err.contains("not proven on chain"), "{err}");
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
@@ -465,7 +471,6 @@ fn a_listed_asset_caps_the_reject_walk_and_an_unlisted_one_does_not() {
     );
     gate(&at_cap, true).unwrap();
     let over = wide_transfer(listed(), k + 1);
-    assert!(opouts_dag_cost(&load(&over)) <= MAX_OPOUTS_DAG_COST);
     assert_capped(&over, "reject list");
     let unlisted = wide_transfer(issue(), k + 1);
     assert!(walk_cost(&unlisted) > MAX_REJECT_WALK_COST);
@@ -474,19 +479,75 @@ fn a_listed_asset_caps_the_reject_walk_and_an_unlisted_one_does_not() {
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
-/// The file costs its bytes at one rate and each cost its steps at another;
-/// the sum saturates.
+/// The file costs its bytes at one rate, its opouts and genesis leaf hashes
+/// at others and each cost its steps at its own; the sum saturates.
 #[test]
 fn the_rgb_lib_time_adds_the_file_to_each_cost() {
-    let costs = [100, 1_000, 10, 1_000];
-    assert_eq!(rgb_lib_ns(0, [0; 4]), 0);
-    assert_eq!(rgb_lib_ns(1_000, [0; 4]), 1_300_000);
-    assert_eq!(rgb_lib_ns(0, costs), 200 + 14_000 + 45_000 + 75_000);
+    let costs = [1_000, 10, 1_000];
+    assert_eq!(rgb_lib_ns(0, [0; 2], [0; 3]), 0);
+    assert_eq!(rgb_lib_ns(1_000, [0; 2], [0; 3]), 1_100_000);
+    assert_eq!(rgb_lib_ns(0, [10, 0], [0; 3]), 550_000);
+    assert_eq!(rgb_lib_ns(0, [0, 10], [0; 3]), 150_000);
+    assert_eq!(rgb_lib_ns(0, [0; 2], costs), 14_000 + 45_000 + 75_000);
     assert_eq!(
-        rgb_lib_ns(1_000, costs),
-        rgb_lib_ns(1_000, [0; 4]) + rgb_lib_ns(0, costs)
+        rgb_lib_ns(1_000, [10, 10], costs),
+        rgb_lib_ns(1_000, [0; 2], [0; 3])
+            + rgb_lib_ns(0, [10, 10], [0; 3])
+            + rgb_lib_ns(0, [0; 2], costs)
     );
-    assert_eq!(rgb_lib_ns(usize::MAX, costs), u64::MAX);
+    assert_eq!(rgb_lib_ns(usize::MAX, [0; 2], costs), u64::MAX);
+    assert_eq!(rgb_lib_ns(0, [u64::MAX, 0], costs), u64::MAX);
+    assert_eq!(rgb_lib_ns(0, [0, u64::MAX], costs), u64::MAX);
+}
+
+/// Each link of a propagate chain spends one opout and creates its rights.
+#[test]
+fn the_opout_count_is_every_opout_created_and_spent() {
+    let count = |links| opout_count(&load(&propagate_chain(issue(), 3, links)));
+    assert_eq!(count(2) - count(1), 1 + 3);
+    assert_eq!(count(3) - count(1), 2 * (1 + 3));
+    // The mint spends its right for one output, the fan-out makes 3, the transfer moves them.
+    let transfer = load(&wide_transfer(issue(), 3));
+    assert_eq!(
+        opout_count(&transfer) - count(0),
+        (1 + 1) + (1 + 3) + (3 + 3)
+    );
+}
+
+/// Each operation hashes every genesis global and assignment: 5 globals and
+/// r rights, 6 with a reject list.
+#[test]
+fn the_genesis_hash_cost_is_every_genesis_leaf_once_per_operation() {
+    let cost = |history, links| genesis_hash_cost(&load(&propagate_chain(history, 1, links)));
+    assert_eq!(cost(issue_of(1, false), 0), 5 + 1);
+    assert_eq!(cost(issue_of(1, false), 3), 4 * (5 + 1));
+    assert_eq!(cost(issue_of(255, false), 3), 4 * (5 + 255));
+    assert_eq!(cost(issue_of(255, true), 3), 4 * (6 + 255));
+}
+
+/// rgb-lib rehashes the genesis once per operation, 3.4 ms per operation at
+/// 255 rights: 5000 one-right propagates take it about 19 s from that genesis
+/// and 2.4 s from a one-right genesis.
+#[test]
+fn a_chain_from_a_255_right_genesis_is_refused_where_a_one_right_genesis_passes() {
+    gate(&propagate_chain(issue_of(1, false), 1, 5_000), false).unwrap();
+    let wide = propagate_chain(issue_of(255, false), 1, 5_000);
+    assert_capped(&wide, "rgb-lib time");
+}
+
+/// A propagate chain within every cap passes at the largest file its opouts
+/// leave the time budget and is refused one byte larger.
+#[test]
+fn a_file_is_refused_when_its_opouts_leave_too_little_time() {
+    let transfer = load(&propagate_chain(issue(), 4_096, 4));
+    let uncapped = uncapped_costs(&transfer);
+    let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
+    let left = MAX_RGB_LIB_NS - rgb_lib_ns(0, uncapped, costs);
+    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 2], [0; 3])).unwrap();
+    assert!(rgb_lib_ns(largest + 1, [0; 2], costs) <= MAX_RGB_LIB_NS);
+    assert_bounded_for_rgb_lib(&transfer, largest, false).unwrap();
+    let err = assert_bounded_for_rgb_lib(&transfer, largest + 1, false).unwrap_err();
+    assert!(err.to_string().contains("rgb-lib time"), "{err}");
 }
 
 /// A listed walk within its cap passes at the largest file the time budget
@@ -497,13 +558,12 @@ fn a_listed_walk_is_refused_when_its_file_leaves_too_little_time() {
     let walk = reject_walk_cost(&transfer, MAX_REJECT_WALK_COST);
     assert!(walk > 2 * 16 * 8, "{walk}");
     let costs = [
-        opouts_dag_cost(&transfer),
         witness_check_cost(&transfer),
         bundle_id_cost(&transfer),
         walk,
     ];
-    let left = MAX_RGB_LIB_NS - rgb_lib_ns(0, costs);
-    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 4])).unwrap();
+    let left = MAX_RGB_LIB_NS - rgb_lib_ns(0, uncapped_costs(&transfer), costs);
+    let largest = usize::try_from(left / rgb_lib_ns(1, [0; 2], [0; 3])).unwrap();
     assert_bounded_for_rgb_lib(&transfer, largest, true).unwrap();
     let err = assert_bounded_for_rgb_lib(&transfer, largest + 1, true).unwrap_err();
     assert!(err.to_string().contains("rgb-lib time"), "{err}");
@@ -521,17 +581,30 @@ fn the_burn_of_2810_mints_passes_every_cap() {
     assert_bounded_for_rgb_lib(&load(&bytes), size_cap, true).unwrap();
 }
 
-/// A listed merge of 1400 lines after 23,900 transfers: 12.1 MB, its walk
-/// at 66.98M, within the size cap and every other cap, took rgb-lib 20.1 s.
-/// The time budget refuses it before rgb-lib; unlisted it passes.
+/// A listed merge of 1400 lines after 21,000 transfers, within the size cap
+/// and every other cap: unlisted it passes the time budget, and its walk on
+/// top refuses it before rgb-lib. After 23,900 it took rgb-lib 19.5 s.
 #[test]
-#[ignore = "builds a 12 MB history; run it in release on request"]
+#[ignore = "builds an 11 MB history; run it in release on request"]
 fn a_listed_merge_at_the_size_and_walk_caps_is_refused_before_rgb_lib() {
-    let bytes = merged_chain(listed(), 1_400, 23_900);
+    let bytes = merged_chain(listed(), 1_400, 21_000);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
     let walk = reject_walk_cost(&load(&bytes), MAX_REJECT_WALK_COST);
     assert!(walk <= MAX_REJECT_WALK_COST, "{walk}");
     gate(&bytes, false).unwrap();
+    assert_capped(&bytes, "rgb-lib time");
+}
+
+/// A chain of 13 propagates of 65535 rights: 11.9 MB, 852k opouts, within
+/// every cap, took rgb-lib 42.8 s. Its opouts refuse it before rgb-lib.
+#[test]
+#[ignore = "builds a 12 MB history; run it in release on request"]
+fn a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib() {
+    let bytes = propagate_chain(issue(), u16::MAX, 13);
+    assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
+    let transfer = load(&bytes);
+    let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
+    assert!(rgb_lib_ns(bytes.len(), [0; 2], costs) <= MAX_RGB_LIB_NS);
     assert_capped(&bytes, "rgb-lib time");
 }
 
@@ -542,6 +615,13 @@ fn sizes(var: &str, default: &[u64]) -> Vec<u64> {
     std::env::var(var)
         .map(|v| v.split(',').map(|n| n.trim().parse().unwrap()).collect())
         .unwrap_or_else(|_| default.to_vec())
+}
+
+/// The genesis of a timing: `GENESIS_RIGHTS` mint rights (default 1), as
+/// the pinned asset has.
+fn timed(listed: bool) -> History {
+    let rights = std::env::var("GENESIS_RIGHTS").map_or(1, |r| r.trim().parse().unwrap());
+    issue_of(rights, listed)
 }
 
 /// `a:b` pairs from `var` (comma separated) or `default`.
@@ -610,9 +690,9 @@ fn assert_reached_the_witnesses(err: Option<String>) {
 }
 
 /// Our checks before rgb-lib, as production runs them: the parse and the
-/// gate. Returns the costs (dag, witness, bundle ids, walk), whether the gate
+/// gate. Returns the costs (witness, bundle ids, walk), whether the gate
 /// passed, its time, then the walk's alone.
-fn time_pre_checks(bytes: &[u8]) -> ([u64; 4], bool, Duration, Duration) {
+fn time_pre_checks(bytes: &[u8]) -> ([u64; 3], bool, Duration, Duration) {
     let start = Instant::now();
     let transfer = load(bytes);
     let listed = reject_list(&transfer.genesis).unwrap().is_some();
@@ -622,7 +702,6 @@ fn time_pre_checks(bytes: &[u8]) -> ([u64; 4], bool, Duration, Duration) {
     let walk = reject_walk_cost(&transfer, MAX_REJECT_WALK_COST);
     let walk_took = walk_start.elapsed();
     let costs = [
-        opouts_dag_cost(&transfer),
         witness_check_cost(&transfer),
         bundle_id_cost(&transfer),
         if listed { walk } else { 0 },
@@ -646,12 +725,14 @@ fn time_file_load(bytes: &[u8]) -> Duration {
 /// rgb-lib time they hold to `MAX_RGB_LIB_NS`.
 fn describe(name: &str, bytes: &[u8]) -> String {
     let (costs, passed, pre, walk_took) = time_pre_checks(bytes);
-    let [dag, witness, ids, walk] = costs;
+    let [witness, ids, walk] = costs;
+    let uncapped = uncapped_costs(&load(bytes));
+    let [opouts, genesis] = uncapped;
     format!(
-        "{name}: {} bytes, dag {dag}, witness {witness}, ids {ids}, walk {walk}, model {} ms, \
-         gate {}, pre-checks {} ms (walk {} ms), file load {} ms",
+        "{name}: {} bytes, opouts {opouts}, genesis leaf hashes {genesis}, witness {witness}, ids \
+         {ids}, walk {walk}, model {} ms, gate {}, pre-checks {} ms (walk {} ms), file load {} ms",
         bytes.len(),
-        rgb_lib_ns(bytes.len(), costs) / 1_000_000,
+        rgb_lib_ns(bytes.len(), uncapped, costs) / 1_000_000,
         if passed { "passes" } else { "refuses" },
         pre.as_millis(),
         walk_took.as_millis(),
@@ -660,12 +741,12 @@ fn describe(name: &str, bytes: &[u8]) -> String {
 }
 
 /// Forged burns of n rights (`DAG_N`, default 4096, 16384, 65535): rgb-lib
-/// refuses each at its first witness, after phase 1 built the opouts DAG.
+/// refuses each at its first witness, after phase 1 built the operations DAG.
 #[test]
 #[ignore = "release-mode timing; run on request"]
-fn measures_the_opouts_dag_of_forged_wide_burns() {
+fn measures_forged_wide_burns_of_rights() {
     for n in sizes("DAG_N", &[4_096, 16_384, 65_535]) {
-        let bytes = rights_burn(issue(), u16::try_from(n).unwrap());
+        let bytes = rights_burn(timed(false), u16::try_from(n).unwrap());
         time_forged(&format!("dag n={n}"), &bytes);
     }
 }
@@ -679,7 +760,7 @@ fn measures_the_witness_checks_of_forged_bundles() {
     let default = "64:49900,256:12480,1024:3110,256:0,512:0,1024:0,2048:0";
     for (t, d) in pairs("WITNESS_TD", default) {
         let bytes = many_burns(
-            issue(),
+            timed(false),
             u16::try_from(t).unwrap(),
             u32::try_from(d).unwrap(),
         );
@@ -687,10 +768,11 @@ fn measures_the_witness_checks_of_forged_bundles() {
     }
     for (t, l) in pairs("TAPRET_TL", "64:2090000,256:523000,511:262000,511:0") {
         let (t, l) = (u16::try_from(t).unwrap(), usize::try_from(l).unwrap());
-        time_forged(&format!("tapret t={t} leaf={l}"), &many_tapret_burns(t, l));
+        let bytes = many_tapret_burns(timed(false), t, l);
+        time_forged(&format!("tapret t={t} leaf={l}"), &bytes);
     }
     for (n, d) in pairs("SCAN_ND", "8192:16000") {
-        let mut history = issue();
+        let mut history = timed(false);
         let right = history.genesis_right(0, right_utxo());
         let (n, d) = (u16::try_from(n).unwrap(), u32::try_from(d).unwrap());
         burn_rights_of(&mut history, right, n, d);
@@ -706,26 +788,114 @@ fn time_forged(name: &str, bytes: &[u8]) {
     assert_reached_the_witnesses(err);
 }
 
-/// A forged file near `MAX_CONSIGNMENT_BYTES` within the DAG cap: burns of
-/// `FILL_K` rights each (default 700), as many as the cap allows.
+/// A forged file near `MAX_CONSIGNMENT_BYTES`: burns of `FILL_K` rights each
+/// (default 700, 8192, 65535), as many as the size cap holds.
 #[test]
 #[ignore = "release-mode timing; run on request"]
-fn measures_a_forged_file_at_the_size_cap_within_the_dag_cap() {
-    let k = sizes("FILL_K", &[700])[0];
-    let pairs = MAX_OPOUTS_DAG_COST / rights_burn_cost(k);
-    let outpoints: Vec<OutPoint> = (0..pairs).map(|i| gen::outpoint(0xA0, i as u32)).collect();
-    let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
-    for (no, outpoint) in outpoints.iter().enumerate() {
-        let right = history.genesis_right(u16::try_from(no).unwrap(), *outpoint);
-        burn_rights_of(&mut history, right, u16::try_from(k).unwrap(), 0);
-    }
-    let bytes = history.consignment();
-    assert!(opouts_dag_cost(&load(&bytes)) <= MAX_OPOUTS_DAG_COST);
+fn measures_a_forged_file_at_the_size_cap() {
     let size_cap = crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
-    time_forged(
-        &format!("fill k={k} x {pairs} (size cap {size_cap})"),
-        &bytes,
+    for k in sizes("FILL_K", &[700, 8_192, 65_535]) {
+        let k = u16::try_from(k).unwrap();
+        let pairs = most_within(size_cap, |burns| rights_burns(k, burns));
+        let bytes = rights_burns(k, pairs);
+        assert!(bytes.len() <= size_cap, "{}", bytes.len());
+        time_forged(
+            &format!("fill k={k} x {pairs} (size cap {size_cap})"),
+            &bytes,
+        );
+    }
+}
+
+/// `burns` [`rights_burn`]s of `k` rights, each from its own genesis right.
+fn rights_burns(k: u16, burns: u16) -> Vec<u8> {
+    let outpoints: Vec<OutPoint> = (0..burns)
+        .map(|i| gen::outpoint(0xA0, u32::from(i)))
+        .collect();
+    let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
+    for (no, outpoint) in (0..).zip(&outpoints) {
+        let right = history.genesis_right(no, *outpoint);
+        burn_rights_of(&mut history, right, k, 0);
+    }
+    history.consignment()
+}
+
+/// The most repeats of `shape` whose file fits `size` bytes.
+fn most_within(size: usize, shape: impl Fn(u16) -> Vec<u8>) -> u16 {
+    let one = shape(1).len();
+    let each = shape(2).len() - one;
+    u16::try_from((size - one) / each + 1).unwrap()
+}
+
+/// Forged chains of propagates of `CHAIN_N` rights each (default 65535,
+/// 4096) up to `MAX_CONSIGNMENT_BYTES`: the fewest bytes per opout.
+#[test]
+#[ignore = "release-mode timing; run on request"]
+fn measures_a_forged_chain_of_propagates_at_the_size_cap() {
+    let size_cap = crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
+    for n in sizes("CHAIN_N", &[65_535, 4_096]) {
+        let n = u16::try_from(n).unwrap();
+        let links = most_within(size_cap, |links| propagate_chain(timed(false), n, links));
+        let bytes = propagate_chain(timed(false), n, links);
+        assert!(bytes.len() <= size_cap, "{}", bytes.len());
+        time_forged(
+            &format!("chain n={n} x {links} (size cap {size_cap})"),
+            &bytes,
+        );
+    }
+}
+
+/// Forged chains of `GENESIS_LINKS` one-right propagates (default 2000) from
+/// geneses of `GENESIS_R` rights (default 1, 64, 255): rgb-consensus hashes
+/// the whole genesis once per operation.
+#[test]
+#[ignore = "release-mode timing; run on request"]
+fn measures_chains_of_propagates_from_wider_geneses() {
+    for links in sizes("GENESIS_LINKS", &[2_000]) {
+        for r in sizes("GENESIS_R", &[1, 64, 255]) {
+            let history = issue_of(u32::try_from(r).unwrap(), false);
+            let bytes = propagate_chain(history, 1, u16::try_from(links).unwrap());
+            time_forged(&format!("genesis r={r} chain of {links}"), &bytes);
+        }
+    }
+}
+
+/// The model holds rgb-lib's time on 2000 one-right propagates from a
+/// 255-right genesis, which it spends mostly rehashing that genesis.
+#[test]
+#[ignore = "release-mode timing; run on request"]
+fn a_chain_from_a_255_right_genesis_is_modeled_at_or_above_its_time() {
+    let bytes = propagate_chain(issue_of(255, false), 1, 2_000);
+    let (err, took) = time_rgb_lib(&bytes, &BTreeMap::new());
+    assert_reached_the_witnesses(err);
+    let transfer = load(&bytes);
+    let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
+    let model = rgb_lib_ns(bytes.len(), uncapped_costs(&transfer), costs);
+    println!(
+        "model {} ms, rgb-lib {} ms",
+        model / 1_000_000,
+        took.as_millis()
     );
+    assert!(u128::from(model) >= took.as_nanos());
+}
+
+/// Our read of the last bundle once rgb-lib passed, on burns of `READ_N`
+/// rights (default 8192, 65535) from a 255-right genesis.
+#[test]
+#[ignore = "release-mode timing; run on request"]
+fn reads_the_last_bundle_of_a_wide_burn_from_a_255_right_genesis_within_a_second() {
+    for n in sizes("READ_N", &[8_192, 65_535]) {
+        let burn = rights_burn(issue_of(255, false), u16::try_from(n).unwrap());
+        let transfer = load(&burn);
+        let start = Instant::now();
+        let last = read_last_bundle(&transfer).unwrap().unwrap();
+        let took = start.elapsed();
+        println!(
+            "read_last_bundle n={n}, 255 rights: {} ms",
+            took.as_millis()
+        );
+        assert_eq!(last.closed_seals.len(), usize::try_from(n).unwrap());
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
 }
 
 /// Forged reject walks, every witness mined: fan-outs (`WALK_KL`), merges
@@ -733,7 +903,7 @@ fn measures_a_forged_file_at_the_size_cap_within_the_dag_cap() {
 #[test]
 #[ignore = "release-mode timing; run on request"]
 fn measures_the_reject_walk_of_forged_shapes() {
-    for (k, l) in pairs("WALK_KL", "4096:1000,65535:500") {
+    for (k, l) in pairs("WALK_KL", "4096:1000,65535:500,65535:0,16384:0") {
         let (k, l) = (u16::try_from(k).unwrap(), usize::try_from(l).unwrap());
         report_walk(&format!("fan-out k={k} l={l}"), |h| fanned_chain(h, k, l));
     }
@@ -748,8 +918,7 @@ fn measures_the_reject_walk_of_forged_shapes() {
 }
 
 /// Listed merges of k lines after l transfers near the size cap
-/// (`BUDGET_KL`, `k:l`): the time budget refuses the first, which every other
-/// cap lets through, and admits the second.
+/// (`BUDGET_KL`, `k:l`), which every cap but the time budget lets through.
 #[test]
 #[ignore = "release-mode timing; run on request"]
 fn measures_listed_merges_against_the_time_budget() {
@@ -763,8 +932,8 @@ fn measures_listed_merges_against_the_time_budget() {
 
 /// The same shape listed and unlisted: the difference is rgb-lib's walk.
 fn report_walk(name: &str, shape: impl Fn(History) -> Vec<u8>) {
-    let listed = shape(listed());
-    let unlisted = shape(issue());
+    let listed = shape(timed(true));
+    let unlisted = shape(timed(false));
     let (err, with_list) = time_rgb_lib(&listed, &mined(&witness_ids(&listed)));
     assert_eq!(err, None, "{name}");
     let (err, without) = time_rgb_lib(&unlisted, &mined(&witness_ids(&unlisted)));
@@ -821,13 +990,14 @@ fn honest_burn(mut history: History, n: u16, transfers: usize) -> Vec<u8> {
 
 /// Honest burns over `MINTS` mints (default 1404, 2810), each line with
 /// `HISTORY` transfers (default 0, 3), validate end to end, listed and not.
+/// The asset has `GENESIS_RIGHTS` rights (default 1).
 #[test]
 #[ignore = "release-mode timing; run on request"]
 fn times_honest_burns_over_many_mints() {
     for n in sizes("MINTS", &[1_404, 2_810]) {
         for h in sizes("HISTORY", &[0, 3]) {
             let n = u16::try_from(n).unwrap();
-            for (kind, history) in [("unlisted", issue()), ("listed", listed())] {
+            for (kind, history) in [("unlisted", timed(false)), ("listed", timed(true))] {
                 let bytes = honest_burn(history, n, usize::try_from(h).unwrap());
                 let chain = mined(&witness_ids(&bytes));
                 let (err, in_rgb_lib) = time_rgb_lib(&bytes, &chain);
@@ -837,17 +1007,34 @@ fn times_honest_burns_over_many_mints() {
                     read: Some(&reads_unrelated),
                 };
                 let start = Instant::now();
-                let validated = validator()
-                    .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &lists)
-                    .unwrap();
+                let validated = validator().validate_consignment(
+                    &bytes,
+                    Some(&bind_all),
+                    &on_chain(&chain),
+                    &lists,
+                );
                 let end_to_end = start.elapsed();
+                let transfer = load(&bytes);
+                let start = Instant::now();
+                read_last_bundle(&transfer).unwrap();
+                let last_bundle = start.elapsed();
                 println!(
-                    "{}, rgb-lib {} ms, validated in {} ms",
+                    "{}, rgb-lib {} ms, {} in {} ms (read_last_bundle {} ms)",
                     describe(&format!("honest {kind} mints={n} history={h}"), &bytes),
                     in_rgb_lib.as_millis(),
-                    end_to_end.as_millis()
+                    if validated.is_ok() {
+                        "validated"
+                    } else {
+                        "refused"
+                    },
+                    end_to_end.as_millis(),
+                    last_bundle.as_millis()
                 );
-                assert_eq!(validated.mint_locks.len(), usize::from(n));
+                // A wide genesis can put an honest burn past the time budget.
+                match validated {
+                    Ok(validated) => assert_eq!(validated.mint_locks.len(), usize::from(n)),
+                    Err(e) => assert!(e.to_string().contains("rgb-lib time"), "{e}"),
+                }
             }
         }
     }

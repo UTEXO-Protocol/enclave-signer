@@ -4,7 +4,7 @@
 //! rgbstd and parser output into the shapes in [`super::types`]. It fails
 //! closed on data that it cannot read exactly.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::hashes::Hash;
@@ -118,13 +118,14 @@ fn fully_disclosed(bundle: &WitnessBundle) -> bool {
 /// The outpoints of the seals the bundle's known transitions close.
 /// Consensus proved each one is spent by the bundle's witness tx.
 fn closed_seals(transfer: &Transfer, bundle: &WitnessBundle) -> Result<Vec<bitcoin::OutPoint>> {
+    let makers = SealMakers::of(transfer);
     bundle
         .bundle
         .known_transitions
         .iter()
         .flat_map(|k| k.transition.inputs.iter())
         .map(|&input| {
-            seal_outpoint(transfer, input).ok_or_else(|| {
+            makers.outpoint(input).ok_or_else(|| {
                 EnclaveError::CrossCheck(format!(
                     "input {input} has no revealed seal in the consignment"
                 ))
@@ -133,20 +134,39 @@ fn closed_seals(transfer: &Transfer, bundle: &WitnessBundle) -> Result<Vec<bitco
         .collect()
 }
 
-/// The outpoint of the seal `input` spends, from the operation that made it.
-fn seal_outpoint(transfer: &Transfer, input: Opout) -> Option<bitcoin::OutPoint> {
-    let genesis = &transfer.genesis;
-    if input.op == genesis.id() {
-        return revealed_seal(&genesis.assignments.transmutate_seals(), input, None);
+/// The operations that made the seals, indexed once: a genesis id or a
+/// witness id hashes all of it, and a burn can spend 65535 inputs.
+struct SealMakers<'a> {
+    genesis_id: OpId,
+    genesis: Assignments<GraphSeal>,
+    transitions: HashMap<OpId, (&'a KnownTransition, bitcoin::Txid)>,
+}
+
+impl<'a> SealMakers<'a> {
+    /// A transition in two bundles keeps its first.
+    fn of(transfer: &'a Transfer) -> Self {
+        let mut transitions = HashMap::new();
+        for wb in &transfer.bundles {
+            let witness_id = wb.witness_id();
+            for known in &wb.bundle.known_transitions {
+                transitions.entry(known.opid).or_insert((known, witness_id));
+            }
+        }
+        Self {
+            genesis_id: transfer.genesis.id(),
+            genesis: transfer.genesis.assignments.transmutate_seals(),
+            transitions,
+        }
     }
-    let (known, witness_id) = transfer.bundles.iter().find_map(|wb| {
-        wb.bundle
-            .known_transitions
-            .iter()
-            .find(|k| k.opid == input.op)
-            .map(|k| (k, wb.witness_id()))
-    })?;
-    revealed_seal(&known.transition.assignments, input, Some(witness_id))
+
+    /// The outpoint of the seal `input` spends, from the operation that made it.
+    fn outpoint(&self, input: Opout) -> Option<bitcoin::OutPoint> {
+        if input.op == self.genesis_id {
+            return revealed_seal(&self.genesis, input, None);
+        }
+        let (known, witness_id) = self.transitions.get(&input.op)?;
+        revealed_seal(&known.transition.assignments, input, Some(*witness_id))
+    }
 }
 
 fn revealed_seal(

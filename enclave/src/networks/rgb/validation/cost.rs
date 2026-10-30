@@ -1,10 +1,10 @@
-//! Bounds the work rgb-lib does on a consignment, before it runs. Four parts
-//! of it grow faster than the file. For every BFA, in phase 1 and before any
-//! witness is checked, it builds the opouts DAG and checks each transition
-//! against the whole witness tx, anchor and input map of its bundle. For an
-//! asset with a reject list it walks that DAG once per origin. So a small
-//! forged consignment could hold a worker long past the request deadline.
-//! Each part has its cap, and their sum with the file has one budget.
+//! Bounds the work rgb-lib does on a consignment, before it runs. In phase 1,
+//! before any witness is checked, it checks each BFA transition against the
+//! whole witness tx, anchor and input map of its bundle, hashes every opout
+//! into its operation id more than once, and the whole genesis once per
+//! operation. For a listed asset it walks the operations DAG once per origin.
+//! Each superlinear part has its cap, and all of them with the file, its opouts
+//! and the genesis hashes have one time budget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -15,36 +15,33 @@ use rgbstd::{Anchor, KnownTransition, OpId, Opout};
 
 use crate::error::{EnclaveError, Result};
 
-/// Summed over the whole history: one transition of 8192 inputs takes rgb-lib
-/// 1.3 s. The burn of 2810 mints costs 7.9M (`tests/caps.rs`, docs/burn-flow.md).
-pub(super) const MAX_OPOUTS_DAG_COST: u64 = 8_192 * 8_192;
-
-/// Forged bundles at the cap take rgb-lib 1.6 to 2.6 s. The burn of 2810 mints
+/// Forged bundles at the cap take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
 /// costs 8.5M (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_WITNESS_CHECK_COST: u64 = 128 * 1_024 * 1_024;
 
-/// 512 transitions in one bundle (one over) take rgb-lib 1.2 s, 2048 take 15.6 s.
+/// 512 transitions in one bundle (one over) take rgb-lib 1.2 s, 2048 take 15.5 s.
 /// The burn of 2810 mints costs 11k (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_BUNDLE_ID_COST: u64 = 256 * 1_024;
 
-/// About 5 s of rgb-lib walk at the measured 71 to 75 ns per step. The burn of
+/// About 5 s of rgb-lib walk at the measured 45 to 73 ns per step. The burn of
 /// 2810 mints costs 14k (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_REJECT_WALK_COST: u64 = 64 * 1_024 * 1_024;
 
-/// The caps add up on top of the file: a 12 MiB file takes about 16 s alone.
-/// So the modeled time of file and costs together is held to 18 s.
+/// A 12 MiB history of transfers takes rgb-lib 15 s alone, and the caps add up.
+/// So the modeled time of file, opouts, genesis hashes and costs is held to 18 s.
 pub(super) const MAX_RGB_LIB_NS: u64 = 18_000_000_000;
 
-/// rgb-lib's ns per file byte and per step of each cost, rounded up from
-/// release timings on an M-series Mac (`tests/caps.rs`).
-const NS_PER_FILE_BYTE: u64 = 1_300;
-const NS_PER_DAG_STEP: u64 = 2;
+/// rgb-lib's ns per file byte, per opout, per genesis leaf hashed and per step
+/// of each cost, rounded up from release timings on an M-series Mac (`tests/caps.rs`).
+const NS_PER_FILE_BYTE: u64 = 1_100;
+const NS_PER_OPOUT: u64 = 55_000;
+const NS_PER_GENESIS_LEAF: u64 = 15_000;
 const NS_PER_WITNESS_STEP: u64 = 14;
 const NS_PER_BUNDLE_ID_STEP: u64 = 4_500;
 const NS_PER_WALK_STEP: u64 = 75;
 
-/// Refuses a consignment of `file_len` bytes whose DAG, witness checks, bundle
-/// ids, or reject walk when `listed`, pass a cap, or whose total time would.
+/// Refuses a consignment of `file_len` bytes whose witness checks, bundle ids,
+/// or reject walk when `listed`, pass a cap, or whose total time would.
 pub(super) fn assert_bounded_for_rgb_lib(
     transfer: &Transfer,
     file_len: usize,
@@ -52,23 +49,16 @@ pub(super) fn assert_bounded_for_rgb_lib(
 ) -> Result<()> {
     let costs = capped_costs(transfer, listed)?;
     assert_within(
-        rgb_lib_ns(file_len, costs),
+        rgb_lib_ns(file_len, uncapped_costs(transfer), costs),
         MAX_RGB_LIB_NS,
         "ns of rgb-lib time on its file and work together",
         "its file is too large for the work it also asks",
     )
 }
 
-/// The DAG, witness, bundle id and walk costs, each refused above its cap.
-/// The walk is 0 when not `listed`.
-fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 4]> {
-    let dag = opouts_dag_cost(transfer);
-    assert_within(
-        dag,
-        MAX_OPOUTS_DAG_COST,
-        "steps to build its opouts DAG",
-        "its transitions spend too many inputs in all",
-    )?;
+/// The witness, bundle id and walk costs, each refused above its cap. The
+/// walk is 0 when not `listed`.
+fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 3]> {
     let witness = witness_check_cost(transfer);
     assert_within(
         witness,
@@ -84,7 +74,7 @@ fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 4]> {
         "a bundle carries too many transitions for the size of its input map",
     )?;
     if !listed {
-        return Ok([dag, witness, ids, 0]);
+        return Ok([witness, ids, 0]);
     }
     let walk = reject_walk_cost(transfer, MAX_REJECT_WALK_COST);
     assert_within(
@@ -93,14 +83,24 @@ fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 4]> {
         "steps to check against its reject list",
         "too many origins over too long a history",
     )?;
-    Ok([dag, witness, ids, walk])
+    Ok([witness, ids, walk])
+}
+
+/// The opouts and genesis leaf hashes, which only the time budget bounds.
+pub(super) fn uncapped_costs(transfer: &Transfer) -> [u64; 2] {
+    [opout_count(transfer), genesis_hash_cost(transfer)]
 }
 
 /// rgb-lib's modeled time on a file of `file_len` bytes with `costs`.
-pub(super) fn rgb_lib_ns(file_len: usize, [dag, witness, ids, walk]: [u64; 4]) -> u64 {
+pub(super) fn rgb_lib_ns(
+    file_len: usize,
+    [opouts, genesis]: [u64; 2],
+    [witness, ids, walk]: [u64; 3],
+) -> u64 {
     [
         (file_len as u64, NS_PER_FILE_BYTE),
-        (dag, NS_PER_DAG_STEP),
+        (opouts, NS_PER_OPOUT),
+        (genesis, NS_PER_GENESIS_LEAF),
         (witness, NS_PER_WITNESS_STEP),
         (ids, NS_PER_BUNDLE_ID_STEP),
         (walk, NS_PER_WALK_STEP),
@@ -120,12 +120,29 @@ pub(super) fn assert_within(cost: u64, cap: u64, what: &str, why: &str) -> Resul
     )))
 }
 
-/// `connect_input` scans the edges already linked to the spending operation,
-/// so a transition with k inputs costs about k^2 (rgb-consensus `opouts_dag.rs`).
-pub(super) fn opouts_dag_cost(transfer: &Transfer) -> u64 {
+/// The opouts the genesis and the transitions create, plus those they spend:
+/// rgb-consensus merklizes each into its operation id three times or more.
+pub(super) fn opout_count(transfer: &Transfer) -> u64 {
+    let genesis = transfer.genesis.assignments.iter();
+    let created = genesis.map(|(_, a)| u64::from(a.len_u16())).sum();
     known_transitions(transfer)
-        .map(|k| (k.transition.inputs.len() as u64).pow(2))
-        .fold(0, u64::saturating_add)
+        .map(|k| {
+            let outputs = k.transition.assignments.iter();
+            let outputs: u64 = outputs.map(|(_, a)| u64::from(a.len_u16())).sum();
+            outputs.saturating_add(k.transition.inputs.len() as u64)
+        })
+        .fold(created, u64::saturating_add)
+}
+
+/// rgb-consensus `validate_state` merklizes every genesis global and
+/// assignment into the contract id again for each operation it validates.
+pub(super) fn genesis_hash_cost(transfer: &Transfer) -> u64 {
+    let genesis = &transfer.genesis;
+    let globals = genesis.globals.values().map(|g| g.len() as u64);
+    let assigns = genesis.assignments.values().map(|a| u64::from(a.len_u16()));
+    let leaves: u64 = globals.chain(assigns).sum();
+    let operations = known_transitions(transfer).count() as u64 + 1;
+    operations.saturating_mul(leaves)
 }
 
 /// Per transition, rgb-consensus `validate_transition` clones, hashes and
@@ -194,7 +211,7 @@ pub(super) fn reject_walk_cost(transfer: &Transfer, cap: u64) -> u64 {
     total
 }
 
-/// rgb-lib's opouts DAG: each operation, and the operations it spends from.
+/// rgb-lib's operations DAG: each operation, and the operations it spends from.
 struct OpGraph {
     index: HashMap<OpId, usize>,
     parents: Vec<Vec<usize>>,

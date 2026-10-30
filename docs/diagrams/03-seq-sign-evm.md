@@ -31,7 +31,7 @@ sequenceDiagram
     Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
     Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, reject list EVM-only
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
-    Rgb->>Rgb: work caps (cost.rs): opouts DAG, witness checks,<br/>bundle ids, reject walk (listed asset only),<br/>then their modeled time with the file
+    Rgb->>Rgb: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file
     Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
