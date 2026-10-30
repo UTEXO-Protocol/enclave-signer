@@ -50,8 +50,8 @@ pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path uses `Vanilla`, the send-RGB sats budget uses `None`,
-/// and the asset change oracle uses `Colored`.
+/// The plain-BTC path uses `Vanilla` and the asset change oracle uses
+/// `Colored`. `None` takes either.
 /// A wider filter changes only which scripts count as ours, never what is
 /// signed. `sign_psbt_scoped` controls signing.
 pub fn self_controlled_input_scripts_scoped(
@@ -218,7 +218,7 @@ pub(crate) mod tests {
     };
 
     use crate::config::BridgeConfig;
-    use crate::networks::rgb::btc_crosscheck::{validate_btc_request, validate_rgb_psbt_sats};
+    use crate::networks::rgb::btc_crosscheck::validate_btc_request;
     use crate::networks::rgb::signing::taproot::{outstanding_job_inputs, sign_taproot_inputs};
     use crate::proto::SignBtcRequest;
 
@@ -783,21 +783,16 @@ pub(crate) mod tests {
 
     // === custody must not depend on merge progress ===
 
-    /// Results of the two sats gates and the ownership resolvers for one PSBT.
+    /// Results of the plain-BTC sats gate and the ownership resolvers for one PSBT.
     struct Gates {
         owned: HashSet<Vec<u8>>,
         indices: HashSet<u32>,
-        rgb: Option<String>,
         btc: Option<String>,
     }
 
-    /// Budgets are pinned, so the permissive unset branch never runs. The
+    /// The budget is pinned, so the permissive unset branch never runs. The
     /// plain-BTC gate applies to the Vanilla account only.
     fn gates(psbt: &Psbt, keys: &KeyManager, account: AccountType) -> Gates {
-        let rgb_cfg = BridgeConfig {
-            rgb_max_unowned_sats: 5_000,
-            ..Default::default()
-        };
         let btc_cfg = BridgeConfig {
             btc_max_total_sats: 1_000_000,
             btc_max_unowned_sats: 5_000,
@@ -809,9 +804,6 @@ pub(crate) mod tests {
         Gates {
             owned: self_controlled_input_scripts_scoped(psbt, keys, None),
             indices: self_owned_output_indices(psbt, keys),
-            rgb: validate_rgb_psbt_sats(psbt, &rgb_cfg, keys)
-                .err()
-                .map(|e| e.to_string()),
             btc: (account == AccountType::Vanilla)
                 .then(|| validate_btc_request(&req, &btc_cfg, keys).err())
                 .flatten()
@@ -976,15 +968,11 @@ pub(crate) mod tests {
             // merge. A non-empty change leg under merge is tested in
             // `psbt_validation::tests::anchor::change_leg_survives_merging_our_own_signature`.
             assert_eq!(s.before.indices, HashSet::new(), "{tag}: indices before");
-            assert_eq!(s.before.rgb, None, "{tag}: send-RGB gate before");
             assert_eq!(s.before.btc, None, "{tag}: plain-BTC gate before");
             assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
             assert!(s.tx_unchanged, "{tag}: tx or prevouts changed");
 
             // Custody must not change when A's signature merges.
-            if let Some(err) = &s.after.rgb {
-                failures.push(format!("{tag}: send-RGB gate after merging A: {err}"));
-            }
             if let Some(err) = &s.after.btc {
                 failures.push(format!("{tag}: plain-BTC gate after merging A: {err}"));
             }

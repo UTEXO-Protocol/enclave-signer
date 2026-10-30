@@ -225,7 +225,7 @@ accepts `tcp://` or `http://`. Matching policies do not prove specific
 endpoint ports.
 
 The sats values are image env, so PCR0 measures them. The policy does not
-commit `BTC_MAX_UNOWNED_SATS`, `RGB_MAX_UNOWNED_SATS` or `MINT_WITNESS_SAT`,
+commit `BTC_MAX_UNOWNED_SATS` or `MINT_WITNESS_SAT`,
 and `attest-verify` has no flag for them. `BTC_MAX_TOTAL_SATS` shows only as
 `allow_vanilla_psbt`: a non-zero value allows plain-BTC signing, except on a
 burn signer.

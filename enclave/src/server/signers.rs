@@ -113,21 +113,6 @@ pub(super) fn handle_sign_psbt(
     req: RgbDestination,
     #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
-    // Sats gate. All other send-RGB binds use RGB asset units. Without this
-    // gate, a witness tx can satisfy the ledger and still take the BTC backing.
-    // A mint passed M8 in validation, where its recipient is known; this
-    // budget stays a second gate (S7.1).
-    let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
-    ctx.state.with_keys(|keys| {
-        crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
-            &psbt,
-            &ctx.bridge_config,
-            keys,
-        )
-    })?;
-    // The signer parses the bytes again. Only one parsed copy is alive at a
-    // time (`memory.rs`).
-    drop(psbt);
 
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.

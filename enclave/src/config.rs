@@ -130,11 +130,6 @@ pub struct BridgeConfig {
     /// There is no output script allowlist: the scripts come from a seed that
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
-    /// Budget in sats for send-RGB outputs the enclave cannot prove it owns
-    /// (`RGB_MAX_UNOWNED_SATS`). The recipient output is blinded, so the enclave
-    /// bounds the value that leaves. `0` = unset: production refuses send-RGB.
-    /// A mint signer does not boot below [`Self::mint_witness_sat`].
-    pub rgb_max_unowned_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
     /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
     /// each, 5 by default). `0` = unset: production refuses plain-BTC signing.
@@ -237,7 +232,6 @@ impl Default for BridgeConfig {
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
-            rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Finalized,
@@ -351,9 +345,6 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let rgb_max_unowned_sats =
-            parse_rgb_max_unowned_sats(std::env::var("RGB_MAX_UNOWNED_SATS").ok().as_deref());
-
         let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -424,7 +415,6 @@ impl BridgeConfig {
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,
             btc_max_total_sats,
-            rgb_max_unowned_sats,
             btc_max_unowned_sats,
             funds_in_contract,
             evm_finality_tag,
@@ -441,21 +431,6 @@ impl BridgeConfig {
             )
             .unwrap_or_else(|e| panic!("{e}")),
         }
-    }
-
-    /// The mint signer's boot check. S7.1 counts a witness mint's recipient
-    /// output as unowned, so a lower `RGB_MAX_UNOWNED_SATS` (unset is 0) would
-    /// refuse every witness mint after its deposit is locked.
-    pub fn check_mint_witness_budget(&self) -> std::result::Result<(), String> {
-        if self.rgb_max_unowned_sats >= self.mint_witness_sat {
-            return Ok(());
-        }
-        Err(format!(
-            "RGB_MAX_UNOWNED_SATS {} (unset or not a number is 0) is below \
-             {MINT_WITNESS_SAT_ENV} {}: every witness mint would be refused after its \
-             deposit is locked. Set RGB_MAX_UNOWNED_SATS to at least {}",
-            self.rgb_max_unowned_sats, self.mint_witness_sat, self.mint_witness_sat
-        ))
     }
 
     /// True only when all three pin fields are set. Only a full pin allows
@@ -576,12 +551,6 @@ pub fn parse_mint_witness_sat(value: Option<&str>) -> std::result::Result<u64, S
              {DEFAULT_MINT_WITNESS_SAT}"
         )),
     }
-}
-
-/// Parse `RGB_MAX_UNOWNED_SATS`. Unset or not a number is 0, which refuses
-/// send-RGB in production. Trimmed, so a `\r` from an env file keeps the value.
-pub fn parse_rgb_max_unowned_sats(value: Option<&str>) -> u64 {
-    value.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
 /// Parse 40 hex chars, with or without `0x`, into 20 bytes.
@@ -1140,36 +1109,6 @@ mod tests {
         ] {
             let err = parse_mint_witness_sat(Some(v)).unwrap_err();
             assert!(err.contains("from 546 to 10000"), "{v}: {err}");
-        }
-    }
-
-    #[test]
-    fn mint_witness_budget_must_cover_the_witness_output() {
-        let budget = |rgb_max_unowned_sats| BridgeConfig {
-            rgb_max_unowned_sats,
-            ..Default::default()
-        };
-        for sats in [1_500, 10_000] {
-            assert_eq!(budget(sats).check_mint_witness_budget(), Ok(()), "{sats}");
-        }
-        for sats in [0, 1, 1_499] {
-            let err = budget(sats).check_mint_witness_budget().unwrap_err();
-            assert!(err.contains("at least 1500"), "{sats}: {err}");
-            assert!(err.contains("unset or not a number is 0"), "{sats}: {err}");
-        }
-    }
-
-    #[test]
-    fn rgb_max_unowned_sats_ignores_surrounding_whitespace() {
-        assert_eq!(parse_rgb_max_unowned_sats(Some("1500")), 1_500);
-        assert_eq!(parse_rgb_max_unowned_sats(Some("1500 ")), 1_500);
-        assert_eq!(parse_rgb_max_unowned_sats(Some("1500\r")), 1_500);
-    }
-
-    #[test]
-    fn rgb_max_unowned_sats_is_zero_when_unset_or_not_a_number() {
-        for v in [None, Some(""), Some("abc"), Some("-1"), Some("1.5")] {
-            assert_eq!(parse_rgb_max_unowned_sats(v), 0, "{v:?}");
         }
     }
 

@@ -136,11 +136,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
 # witness mint is refused after its lock. Measured, not attested.
-# RGB_MAX_UNOWNED_SATS: the sats budget of the signer (S7.1). A mint signer does
-# not boot below MINT_WITNESS_SAT, so it defaults to the same value.
-ARG RGB_MAX_UNOWNED_SATS=1500
-ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
-    BTC_RELAY_MODE=${BTC_RELAY_MODE} \
+ENV BTC_RELAY_MODE=${BTC_RELAY_MODE} \
     EVM_FINALITY_TAG=finalized \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \

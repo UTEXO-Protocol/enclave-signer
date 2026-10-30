@@ -426,8 +426,6 @@ fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
         funds_in_contract: FUNDS_IN_CONTRACT,
         token_contract: TOKEN_CONTRACT,
         rgb_asset_id: contract_id.to_string(),
-        // The boot floor of a mint signer: S7.1 lets one witness output through.
-        rgb_max_unowned_sats: DEFAULT_MINT_WITNESS_SAT,
         ..Default::default()
     }
 }
