@@ -8,6 +8,7 @@ use std::net::TcpListener;
 
 use tonic::transport::Server;
 
+use utexo_bridge_parent::client::{EnclaveClient, SignPsbtRequest};
 use utexo_bridge_parent::enclave_proto::{
     self, enclave_request, enclave_response, EnclaveRequest, EnclaveResponse,
 };
@@ -108,7 +109,8 @@ fn start_mock_enclave() -> u16 {
                         enclave_proto::SignedPsbtResponse {
                             signed_psbt: [
                                 req.psbt_bytes,
-                                req.parent_psbt,
+                                req.fascia,
+                                req.parent_fascia,
                                 req.asset_id.into_bytes(),
                             ]
                             .concat(),
@@ -566,7 +568,8 @@ async fn grpc_sign_psbt_roundtrip() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
-        parent_psbt: vec![],
+        fascia: vec![],
+        parent_fascia: vec![],
     };
 
     let req = sign_rgb_request(evm_source(0, 0), payload);
@@ -602,17 +605,35 @@ fn start_sign_reply_mock(
     (port, rx)
 }
 
-#[tokio::test]
-async fn grpc_rgb_destination_forwards_the_parent_psbt() {
-    let signed = EnclaveResponse {
+fn signed_psbt_reply() -> EnclaveResponse {
+    EnclaveResponse {
         response: Some(enclave_response::Response::SignedPsbt(
             enclave_proto::SignedPsbtResponse {
                 signed_psbt: vec![0xDD; 10],
                 inputs_signed: 1,
             },
         )),
+    }
+}
+
+/// The RGB destination of the one Sign request `received` got.
+fn received_rgb_destination(
+    received: &std::sync::mpsc::Receiver<enclave_proto::SignRequest>,
+) -> enclave_proto::RgbDestination {
+    let request = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let Some(enclave_proto::sign_request::DestinationNetwork::RgbDestination(destination)) =
+        request.destination_network
+    else {
+        panic!("expected an RGB destination");
     };
-    let (enclave_port, received) = start_sign_reply_mock(signed);
+    destination
+}
+
+#[tokio::test]
+async fn grpc_rgb_destination_forwards_both_fascias() {
+    let (enclave_port, received) = start_sign_reply_mock(signed_psbt_reply());
     let grpc_port = start_grpc_server(enclave_port).await;
     let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
         .await
@@ -625,25 +646,51 @@ async fn grpc_rgb_destination_forwards_the_parent_psbt() {
         rgb_asset_id: "rgb:asset".into(),
         consignment: vec![0x02; 4],
         consignment_hash: vec![0x03; 32],
-        parent_psbt: vec![0x04; 8],
+        fascia: vec![0x05; 6],
+        parent_fascia: vec![0x04; 8],
     };
     client
         .sign(sign_rgb_request(evm_source(0, 0), payload))
         .await
         .unwrap();
 
-    let request = received
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
-    let Some(enclave_proto::sign_request::DestinationNetwork::RgbDestination(destination)) =
-        request.destination_network
-    else {
-        panic!("expected an RGB destination");
-    };
+    let destination = received_rgb_destination(&received);
     assert_eq!(destination.psbt_bytes, vec![0xFF; 32]);
-    assert_eq!(destination.parent_psbt, vec![0x04; 8]);
+    assert_eq!(destination.fascia, vec![0x05; 6]);
+    assert_eq!(destination.parent_fascia, vec![0x04; 8]);
     assert_eq!(destination.consignment, vec![0x02; 4]);
     assert_eq!(destination.asset_id, "rgb:asset");
+}
+
+/// The CLI's sign-psbt path: the client puts each fascia in its own field.
+#[test]
+fn client_sign_psbt_forwards_both_fascias() {
+    let (enclave_port, received) = start_sign_reply_mock(signed_psbt_reply());
+    let client = EnclaveClient::new(&format!("127.0.0.1:{enclave_port}"));
+    client
+        .sign_psbt(SignPsbtRequest {
+            evm_tx_hash: vec![],
+            evm_funds_in_operation_id: vec![0x11; 32],
+            operation_idx: 0,
+            evm_event_valid: false,
+            evm_event_finalized: false,
+            evm_token: vec![],
+            evm_amount: 0,
+            evm_recipient: vec![],
+            evm_commission: 0,
+            psbt_bytes: vec![0xFF; 32],
+            psbt_output_amount: 0,
+            rgb_asset_id: "rgb:asset".into(),
+            consignment: vec![],
+            consignment_hash: vec![],
+            fascia: vec![0x05; 6],
+            parent_fascia: vec![0x04; 8],
+        })
+        .unwrap();
+
+    let destination = received_rgb_destination(&received);
+    assert_eq!(destination.fascia, vec![0x05; 6]);
+    assert_eq!(destination.parent_fascia, vec![0x04; 8]);
 }
 
 #[tokio::test]
@@ -667,7 +714,8 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         rgb_asset_id: String::new(),
         consignment: vec![],
         consignment_hash: vec![],
-        parent_psbt: vec![],
+        fascia: vec![],
+        parent_fascia: vec![],
     };
 
     let cases = [
@@ -772,7 +820,8 @@ fn rights_refill_request() -> SignRequest {
             // The enclave reads no consignment for a refill.
             consignment: vec![0x02; 4],
             consignment_hash: vec![0x03; 32],
-            parent_psbt: vec![0x04; 5],
+            fascia: vec![0x05; 6],
+            parent_fascia: vec![0x04; 5],
         })),
     }
 }
@@ -790,7 +839,13 @@ async fn grpc_rights_refill_forwards_its_payload_and_returns_the_signed_psbt() {
         .await
         .unwrap()
         .into_inner();
-    let echoed = [vec![0x01; 3], vec![0x04; 5], b"rgb:asset".to_vec()].concat();
+    let echoed = [
+        vec![0x01; 3],
+        vec![0x05; 6],
+        vec![0x04; 5],
+        b"rgb:asset".to_vec(),
+    ]
+    .concat();
     assert_eq!(resp.signature, echoed);
     assert!(resp.public_key.is_empty() && resp.call_data.is_empty());
 }

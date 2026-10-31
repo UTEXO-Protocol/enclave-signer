@@ -3,7 +3,7 @@
 //! This module only wires the submodules. Each check lives in a submodule:
 //!
 //! - `route.rs`: the entry points that `networks::route` calls.
-//! - `validation/`: consignment parsing, rgbstd validation, asset binding,
+//! - `validation/`: consignment parsing, rgb-lib validation, asset binding,
 //!   and the `RgbValidator` indexer client.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
 //! - `psbt_commit.rs`: the mint signer's core: the transition a PSBT commits.
@@ -28,7 +28,7 @@ pub mod flow;
 // fetch that log (`evm-rpc` implies `rgb-validation`).
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 pub mod invoice;
-// The mint signer reads mints and refills from the PSBT, with no consignment.
+// The mint signer reads mints and refills from their fascias, with no consignment.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub mod parent_proof;
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]

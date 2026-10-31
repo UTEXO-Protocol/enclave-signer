@@ -1,16 +1,15 @@
 //! The core of the mint signer's PSBT rules: the one transition of the pinned
-//! contract that a PSBT's tx commits, read from the RGB keys rgb-lib stores in
-//! the PSBT. No consignment: each step below is a commitment, so the txid fixes
-//! the transition. The rule ids (F2-F6) are those of `docs/mint-flow.md`
-//! section 5, Stage 3.
+//! contract that a tx commits, read from the fascia rgb-lib writes for that tx
+//! (rgb-lib strips the RGB keys from the PSBT). No consignment: each step below
+//! is a commitment, so the txid fixes the transition. The rule ids (F3-F6) are
+//! those of `docs/mint-flow.md` section 5, Stage 3.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use amplify::confinement::Confined;
-use bitcoin::psbt::Psbt;
+use amplify::confinement::{Confined, U24};
 use bitcoin::Transaction;
-use psrgbt::{RgbOutExt, RgbPsbtExt};
+use rgbstd::containers::Fascia;
 use rgbstd::opret::OpretProof;
 use rgbstd::rgbcore::commit_verify::mpc::{
     MerkleTree, Message, MultiSource, ProtocolId, MPC_MINIMAL_DEPTH,
@@ -19,12 +18,13 @@ use rgbstd::rgbcore::commit_verify::{CommitId, TryCommitVerify};
 use rgbstd::rgbcore::dbc::Proof;
 use rgbstd::validation::DbcProof;
 use rgbstd::{ContractId, OpId, Operation, Opout, Transition, TransitionBundle};
+use strict_encoding::StrictDeserialize;
 
 use super::validation::OutputSeal;
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 
-/// The one transition of the pinned contract that a PSBT's tx commits.
+/// The one transition of the pinned contract that a tx commits.
 #[derive(Debug, Clone)]
 pub struct Committed {
     pub txid: bitcoin::Txid,
@@ -49,18 +49,43 @@ pub fn pinned_contract(cfg: &BridgeConfig) -> Result<ContractId> {
     })
 }
 
-/// F3-F6: the tx commits, in its first OP_RETURN, exactly the bundles the
-/// PSBT discloses, and the pinned contract's bundle is one known transition.
-pub fn committed_transition(psbt: &Psbt, pin: ContractId) -> Result<Committed> {
-    let host = opret_host(&psbt.unsigned_tx)?;
-    let bundles = psbt.rgb_bundles().map_err(|e| {
-        EnclaveError::CrossCheck(format!("PSBT RGB data does not decode to bundles: {e}"))
-    })?;
-    let bundle = pinned_bundle(&bundles, pin)?;
-    assert_commits_exactly(psbt, host, &bundles)?;
+/// The strict-encoded fascia in the request field `field`, decoded as rgb-lib
+/// reads its fascia file. Capped at U24 (16 MiB), below the 24 MiB frame.
+pub fn parse_fascia(bytes: &[u8], field: &str) -> Result<Fascia> {
+    if bytes.is_empty() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "{field} required: rgb-lib strips the RGB data from the PSBT and keeps it in the \
+             tx's fascia"
+        )));
+    }
+    let bytes = Confined::<Vec<u8>, 0, U24>::try_from(bytes.to_vec())
+        .map_err(|e| EnclaveError::CrossCheck(format!("{field} is too large: {e}")))?;
+    Fascia::from_strict_serialized::<U24>(bytes)
+        .map_err(|e| EnclaveError::CrossCheck(format!("{field} is not an rgb-lib fascia: {e}")))
+}
+
+/// F3-F6: `fascia` is of `tx`, whose first OP_RETURN commits exactly its
+/// bundles, and the pinned contract's bundle is one known transition.
+pub fn committed_transition(
+    tx: &Transaction,
+    fascia: &Fascia,
+    pin: ContractId,
+) -> Result<Committed> {
+    let txid = tx.compute_txid();
+    if fascia.witness_id() != txid {
+        return Err(EnclaveError::CrossCheck(format!(
+            "the fascia is of tx {}, not of the PSBT's tx {txid} - refusing to sign a tx whose \
+             RGB data the enclave cannot see",
+            fascia.witness_id()
+        )));
+    }
+    assert_opret_host(tx)?;
+    let bundles = fascia.bundles();
+    let bundle = pinned_bundle(bundles, pin)?;
+    assert_commits_exactly(tx, fascia, bundles)?;
     let (opid, transition) = disclosed_transition(bundle, pin)?;
     Ok(Committed {
-        txid: psbt.unsigned_tx.compute_txid(),
+        txid,
         opid,
         transition,
     })
@@ -68,19 +93,19 @@ pub fn committed_transition(psbt: &Psbt, pin: ContractId) -> Result<Committed> {
 
 /// F3: consensus reads the commitment from the first OP_RETURN or P2TR output.
 /// A P2TR first would make it a tapret host that our opret check never sees.
-fn opret_host(tx: &Transaction) -> Result<usize> {
+fn assert_opret_host(tx: &Transaction) -> Result<()> {
     let host = tx
         .output
         .iter()
         .position(|out| out.script_pubkey.is_op_return() || out.script_pubkey.is_p2tr());
     match host {
-        Some(i) if tx.output[i].script_pubkey.is_op_return() => Ok(i),
+        Some(i) if tx.output[i].script_pubkey.is_op_return() => Ok(()),
         Some(i) => Err(EnclaveError::CrossCheck(format!(
-            "PSBT output {i} is a P2TR before the OP_RETURN, so RGB consensus reads a tapret \
+            "tx output {i} is a P2TR before the OP_RETURN, so RGB consensus reads a tapret \
              commitment there - refusing to sign"
         ))),
         None => Err(EnclaveError::CrossCheck(
-            "PSBT has no OP_RETURN output to commit its RGB bundle".into(),
+            "tx has no OP_RETURN output to commit its RGB bundle".into(),
         )),
     }
 }
@@ -94,31 +119,31 @@ fn pinned_bundle(
     match bundles.iter().collect::<Vec<_>>().as_slice() {
         [(cid, bundle)] if **cid == pin => Ok(*bundle),
         [(cid, _)] => Err(EnclaveError::CrossCheck(format!(
-            "PSBT commits a bundle of contract {cid}, not of the pinned RGB_ASSET_ID {pin}"
+            "the fascia discloses a bundle of contract {cid}, not of the pinned RGB_ASSET_ID \
+             {pin}"
         ))),
         all => Err(EnclaveError::CrossCheck(format!(
-            "PSBT commits {} contract bundles - exactly one, of the pinned asset",
+            "the fascia discloses {} contract bundles - exactly one, of the pinned asset",
             all.len()
         ))),
     }
 }
 
-/// F5: rebuilds the MPC tree from the disclosed bundles and the host's entropy
-/// and checks its root is the opret commitment. A hidden bundle changes the
-/// root. The PSBT's own MPC message, commitment and proof keys are not read.
+/// F5: the MPC tree of every fascia bundle under its entropy gives the opret
+/// commitment. Unlike rgb-lib, the fascia's DBC proof is not read: F3 rules out a tapret.
 fn assert_commits_exactly(
-    psbt: &Psbt,
-    host: usize,
+    tx: &Transaction,
+    fascia: &Fascia,
     bundles: &BTreeMap<ContractId, TransitionBundle>,
 ) -> Result<()> {
-    let entropy = psbt
-        .outputs
-        .get(host)
-        .and_then(|output| output.mpc_entropy())
+    let entropy = fascia
+        .seal_witness()
+        .mpc_merkle_block
+        .entropy()
         .ok_or_else(|| {
-            EnclaveError::CrossCheck(format!(
-                "PSBT output {host} hosts the commitment but carries no MPC entropy"
-            ))
+            EnclaveError::CrossCheck(
+                "the fascia's MPC block carries no MPC entropy to rebuild the commitment".into(),
+            )
         })?;
     let messages = bundles
         .iter()
@@ -126,16 +151,16 @@ fn assert_commits_exactly(
     let source = MultiSource {
         min_depth: MPC_MINIMAL_DEPTH,
         messages: Confined::try_from_iter(messages)
-            .map_err(|e| EnclaveError::CrossCheck(format!("PSBT MPC messages: {e}")))?,
+            .map_err(|e| EnclaveError::CrossCheck(format!("fascia MPC messages: {e}")))?,
         static_entropy: Some(entropy),
     };
     let tree = MerkleTree::try_commit(&source)
-        .map_err(|e| EnclaveError::CrossCheck(format!("PSBT MPC tree: {e}")))?;
+        .map_err(|e| EnclaveError::CrossCheck(format!("fascia MPC tree: {e}")))?;
     DbcProof::Opret(OpretProof::default())
-        .verify(&tree.commit_id(), &psbt.unsigned_tx)
+        .verify(&tree.commit_id(), tx)
         .map_err(|e| {
             EnclaveError::CrossCheck(format!(
-                "the OP_RETURN does not commit exactly the bundles the PSBT discloses: {e} - \
+                "the OP_RETURN does not commit exactly the bundles the fascia discloses: {e} - \
                  refusing to sign state moves the enclave cannot see"
             ))
         })
@@ -146,7 +171,8 @@ fn assert_commits_exactly(
 fn disclosed_transition(bundle: &TransitionBundle, pin: ContractId) -> Result<(OpId, Transition)> {
     let [known] = bundle.known_transitions.as_slice() else {
         return Err(EnclaveError::CrossCheck(format!(
-            "PSBT discloses {} transitions in its bundle - the mint signer signs exactly one",
+            "the fascia discloses {} transitions in its bundle - the mint signer signs exactly \
+             one",
             bundle.known_transitions.len()
         )));
     };
@@ -154,13 +180,13 @@ fn disclosed_transition(bundle: &TransitionBundle, pin: ContractId) -> Result<(O
     let id = transition.id();
     if id != known.opid {
         return Err(EnclaveError::CrossCheck(format!(
-            "PSBT stores a transition under opid {} but its id is {id}",
+            "the fascia stores a transition under opid {} but its id is {id}",
             known.opid
         )));
     }
     if transition.contract_id != pin {
         return Err(EnclaveError::CrossCheck(format!(
-            "PSBT transition {id} belongs to contract {}, not the pinned {pin}",
+            "the fascia's transition {id} belongs to contract {}, not the pinned {pin}",
             transition.contract_id
         )));
     }
@@ -175,15 +201,16 @@ fn assert_input_map_is(bundle: &TransitionBundle, transition: &Transition, id: O
     let keys: BTreeSet<Opout> = bundle.input_map.keys().copied().collect();
     if keys != inputs {
         return Err(EnclaveError::CrossCheck(format!(
-            "PSBT input map closes {} seal(s), but transition {id} spends {} - refusing to sign \
-             a bundle that closes seals the enclave cannot see",
+            "the fascia's input map closes {} seal(s), but transition {id} spends {} - refusing \
+             to sign a bundle that closes seals the enclave cannot see",
             keys.len(),
             inputs.len()
         )));
     }
     if let Some(other) = bundle.input_map.values().find(|opid| **opid != id) {
         return Err(EnclaveError::CrossCheck(format!(
-            "PSBT input map assigns a seal to transition {other}, not to the disclosed {id}"
+            "the fascia's input map assigns a seal to transition {other}, not to the disclosed \
+             {id}"
         )));
     }
     Ok(())

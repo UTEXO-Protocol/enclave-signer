@@ -168,11 +168,12 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
     }
 }
 
-/// Build the BFA schema rules now, so an inconsistent built-in schema stops
-/// the boot (the build panics) and not a request.
+/// Build the BFA schema rules once now, as rgb-lib does per request, so an
+/// inconsistent built-in schema stops the boot (the build panics), not a request.
 #[cfg(feature = "rgb-validation")]
 pub fn load_schema_rules() {
-    std::sync::LazyLock::force(&crate::networks::rgb::validation::BFA_RULES);
+    use rgbstd::contract::IssuerWrapper;
+    let _ = schemata::BridgedFungibleAsset::schema_rules();
 }
 
 /// Build the RGB consignment validator for the Electrum URL set at launch.

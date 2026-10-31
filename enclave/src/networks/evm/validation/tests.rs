@@ -108,6 +108,8 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         psbt_fee_key_paths: None,
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_binder: None,
+        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        mint_sats: None,
         #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
         anchor_binder: None,
         #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]

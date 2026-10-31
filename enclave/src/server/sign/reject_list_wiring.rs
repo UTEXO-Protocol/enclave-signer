@@ -33,7 +33,7 @@ fn listed_burn() -> (History, OpoutKey) {
 /// selectors the client saw.
 fn sign_listed(entries: Vec<RejectListEntry>) -> (String, Vec<[u8; 4]>) {
     let (history, _) = listed_burn();
-    let consignment = history.consignment(vec![]);
+    let consignment = history.consignment();
     let witnesses: Vec<[u8; 32]> = history
         .bundles
         .iter()
@@ -94,12 +94,22 @@ fn entry(opout: OpoutKey) -> RejectListEntry {
     }
 }
 
-/// The mint the burn descends from spent a rejected genesis right.
+/// The mint the burn descends from spent a rejected genesis right; rgb-lib
+/// refuses it with the list the pinned client read.
 #[test]
 fn a_burn_of_a_rejected_lineage_is_refused_through_the_pinned_client() {
     let (_, right) = listed_burn();
     let (err, selectors) = sign_listed(vec![entry(right)]);
-    assert!(err.contains("reject list: opout"), "{err}");
+    assert!(err.contains("RGB consignment validation failed"), "{err}");
+    assert!(
+        err.contains("Consignment rejected by the reject list"),
+        "{err}"
+    );
+    // bridge-utexo's gateway answers HTTP 422 on this text.
+    assert!(
+        err.contains("descends from an opout the reject list"),
+        "{err}"
+    );
     assert!(selectors.contains(&lengthCall::SELECTOR));
     assert!(selectors.contains(&entriesCall::SELECTOR));
 }

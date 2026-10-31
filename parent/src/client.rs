@@ -58,8 +58,10 @@ pub struct SignPsbtRequest {
     pub rgb_asset_id: String,
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
-    /// PSBT of the tx that made the right the mint spends.
-    pub parent_psbt: Vec<u8>,
+    /// rgb-lib fascia of the PSBT's tx: rgb-lib keeps its RGB data there.
+    pub fascia: Vec<u8>,
+    /// rgb-lib fascia of the tx that made the right the mint spends.
+    pub parent_fascia: Vec<u8>,
 }
 
 /// Parse a `vsock://` address body (`<cid>` or `<cid>:<port>`) into `(cid, port)`.
@@ -379,7 +381,8 @@ impl EnclaveClient {
                                 asset_id: req.rgb_asset_id,
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
-                                parent_psbt: req.parent_psbt,
+                                fascia: req.fascia,
+                                parent_fascia: req.parent_fascia,
                             },
                         ),
                     ),

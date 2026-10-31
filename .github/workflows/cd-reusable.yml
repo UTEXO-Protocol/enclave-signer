@@ -85,6 +85,7 @@ jobs:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
           RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx
@@ -113,11 +114,13 @@ jobs:
           secret-files: |
             federated_key=${{ runner.temp }}/private-deps/federated_key
             lib_key=${{ runner.temp }}/private-deps/lib_key
+            rgb_deps_token=${{ runner.temp }}/private-deps/rgb_deps_token
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}
           cache-from: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }}
-          cache-to: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }},mode=max
+          # mode=min: the builder stage holds the private RGB sources, and fork PRs can read this cache.
+          cache-to: type=gha,scope=build-${{ matrix.name }}-${{ inputs.stage }},mode=min
 
       - name: Rebuild without cache on failure
         if: steps.build_attempt.outcome == 'failure'
@@ -134,6 +137,7 @@ jobs:
           secret-files: |
             federated_key=${{ runner.temp }}/private-deps/federated_key
             lib_key=${{ runner.temp }}/private-deps/lib_key
+            rgb_deps_token=${{ runner.temp }}/private-deps/rgb_deps_token
           tags: |
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ matrix.image }}:${{ matrix.float }}

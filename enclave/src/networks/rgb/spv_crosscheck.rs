@@ -315,8 +315,8 @@ pub fn assert_chain_not_stale(
 /// (`transfer.genesis.chain_net.prefix()`). Thus the two sides use the same
 /// notation.
 ///
-/// rgbstd validation also checks this when `rgb-validation` is on. This SPV
-/// check stays, so a later change that loosens rgbstd validation cannot let a
+/// rgb-lib validation also checks this when `rgb-validation` is on. This SPV
+/// check stays, so a later change that loosens rgb-lib validation cannot let a
 /// wrong-network consignment reach signing.
 #[cfg(rgb_to_evm)]
 pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {

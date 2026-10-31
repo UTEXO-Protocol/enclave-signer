@@ -329,7 +329,7 @@ fn refuses_two_rights_on_one_vout() {
 fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
     let (mut history, rights) = issued(&[0xA0]);
     let send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(rights[0].opout, AllocatedState::Void)
         .unwrap()
         .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, 1))
@@ -341,13 +341,14 @@ fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
     assert!(refusal_of(send).contains("two rights on vout 1"));
 }
 
+/// Rights move only by propagate: TS_TRANSFER takes units only now.
 #[test]
-fn refuses_a_mint_or_a_burn_as_the_refill() {
-    for transition_type in [schemata::TS_MINT, schemata::TS_BURN] {
+fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
+    for transition_type in [schemata::TS_TRANSFER, schemata::TS_MINT, schemata::TS_BURN] {
         let (_, mut send) = rights_send(&[1, 2]);
         send.transition_type = transition_type;
         let err = refusal_of(send);
-        assert!(err.contains("requires a transfer transition"), "{err}");
+        assert!(err.contains("requires a propagate transition"), "{err}");
     }
 }
 
@@ -356,7 +357,7 @@ fn refuses_an_asset_input() {
     let (mut history, _) = issued(&[0xA0]);
     let units = Opout::new(OpId::from([0x55; 32]), schemata::OS_ASSET, 0);
     let send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(units, AllocatedState::from(RevealedValue::from(5u64)))
         .unwrap()
         .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, 1))
@@ -373,7 +374,7 @@ fn refuses_an_asset_input() {
 fn refuses_two_rights_in() {
     let (mut history, rights) = issued(&[0xA0, 0xA1]);
     let send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(rights[0].opout, AllocatedState::Void)
         .unwrap()
         .add_input(rights[1].opout, AllocatedState::Void)
@@ -389,10 +390,10 @@ fn refuses_two_rights_in() {
 }
 
 #[test]
-fn refuses_units_on_the_transfer() {
+fn refuses_units_on_the_propagate() {
     let (mut history, rights) = issued(&[0xA0]);
     let send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(rights[0].opout, AllocatedState::Void)
         .unwrap()
         .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, 1))
@@ -412,7 +413,7 @@ fn refuses_units_on_the_transfer() {
 fn refuses_rights_that_carry_an_amount() {
     let (mut history, rights) = issued(&[0xA0]);
     let mut send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(rights[0].opout, AllocatedState::Void)
         .unwrap()
         .add_fungible_state("assetOwner", GraphSeal::with_blinded_vout(1u32, 1), 1u64)
@@ -430,7 +431,7 @@ fn refuses_rights_that_carry_an_amount() {
 }
 
 #[test]
-fn refuses_a_global_on_the_transfer() {
+fn refuses_a_global_on_the_propagate() {
     let (_, mut send) = rights_send(&[1, 2]);
     let value = GlobalValues::with(RevealedData::new(
         amplify::confinement::SmallBlob::try_from(vec![0u8; 8]).unwrap(),

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.4
 # Enclave (dev mode, TCP, no vsock)
-# rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key) to it. The secret is
-# never in a layer, the image or PCR0.
-# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY -f build/Dockerfile.enclave-dev .
+# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+#   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN -f build/Dockerfile.enclave-dev .
 # Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim AS builder
 
@@ -33,6 +33,7 @@ WORKDIR /build/enclave
 # `rgb-swap` is the RGB flow this dev image carries; `--no-default-features`
 # drops it along with the rest of the default set, so it must be named.
 RUN --mount=type=secret,id=lib_key \
+    --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
 
 

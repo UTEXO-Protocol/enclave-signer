@@ -45,8 +45,8 @@ const BRIDGE: [u8; 20] = [0xB1; 20];
 const TX: [u8; 32] = [0x11; 32];
 const OP_ID: [u8; 32] = [0xAB; 32];
 const MINT_OPID: [u8; 32] = [0xCD; 32];
-/// The mint's `afterBlock`: the lock is at block 100.
-const AFTER_BLOCK: u64 = 90;
+/// The mint's `beforeBlock`: the lock is at block 100.
+const BEFORE_BLOCK: u64 = 110;
 /// Hex of the CA's DER.
 const CA_A_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_a.der.hex");
 const CA_B_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_b.der.hex");
@@ -396,7 +396,7 @@ fn non_default_port_reaches_listener_with_host_header() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap();
     let want = format!("rpc.test:{port}");
@@ -428,7 +428,7 @@ fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap();
 }
@@ -454,7 +454,7 @@ fn pinned_rpc_uses_latest_safe_and_finalized_tags() {
         );
         #[cfg(evm_to_rgb)]
         verify_funds_in_event(&*client, &BRIDGE, tag, &TX, &OP_ID, 1000, 50).unwrap();
-        verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, AFTER_BLOCK).unwrap();
+        verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, BEFORE_BLOCK).unwrap();
     }
 }
 
@@ -478,7 +478,7 @@ fn pinned_rpc_requires_configured_tag_and_matching_canonical_block() {
                 "a receipt above the {tag} head or outside the canonical chain must not authorize signing"
             );
             assert!(
-                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, AFTER_BLOCK).is_err(),
+                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, BEFORE_BLOCK).is_err(),
                 "a receipt above the {tag} head or outside the canonical chain must not authorize a mint lock"
             );
         }
@@ -525,7 +525,7 @@ fn tls_failure_refuses_to_sign() {
                 EvmFinalityTag::Safe,
                 &TX,
                 &MINT_OPID,
-                AFTER_BLOCK
+                BEFORE_BLOCK
             )
             .is_err(),
             "ancestor mint lock accepted: {case}"
@@ -548,7 +548,7 @@ fn proxy_env_has_no_effect() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap();
 }
@@ -569,7 +569,7 @@ fn pinned_ca_is_the_only_trusted_root() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
-            AFTER_BLOCK
+            BEFORE_BLOCK
         )
         .is_err(),
         "a leaf trusted only through the system store must be refused"
@@ -588,7 +588,7 @@ fn timeout_refuses_to_sign() {
         EvmFinalityTag::Safe,
         &TX,
         &MINT_OPID,
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     );
     assert!(got.is_err(), "a hung RPC must refuse to sign");
     assert!(
@@ -610,7 +610,7 @@ fn pinned_host_redirect_is_not_followed() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
-            AFTER_BLOCK
+            BEFORE_BLOCK
         )
         .is_err(),
         "a redirect from the pinned host must not be followed"
@@ -642,7 +642,7 @@ fn host_forged_receipt_is_refused() {
             EvmFinalityTag::Safe,
             &TX,
             &MINT_OPID,
-            AFTER_BLOCK,
+            BEFORE_BLOCK,
         )
     });
     assert!(

@@ -57,7 +57,7 @@ pub(super) struct OnChainResolver<'a> {
 }
 
 impl<'a> OnChainResolver<'a> {
-    /// Owns the txs, so phase 2 can borrow the pending validation mutably.
+    /// Built from our parsed transfer before rgb-lib runs; owns its txs.
     pub(super) fn new(
         transfer: &Transfer,
         chain_net: ChainNet,

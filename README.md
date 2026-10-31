@@ -86,23 +86,28 @@ Before it signs, the mint signer:
    have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
-3. Reads the mint from the PSBT rgb-lib committed, with no consignment. The
-   first `OP_RETURN` must commit exactly the bundles the PSBT discloses: one
-   bundle of the pinned `RGB_ASSET_ID`, holding one mint whose id is
-   recomputed. The txid and the sighash types cannot change. The mint
-   consumes one `mintRight`, passes no right on, and pays exactly
-   `amount - commission` units to one blinded seal.
-4. Checks the parent PSBT: the tx that made the spent right was a transfer
-   that put that right alone on its own output, and the PSBT spends that
-   output, its only input. So every signature for this mint spends the same
-   UTXO.
+3. Reads the mint from the fascia rgb-lib wrote for the PSBT's tx (`fascia`),
+   with no consignment: rgb-lib strips the RGB data from the PSBT. The fascia
+   must be of that tx, and its first `OP_RETURN` must commit exactly the
+   bundles the fascia discloses: one bundle of the pinned `RGB_ASSET_ID`,
+   holding one mint whose id is recomputed. The txid and the sighash types
+   cannot change. The mint consumes one `mintRight`, passes no right on, and
+   pays exactly `amount - commission` units to one seal: the user's blinded
+   seal, or an output of the mint tx (a witness invoice).
+4. Checks the parent fascia (`parent_fascia`): the tx that made the spent right
+   was a propagate of one right that put that right alone on its own output,
+   and the PSBT spends that output, its only input. So every signature for
+   this mint spends the same UTXO.
 5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
-   derives, after its `afterBlock` and covered by the `EVM_FINALITY_TAG` head,
+   derives, before its `beforeBlock` and covered by the `EVM_FINALITY_TAG` head,
    read from a node on the pinned chain.
 6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
-   the mint's one blinded seal must equal that invoice.
-7. Checks the Bitcoin fee. No sat may leave the bridge's own outputs.
+   the mint's one blinded seal must equal that invoice. A witness seal
+   commits only its vout, not the script there: an accepted V1 risk
+   ([mint flow](docs/mint-flow.md) section 11).
+7. Checks the Bitcoin fee and the sats paid out: none for a blinded mint,
+   exactly `MINT_WITNESS_SAT` to the user's output for a witness mint.
 8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
    A Tapret or script-tree root can be part of the output-key tweak.
 
@@ -118,17 +123,20 @@ N signatures.
 
 Before it signs, the burn signer:
 
-1. Validates the RGB consignment (full RGB consensus over the whole history).
-   Each mint in the history is confirmed only against the deposit it
-   derives. The last transition must be a BFA `burn`.
+1. Validates the RGB consignment with one call of rgb-lib's
+   `validate_consignment_with_resolver` (full RGB consensus over the whole
+   history), after the asset bind and caps on the work it would do. Each
+   mint in the history is confirmed only against the deposit it derives. The
+   last transition must be a BFA `burn`. If the genesis names a reject list
+   (an `IRgbRejectList` contract on `EVM_CHAIN_ID`), the enclave reads it
+   over the pinned EVM RPC when rgb-lib asks during this validation, before
+   step 2, and rgb-lib refuses a burn whose terminal operations (the burn,
+   and any companion transfer of its bundle) descend from a rejected output.
+   The mint signer reads no list. Any read failure refuses, so burn hosts
+   need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 2. Checks that each Bitcoin transaction of the consignment is in its own
    header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
    The chain tip must be less than 2 hours old.
-   If the genesis names a reject list (an `IRgbRejectList` contract on
-   `EVM_CHAIN_ID`), it reads the list over the pinned EVM RPC and refuses a
-   burn whose inputs descend from a rejected output. The mint signer checks
-   the mint's inputs and outputs the same way. Any read failure refuses, so
-   burn hosts need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
 4. Checks `sourceChainId`, `sourceAddress` and `burnId`.
@@ -257,15 +265,19 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
 
 - **Rust 1.96.1** - pinned in `rust-toolchain.toml`. The exact patch version
   matters for reproducible PCR0.
-- **Read access to `UTEXO-Protocol/rgb-lib-bfa`.** The RGB crates come from
-  crates.io (`0.11.2-rc.1`, exact pins). rgb-lib, which reads consignments,
-  comes from our private mirror of the RGB-Tools release until that release
-  is public. Both workspaces fetch it over HTTPS, so Git needs a GitHub token
-  with read access to it. The parent also needs read access to
-  `federated-signer-proto` through the `github-federated-signer` SSH alias.
-  CI wires both in `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_TOKEN` and
-  `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). Repository access alone does not
-  prove that a build reproduces the approved PCR0.
+- **Read access to the private RGB repos.** rgb-lib comes from our private
+  mirror of the RGB-Tools release, `UTEXO-Protocol/rgb-lib-bfa`, through the
+  `github-rgb-lib` SSH alias (deploy key `lib_key`). The RGB protocol crates
+  it pins come from the `[patch.crates-io]` of `Cargo.toml` and
+  `parent/Cargo.toml`: `ssh://git@github.com/rgb-tools-devs/<repo>.git` at
+  full revs, which builds map to our `UTEXO-Protocol/<repo>-s-bfa` mirrors
+  (`build/map-rgb-mirrors.sh`, a token in a credential helper). The parent
+  also needs read access to `federated-signer-proto` through the
+  `github-federated-signer` SSH alias. CI wires them in
+  `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_DEPLOY_KEY`,
+  `RGB_PRIVATE_DEPS_TOKEN` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
+  Repository access alone does not prove that a build reproduces the
+  approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
@@ -319,11 +331,13 @@ profile. CI asserts every guard fires.
 No image takes a KMS value: the mint enclave gets them at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
-Every enclave image needs a GitHub token with read access to
-`UTEXO-Protocol/rgb-lib-bfa` at build time: `GITHUB_TOKEN`, or a
-`github_token` file in `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes it as the
-BuildKit secret `github_token`, and `build/with-private-deps.sh enclave` reads
-it for the cargo build only. The token is never in a layer, the image or PCR0.
+Every enclave image needs, at build time, the deploy key of
+`UTEXO-Protocol/rgb-lib-bfa` (`RGB_LIB_BFA_DEPLOY_KEY`) and a token that reads
+the `UTEXO-Protocol/<repo>-s-bfa` mirrors of the RGB protocol crates
+(`RGB_PRIVATE_DEPS_TOKEN`), or `lib_key` and `rgb_deps_token` files in
+`PRIVATE_DEPS_DIR`. `build-enclave.sh` passes them as the BuildKit secrets
+`lib_key` and `rgb_deps_token`, and `build/with-private-deps.sh enclave` reads
+them for the cargo build only. They are never in a layer, the image or PCR0.
 
 ```bash
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
@@ -361,28 +375,38 @@ Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
-Every image resolves the private rgb-lib mirror: supply a GitHub token with
-read access to `UTEXO-Protocol/rgb-lib-bfa` as the `github_token` secret.
-`Dockerfile.parent` also resolves `federated-signer-proto`: the same token
-(if it can read it) or its deploy key as `federated_key`. Credentials are
-mounted as BuildKit secrets during Cargo's build step; they are not copied
-into image layers.
+Every image resolves the private rgb-lib mirror and the RGB protocol crate
+mirrors: supply the `lib_key` and `rgb_deps_token` secrets.
+`build/with-private-deps.sh` refuses to start cargo without either. It maps
+each `ssh://git@github.com/rgb-tools-devs/<repo>.git` of the `[patch]` to
+`https://github.com/UTEXO-Protocol/<repo>-s-bfa.git` (branch `rgb-tools-bfa`
+holds the pinned revs), and a credential helper scoped to those four URLs
+reads the token from its file, so it never sits in a URL cargo could print.
+`Dockerfile.parent` also resolves `federated-signer-proto`: its deploy key as
+`federated_key`. Credentials are mounted as BuildKit secrets during Cargo's
+build step; they are not copied into image layers.
 
 ```bash
-docker build --secret id=github_token,env=GITHUB_TOKEN \
+# Both values must already be exported; neither is a build argument.
+docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
   -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
 RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh
 
-# GITHUB_TOKEN must already be exported; the value is not a build argument.
-docker build --secret id=github_token,env=GITHUB_TOKEN \
+docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
+  --secret id=federated_key,src=<absolute-path> \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-`make build_parent*` and `make build_enclave*` use the token option by
-default. A `DOCKER_AUTH_ARGS` value replaces that default, so to pass the
-parent's deploy key set both: `--secret id=github_token,env=GITHUB_TOKEN --secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the `RGB_LIB_BFA_TOKEN` and
-`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The workflow's automatic `GITHUB_TOKEN` is used for image publishing,
-not cross-repository dependency access.
+`make build_parent*` and `make build_enclave*` pass `lib_key` and
+`rgb_deps_token` by default. A `DOCKER_AUTH_ARGS` value replaces that
+default, so to pass the parent's deploy key set all three, adding
+`--secret id=federated_key,src=<absolute-path>`. CD and EIF workflows use the
+`RGB_LIB_BFA_DEPLOY_KEY`, `RGB_PRIVATE_DEPS_TOKEN` and
+`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets configured for Rust CI. The
+workflow's automatic `GITHUB_TOKEN` is used for image publishing, not
+cross-repository dependency access.
 
 The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
@@ -542,7 +566,7 @@ Value bounds (fail closed while unset in a production build):
 |----------|---------|-------------|
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
 | `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls. Outputs repaying a signed input or landing on the enclave's own BIP-86 key-path addresses (singlesig change, `create_utxo` allocations) are proven and do not count. |
-| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. |
+| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. A mint signer does not boot below `MINT_WITNESS_SAT`; the mint image bakes 1500. |
 | `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
 | `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling (wei) on `maxFeePerGas` / `maxPriorityFeePerGas` / legacy `gasPrice`. |
@@ -567,6 +591,7 @@ Data sources and transport:
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
 | `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
+| `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats a witness mint pays to the user's output. Unset or empty gives 1500; a non-number or a value outside 546 to 10000 stops the boot (every image parses it). It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that ([mint flow](docs/mint-flow.md) M8). Baked into the mint image (1500), so PCR0 measures it; not attested. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 
@@ -703,7 +728,7 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 | `rgb-swap` | `rgb` | Retired RGB flow: send/receive with BFA `Transfer`. In the default set. Not in production. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `rgb-mint-burn` | `rgb` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `rgb-psbt-utils` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the PSBT. |
+| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |
 | `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
@@ -742,7 +767,7 @@ Re-syncing changes PCR0. Procedure in
   if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
   transfer in the history fails validation. The burn signer proves this with
   the request's Merkle proofs against its own header chain. The mint signer
-  checks no witness: it reads the mint from the PSBT, and a bad history makes
+  checks no witness: it reads the mint from the fascia, and a bad history makes
   the mint invalid for every receiver.
 - **Pinned EVM RPC trust (accepted by design).** TLS ends inside the enclave and
   authenticates the configured RPC hostname against the pinned CA. The host

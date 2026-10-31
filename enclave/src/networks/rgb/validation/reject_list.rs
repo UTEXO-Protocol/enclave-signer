@@ -1,18 +1,18 @@
 //! The BFA reject list, with rgb-lib 98a8af6 semantics (`api/evm.rs`
-//! `RejectListLog::decisions`, `wallet/online.rs` `check_dag`).
+//! `RejectListLog::decisions`).
 //!
 //! The genesis may name an `IRgbRejectList` contract. Each entry rejects or
-//! allows one opout. An opout is refused when a rejected opout is in its
-//! history on a path that no allowed opout cuts first. The server reads the
-//! list over the pinned EVM RPC; this module only decides.
+//! allows one opout. The server reads the list over the pinned EVM RPC, this
+//! module turns its entries into decisions, and rgb-lib walks the history
+//! with them (`validate_consignment_with_resolver`).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use amplify::{ByteArray, Wrapper};
-use rgbstd::containers::Transfer;
-use rgbstd::{Assignments, ExposedSeal, Operation, Opout};
+use rgb_lib::no_wallet::{RejectList, RejectListSource, ResolveRejectList};
+use rgbstd::{AssignmentType, OpId, Opout};
 
-use super::types::ValidatedConsignment;
 use crate::error::{EnclaveError, Result};
 
 /// One operation output: OpId, assignment type and output number, the
@@ -31,6 +31,16 @@ impl From<Opout> for OpoutKey {
             ty: opout.ty.to_inner(),
             no: opout.no,
         }
+    }
+}
+
+impl From<OpoutKey> for Opout {
+    fn from(key: OpoutKey) -> Self {
+        Opout::new(
+            OpId::from_byte_array(key.op),
+            AssignmentType::with(key.ty),
+            key.no,
+        )
     }
 }
 
@@ -85,212 +95,72 @@ pub fn decisions(entries: &[RejectListEntry], finalized: usize) -> Decisions {
     out
 }
 
-/// What a reject-list check needs from a validated consignment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RejectScope {
-    pub list: RejectListContract,
-    pub history: OpoutGraph,
-    pub settling_inputs: Vec<OpoutKey>,
-    pub settling_outputs: Vec<OpoutKey>,
-}
-
-impl RejectScope {
-    /// The scope of the settling transition `settling` over `transfer`.
-    pub(super) fn new(
-        list: RejectListContract,
-        transfer: &Transfer,
-        settling: [u8; 32],
-        settling_inputs: Vec<OpoutKey>,
-    ) -> Self {
-        let history = OpoutGraph::of(transfer);
-        let settling_outputs = history.outputs_of(settling).collect();
-        Self {
-            list,
-            history,
-            settling_inputs,
-            settling_outputs,
-        }
-    }
-}
-
-/// The consensus opouts DAG without its edges: an opout's parents are the
-/// inputs of the operation that made it. Linear in the consignment, where
-/// the DAG holds inputs x outputs edges per transition.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpoutGraph {
-    opouts: BTreeSet<OpoutKey>,
-    inputs: BTreeMap<[u8; 32], Vec<OpoutKey>>,
-}
-
-impl OpoutGraph {
-    /// The genesis and every transition consensus validated.
-    fn of(transfer: &Transfer) -> Self {
-        let mut graph = Self::default();
-        let genesis = transfer.genesis.id().to_byte_array();
-        graph.add(
-            genesis,
-            Vec::new(),
-            opouts(genesis, &transfer.genesis.assignments),
-        );
-        for known in transfer
-            .bundles
-            .iter()
-            .flat_map(|wb| &wb.bundle.known_transitions)
-        {
-            let op = known.opid.to_byte_array();
-            let inputs = known.transition.inputs.iter().copied().map(Into::into);
-            graph.add(
-                op,
-                inputs.collect(),
-                opouts(op, &known.transition.assignments),
-            );
-        }
-        graph
-    }
-
-    /// Adds operation `op` with its inputs and the opouts it makes.
-    pub fn add(
-        &mut self,
-        op: [u8; 32],
-        inputs: Vec<OpoutKey>,
-        outputs: impl IntoIterator<Item = OpoutKey>,
-    ) {
-        self.opouts.extend(outputs);
-        self.inputs.insert(op, inputs);
-    }
-
-    pub fn contains(&self, opout: &OpoutKey) -> bool {
-        self.opouts.contains(opout)
-    }
-
-    /// The parents of every opout of `op`.
-    pub fn inputs_of(&self, op: &[u8; 32]) -> &[OpoutKey] {
-        self.inputs.get(op).map(Vec::as_slice).unwrap_or_default()
-    }
-
-    fn outputs_of(&self, op: [u8; 32]) -> impl Iterator<Item = OpoutKey> + '_ {
-        let first = OpoutKey { op, ty: 0, no: 0 };
-        let last = OpoutKey {
-            op,
-            ty: u16::MAX,
-            no: u16::MAX,
-        };
-        self.opouts.range(first..=last).copied()
-    }
-}
-
-/// An opout per assignment of `op`.
-fn opouts<S: ExposedSeal>(op: [u8; 32], assignments: &Assignments<S>) -> Vec<OpoutKey> {
-    assignments
-        .iter()
-        .flat_map(|(ty, typed)| {
-            let ty = ty.to_inner();
-            (0..typed.len_u16()).map(move |no| OpoutKey { op, ty, no })
-        })
-        .collect()
-}
-
-/// The first of `check` whose history reaches a rejected opout before an
-/// allowed one, as rgb-lib `check_dag` decides. An opout missing from the
-/// history is an error.
-pub fn first_rejected(
-    history: &OpoutGraph,
-    decisions: &Decisions,
-    check: &[OpoutKey],
-) -> Result<Option<OpoutKey>> {
-    let mut walk = Walk::default();
-    for start in check {
-        if !history.contains(start) {
-            return Err(EnclaveError::CrossCheck(format!(
-                "opout {start} is not in the consignment's history graph - refusing to sign"
-            )));
-        }
-        if walk.reaches_reject(history, decisions, *start) {
-            return Ok(Some(*start));
-        }
-    }
-    Ok(None)
-}
-
-/// A depth-first walk shared by all start opouts. A node a clean walk saw
-/// reaches no reject, and each operation's inputs are pushed once, so the
-/// whole check is linear in the history.
-#[derive(Default)]
-struct Walk {
-    visited: BTreeSet<OpoutKey>,
-    expanded: BTreeSet<[u8; 32]>,
-}
-
-impl Walk {
-    fn reaches_reject(
-        &mut self,
-        history: &OpoutGraph,
-        decisions: &Decisions,
-        start: OpoutKey,
-    ) -> bool {
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            // The consensus DAG has no node for an opout outside the history.
-            if !history.contains(&node)
-                || !self.visited.insert(node)
-                || decisions.allow.contains(&node)
-            {
-                continue;
-            }
-            if decisions.reject.contains(&node) {
-                return true;
-            }
-            if self.expanded.insert(node.op) {
-                stack.extend(history.inputs_of(&node.op));
-            }
-        }
-        false
-    }
-}
-
 /// Reads a list's current decisions. The server reads it over the pinned EVM
 /// RPC; a build without one passes `None` and refuses an asset with a list.
 pub type RejectListReader<'a> = &'a dyn Fn(&RejectListContract) -> Result<Decisions>;
 
-/// The opouts a path checks, as rgb-lib does on its side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RejectCheck {
-    /// A release: the units the settling burn destroys. Its change is not
-    /// released, so it does not count.
-    SettlingInputs,
-    /// A mint: its right lineage, and the outputs its recipient checks.
-    SettlingInputsAndOutputs,
+/// `bind_asset` runs on the genesis contract id before rgb-lib, so only the
+/// pinned asset's list is ever read; with no `read`er a listed asset refuses.
+pub struct ListAccess<'a> {
+    pub bind_asset: &'a dyn Fn(&str) -> Result<()>,
+    pub read: Option<RejectListReader<'a>>,
 }
 
-/// Refuses the settling transition if the reject list reaches it. No-op for an
-/// asset without a list. Run it after the asset bind, so only the pinned
-/// asset's list is ever read.
-pub fn assert_not_rejected(
-    validated: &ValidatedConsignment,
-    reader: Option<RejectListReader<'_>>,
-    check: RejectCheck,
-) -> Result<()> {
-    let Some(scope) = &validated.reject_scope else {
-        return Ok(());
-    };
-    let reader = reader.ok_or_else(|| {
-        EnclaveError::CrossCheck(
-            "the asset declares a reject list, but this build cannot read it - refusing to sign"
-                .into(),
-        )
-    })?;
-    let decisions = reader(&scope.list)?;
-    let mut checked = scope.settling_inputs.clone();
-    if check == RejectCheck::SettlingInputsAndOutputs {
-        checked.extend(&scope.settling_outputs);
+/// rgb-lib's reject-list resolver: it reads only the list of the genesis the
+/// asset bind passed, and keeps the reader's own error.
+pub(super) struct ListResolver<'a> {
+    list: RejectListContract,
+    read: RejectListReader<'a>,
+    failure: RefCell<Option<EnclaveError>>,
+}
+
+impl<'a> ListResolver<'a> {
+    pub(super) fn new(list: RejectListContract, read: RejectListReader<'a>) -> Self {
+        Self {
+            list,
+            read,
+            failure: RefCell::new(None),
+        }
     }
-    match first_rejected(&scope.history, &decisions, &checked)? {
-        None => Ok(()),
-        Some(opout) => Err(EnclaveError::CrossCheck(format!(
-            "reject list: opout {opout} descends from an opout the reject list 0x{} on chain {} \
-             rejects - refusing to sign",
-            hex::encode(scope.list.address),
-            scope.list.chain_id
-        ))),
+
+    /// The reader's error, which rgb-lib would report as a network one.
+    pub(super) fn take_failure(&self) -> Option<EnclaveError> {
+        self.failure.borrow_mut().take()
+    }
+
+    fn fail(&self, e: EnclaveError) -> rgb_lib::Error {
+        let details = e.to_string();
+        *self.failure.borrow_mut() = Some(e);
+        rgb_lib::Error::Network { details }
+    }
+
+    fn contract(source: &RejectListSource) -> Option<RejectListContract> {
+        let RejectListSource::Evm(contract) = source else {
+            return None;
+        };
+        Some(RejectListContract {
+            chain_id: contract.chain_id,
+            address: contract.address.to_byte_array(),
+        })
+    }
+}
+
+impl ResolveRejectList for ListResolver<'_> {
+    fn get_reject_list(
+        &self,
+        source: &RejectListSource,
+    ) -> std::result::Result<RejectList, rgb_lib::Error> {
+        if Self::contract(source) != Some(self.list) {
+            return Err(self.fail(EnclaveError::CrossCheck(format!(
+                "rgb-lib asked for the reject list {source:?}, not the genesis list 0x{} on chain \
+                 {} - refusing to read it",
+                hex::encode(self.list.address),
+                self.list.chain_id
+            ))));
+        }
+        let decisions = (self.read)(&self.list).map_err(|e| self.fail(e))?;
+        let rejected = decisions.reject.into_iter().map(|o| (o.into(), false));
+        let allowed = decisions.allow.into_iter().map(|o| (o.into(), true));
+        Ok(RejectList::from_decisions(rejected.chain(allowed)))
     }
 }

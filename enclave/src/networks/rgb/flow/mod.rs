@@ -18,7 +18,7 @@
 //! Exactly one of the two features must be on (see the `compile_error!` pair
 //! in `lib.rs`). Both files export the same item names for the paths both
 //! flows run, so callers use `flow::...` without a `cfg`. The mint signer
-//! reads its mint from the PSBT (`psbt_validation::mint_facts`), so the swap
+//! reads its mint from the fascia (`psbt_validation::mint_facts`), so the swap
 //! flow's consignment binds have no mint twin.
 //!
 //! Shared code that is not flow-specific: consignment parsing
