@@ -46,10 +46,10 @@ use rgbstd::validation::{
     WitnessResolverError, WitnessStatus,
 };
 use rgbstd::vm::WitnessOrd;
-use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, OpId, Opout};
+use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, OpId, Opout, SecretSeal};
 use schemata::BridgedFungibleAsset;
 use sha3::{Digest, Keccak256};
-use utexo_bridge_enclave::config::BridgeConfig;
+use utexo_bridge_enclave::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::keys::{AccountType, KeyManager};
 use utexo_bridge_enclave::networks::evm::events::{EvmReceiptProvider, LogEntry, ReceiptData};
@@ -79,6 +79,8 @@ const BEFORE_BLOCK: u64 = 110;
 const LOCK_BLOCK: u64 = 100;
 const BRIDGE_FUNDS: u64 = 10_000;
 const BRIDGE_CHANGE: u64 = 9_700;
+/// A witness mint's change: the right's sats less the witness output and the fee.
+const WITNESS_BRIDGE_CHANGE: u64 = BRIDGE_FUNDS - DEFAULT_MINT_WITNESS_SAT - 300;
 const AUX_FUNDS: u64 = 2_000;
 const USER_FUNDS: u64 = 1_000;
 /// The `IRgbRejectList` a listed asset names, on `EVM_CHAIN_ID`.
@@ -175,20 +177,76 @@ struct Deposit {
     contract_id: ContractId,
     /// The seeded right the mint spent.
     right: Opout,
+    /// The deposit's `destinationAddress`: an invoice, or empty (v2 Bridge).
     invoice: String,
     user_funding: Transaction,
 }
 
+/// Where a mint puts its units.
+#[derive(Clone, Copy)]
+enum Payee {
+    /// The user's blinded seal; the legacy deposit names its invoice.
+    Blinded,
+    /// The user's output on vout 1 of the mint tx; the v2 deposit names none.
+    Witness,
+}
+
+/// The blinded invoice of `secret` for `contract_id`.
+fn blinded_invoice(contract_id: ContractId, secret: SecretSeal) -> String {
+    RgbInvoiceBuilder::with(
+        contract_id,
+        XChainNet::with(ChainNet::BitcoinRegtest, Beneficiary::BlindedSeal(secret)),
+    )
+    .finish()
+    .to_string()
+}
+
+/// The mint's seal, the outputs it pays from vout 1, and the deposit's
+/// `destinationAddress`, for `payee`. The user holds `user_funding`'s output.
+fn pay(
+    payee: Payee,
+    contract_id: ContractId,
+    user_funding: &Transaction,
+    bridge_spk: &ScriptBuf,
+) -> (BuilderSeal<GraphSeal>, Vec<TxOut>, String) {
+    let change = |sats| TxOut {
+        value: Amount::from_sat(sats),
+        script_pubkey: bridge_spk.clone(),
+    };
+    match payee {
+        Payee::Blinded => {
+            let secret = GraphSeal::with_blinding(user_funding.compute_txid(), 0u32, 0x2222)
+                .to_secret_seal();
+            let invoice = blinded_invoice(contract_id, secret);
+            (
+                BuilderSeal::Concealed(secret),
+                vec![change(BRIDGE_CHANGE)],
+                invoice,
+            )
+        }
+        Payee::Witness => {
+            let to_user = TxOut {
+                value: Amount::from_sat(DEFAULT_MINT_WITNESS_SAT),
+                script_pubkey: user_funding.output[0].script_pubkey.clone(),
+            };
+            let outputs = vec![to_user, change(WITNESS_BRIDGE_CHANGE)];
+            let seal = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 0x2222));
+            (seal, outputs, String::new())
+        }
+    }
+}
+
 /// Issues a BFA asset, with `reject_list` if any. The issuer seeds its right
 /// to the bridge's key-path output (`bridge_spk`, vout 1 of the seed). A
-/// `mint` gives `MINTED` units to the user's blinded seal. Its witness tx
-/// spends the right and `aux` (if any). The mint consumes the right, or in the
-/// old form (`keeps_right`) passes it on to the bridge change.
+/// `mint` gives `MINTED` units to `payee`. Its witness tx spends the right and
+/// `aux` (if any). The mint consumes the right, or in the old form
+/// (`keeps_right`) passes it on to the bridge change.
 fn issue_and_mint(
     bridge_spk: &ScriptBuf,
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
     keeps_right: bool,
+    payee: Payee,
 ) -> Deposit {
     let issuer_utxo = OutPoint::new(Txid::from_byte_array([0x15; 32]), 0);
     let mut history = History::issue(Issue {
@@ -203,35 +261,22 @@ fn issue_and_mint(
     let seed = history.send_rights(genesis_right, &[1], vec![], vec![seeded_to]);
     let right: Utxo = bfa_consignment::rights_made(&seed, &[1])[0];
 
-    // The recipient: a blinded seal on a UTXO the user already holds.
+    // A UTXO of the user's key: a blinded seal sits on it, a witness mint pays its script.
     let user_spk =
         ScriptBuf::new_p2tr(&Secp256k1::new(), foreign(0xD1).x_only_public_key().0, None);
     let user_funding = coinbase(103, USER_FUNDS, user_spk);
-    let secret =
-        GraphSeal::with_blinding(user_funding.compute_txid(), 0u32, 0x2222).to_secret_seal();
 
     let extra = aux
         .map(|aux| vec![OutPoint::new(aux.funding.compute_txid(), 0)])
         .unwrap_or_default();
-    let change = TxOut {
-        value: Amount::from_sat(BRIDGE_CHANGE),
-        script_pubkey: bridge_spk.clone(),
-    };
-    let to = BuilderSeal::Concealed(secret);
+    let (to, outputs, invoice) = pay(payee, history.contract_id, &user_funding, bridge_spk);
     let mint = if keeps_right {
         history
-            .mint_keeping_right(right, MINTED, BEFORE_BLOCK, to, extra, vec![change])
+            .mint_keeping_right(right, MINTED, BEFORE_BLOCK, to, extra, outputs)
             .0
     } else {
-        history.mint(right, MINTED, BEFORE_BLOCK, to, extra, vec![change])
+        history.mint(right, MINTED, BEFORE_BLOCK, to, extra, outputs)
     };
-
-    let invoice = RgbInvoiceBuilder::with(
-        history.contract_id,
-        XChainNet::with(ChainNet::BitcoinRegtest, Beneficiary::BlindedSeal(secret)),
-    )
-    .finish()
-    .to_string();
 
     Deposit {
         consignment: history.consignment(),
@@ -381,7 +426,8 @@ fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
         funds_in_contract: FUNDS_IN_CONTRACT,
         token_contract: TOKEN_CONTRACT,
         rgb_asset_id: contract_id.to_string(),
-        rgb_max_unowned_sats: 1_000,
+        // The boot floor of a mint signer: S7.1 lets one witness output through.
+        rgb_max_unowned_sats: DEFAULT_MINT_WITNESS_SAT,
         ..Default::default()
     }
 }
@@ -396,10 +442,9 @@ fn operation_id(deposit: &Deposit) -> [u8; 32] {
     .unwrap()
 }
 
-fn context(contract_id: &ContractId, chain: DepositChain) -> ServerContext {
+fn context(bridge_config: BridgeConfig, chain: DepositChain) -> ServerContext {
     let state = EnclaveState::new(Network::Regtest);
     state.initialize_from_seed(SEED).unwrap();
-    let bridge_config = bridge_config(contract_id);
     let policy = SecurityPolicy::resolve(
         &BuildContext::current(),
         &bridge_config,
@@ -449,11 +494,12 @@ fn build_on(
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
     keeps_right: bool,
+    payee: Payee,
 ) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
     let bridge_spk = bridge_address(our);
-    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right);
+    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right, payee);
 
     let origin = (vec![], (*keys.master_fingerprint(), our_path));
     let mut psbt = deposit.mint.psbt.clone();
@@ -474,14 +520,14 @@ fn build_on(
 }
 
 fn build(aux: Option<&Aux>) -> Built {
-    build_on(aux, None, false)
+    build_on(aux, None, false, Payee::Blinded)
 }
 
 /// The built deposit through the front door, over the wire, against a lock
 /// at `lock_block` and a node whose finality tag reports `tagged_head`.
 fn drive_with(built: &Built, lock_block: u64, tagged_head: u64) -> EnclaveResponse {
     let chain = deposit_chain(built, lock_block, tagged_head, vec![]);
-    let ctx = context(&built.deposit.contract_id, chain);
+    let ctx = context(bridge_config(&built.deposit.contract_id), chain);
     sign_over_the_wire(&ctx, sign_request(built))
 }
 
@@ -490,7 +536,7 @@ fn drive_with(built: &Built, lock_block: u64, tagged_head: u64) -> EnclaveRespon
 fn drive_listed(built: &Built, list: Vec<(Opout, bool)>) -> (EnclaveResponse, Vec<[u8; 4]>) {
     let chain = deposit_chain(built, LOCK_BLOCK, LOCK_BLOCK, list);
     let calls = Arc::clone(&chain.calls);
-    let ctx = context(&built.deposit.contract_id, chain);
+    let ctx = context(bridge_config(&built.deposit.contract_id), chain);
     let response = sign_over_the_wire(&ctx, sign_request(built));
     let calls = calls.lock().unwrap().clone();
     (response, calls)
@@ -757,7 +803,7 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
 fn refusal_of_edited(edit: impl FnOnce(&mut RgbDestination)) -> String {
     let native = build(None);
     let chain = deposit_chain(&native, LOCK_BLOCK, LOCK_BLOCK, vec![]);
-    let ctx = context(&native.deposit.contract_id, chain);
+    let ctx = context(bridge_config(&native.deposit.contract_id), chain);
     let mut request = sign_request(&native);
     if let Some(DestinationNetwork::RgbDestination(destination)) =
         request.destination_network.as_mut()
@@ -855,13 +901,13 @@ fn refuses_a_lock_at_or_after_before_block() {
 /// enclave owns. The mint signer refuses it all the same.
 #[test]
 fn refuses_a_mint_that_passes_its_right_on() {
-    let refusal = refusal(&drive(&build_on(None, None, true)));
+    let refusal = refusal(&drive(&build_on(None, None, true, Payee::Blinded)));
     assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
 }
 
 fn build_listed() -> Built {
     let list = bfa_consignment::evm_reject_list(EVM_CHAIN_ID, LIST);
-    build_on(None, Some(list), false)
+    build_on(None, Some(list), false, Payee::Blinded)
 }
 
 /// The mint signer reads no reject list: the connector's rgb-lib checks it
@@ -873,4 +919,75 @@ fn signs_a_listed_mint_without_reading_the_list() {
     let (response, calls) = drive_listed(&listed, vec![(listed.deposit.right, true)]);
     signed_psbt(&response).expect("the mint signer does not read the list");
     assert!(calls.is_empty(), "eth_call made: {calls:?}");
+}
+
+/// A witness mint against a v2 deposit, which names no invoice: the enclave
+/// signs it, it finalizes to the bound txid, and the consumer accepts it. The
+/// user's output carries exactly `MINT_WITNESS_SAT`.
+#[test]
+fn signs_a_witness_mint_paying_exactly_mint_witness_sat() {
+    let witness = build_on(None, None, false, Payee::Witness);
+    let (signed, inputs_signed) = signed_psbt(&drive(&witness)).expect("witness mint signs");
+    assert_eq!(inputs_signed, 1);
+    let bound = witness.psbt.unsigned_tx.compute_txid();
+    assert_eq!(bound_witness(&witness.deposit.consignment), bound);
+    let final_tx = finalize(&signed, None);
+    assert_eq!(final_tx.compute_txid(), bound);
+    let to_user = &final_tx.output[1];
+    assert_eq!(to_user.value.to_sat(), DEFAULT_MINT_WITNESS_SAT);
+    assert_eq!(
+        to_user.script_pubkey,
+        witness.deposit.user_funding.output[0].script_pubkey
+    );
+    consumer_validates(
+        &witness.deposit,
+        vec![witness.deposit.seed.tx.clone(), final_tx],
+    )
+    .expect("consumer resolves the bound witness");
+}
+
+/// A legacy deposit names a blinded invoice; a witness mint has no seal to match.
+#[test]
+fn refuses_a_witness_mint_against_a_legacy_blinded_invoice() {
+    let mut witness = build_on(None, None, false, Payee::Witness);
+    let secret = GraphSeal::with_blinding(witness.deposit.user_funding.compute_txid(), 0u32, 7)
+        .to_secret_seal();
+    witness.deposit.invoice = blinded_invoice(witness.deposit.contract_id, secret);
+    let refusal = refusal(&drive(&witness));
+    assert!(
+        refusal.contains("pays 0 confidential recipient legs"),
+        "{refusal}"
+    );
+}
+
+/// M8 takes W from the pinned config: an enclave pinned to 1000 refuses a mint
+/// whose PSBT pays the default 1500 to the user.
+#[test]
+fn refuses_a_witness_mint_paying_other_than_the_pinned_mint_witness_sat() {
+    let witness = build_on(None, None, false, Payee::Witness);
+    let config = BridgeConfig {
+        mint_witness_sat: 1_000,
+        ..bridge_config(&witness.deposit.contract_id)
+    };
+    let chain = deposit_chain(&witness, LOCK_BLOCK, LOCK_BLOCK, vec![]);
+    let ctx = context(config, chain);
+    let refusal = refusal(&sign_over_the_wire(&ctx, sign_request(&witness)));
+    assert!(
+        refusal.contains("pays 1500 sat to its recipient's vout 1")
+            && refusal.contains("MINT_WITNESS_SAT (1000 sat)"),
+        "{refusal}"
+    );
+}
+
+/// M8 refuses a blinded mint that pays sats out: here the change without its
+/// rule C metadata.
+#[test]
+fn refuses_a_mint_that_pays_sats_out_over_the_wire() {
+    let mut native = build(None);
+    native.psbt.outputs[1] = Default::default();
+    let refusal = refusal(&drive(&native));
+    assert!(
+        refusal.contains("mint PSBT pays 9700 sat to outputs this enclave does not derive"),
+        "{refusal}"
+    );
 }

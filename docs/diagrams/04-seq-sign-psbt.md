@@ -6,8 +6,9 @@ The mint signer path, in code order. Step-by-step text:
 The request must have the EVM deposit hash, the PSBT rgb-lib committed, its
 fascia and the parent fascia of the spent right. The mint signer reads no
 consignment and no RGB key of the PSBT (rgb-lib strips them). It
-uses Taproot key-path signatures from the colored BIP-86 account. Every
-output must be its own or carry 0 sat (M8).
+uses Taproot key-path signatures from the colored BIP-86 account. A blinded
+mint pays no sat out; a witness mint pays exactly `MINT_WITNESS_SAT` to its
+seal's output (M8).
 
 Plain-BTC PSBTs do not use this path. They use the separate `SignBtc` request
 (vanilla account, attested `allow_vanilla_psbt`, `BTC_MAX_TOTAL_SATS`,
@@ -53,10 +54,11 @@ sequenceDiagram
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
     Srv->>Core: F1 parse; F2 witness_utxo native SegWit, sighash ALL / DEFAULT
     Srv->>Core: fascia decodes, its witness txid == the PSBT txid<br/>F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 one fascia bundle, of RGB_ASSET_ID (== asset_id)<br/>F5 MPC tree of every fascia bundle + its entropy == opret commitment<br/>F6 one transition, its own id, input map == its inputs
-    Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one blinded leg
+    Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one leg, blinded or a witness seal of this tx
     Srv->>Anchor: F7 one input, Colored key path of this enclave
     Srv->>Core: PP1-PP7 parent fascia: core again on its own tx, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
     Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)
+    Srv->>Anchor: M8 blinded: no sat out<br/>witness: exactly MINT_WITNESS_SAT to the seal's output, not ours, nothing else
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
@@ -66,7 +68,7 @@ sequenceDiagram
     Srv->>Srv: amount ≥ minted units + commission
     alt destinationAddress not empty (legacy deposit)
         Srv->>Inv: RGB invoice, blinded seal only
-        Srv->>Inv: the M7 seal == invoice seal
+        Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
     else empty (v2 Bridge)
         Note right of Srv: recipient bound by the mint OpId (step 3)
     end
@@ -75,7 +77,7 @@ sequenceDiagram
     Srv->>State: reserve (rolled back on error)
 
     Note over Srv,Km: 7 — sign
-    Srv->>Srv: M8 no unowned output sats; then ≤ RGB_MAX_UNOWNED_SATS
+    Srv->>Srv: S7.1 unowned output sats ≤ RGB_MAX_UNOWNED_SATS
     Srv->>Km: sign_psbt_scoped(psbt, Colored)
     Km->>Km: per input: P2TR, origin fp == ours,<br/>derived key == tap_internal_key,<br/>tweak(internal, merkle_root) == output key<br/>⇒ Schnorr key-path signature
     Km-->>Srv: signed PSBT, inputs_signed

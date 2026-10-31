@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-30 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia).
+**Checked against repository code:** 2026-10-30 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia; witness mints).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -101,10 +101,10 @@ sequenceDiagram
     P->>E: forward over vsock
     E->>E: Stage 1: replay precheck
     E->>R: Stage 2: this deposit's receipt
-    E->>E: Stages 3-5: core on the fascia, mint rule, parent proof, fee
+    E->>E: Stages 3-5: core on the fascia, mint rule, parent proof, fee, M8 sats
     E->>R: Stage 6: chain id, FundsIn of this mint, finality
     E->>E: Stage 6: recipient bind, replay reserve
-    E->>E: Stage 7: sats rules, sign
+    E->>E: Stage 7: sats budget, sign
     E-->>P: signed PSBT
     P-->>L: signed PSBT
     L->>L: finalize and broadcast
@@ -141,7 +141,8 @@ refuses it.
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| `RGB_MAX_UNOWNED_SATS` | not set in the mint image | Second sats gate after M8. Not set: refuse every mint PSBT. |
+| `MINT_WITNESS_SAT` | 1500 (default and mint image) | The exact sats a witness mint pays to its recipient's output (M8). 546 to 10 000: a value out of bounds or not a number stops the boot. Image env, so PCR0 measures it; not attested. It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that (M8). |
+| `RGB_MAX_UNOWNED_SATS` | 1500 in the mint image | Second sats gate after M8 (S7.1). A mint signer does not boot when it is below `MINT_WITNESS_SAT`; unset or not a number is 0. |
 | Replay window | 24 h, 100 000 entries | In memory, per enclave. |
 | Colored account | `m/86'/827166'/0'` (mainnet) | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
@@ -225,6 +226,21 @@ does not sign the parent.
 - **F7** The PSBT spends exactly one input (`MINT_INPUTS`), a Colored
   key-path input of the enclave. A mint above about 15 sat/vB needs a fee
   input and is refused, so the right's UTXO must cover the fee.
+  A witness mint's right also pays `MINT_WITNESS_SAT` (W). One P2TR
+  key-path input, the `OP_RETURN`, a P2TR witness output and P2TR change
+  come to about 197 vB (154 vB without change), so a right of S sats keeps
+  its change while `S >= W + 197 r + 330` at r sat/vB. With S = 3000 and
+  W = 1500 that is up to about 5.9 sat/vB, and up to about 9.7 sat/vB
+  without change (BDK drops change below dust, and the rest goes to the
+  miner). Above that rgb-lib adds a second input and F7 refuses, so the
+  bridge must refuse such a mint before begin. These sizes are estimates,
+  not measured. The smallest S that keeps change at W = 1500:
+
+  | r (sat/vB) | S (sats) |
+  |------------|----------|
+  | 5 | 2815 |
+  | 10 | 3800 |
+  | 20 | 5770 |
 - **Fee**:
   - not more than 100 000 sats;
   - not more than 200 sat/vB over the unsigned size;
@@ -249,8 +265,31 @@ binds checked, on the committed transition.
   a little-endian u64.
 - **M5** The `OS_ASSET` units must equal `issuedSupply`, and **exactly**
   `amount - commission`. A larger sum is an over-mint.
-- **M7** There is exactly one `OS_ASSET` leg, on a blinded seal: the
-  depositor's. rgb-lib mints to one recipient.
+- **M7** There is exactly one `OS_ASSET` leg: on a blinded seal (the
+  depositor's), or on a witness seal, an output of this tx (a witness
+  invoice). A seal on another tx's output is refused: the enclave cannot see
+  what that output pays. rgb-lib mints to one recipient.
+- **M8** The sats the mint pays out. It runs on the PSBT after the parent
+  proof (Stage 5) and the fee check, and before M6 reads the deposit.
+  - A blinded mint pays no sat out. Every output is a BIP-86 key-path output
+    the enclave derives at a wallet path, or carries 0 sat, as the
+    `OP_RETURN` must. A wallet path is `[k, i]`, both steps non-hardened,
+    and `k` = 0 on Colored, 0 or 1 on Vanilla. rgb-lib sends the change to
+    the colored keychain, so an honest mint pays nothing out.
+  - A witness mint pays exactly `MINT_WITNESS_SAT` to its seal's output. That
+    output must exist, must not be an `OP_RETURN`, and must not be the
+    enclave's: not on the script of an input it controls (rule A) and not a
+    key-path output it derives (rule C, either account). The sats paid to
+    outputs the enclave does not derive must total exactly
+    `MINT_WITNESS_SAT`, so every other output is the enclave's (rule C) or
+    carries 0 sat. The change may be missing.
+  - The connector and the enclave must use the same `MINT_WITNESS_SAT`: the
+    PSBT pays the connector's value, fixed at `mint_begin`, and a mismatch
+    is refused here, after the user's lock. The attestation does not carry
+    it, so the connector cannot check it; the deploy does. Before a release
+    takes witness invoices, compare the connector's `MINT_WITNESS_SAT` with
+    the mint enclave's: `IMAGE-ENV.json` of an EIF, the container env
+    otherwise (unset is 1500).
 
 ### Stage 5 - Does the mint spend the right its parent made?
 
@@ -294,20 +333,22 @@ it is signed.
 - **S6.1** The amount must cover the minted units plus the commission.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal.
+  A witness mint has no blinded seal, so a legacy deposit refuses it
+  ("pays 0 confidential recipient legs"). A `wvout` invoice is refused too.
 - **S6.3** If the `destinationAddress` is empty (the v2 Bridge), the deposit
   binds the user through the mint OpId (M6). The mint transition commits to
-  its seal.
+  its seal: a blinded seal in full, a witness seal by its vout only, not the
+  script on that output (section 11, accepted V1 risk).
 - **S6.4** The mint signer reserves the replay key.
 
 ### Stage 7 - Sign
 
-- **M8** No sat leaves. Every output is a BIP-86 key-path output the enclave
-  derives at a wallet path, or carries 0 sat, as the `OP_RETURN` must. A wallet
-  path is `[k, i]`, both steps non-hardened, and `k` = 0 on Colored, 0 or 1 on Vanilla.
-  rgb-lib sends the change to the colored keychain, so an honest
-  mint pays nothing out.
 - **S7.1** The sats that go to scripts the enclave does not own must not be
-  more than `RGB_MAX_UNOWNED_SATS`. M8 makes this redundant.
+  more than `RGB_MAX_UNOWNED_SATS`. M8 ran before it: a blinded mint pays 0,
+  a witness mint `MINT_WITNESS_SAT`. A mint signer does not boot when
+  `RGB_MAX_UNOWNED_SATS` is below `MINT_WITNESS_SAT` (unset or not a number
+  is 0), so S7.1 never refuses, after the user's lock, a witness mint that M8
+  accepted.
 - **S7.2** The mint signer signs only inputs of the colored account. It uses
   Taproot key-path signatures with BIP-86 account keys. A Tapret or script-tree
   root can be part of the tweak. It never produces script-path signatures.
@@ -365,8 +406,8 @@ The listener gRPC has no auth, so the cheap checks run first.
   input. Each extra input could destroy the state it carries.
 - **RR10** Every input is a Colored key-path input of the enclave (the custody
   check of S7.3).
-- **RR12** M8: no sat leaves. An output that repays an input script gets no
-  exemption here.
+- **RR12** M8 of a blinded mint: no sat leaves. An output that repays an
+  input script gets no exemption here.
 - **RR13** The fee limits of Stage 3.
 - **RR15** At most 12 requests in any sliding hour get past this point. The
   count is in memory, per enclave, and a restart resets it. A request the gate
@@ -464,8 +505,9 @@ signer checks the amount three times, from the fascia and the deposit:
 2. The deposit: its `FundsIn` names this mint's OpId, and the deposit id the
    mint derives carries `issuedSupply` (M6). The units equal
    `amount - commission` (M5).
-3. The recipient: the one blinded leg (M7) is the depositor's seal when the
-   deposit names one (S6.2).
+3. The recipient: the one leg (M7) is the depositor's blinded seal when a
+   legacy deposit names one (S6.2). Otherwise the OpId binds it (S6.3): a
+   blinded seal in full, a witness seal by its vout only (below).
 
 A propagate parent (PP4) keeps every mint out of a mint's history, by
 induction: rights reach the mint wallet only by issuer sends or refills,
@@ -490,7 +532,19 @@ when it accepts the mint, and refuses a bad one.
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
-mint spends.
+mint spends. With a witness mint it can also take the minted units (below).
+
+**Accepted V1 risk (CTO 2026-10-30): the OpId does not commit a witness
+mint's output script.** A witness seal names a vout of the mint tx. The mint
+transition, and so the OpId the deposit binds, commits that vout, not the
+script on it. A host that controls the bridge can commit the same mint in a
+tx that pays that vout to its own script, after the user's lock. Every check
+passes on both txs (route test
+`witness_mint_opid_does_not_bind_the_recipient_script`), and the units go to
+the host. M8 only keeps the units off the enclave's own outputs and bounds
+the sats that leave to `MINT_WITNESS_SAT`. A blinded mint has no such gap:
+its seal commits the user's UTXO. V1 does not fix it. There is no amount cap
+on a witness mint yet (to be added later).
 
 The fascia is read in the strict encoding of rgb-ops ed1d60d (the pinned
 `rgb-ops` rev). A change of that encoding fails F4 and PP1 closed: every mint

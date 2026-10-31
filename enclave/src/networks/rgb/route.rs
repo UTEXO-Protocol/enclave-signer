@@ -252,7 +252,7 @@ fn validated_destination_consignment(
 }
 
 /// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO
-/// (F1-F7, PP, M1-M7; M8 runs in the signer). Returns the units and the `utxob:` seal.
+/// (F1-F7, PP, M1-M8). Returns the units and the `utxob:` seal of a blinded mint.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
@@ -275,6 +275,12 @@ pub fn validate_destination_anchor(
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched: the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &colored, "mint")?;
+    let mint_sats = ctx.mint_sats.ok_or_else(|| {
+        crate::error::EnclaveError::CrossCheck(
+            "mint cannot be signed: no sats check is wired in".into(),
+        )
+    })?;
+    mint_sats(&psbt, &mint.recipient)?;
     // Last: the only network read on this path.
     let bind = ctx.mint_binder.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
@@ -282,7 +288,7 @@ pub fn validate_destination_anchor(
         )
     })?;
     bind(&mint)?;
-    Ok((mint.issued, vec![mint.recipient_seal]))
+    Ok((mint.issued, mint.recipient.blinded_seals()))
 }
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which

@@ -92,7 +92,8 @@ Before it signs, the mint signer:
    bundles the fascia discloses: one bundle of the pinned `RGB_ASSET_ID`,
    holding one mint whose id is recomputed. The txid and the sighash types
    cannot change. The mint consumes one `mintRight`, passes no right on, and
-   pays exactly `amount - commission` units to one blinded seal.
+   pays exactly `amount - commission` units to one seal: the user's blinded
+   seal, or an output of the mint tx (a witness invoice).
 4. Checks the parent fascia (`parent_fascia`): the tx that made the spent right
    was a propagate of one right that put that right alone on its own output,
    and the PSBT spends that output, its only input. So every signature for
@@ -102,8 +103,11 @@ Before it signs, the mint signer:
    read from a node on the pinned chain.
 6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
    mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
-   the mint's one blinded seal must equal that invoice.
-7. Checks the Bitcoin fee. No sat may leave the bridge's own outputs.
+   the mint's one blinded seal must equal that invoice. A witness seal
+   commits only its vout, not the script there: an accepted V1 risk
+   ([mint flow](docs/mint-flow.md) section 11).
+7. Checks the Bitcoin fee and the sats paid out: none for a blinded mint,
+   exactly `MINT_WITNESS_SAT` to the user's output for a witness mint.
 8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
    A Tapret or script-tree root can be part of the output-key tweak.
 
@@ -562,7 +566,7 @@ Value bounds (fail closed while unset in a production build):
 |----------|---------|-------------|
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on total input value of one plain-BTC (`SignBtc`) transaction. Non-zero also flips `allow_vanilla_psbt` in the attested policy. |
 | `BTC_MAX_UNOWNED_SATS` | `0` | Plain-BTC output budget for scripts the enclave does not prove it controls. Outputs repaying a signed input or landing on the enclave's own BIP-86 key-path addresses (singlesig change, `create_utxo` allocations) are proven and do not count. |
-| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. |
+| `RGB_MAX_UNOWNED_SATS` | `0` | Bridge-PSBT output budget for sats the enclave cannot prove it controls. Size it from the bridge's witnessed satoshi amount. A mint signer does not boot below `MINT_WITNESS_SAT`; the mint image bakes 1500. |
 | `GAS_TX_ALLOWED_TO` | unset | Only `to` a gas tx may target. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
 | `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling (wei) on `maxFeePerGas` / `maxPriorityFeePerGas` / legacy `gasPrice`. |
@@ -587,6 +591,7 @@ Data sources and transport:
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
 | `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
+| `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats a witness mint pays to the user's output. Unset or empty gives 1500; a non-number or a value outside 546 to 10000 stops the boot (every image parses it). It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that ([mint flow](docs/mint-flow.md) M8). Baked into the mint image (1500), so PCR0 measures it; not attested. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
 

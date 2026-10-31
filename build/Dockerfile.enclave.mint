@@ -122,11 +122,18 @@ ENV EVM_CHAIN_ID=42161 \
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
 # The connector must pass mint_begin min_confirmations of at least this value.
+# MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
+# (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
+# witness mint is refused after its lock. Measured, not attested.
+# RGB_MAX_UNOWNED_SATS: the sats budget of the signer (S7.1). A mint signer does
+# not boot below MINT_WITNESS_SAT, so it carries the same value.
 ENV EVM_FINALITY_TAG=safe \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
     TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    BTC_MAX_TOTAL_SATS=1000000
+    BTC_MAX_TOTAL_SATS=1000000 \
+    MINT_WITNESS_SAT=1500 \
+    RGB_MAX_UNOWNED_SATS=1500
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.

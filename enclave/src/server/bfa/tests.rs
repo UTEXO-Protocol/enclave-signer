@@ -120,7 +120,7 @@ mod burn {
 mod mint {
     use super::*;
     use crate::networks::evm::events::{LogEntry, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG};
-    use crate::networks::rgb::psbt_validation::MintFacts;
+    use crate::networks::rgb::psbt_validation::{MintFacts, MintRecipient};
     use crate::test_support::{abi_word, bridge_funds_in_data, FakeEvm};
     use sha3::{Digest, Keccak256};
 
@@ -167,7 +167,7 @@ mod mint {
             opid: [2; 32],
             issued,
             before_block: 110,
-            recipient_seal: "utxob:recipient".into(),
+            recipient: MintRecipient::Blinded("utxob:recipient".into()),
         }
     }
 

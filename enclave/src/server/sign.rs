@@ -131,6 +131,20 @@ pub(super) fn handle_sign(
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
     let mint_binder =
         |mint: &crate::networks::rgb::psbt_validation::MintFacts| bind_mint(ctx, source_ref, mint);
+    // M8 takes the witness amount from the pinned config, never the request.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    let mint_sats =
+        |psbt: &bitcoin::psbt::Psbt,
+         recipient: &crate::networks::rgb::psbt_validation::MintRecipient| {
+            ctx.state.with_keys(|keys| {
+                crate::networks::rgb::psbt_validation::assert_mint_sats(
+                    psbt,
+                    keys,
+                    recipient,
+                    ctx.bridge_config.mint_witness_sat,
+                )
+            })
+        };
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `sign_with_chain_pins_unchanged` reads these
@@ -153,6 +167,8 @@ pub(super) fn handle_sign(
         psbt_fee_key_paths: Some(&psbt_fee_key_paths),
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_binder: Some(&mint_binder),
+        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        mint_sats: Some(&mint_sats),
         #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]

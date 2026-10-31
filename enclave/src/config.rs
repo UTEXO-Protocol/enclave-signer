@@ -37,6 +37,15 @@ pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
 /// Default depth of each Bitcoin witness tx before the enclave signs.
 pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 6;
 
+/// Env var of [`BridgeConfig::mint_witness_sat`].
+pub const MINT_WITNESS_SAT_ENV: &str = "MINT_WITNESS_SAT";
+/// Default sats a witness mint pays to its recipient's output.
+pub const DEFAULT_MINT_WITNESS_SAT: u64 = 1_500;
+/// P2PKH dust, the highest of the scripts a `wvout` invoice can name.
+pub const MIN_MINT_WITNESS_SAT: u64 = 546;
+/// A typo guard: every witness mint pays `MINT_WITNESS_SAT` of the bridge's sats.
+pub const MAX_MINT_WITNESS_SAT: u64 = 10_000;
+
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -91,6 +100,7 @@ pub struct BridgeConfig {
     /// Budget in sats for send-RGB outputs the enclave cannot prove it owns
     /// (`RGB_MAX_UNOWNED_SATS`). The recipient output is blinded, so the enclave
     /// bounds the value that leaves. `0` = unset: production refuses send-RGB.
+    /// A mint signer does not boot below [`Self::mint_witness_sat`].
     pub rgb_max_unowned_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
     /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
@@ -125,6 +135,10 @@ pub struct BridgeConfig {
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
     /// 6, at least 1). Image env, so PCR0 measures it, and attested.
     pub spv_min_confirmations: u32,
+    /// Exact sats a witness mint pays to its recipient's output
+    /// (`MINT_WITNESS_SAT`, default 1500, 546 to 10_000). It must equal the
+    /// connector's value. Image env, so PCR0 measures it; not attested.
+    pub mint_witness_sat: u64,
 }
 
 /// Env var selecting [`BtcRelayMode`].
@@ -197,6 +211,7 @@ impl Default for BridgeConfig {
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
+            mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
         }
     }
 }
@@ -269,10 +284,8 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let rgb_max_unowned_sats = std::env::var("RGB_MAX_UNOWNED_SATS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let rgb_max_unowned_sats =
+            parse_rgb_max_unowned_sats(std::env::var("RGB_MAX_UNOWNED_SATS").ok().as_deref());
 
         let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
             .ok()
@@ -329,6 +342,10 @@ impl BridgeConfig {
             parse_spv_min_confirmations(std::env::var(SPV_MIN_CONFIRMATIONS_ENV).ok().as_deref())
                 .unwrap_or_else(|e| panic!("{e}"));
 
+        let mint_witness_sat =
+            parse_mint_witness_sat(std::env::var(MINT_WITNESS_SAT_ENV).ok().as_deref())
+                .unwrap_or_else(|e| panic!("{e}"));
+
         Self {
             chain_id,
             bridge_contract,
@@ -350,7 +367,23 @@ impl BridgeConfig {
             max_merkle_proofs,
             max_total_proof_bytes,
             spv_min_confirmations,
+            mint_witness_sat,
         }
+    }
+
+    /// The mint signer's boot check. S7.1 counts a witness mint's recipient
+    /// output as unowned, so a lower `RGB_MAX_UNOWNED_SATS` (unset is 0) would
+    /// refuse every witness mint after its deposit is locked.
+    pub fn check_mint_witness_budget(&self) -> std::result::Result<(), String> {
+        if self.rgb_max_unowned_sats >= self.mint_witness_sat {
+            return Ok(());
+        }
+        Err(format!(
+            "RGB_MAX_UNOWNED_SATS {} (unset or not a number is 0) is below \
+             {MINT_WITNESS_SAT_ENV} {}: every witness mint would be refused after its \
+             deposit is locked. Set RGB_MAX_UNOWNED_SATS to at least {}",
+            self.rgb_max_unowned_sats, self.mint_witness_sat, self.mint_witness_sat
+        ))
     }
 
     /// True only when all three pin fields are set. Only a full pin allows
@@ -397,6 +430,28 @@ pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u
              or leave it unset for {DEFAULT_SPV_MIN_CONFIRMATIONS}"
         )),
     }
+}
+
+/// Parse `MINT_WITNESS_SAT`. Unset or empty gives the default. A non-number or
+/// a value out of bounds is an error, so a typo cannot change what a mint pays.
+pub fn parse_mint_witness_sat(value: Option<&str>) -> std::result::Result<u64, String> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_MINT_WITNESS_SAT);
+    };
+    match raw.parse::<u64>() {
+        Ok(n) if (MIN_MINT_WITNESS_SAT..=MAX_MINT_WITNESS_SAT).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "{MINT_WITNESS_SAT_ENV} {raw:?} is not valid: set a whole number of sats from \
+             {MIN_MINT_WITNESS_SAT} to {MAX_MINT_WITNESS_SAT}, or leave it unset for \
+             {DEFAULT_MINT_WITNESS_SAT}"
+        )),
+    }
+}
+
+/// Parse `RGB_MAX_UNOWNED_SATS`. Unset or not a number is 0, which refuses
+/// send-RGB in production. Trimmed, so a `\r` from an env file keeps the value.
+pub fn parse_rgb_max_unowned_sats(value: Option<&str>) -> u64 {
+    value.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
 /// Parse 40 hex chars, with or without `0x`, into 20 bytes.
@@ -780,6 +835,65 @@ mod tests {
         for v in ["0", "-1", "six", "6.5", "99999999999"] {
             let err = parse_spv_min_confirmations(Some(v)).unwrap_err();
             assert!(err.contains("at least 1"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn mint_witness_sat_defaults_to_1500_when_unset() {
+        assert_eq!(parse_mint_witness_sat(None), Ok(1_500));
+        assert_eq!(parse_mint_witness_sat(Some(" ")), Ok(1_500));
+    }
+
+    #[test]
+    fn mint_witness_sat_accepts_values_in_bounds() {
+        assert_eq!(parse_mint_witness_sat(Some("546")), Ok(546));
+        assert_eq!(parse_mint_witness_sat(Some(" 1500 ")), Ok(1_500));
+        assert_eq!(parse_mint_witness_sat(Some("10000")), Ok(10_000));
+    }
+
+    #[test]
+    fn mint_witness_sat_rejects_dust_values_above_the_cap_and_garbage() {
+        for v in [
+            "0",
+            "545",
+            "10001",
+            "-1",
+            "1.5",
+            "abc",
+            "99999999999999999999",
+        ] {
+            let err = parse_mint_witness_sat(Some(v)).unwrap_err();
+            assert!(err.contains("from 546 to 10000"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn mint_witness_budget_must_cover_the_witness_output() {
+        let budget = |rgb_max_unowned_sats| BridgeConfig {
+            rgb_max_unowned_sats,
+            ..Default::default()
+        };
+        for sats in [1_500, 10_000] {
+            assert_eq!(budget(sats).check_mint_witness_budget(), Ok(()), "{sats}");
+        }
+        for sats in [0, 1, 1_499] {
+            let err = budget(sats).check_mint_witness_budget().unwrap_err();
+            assert!(err.contains("at least 1500"), "{sats}: {err}");
+            assert!(err.contains("unset or not a number is 0"), "{sats}: {err}");
+        }
+    }
+
+    #[test]
+    fn rgb_max_unowned_sats_ignores_surrounding_whitespace() {
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500")), 1_500);
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500 ")), 1_500);
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500\r")), 1_500);
+    }
+
+    #[test]
+    fn rgb_max_unowned_sats_is_zero_when_unset_or_not_a_number() {
+        for v in [None, Some(""), Some("abc"), Some("-1"), Some("1.5")] {
+            assert_eq!(parse_rgb_max_unowned_sats(v), 0, "{v:?}");
         }
     }
 

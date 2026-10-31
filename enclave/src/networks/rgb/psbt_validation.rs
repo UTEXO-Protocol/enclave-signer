@@ -504,8 +504,8 @@ pub fn assert_only_colored_inputs(psbt: &Psbt, colored: &[usize], path: &str) ->
     Ok(())
 }
 
-/// M8 and RR12: no sat leaves. With no rule A exemption, each output must be a
-/// rule C output of ours or carry 0 sat, as the OP_RETURN must.
+/// M8 of a blinded mint and RR12: no sat leaves. With no rule A exemption, each
+/// output must be a rule C output of ours or carry 0 sat, as the OP_RETURN must.
 #[cfg(feature = "bfa-mint")]
 pub fn assert_keeps_all_sats(
     psbt: &Psbt,

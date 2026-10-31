@@ -43,6 +43,12 @@ fn main() {
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");
     }
+    // Every mint build refuses unset in S7.1 too, so this stops at boot what
+    // would otherwise strand each witness mint after its lock.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    if let Err(msg) = bridge_config.check_mint_witness_budget() {
+        panic!("{msg}");
+    }
 
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]

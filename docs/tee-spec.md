@@ -284,7 +284,8 @@ instead of trusting the operator's configuration. An unset pin commits as its ze
 Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum/Esplora URL
 scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
-(only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested).
+(only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested), and the mint
+signer's `MINT_WITNESS_SAT`.
 
 The scheme needs no commitment: a release image accepts only TLS
 (`ssl://` or `https://`) for the Electrum/Esplora URL, so the rule is in the
@@ -487,7 +488,9 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   The v2 Bridge sends an empty `destinationAddress` for RGB.
   Then the recipient is bound through the mint OpId: the `FundsIn` `rgbOpId`
   must be the mint transition being signed (Sec 8), and that transition
-  commits to its seals.
+  commits to its seals. A witness mint has no confidential leg, so a legacy
+  invoice refuses it. Its witness seal commits a vout of the mint tx, not the
+  script on it (accepted V1 risk, Known limits).
 
 **Mint signer (plan B).** The mint signer validates no consignment.
 rgb-lib f3975623 strips the RGB, MPC, OPRET and TAPRET proprietary keys from
@@ -508,9 +511,12 @@ transition whose id is recomputed and whose inputs are exactly the input map
 (F6); one Colored key-path input (F7). The transition must be one `TS_MINT`
 that consumes one `mintRight`, assigns asset units only, carries exactly
 `issuedSupply` (> 0) and `beforeBlock` as 8-byte little-endian values, pays
-`issuedSupply` to one blinded seal, and issues exactly `amount - commission`
-(M1 - M5, M7). The deposit must name this mint's OpId and carry the deposit
-id it derives (M6), and no sat may leave the enclave's outputs (M8).
+`issuedSupply` to one seal, blinded or a witness seal on an output of its own
+tx, and issues exactly `amount - commission` (M1 - M5, M7). The deposit must
+name this mint's OpId and carry the deposit id it derives (M6). A blinded
+mint pays no sat out of the enclave's outputs. A witness mint pays exactly
+`MINT_WITNESS_SAT` (image env, default 1500, 546 to 10 000) to its seal's
+output, which must not be the enclave's, and no sat elsewhere (M8).
 
 The parent fascia, of the tx that made the spent right, passes the same core
 on the tx it carries and must show a `TS_PROPAGATE` of one right that put
@@ -578,7 +584,11 @@ diversion *lowers* the implied rate. Outputs that do not pay back into the
 custody their inputs were in are therefore bounded by `RGB_MAX_UNOWNED_SATS`,
 fail-closed while unset. The budget is a bound rather than an identity check
 because the recipient's seal is blinded: the enclave cannot tell which output is
-the payout, only how much may leave. Signing is scoped to the **colored** BIP-86
+the payout, only how much may leave. The mint signer checks more (M8): a
+blinded mint pays no sat out, a witness mint exactly `MINT_WITNESS_SAT` to its
+seal's output. A mint signer does not boot when `RGB_MAX_UNOWNED_SATS` is
+below `MINT_WITNESS_SAT` (unset or not a number is 0), so this budget never
+refuses a witness mint after its lock. Signing is scoped to the **colored** BIP-86
 account, key-path spends only: the bridge wallet is singlesig, and a script-path
 input is never signed.
 
@@ -1073,6 +1083,14 @@ Known limits. Read them before deployment.
   response write can commit an entry even when the caller receives no response.
   The parent proof is the real bound: every signature for one mint spends the
   same UTXO, so Bitcoin confirms at most one.
+- **Witness mint recipient (accepted V1 risk, CTO 2026-10-30).** A witness
+  mint's seal names a vout of the mint tx. The OpId the deposit binds commits
+  that vout, not the script on it. A host that controls the bridge can commit
+  the same mint in a tx that pays that vout to its own script, after the
+  user's lock, and every check passes. M8 keeps the units off the enclave's
+  outputs and bounds the sats that leave to `MINT_WITNESS_SAT`; nothing binds
+  them to the user. A witness mint has no amount cap yet. A blinded mint has
+  no such gap.
 - **EVM and CCD trust.** The images trust the pinned EVM RPC endpoint for
   receipts, canonical blocks and the selected finality head. TLS authenticates the
   endpoint, not its EVM history. A self-consistent false history from an
@@ -1097,8 +1115,11 @@ Known limits. Read them before deployment.
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,
   but Docker, Buildx and BuildKit versions are not pinned.
-  The supplied images leave the gas limits and `RGB_MAX_UNOWNED_SATS` unset,
-  so the gas and mint PSBT paths refuse until a rebuilt image sets them.
+  The supplied images leave the gas limits unset, so the gas path refuses
+  until a rebuilt image sets them. The mint image bakes
+  `MINT_WITNESS_SAT=1500` and `RGB_MAX_UNOWNED_SATS=1500`; a mint signer with
+  `RGB_MAX_UNOWNED_SATS` below `MINT_WITNESS_SAT` does not boot. The other
+  images leave `RGB_MAX_UNOWNED_SATS` unset.
 - **Protocol integration.** The enclave derives each mint's deposit id. The
   Bridge must derive RGB deposit ids the same way. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.
