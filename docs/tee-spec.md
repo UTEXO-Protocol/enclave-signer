@@ -1,7 +1,7 @@
 # Nitro Enclave Signer -- Technical Specification
 
 **Component:** `enclave-signer` (TEE validator / signer + parent adapter)
-**Reviewed:** 2026-10-05 against repository code. Deployment was not checked.
+**Reviewed:** 2026-11-02 against repository code. Deployment was not checked.
 
 The production bridge has two flows. Each flow has its own signer image:
 
@@ -51,7 +51,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
-| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint launch still pins the URL until the image drops the indexer. |
+| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint and burn launches still pin the URL until the images drop the indexer. |
 | EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
@@ -158,10 +158,10 @@ and 8002); the enclave has no direct network stack.
 EIF gets the same PCR0 (build access: see Known limits). The operator sends them once, after launch, in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. The burn signer still requires and pins the indexer URL
-although its RGB-source path never calls it; dropping it changes the
-`SetEndpoints` and attested-policy shape, so that waits until after the RGB
-0.11.2 cutover. The enclave refuses a second set; changing them needs a
+expected EVM address. The mint and burn signers still require and pin the
+indexer URL and start its forwarder, although neither reads it. Dropping it
+changes the `SetEndpoints` and attested-policy shape, so it is a separate
+change. The enclave refuses a second set; changing them needs a
 restart, which loses the keys. Until the set, the enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
@@ -213,6 +213,7 @@ the public-key bundle. This policy covers the fields below, not all configuratio
 ```
 SecurityPolicy = Production {
     chain_id, bridge_contract, rgb_asset_id,   -- operator pins
+    bitcoin_network,                           -- BITCOIN_NETWORK
     funds_in_contract, token_contract,         -- deposit and burnId pins
     evm_finality_tag: Latest | Safe | Finalized, -- required receipt head
     spv_min_confirmations,                     -- Bitcoin witness depth
@@ -223,6 +224,7 @@ SecurityPolicy = Production {
     electrum_host, evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,                  -- always, in production
     kms,                                       -- KMS pin, mint signer only
+    clone_peer_pcr3,                           -- own PCR3, cloning roles only
 } | Development { reason }
 ```
 
@@ -237,6 +239,8 @@ SecurityPolicy = Production {
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
   and `TOKEN_CONTRACT` must be non-zero, and `BTC_RELAY_MODE` must be `required`.
+  A mainnet EVM chain (`EVM_CHAIN_ID` 1 or 42161) requires
+  `BITCOIN_NETWORK=bitcoin`.
   `EVM_FINALITY_TAG` accepts exactly `latest`, `safe`, or `finalized` (default
   `safe`); an invalid value rejects startup, and a production policy refuses
   `latest`.
@@ -262,7 +266,8 @@ SecurityPolicy = Production {
   `--expect-evm-rpc-host`,
   `--expect-evm-rpc-ca-sha256`,
   `--expect-funds-in-contract`, `--expect-evm-finality-tag`,
-  `--expect-spv-min-confirmations`, and the gas-rule flags) and
+  `--expect-spv-min-confirmations`, `--expect-bitcoin-network`, and the
+  gas-rule flags) and
   fails if the commitment differs -- a downgraded posture (vanilla signing on,
   a different EVM source, a dev build) fails verification instead of being
   silently trusted.
@@ -281,7 +286,9 @@ Inside the commitment: the whole gas-tx rule -- `GAS_TX_ALLOWED_TO`,
 instead of trusting the operator's configuration. An unset pin commits as its zero value, which is the posture it enforces, so
 "unpinned" is attested too.
 
-Not inside the policy commitment: `BITCOIN_NETWORK`, the Electrum/Esplora URL
+Also inside: `BITCOIN_NETWORK` (`bitcoin_network`).
+
+Not inside the policy commitment: the Electrum/Esplora URL
 scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
 `BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested), and the mint
@@ -477,8 +484,9 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   such events refuse. There is no fallback to the plain `FundsIn` event: it
   carries an RGB OpId, a different id space;
 - the event MUST bind the on-chain `operationId` (the full 32-byte word,
-  indexed topic 1) to the request's 32-byte `funds_in_operation_id` -- not the
-  hub's `operation_idx` -- plus the gross `amount` and `tokenCommission`;
+  indexed topic 1) to the request's 32-byte `funds_in_operation_id` -- not
+  `RgbDestination.operation_idx`, which the enclave does not read -- plus the
+  gross `amount` and `tokenCommission`;
   `netAmount` MUST NOT exceed `gross - commission` (a lower value is accepted
   with a warning for fee-on-transfer tokens);
 - when the event's `destinationAddress` string is not empty, it is the
@@ -493,7 +501,8 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   script on it (accepted V1 risk, Known limits).
 
 **Mint signer (plan B).** The mint signer validates no consignment.
-rgb-lib f3975623 strips the RGB, MPC, OPRET and TAPRET proprietary keys from
+rgb-lib (pin: rgb-lib-bfa 0a9d352f, RGB-Tools bfa 1ae1c160; since f3975623)
+strips the RGB, MPC, OPRET and TAPRET proprietary keys from
 the PSBT it returns and keeps the tx, its bundles and the MPC entropy in the
 tx's strict-encoded fascia. The enclave decodes that fascia as rgb-lib reads
 it, checks it as rgb-lib's `inspect_rgb_transfer` does without the wallet
@@ -714,7 +723,8 @@ pending secret; the expiry deadline alone does not erase it.
 The activated replica can then donate to another replica using the same
 operator secret, even when its original donor is unavailable. Each replica
 enforces its own export cap; this is not a cluster-wide replica limit or
-revocation mechanism. Blocking the original donor does not revoke its clones.
+revocation mechanism. The cap is `CLONE_EXPORT_HARD_CAP`. Unset or zero means
+no cap, and no supplied image sets it. Blocking the original donor does not revoke its clones.
 Each `EnclaveState` also owns its nonce replay guard. A successful export on
 one donor does not prevent another donor from accepting the same otherwise-valid
 requester attestation, subject to its own export cap. Each donor refuses a
@@ -843,6 +853,7 @@ For an RGB-source request, the SPV layer enforces these rules:
 6. Require the consignment's `chain_net` to match the enclave's Bitcoin network.
    `BITCOIN_NETWORK` selects that network at boot.
    The image measurement covers the value when it is part of the image.
+   The attested policy commits it.
 
 `SPV_MIN_CONFIRMATIONS` is read from the image env at boot, so PCR0 measures
 it, and the attested policy commits it. The burn image bakes 6, the mint image
@@ -854,9 +865,10 @@ hash. The three request-size caps above are env-tunable because they only bound
 resource use; they never relax a verification step.
 
 **Checkpoints:** mainnet block 951,552 (retarget-aligned), testnet4 block
-155,232 (retarget-aligned, chainwork not set yet, so testnet4 `fundsOut`
-fails until it is) and UTEXO signet block 334,000 are real pinned
-checkpoints; regtest uses genesis. `signetcustom` uses the signet checkpoint
+155,232 (retarget-aligned) and UTEXO signet block 334,000 are real pinned
+checkpoints; regtest uses genesis. The testnet4 and signet checkpoints have no
+chainwork yet. So their `fundsOut` fails under `BTC_RELAY_MODE=required`,
+unless a dev build sets `SPV_CHECKPOINT` with chainwork. `signetcustom` uses the signet checkpoint
 with the RGB chain-network `sbc`. Local/dev
 builds (debug, `cfg(test)`, or `allow-seed-import`) may move the anchor forward
 at boot with `SPV_CHECKPOINT=height:block_hash[:bits:time[:chainwork]]` to skip a long
@@ -877,7 +889,7 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | # | Required check | Enforcement |
 | --- | --- | --- |
 | P1 | Valid RGB consignment | Full RGB consensus validation. |
-| P2 | Expected transition | The settling transition (the last witness's last burn, else its last transition) must be `TS_BURN`. Each ancestry mint needs a verified deposit. |
+| P2 | Expected transition | The settling transition (the one burn of the last witness bundle, else its last transition) must be `TS_BURN`. Two burns in that bundle refuse. Each ancestry mint needs a verified deposit. |
 | P3 | Exact amount | `burnedAsset` must equal calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`, V1 record). A V0 burn: direct route only. |
@@ -1026,8 +1038,9 @@ Known limits. Read them before deployment.
   restart resets the count). It cannot take a right. Accepted until rgb-lib
   can take a refill's fee from the vanilla key.
 - **Reject list.** A genesis may name an `IRgbRejectList` contract on
-  `EVM_CHAIN_ID`. The burn signer reads it over the pinned EVM RPC, with rgb-lib
-  98a8af6 rules: a pending reject counts at once, an allow only once
+  `EVM_CHAIN_ID`. The burn signer reads it over the pinned EVM RPC, with the
+  rules of rgb-lib-bfa 0a9d352f (RGB-Tools bfa 1ae1c160, unchanged since
+  98a8af6): a pending reject counts at once, an allow only once
   `finalized`. rgb-lib then refuses a release when an input or output of a
   terminal operation descends from a rejected opout: the burn's inputs, and
   also a companion transfer in the burn's bundle, so a rejected line there

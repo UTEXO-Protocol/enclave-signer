@@ -68,11 +68,13 @@ sequenceDiagram
     Srv->>Evm: validate_destination(EvmDestination)
     Evm->>Evm: calldata ≥ 4 bytes, ≤ 96 KiB
     Evm->>Evm: selector is fundsOut 0x340276aa or lzFundsOut
+    Evm->>Evm: lz_release present only with lzFundsOut, else REFUSE
     Evm->>Evm: canonical ABI check: decode FundsOutParams,<br/>then re-encode must byte-equal input
+    Evm->>Evm: lzFundsOut only: 1 ≤ minAmountLD ≤ amount,<br/>extraOptions empty or one lzReceive gas option,<br/>no value, gas ≤ 1 000 000
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)
     Evm->>Evm: config pinned? chain_id / proxy_contract == env pins<br/>(unconfigured ⇒ REFUSE on bridge builds)
     Evm->>Evm: calldata destinationChainId:<br/>pools route == pinned chain, LZ route != pinned and > 0
-    Evm->>Evm: deadline strictly in the future
+    Evm->>Evm: deadline after now and ≤ now + 24 h
     Evm-->>Srv: Ok / CrossCheck err
 
     Note over Srv: 3 — validate_route_proofs
@@ -83,7 +85,7 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (both routes: fundsOut and lzFundsOut)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
     Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>burn_destination::resolve(burnReason, record)<br/>V0: burnReason[12..] == calldata recipient, direct only<br/>V1: hash_v1(record) == burnReason, then<br/>destinationChainId, dstEid, recipient == record

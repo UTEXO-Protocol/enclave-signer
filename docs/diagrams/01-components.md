@@ -38,16 +38,20 @@ flowchart TB
         EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s socket deadline<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
-        EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL]
+        EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL<br/>refill_rate.rs RR15: 12 refills per hour]
         EFr[framing.rs<br/>len-prefixed proto, 24 MiB cap]
-        BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS<br/>MINT_WITNESS_SAT]
+        BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS<br/>MINT_WITNESS_SAT<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS]
+        EKms[kms/ + seed_persistence.rs<br/>KMS seed custody, mint only:<br/>TLS to KMS ends in the enclave]
         VFwd["vsock_forwarder.rs<br/>loopback -> vsock, per-port instances<br/>started at SetEndpoints<br/>Electrum port -> 8001,<br/>EVM RPC TLS port -> 8002,<br/>KMS 443 -> 8003 (mint only)"]
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
             NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>96 KiB cap, pins, destinationChainId, deadline]
-            NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient]
+            NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient,<br/>sourceBurnTxId bind, settlementData ids]
             NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC,<br/>TLS ends in the enclave]
+            NER[reject_list.rs<br/>asset reject list read:<br/>length at finalized and latest,<br/>entries pages at latest]
+            NEB[burn_destination.rs<br/>V0 / V1 burnReason record]
+            NEL[lz_options.rs<br/>lzFundsOut extraOptions bound]
             NEG[gas_tx.rs<br/>gas-tx preimage allowlist:<br/>strict RLP + chain / to pins]
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
@@ -77,7 +81,7 @@ flowchart TB
 
     %% External
     NSM[(AWS NSM device<br/>/dev/nsm)]
-    Esp{{Electrum indexer}}
+    Esp{{Electrum or Esplora indexer}}
     VP[(host vsock-proxy<br/>port 8001)]
     EvmRpc{{EVM JSON-RPC}}
     VPe[(host vsock-proxy<br/>port 8002)]
@@ -123,11 +127,16 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"Electrum 15 s timeout,<br/>via loopback"| VFwd
+    NRV -->|"indexer, swap path only (retired),<br/>15 s timeout, via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
-    VP -->|"Electrum TCP/TLS"| Esp
+    VP -->|"Electrum or Esplora, TLS"| Esp
 
-    NEE -.->|"eth_getTransactionReceipt /<br/>eth_getBlockByNumber — TLS to pinned host and CA"| VFwd
+    NEE -.->|"eth_getTransactionReceipt /<br/>eth_getBlockByNumber / eth_chainId - TLS to pinned host and CA"| VFwd
+    NER -.->|"eth_chainId / eth_call, burn signer"| VFwd
+    NRV -->|"reject-list resolver"| NER
+    NEC --> NEB
+    NEV --> NEL
+    EKms -.->|"KMS 443, mint only"| VFwd
     VFwd -->|"vsock 8002"| VPe
     VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 

@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-10-30 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia; witness mints).
+**Checked against repository code:** 2026-11-02 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia; witness mints).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -10,17 +10,22 @@ document differ, investigate the difference. Either can contain an error.
 
 ## 1. What the mint flow does
 
-1. The user locks ERC-20 tokens in the Bridge contract on EVM.
-2. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
-3. The backend makes an RGB mint (a BFA `mint` transition) and a Bitcoin
-   PSBT that anchors it. The mint commits to `beforeBlock`: its EVM lock
-   must be in an earlier (L2) block. The backend also sends the fascia
-   rgb-lib wrote for the mint tx, and the fascia of the tx that made the
-   right the mint spends (the parent fascia).
-4. The mint signer checks the deposit, the mint, the PSBT and both fascias.
-5. The mint signer signs the PSBT with its colored taproot key.
-6. The backend finalizes and broadcasts the Bitcoin transaction.
-7. The recipient validates the RGB transfer and waits for the required confirmations.
+1. The backend makes an RGB mint (a BFA `mint` transition) with
+   `mint_begin`, and a Bitcoin PSBT that anchors it. It returns the mint
+   OpId and `settlementData = abi.encode(uint256 opId, uint64 beforeBlock)`.
+   The mint commits to `beforeBlock`: its EVM lock must be in an earlier
+   (L2) block.
+2. The user locks ERC-20 tokens in the Bridge contract on EVM. The
+   `fundsIn` call carries that `settlementData`.
+3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
+   `FundsIn` names the mint OpId.
+4. The backend sends the PSBT, the fascia rgb-lib wrote for the mint tx,
+   and the fascia of the tx that made the right the mint spends (the parent
+   fascia).
+5. The mint signer checks the deposit, the mint, the PSBT and both fascias.
+6. The mint signer signs the PSBT with its colored taproot key.
+7. The backend finalizes and broadcasts the Bitcoin transaction.
+8. The recipient validates the RGB transfer and waits for the required confirmations.
 
 ## 2. Who does what
 
@@ -32,7 +37,7 @@ document differ, investigate the difference. Either can contain an error.
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipts, canonical blocks and selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
-| Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy | Nothing | Not read by a mint or a refill. The launch still pins `INDEXER_URL` until the mint image drops the indexer. |
+| Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy | Nothing | Not read by a mint or a refill. The launch still pins `ELECTRUM_URL` until the mint image drops the indexer. |
 
 The mint signer ignores `event_valid` and `event_finalized` from the listener.
 It checks deposits through the pinned EVM RPC. It trusts that provider for
@@ -47,8 +52,9 @@ diagnostic text is not used to identify this state. The enclave and listener
 log this wait at debug level. Other validation failures keep code 3; a receipt
 above the `latest` head also remains a validation failure.
 
-The mint signer validates no RGB consignment. rgb-lib f3975623 commits the
-PSBT and then strips its RGB, MPC, OPRET and TAPRET proprietary keys. It keeps
+The mint signer validates no RGB consignment. Since f3975623, rgb-lib (pinned:
+rgb-lib-bfa 0a9d352f, RGB-Tools bfa 1ae1c160) commits the PSBT and then
+strips its RGB, MPC, OPRET and TAPRET proprietary keys. It keeps
 the RGB data in the tx's fascia (`transfers/<txid>/fascia`): the unsigned tx,
 every bundle the tx commits and the MPC merkle block with its entropy,
 strict-encoded. The mint signer reads the mint from that fascia and checks it
@@ -152,14 +158,20 @@ refuses it.
 If one check fails, the mint signer stops. It signs nothing. It returns an
 error.
 
+The stages group the checks by topic. The code order differs in places: F7
+and the fee check run after M1 - M5 and M7, and the fee check runs after the
+parent proof. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md) show the code
+order. Stage 2 parses the invoice of S6.2. Only the seal compare runs in
+Stage 6.
+
 ### Stage 0 - Can this enclave do this request?
 
 - **S0.1** The endpoints must be set (`SetEndpoints`).
 - **S0.2** The source must be EVM and the destination must be RGB. The mint
   signer refuses a burn request.
-
-The enclave must be `Active`, but no check runs here. The first check that
-reads the keys refuses an enclave without keys.
+- **S0.3** The key must be ready (the enclave is `Active`). Otherwise the
+  signer refuses with `KeyNotInitialized`, before the replay check and any
+  network call.
 
 ### Stage 1 - Is this a repeat?
 
@@ -316,8 +328,9 @@ it is signed.
 ### Stage 6 - Is the deposit this mint's, and the user the right one?
 
 - **M6** The EVM node must report `EVM_CHAIN_ID` (`eth_chainId`). The receipt
-  of `evm_tx_hash` must have exactly one `FundsIn` event with this mint's
-  OpId and exactly one `BridgeFundsIn` event, both from `FUNDS_IN_CONTRACT`.
+  of `evm_tx_hash` must have exactly one `FundsIn` event and exactly one
+  `BridgeFundsIn` event from `FUNDS_IN_CONTRACT`. A tx with two deposits is
+  refused as ambiguous. The `FundsIn` `rgbOpId` must equal this mint's OpId.
   The `operationId` and the net amount must be the deposit id the mint
   derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
   burn-flow B2.4). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
@@ -450,8 +463,9 @@ begin returns. For a right a refill made, the parent fascia is that refill's.
 For a right the issuer seeded, the issuer's `rights.fascia` (saved by
 `bfa_issuer` at `send-rights-begin`) is placed once, at seeding, as
 `<connector data dir>/rights_seeds/<txid>.fascia`. It must be strict-encoded,
-as rgb-lib f3975623 writes it: an older rgb-lib wrote JSON, which PP1 refuses,
-and only opening that wallet on f3975623 re-saves it.
+as rgb-lib writes it since f3975623 (pinned: rgb-lib-bfa 0a9d352f, RGB-Tools
+bfa 1ae1c160). An older rgb-lib wrote JSON, which PP1 refuses. Only opening
+that wallet on f3975623 or later re-saves it.
 
 What is not checked, and why that is safe:
 
@@ -483,7 +497,7 @@ input, at most 12 refills per hour.
 | `Sign` with an RGB source or an EVM destination (burn) | Refused: wrong signer role. |
 | `SignRawDigest` (gas transaction) | Refused: wrong signer role. |
 | `InitiateCloning`, `GetClone`, `SetClone` | Refused: the seed comes from KMS. |
-| `Sign` without `fascia` | Refused (F4). rgb-lib f3975623 strips the PSBT, so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
+| `Sign` without `fascia` | Refused (F4). rgb-lib strips the PSBT (since f3975623; pinned 0a9d352f, RGB-Tools bfa 1ae1c160), so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
 | `Sign` without `parent_fascia` | Refused (PP1). |
 | `SignRightsRefill` without `fascia` or `parent_fascia` | Refused (F4, PP1). |
 | `SignRightsRefill` that breaks a rule of section 8 | Refused. Past the gate it still counts against the hourly limit. |

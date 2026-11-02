@@ -1,6 +1,7 @@
 # Burn destination: integration design
 
-Status: draft for the bridge, wallet and contract teams.
+Status: design for the bridge, wallet and contract teams. The proto change
+is merged (proto PR #37).
 Format spec: [burn-destination.md](burn-destination.md).
 
 ## Problem
@@ -56,11 +57,11 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 
 ### Proto (federated-signer-proto)
 
-- One field per hop, branch `feat/burn-destination` (not yet on `main`):
+- One field per hop, merged into `main` in proto PR #37:
   - backend -> listener: node `EvmSignData.burn_destination = 4`;
   - listener -> parent: parent `EnrichedEvmPayload.burn_destination = 10`;
   - parent -> enclave: enclave `EvmDestination.burn_destination = 9`.
-- enclave-signer vendors and pins the branch head. Re-pin after the merge.
+- enclave-signer vendors and pins proto `6c10ce0`, which contains that merge.
 
 ### Enclave (enclave-signer)
 
@@ -83,7 +84,7 @@ mismatched pair.
 
 ## Rollout order
 
-1. Proto PR merged.
+1. Proto PR merged. Done: proto PR #37, pinned at `6c10ce0`.
 2. Enclave release with the resync (new PCR0, re-attest).
 3. Listener, then backend.
 4. Wallets start writing V1.

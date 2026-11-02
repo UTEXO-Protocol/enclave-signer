@@ -29,6 +29,7 @@ stateDiagram-v2
 
     Active --> Active : Sign / SignBtc / SignRightsRefill / SignRawDigest / SignCcd / GetAttestedPublicKey (no state change)
     Initial --> Initial : SubmitHeaders / GetLastSavedBlock (no keys needed, any phase)
+    Initial --> Initial : GetAttestedPublicKey after SetEndpoints - attests the policy only
     Active --> Active : GetClone (donor - exports sealed seed, stays Active)
 
     note right of Active

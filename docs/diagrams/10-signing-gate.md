@@ -10,10 +10,14 @@ flowchart TD
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis,<br/>reject list EVM-only"]
+        p1wq -->|yes| p1sp{"every proof before rgb-lib:<br/>merkle path ≤ 32, inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS?"}
+        p1sp -->|no| p1spr[REFUSE - SPV failure]:::refuse
+        p1sp -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis"]
         p1a --> p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
-        p1c -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
+        p1c -->|yes| p1l{"reject list, if named,<br/>is an EVM contract?"}
+        p1l -->|no| p1lr[REFUSE - not an EVM reject list]:::refuse
+        p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
         p1k -->|no| p1kr[REFUSE - work cap]:::refuse
         p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{valid?}
@@ -37,15 +41,19 @@ flowchart TD
         p2len -->|no| p2lenr[REFUSE — size]:::refuse
         p2len -->|yes| p2sel{"selector is fundsOut 0x340276aa<br/>or lzFundsOut?"}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
-        p2sel -->|yes| p2abi{"canonical ABI:<br/>decode FundsOutParams AND<br/>re-encode byte-equals input?"}
+        p2sel -->|yes| p2lr{"lz_release set exactly when<br/>the selector is lzFundsOut?"}
+        p2lr -->|no| p2lrr[REFUSE - lz_release mismatch]:::refuse
+        p2lr -->|yes| p2abi{"canonical ABI:<br/>decode FundsOutParams AND<br/>re-encode byte-equals input?"}
         p2abi -->|no| p2abir[REFUSE — non-canonical calldata]:::refuse
-        p2abi -->|yes| p2am{"decoded amount == declared<br/>calldata_amount, fits u64?"}
+        p2abi -->|yes| p2lz{"lzFundsOut only: minAmountLD nonzero, ≤ amount,<br/>extraOptions empty or one lzReceive gas option<br/>≤ MAX_LZ_RECEIVE_GAS, no value?"}
+        p2lz -->|no| p2lzr[REFUSE - LayerZero fields]:::refuse
+        p2lz -->|yes| p2am{"decoded amount == declared<br/>calldata_amount, fits u64?"}
         p2am -->|no| p2amr[REFUSE — amount mismatch]:::refuse
         p2am -->|yes| p2p{"config pinned AND chain_id /<br/>proxy_contract == env pins?"}
         p2p -->|no| p2pr[REFUSE — pinned-config mismatch]:::refuse
         p2p -->|yes| p2dc{"calldata destinationChainId:<br/>pools == pin / LZ != pin and > 0?"}
         p2dc -->|no| p2dcr[REFUSE — destination chain]:::refuse
-        p2dc -->|yes| p2d{deadline strictly in the future?}
+        p2dc -->|yes| p2d{"deadline strictly in the future,<br/>at most 1 day ahead?"}
         p2d -->|no| p2dr[REFUSE — expired]:::refuse
     end
     p3q -->|yes| p1e{"settling transition == TS_BURN?<br/>source amount = burnedAsset<br/>(host rgb_amount NOT used)"}
@@ -67,9 +75,9 @@ flowchart TD
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero)?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
-        p4id -->|yes| p4rc{"burnReason == calldata recipient<br/>(LZ: LayerZero recipient)?"}
-        p4rc -->|no| p4rcr[REFUSE — burn recipient]:::refuse
-        p4rc -->|yes| p4st{"settlementData operationIds == verified<br/>ancestry BridgeFundsIn records?"}
+        p4id -->|yes| p4rc{"burnReason present. V0: no record, pools only,<br/>low 20 bytes == calldata recipient.<br/>V1: record hash == burnReason, record dstEid,<br/>destinationChainId and padded recipient == calldata?"}
+        p4rc -->|no| p4rcr[REFUSE - burn destination]:::refuse
+        p4rc -->|yes| p4st{"settlementData ids == the deposit ids derived<br/>from the mint anchors, non-empty,<br/>strictly ascending?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse
     end
     p2d -->|yes| p4r
@@ -92,7 +100,8 @@ flowchart TD
 - Both routes (`fundsOut` and `lzFundsOut`) run every P4 bind:
   `sourceChainId` and `sourceAddress`, `burnId` (`validate_burn_id`),
   `sourceBurnTxId` to the burn OpId, amount and recipient to the burn
-  metadata, `settlementData` to the verified mint ancestry.
+  globals `burnedAsset` and `burnReason`, `settlementData` to the deposit
+  ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
 - The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for

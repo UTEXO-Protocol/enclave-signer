@@ -34,8 +34,9 @@ sequenceDiagram
     Parent->>Wire: Sign{EvmSource, RgbDestination}
     Wire->>Srv: dispatch (endpoints must be set)
 
-    Note over Srv: 0 — role check
+    Note over Srv: 0 - role check, key ready
     Srv->>Srv: RgbSource or EvmDestination ⇒ REFUSE (wrong signer role)
+    Srv->>State: key ready, else KeyNotInitialized ⇒ REFUSE
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))

@@ -46,9 +46,10 @@ Reference material:
 2. The parent runs on the EC2 host. It is not trusted. It sends the request
    to the enclave over vsock.
 3. The enclave holds the keys. It checks the request and signs, or refuses.
-4. The enclave reads Bitcoin data (Electrum) and EVM data (JSON-RPC) through
-   host vsock proxies. EVM TLS ends inside the enclave. Electrum uses TLS
-   only when the configured URL uses `ssl://`.
+4. The enclave reaches the Bitcoin indexer (Electrum or Esplora) and the EVM
+   JSON-RPC through host vsock proxies. TLS ends inside the enclave. A release
+   image accepts only an `ssl://` or `https://` indexer URL. Only the retired
+   swap flow reads the indexer.
 5. The parent sends Bitcoin block headers to the enclave. On mainnet, the
    enclave checks proof of work and maintains its own header chain.
    On testnet4 it also applies the 20-minute rule and BIP94. On the testnets
@@ -233,7 +234,7 @@ request per connection. Frame cap 24 MiB. Schema:
 | `SetEndpoints` | any | all | Sets the chain endpoints (and the KMS values on mint). Once per boot. |
 | `InitializeKey` | Initial | all | Mint: recover or create the KMS seed. Burn: make a seed from OS entropy, with an optional donor `cloning_secret`. |
 | `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, CCD key, boot pins. |
-| `GetAttestedPublicKey` | Active | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. |
+| `GetAttestedPublicKey` | any, after `SetEndpoints` | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. Before keys exist it attests the policy only. |
 | `Sign` | Active | mint, burn | Bridge signing. Mint signer: EVM -> RGB only. Burn signer: RGB -> EVM only. |
 | `SignBtc` | Active | mint | Plain-BTC PSBT on the vanilla account. Off unless the attested policy turns it on. |
 | `SignRightsRefill` | Active | mint | The mint wallet sends one `mintRight` to 2..255 of its own Colored outputs. No units move. At most 12 per hour pass the PSBT gate. See [`docs/mint-flow.md`](docs/mint-flow.md#8-rights-refill-signrightsrefill). |
@@ -497,6 +498,7 @@ complete proofs and configured pins; see their `--help` and the spec.
 A successful clone retains the verified session's cloning secret and can act
 as a donor for a replacement without another `init`. The export cap applies
 per enclave; it does not limit the total number of replicas across a cluster.
+There is no cap unless `CLONE_EXPORT_HARD_CAP` is set.
 
 ### Production (Nitro)
 
@@ -598,9 +600,10 @@ Data sources and transport:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it; the mint image still pins it. |
+| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it. The mint and burn images still pin the URL and start its forwarder. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
+| `KMS_VSOCK_PORT` | `8003` | Mint signer: host vsock-proxy port for AWS KMS. |
 | `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
 | `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
 | `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats a witness mint pays to the user's output. Unset or empty gives 1500; a non-number or a value outside 546 to 10000 stops the boot (every image parses it). It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that ([mint flow](docs/mint-flow.md) M8). Baked into the mint image (1500), so PCR0 measures it; not attested. |
@@ -650,6 +653,8 @@ Limits and dev knobs:
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes cap per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash[:bits:time[:chainwork]]` moves the SPV anchor forward. Without `chainwork` (Core's `getblockheader` value) every `fundsOut` is refused under `BTC_RELAY_MODE=required`; `none` needs no chainwork. A production-shaped build refuses to boot when set. |
 | `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
+| `CLONE_EXPORT_SOFT_CAP` | unset | Seed exports per enclave process before a warning. It does not block exports. Unset or zero turns it off. |
+| `CLONE_EXPORT_HARD_CAP` | unset | Seed exports per enclave process. A restart resets the count. Unset or zero means no cap. No supplied image sets it. |
 
 ### Parent
 
@@ -680,8 +685,9 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
 ```
 
 - `200` - endpoints are set and the signing key is loaded. Builds with the
-  RGB -> EVM path also require a fresh header chain with at least six headers
-  above the checkpoint (`assert_chain_ready`). Mint signers do
+  RGB -> EVM path also require a fresh header chain with at least
+  `SPV_MIN_CONFIRMATIONS` headers above the checkpoint
+  (`assert_chain_ready`). Mint signers do
   not require SPV readiness, although they report `spv_synced`.
 - `503` - the enclave is not ready, cannot be reached, or does not answer
   within the five-second probe timeout.

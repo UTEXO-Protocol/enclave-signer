@@ -1,10 +1,8 @@
 # Burn flow (RGB -> EVM)
 
 **Signer image:** `burn-signer` (`--no-default-features --features vsock,rgb,burn-signer`).
-**Checked against repository code:** 2026-10-29 (rgb-lib f3975623 move, burns
-validated by rgb-lib's `validate_consignment_with_resolver`); B2.2 and section
-10 on 2026-10-30 (rgb-lib 1ae1c160: no DAG cap, opouts and genesis hashes in
-the time budget).
+**Checked against repository code:** 2026-11-02, rgb-lib-bfa 0a9d352f
+(RGB-Tools bfa 1ae1c160).
 Deployment was not checked.
 
 This document tells how the burn signer checks and signs a release. The
@@ -118,9 +116,8 @@ error.
 - **B0.1** The endpoints must be set (`SetEndpoints`).
 - **B0.2** The source must be RGB and the destination must be EVM. The burn
   signer refuses a mint request.
-
-The enclave must be `Active`, but no check runs here. Signing (Stage 6) is
-the first step that reads the keys. It refuses an enclave without keys.
+- **B0.3** The enclave must be `Active`. While the keys are not ready, the
+  burn signer refuses the request before any validation.
 
 ### Stage 1 - Is the request within the caps?
 
@@ -184,7 +181,10 @@ the first step that reads the keys. It refuses an enclave without keys.
 - **B2.5** rgb-lib confirms each anchor only against its derived lock, one
   for one; rgb-lib makes no RPC for it. The Bridge holds a record under that id only if a
   deposit of exactly the minted units was made for that mint, and the release
-  checks each cited record, so a mint with no deposit fails on chain.
+  checks each cited record, so a mint with no deposit fails on chain. The
+  burn signer does not check the mint's `beforeBlock`. The mint signer
+  checked it before it signed the mint. A mint to a witness seal needs no
+  rule of its own: its tx is one more witness, and its anchor binds the same way.
 - **B2.6** The result is a list of locks: deposit `operationId`s. One burn
   has one list, so one `settlementData`; `burnId` does not hash it. Stage 5
   uses this list.
@@ -309,11 +309,14 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
 - **B5.5** BtcRelay proof: the calldata `proof` is
   `(sourceHeight, sourceCommit, latestHeight, latestCommit)`, 128 bytes.
   - `sourceHeight` must be the block that holds the last witness transaction.
+  - `latestHeight` must not be below `sourceHeight`.
   - The enclave must have a header at `latestHeight`. That header must be at
     most 100 blocks below the enclave tip.
   - With `BTC_RELAY_MODE=required` (the production mode), each commit word must
     equal `keccak256` of the 160-byte BtcRelay record that the enclave builds
-    from its own chain. A zero word is refused.
+    from its own chain. A zero word is refused. To build a record, the
+    checkpoint must carry its chain work. Each proof height must be at least
+    10 blocks above the checkpoint, and its epoch start must not be below it.
   - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
     A production policy does not boot in this mode.
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
