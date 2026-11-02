@@ -51,6 +51,7 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
 | `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
 | `SetEndpointsRequest.evm_rpc_path` | This enclave does not read it. It always requests the EVM RPC at path `/`. |
+| `EvmSignatureResponse.call_data` | The comment names only the `TeeFundsOut` digest. On the LayerZero route (`EvmDestination.lz_release` set) the enclave signs the EIP-712 `TeeLzFundsOut` digest (`lz_funds_out_digest`) instead. |
 
 Correct these comments upstream, then synchronize both vendored files and their
 recorded provenance. Do not change only the local generated comments.

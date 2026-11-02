@@ -344,14 +344,6 @@ pub(super) fn validation_error(
             "RGB consignment validation failed: mint {opid} has no bound lock that confirms it - \
              refusing to validate"
         ),
-        E::MintEventExpired { opid, before_block } => format!(
-            "RGB consignment validation failed: the lock of mint {opid} was not included before \
-             EVM block {before_block}, so the mint is never backed - refusing to validate"
-        ),
-        E::InvalidBeforeBlock { details } => format!(
-            "RGB consignment validation failed: a mint's beforeBlock leaves no block for its \
-             lock ({details}) - refusing to validate"
-        ),
         E::Network { details } => format!(
             "RGB consignment validation failed: a witness is not proven on chain: {details}"
         ),

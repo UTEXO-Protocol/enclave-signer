@@ -1874,19 +1874,6 @@ fn each_rgb_lib_refusal_names_what_failed() {
         address: LIST,
     };
     let cases = [
-        (
-            E::MintEventExpired {
-                opid: "op".into(),
-                before_block: 77,
-            },
-            "not included before EVM block 77",
-        ),
-        (
-            E::InvalidBeforeBlock {
-                details: "zero".into(),
-            },
-            "leaves no block for its lock",
-        ),
         (E::MintEventNotFound { opid: "op".into() }, "no bound lock"),
         (E::NoAnchorResolver, "binds none"),
         (E::NoRejectListResolver, "cannot read it"),
