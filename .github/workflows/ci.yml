@@ -60,7 +60,8 @@ jobs:
           chmod 600 ~/.ssh/config
 
       # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
-      # would pack an excluded subdirectory of a listed one.
+      # would pack an excluded subdirectory of a listed one. No target dirs: they
+      # hold the compiled private RGB crates.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -72,8 +73,6 @@ jobs:
             !~/.cargo/git/*/rgb-ops-*
             !~/.cargo/git/*/rgb-api-*
             !~/.cargo/git/*/rgb-schemas-*
-            target
-            parent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -295,7 +294,8 @@ jobs:
           chmod 600 ~/.ssh/config
 
       # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
-      # would pack an excluded subdirectory of a listed one.
+      # would pack an excluded subdirectory of a listed one. No target dirs: they
+      # hold the compiled private RGB crates.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -307,8 +307,6 @@ jobs:
             !~/.cargo/git/*/rgb-ops-*
             !~/.cargo/git/*/rgb-api-*
             !~/.cargo/git/*/rgb-schemas-*
-            target
-            parent/target
           key: ${{ runner.os }}-cargo-release-guards-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-guards-
 
@@ -354,7 +352,8 @@ jobs:
         run: sh build/ci-rgb-lib-access.sh
 
       # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
-      # would pack an excluded subdirectory of a listed one.
+      # would pack an excluded subdirectory of a listed one. No target dirs: they
+      # hold the compiled private RGB crates.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -366,8 +365,6 @@ jobs:
             !~/.cargo/git/*/rgb-ops-*
             !~/.cargo/git/*/rgb-api-*
             !~/.cargo/git/*/rgb-schemas-*
-            target
-            parent/target
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 

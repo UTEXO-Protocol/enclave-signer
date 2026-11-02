@@ -528,6 +528,13 @@ when it accepts the mint, and refuses a bad one.
 - No witness depth. The host picks the indexer, so a depth check would prove
   nothing against it.
 - No reject list. The connector's rgb-lib checks it before `mint_begin`.
+- No invoice expiry. A v2 deposit carries no invoice, so the enclave never
+  sees the expiry, and S6.2 does not check it. It can sign a mint after the
+  invoice expired; the receiver's wallet then fails that receive, and proxies
+  take a transfer only until the expiry. The connector checks only that an
+  hour of the invoice is left when it prepares the mint, while the lock may
+  come any time before `beforeBlock`, `INIT_OP_TTL` later. The bridge must
+  bound this: an invoice has to outlive its mint's `beforeBlock`.
 
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it

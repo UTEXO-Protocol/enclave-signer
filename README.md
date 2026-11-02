@@ -366,6 +366,18 @@ The EIF workflow gets this value from the repository variable `BFA_RGB_ASSET_ID`
 It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
 This file accompanies the EIF in the Actions artifact and S3 bundle.
 
+This release needs a new asset. rgb-schemas 641a06f changes the BFA schema id
+from `rgb:sch:Ryl5eQZ3IHrU05e3AWdQZJR4FB5GvxZPy96cwhJiApc#amazon-norway-harris`
+to `rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture`,
+and `assert_bfa_genesis` refuses any other id. Before deploying these signers:
+
+1. Holders of the old asset redeem it (burn and release) while the old burn
+   signers still run. Once the new burn signers replace them, every burn of
+   the old asset is refused, and its units cannot move to the new asset.
+2. Reissue the BFA on the new schema.
+3. Set `RGB_ASSET_ID` (and the repository variable `BFA_RGB_ASSET_ID`) to the
+   new contract id for both the mint and the burn image, and rebuild both.
+
 To reproduce a published EIF, use its recorded asset id, not the current
 repository variable. Older bundles may lack this field; obtain the original
 build value from the release owner. Include `metadata.json` when distributing

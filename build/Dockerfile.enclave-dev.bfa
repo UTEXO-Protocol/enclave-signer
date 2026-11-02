@@ -66,6 +66,10 @@ USER enclave
 ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
 ENV BITCOIN_NETWORK=testnet
 ENV RUST_LOG=debug
+# CD runs the mint signer from this image, and it refuses to boot when
+# RGB_MAX_UNOWNED_SATS is below MINT_WITNESS_SAT. The runtime env may raise both.
+ENV MINT_WITNESS_SAT=1500 \
+    RGB_MAX_UNOWNED_SATS=1500
 
 EXPOSE 5000
 

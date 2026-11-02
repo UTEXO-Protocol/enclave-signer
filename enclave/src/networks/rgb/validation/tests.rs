@@ -404,6 +404,12 @@ fn a_pending_allow_does_not_shield_the_burn() {
 #[test]
 fn a_rejected_split_change_does_not_block_the_release() {
     let (history, ..) = listed_burn();
+    let change = split_change(&history);
+    listed_result(&history.consignment(), &[(change, true)]).expect("the change is not released");
+}
+
+/// The change output the burn's split keeps for the holder.
+fn split_change(history: &History) -> rgbstd::Opout {
     let split = &history.bundles.last().unwrap().bundle.known_transitions[0];
     let outputs = split
         .transition
@@ -415,8 +421,7 @@ fn a_rejected_split_change_does_not_block_the_release() {
         .iter()
         .position(|a| a.as_state().as_u64() == MINTED - 60_000)
         .expect("the split's change");
-    let change = rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap());
-    listed_result(&history.consignment(), &[(change, true)]).expect("the change is not released");
+    rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap())
 }
 
 /// A listed mint, then a transfer that splits the units into two halves on
@@ -3028,19 +3033,7 @@ mod source_path {
     #[test]
     fn a_rejected_burn_change_does_not_block_the_release() {
         let (history, ..) = listed_burn();
-        let split = &history.bundles.last().unwrap().bundle.known_transitions[0];
-        let outputs = split
-            .transition
-            .assignments
-            .get(&schemata::OS_ASSET)
-            .unwrap()
-            .as_fungible();
-        let no = outputs
-            .iter()
-            .position(|a| a.as_state().as_u64() == MINTED - 60_000)
-            .expect("the split's change");
-        let change = rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap());
-        let (result, _) = run_listed(None, &[(change, true)]);
+        let (result, _) = run_listed(None, &[(split_change(&history), true)]);
         result.unwrap();
     }
 
