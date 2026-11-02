@@ -486,7 +486,6 @@ mod tests {
         for dockerfile in [
             include_str!("../../../build/Dockerfile.enclave.mint"),
             include_str!("../../../build/Dockerfile.enclave.burn"),
-            include_str!("../../../build/Dockerfile.enclave"),
         ] {
             assert_eq!(
                 parse_expect_spv_min_confirmations(None).unwrap(),

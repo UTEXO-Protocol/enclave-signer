@@ -340,7 +340,7 @@ attest-verify \
 
 # --expect-signer-role is required: `mint` for the mint signer image
 # (Dockerfile.enclave.mint), `burn` for the burn signer
-# (Dockerfile.enclave.burn), `combined` for a swap image. A burn signer that
+# (Dockerfile.enclave.burn), `combined` for a build with no signer role (CCD). A burn signer that
 # attests `mint` fails verification. A role attests the other role's path as
 # off whatever its env says: a burn signer never attests plain-BTC signing
 # (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit

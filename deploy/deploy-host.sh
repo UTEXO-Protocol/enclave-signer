@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy the matching EIF, Parent, and CLI from S3 for one git_sha.
+# Deploy the matching EIF, Parent, and CLI from S3 for one git_sha and one
+# signer role (SIGNER_ROLE=mint or burn).
 # Verify checksums and PCRs before starting the services.
 # Start one enclave on CID 16 and Parent port 50051 by default.
 # Set ENCLAVE_CID=18 or 20 to deploy one of the other supported CIDs.
@@ -33,8 +34,11 @@ GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
 BUCKET="${BUCKET:?BUCKET required (S3 artifact bucket)}"
 REGION="${AWS_REGION:?AWS_REGION required (e.g. eu-central-1)}"
 DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>/<dir>)}"
+SIGNER_ROLE="${SIGNER_ROLE:?SIGNER_ROLE required (mint or burn)}"
+case "$SIGNER_ROLE" in mint|burn) ;; *) echo "SIGNER_ROLE must be mint or burn" >&2; exit 1 ;; esac
 EIF="$DIR/utexo-bridge-enclave.eif"
-SRC="s3://$BUCKET/eif/$GIT_SHA"
+# build-eif publishes one S3 subpath per signer role.
+SRC="s3://$BUCKET/eif/$GIT_SHA/rgb-$SIGNER_ROLE"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
 ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-4096}"
 # A release enclave refuses to start below 3072 MiB of usable memory
@@ -170,7 +174,7 @@ mkdir -p "$DIR"
 
 # --- 1. fetch artifacts ----------------------------------------------------
 log "pulling artifacts from $SRC"
-asubuntu "aws s3 cp $SRC/utexo-bridge-enclave.eif $EIF                 --region $REGION --no-progress"
+asubuntu "aws s3 cp $SRC/utexo-bridge-enclave-$SIGNER_ROLE.eif $EIF               --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/PCR.json                 $DIR/PCR.json         --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/IMAGE-ENV.json           $DIR/IMAGE-ENV.json   --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/SHA256SUMS               $DIR/SHA256SUMS.eif   --region $REGION --no-progress"
@@ -526,7 +530,7 @@ ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
 PCR_FILE=$DIR/PCR.json
 IMAGE_ENV=$DIR/IMAGE-ENV.json
-SIGNER_ROLE=combined
+SIGNER_ROLE=$SIGNER_ROLE
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
 KMS_KEY_ARN=$KMS_KEY_ARN

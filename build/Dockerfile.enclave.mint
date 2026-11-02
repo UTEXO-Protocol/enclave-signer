@@ -26,15 +26,14 @@ COPY . /build/
 
 WORKDIR /build/enclave
 
-# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave.burn:
 #   CARGO_INCREMENTAL=0   no incremental artifacts
 #   --remap-path-prefix   strip the absolute build path from embedded paths
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
-# (so this binary is RGB-only) and also drops the default `rgb-swap`, which is
-# what lets the mint/burn flow be selected instead. The signer role implies
+# (so this binary is RGB-only). The signer role implies
 # `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
 # alloy + tokio); it needs a second host vsock-proxy
 # (EVM_RPC_VSOCK_PORT, default 8002).

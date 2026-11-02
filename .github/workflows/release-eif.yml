@@ -29,6 +29,11 @@ on:
         description: "40-hex commit to deploy (must already be published to S3 by build-eif)"
         type: string
         required: true
+      signer_role:
+        description: "Signer role to deploy"
+        type: choice
+        options: [mint, burn]
+        required: true
       instances:
         description: "Space-separated EC2 instance ids (blank = secrets.STAGE_INSTANCE_IDS)"
         type: string
@@ -63,6 +68,7 @@ jobs:
       - name: Deploy to hosts via SSM
         env:
           GIT_SHA: ${{ inputs.git_sha }}
+          SIGNER_ROLE: ${{ inputs.signer_role }}
           BUCKET: ${{ vars.EIF_S3_BUCKET }}
           REGION: ${{ vars.AWS_REGION }}
           CLUSTER_DIR: ${{ vars.CLUSTER_DIR }}
@@ -80,6 +86,7 @@ jobs:
           {
             echo '#!/usr/bin/env bash'
             printf 'export GIT_SHA=%q\n' "$GIT_SHA"
+            printf 'export SIGNER_ROLE=%q\n' "$SIGNER_ROLE"
             printf 'export BUCKET=%q\n' "$BUCKET"
             printf 'export AWS_REGION=%q\n' "$REGION"
             printf 'export CLUSTER_DIR=%q\n' "$CLUSTER_DIR"

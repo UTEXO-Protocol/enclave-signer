@@ -271,8 +271,17 @@ async fn e2e_endpoints_are_set_once_at_launch() {
         )
     };
     let client = EnclaveClient::new(&format!("127.0.0.1:{enclave_port}"));
+    // The mint signer pins an EVM RPC host and its CA; any DER cert works.
+    let ca_der = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        .unwrap()
+        .cert
+        .der()
+        .to_vec();
     let set = |host: &str| SetEndpointsRequest {
         electrum_url: format!("tcp://{host}:{electrum_port}"),
+        evm_rpc_host: host.to_string(),
+        evm_rpc_ca_der: ca_der.clone(),
+        evm_rpc_tls_port: 443,
         ..Default::default()
     };
 

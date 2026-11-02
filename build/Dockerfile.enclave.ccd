@@ -25,7 +25,7 @@ COPY . /build/
 
 WORKDIR /build/enclave
 
-# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave:
+# Deterministic compilation (PCR0 reproducibility), same as Dockerfile.enclave.mint:
 #   CARGO_INCREMENTAL=0   no incremental artifacts
 #   --remap-path-prefix   strip the absolute build path from embedded paths
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables

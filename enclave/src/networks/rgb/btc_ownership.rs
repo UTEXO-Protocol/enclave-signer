@@ -79,34 +79,6 @@ pub fn controlled_input_scripts(
         .collect()
 }
 
-/// The Colored input script that can take bridge asset change. Empty unless the
-/// PSBT spends exactly one. A controlled input can have foreign spend paths, so
-/// a second Colored script makes custody ambiguous.
-pub fn asset_change_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
-    let scripts = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Colored));
-    if scripts.len() == 1 {
-        scripts
-    } else {
-        HashSet::new()
-    }
-}
-
-/// Indices of the PSBT outputs on an [`asset_change_scripts`] script, or
-/// proven ours on the Colored account by rule (C).
-///
-/// The change-leg oracle for the send-RGB per-output amount bind. A revealed
-/// RGB seal is bridge change only when we control its Bitcoin output.
-pub fn self_owned_output_indices(psbt: &Psbt, keys: &KeyManager) -> HashSet<u32> {
-    let input_scripts = asset_change_scripts(psbt, keys);
-    (0..psbt.unsigned_tx.output.len())
-        .filter(|&i| {
-            output_is_self_owned(psbt, i, &input_scripts)
-                || output_is_self_derived(psbt, i, keys, Some(AccountType::Colored))
-        })
-        .map(|i| i as u32)
-        .collect()
-}
-
 /// True when output `index` pays back to one of `input_scripts` (rule A).
 /// The caller resolves `input_scripts` once for all outputs.
 pub fn output_is_self_owned(psbt: &Psbt, index: usize, input_scripts: &HashSet<Vec<u8>>) -> bool {
@@ -678,32 +650,6 @@ pub(crate) mod tests {
         assert_eq!(unowned_output_sats(&psbt, &inputs, &keys), Some(0));
     }
 
-    /// Asset change is pinned to Colored: a rule (C) output on the Vanilla
-    /// account is ours in sats but is not bridge asset change.
-    #[test]
-    fn change_oracle_takes_a_derived_output_only_on_colored() {
-        let keys = km();
-        let secp = Secp256k1::new();
-        for (account, (key, path)) in [
-            (AccountType::Vanilla, our_key(&keys, 1, 3)),
-            (AccountType::Colored, our_colored_key(&keys)),
-        ] {
-            let spk = ScriptBuf::new_p2tr(&secp, key, None);
-            let mut psbt = psbt_with(ScriptBuf::new(), spk);
-            make_input_ours(&mut psbt, &keys);
-            psbt.outputs[0].tap_internal_key = Some(key);
-            psbt.outputs[0]
-                .tap_key_origins
-                .insert(key, (vec![], (*keys.master_fingerprint(), path)));
-
-            assert_eq!(
-                self_owned_output_indices(&psbt, &keys).contains(&0),
-                account == AccountType::Colored,
-                "{account:?}"
-            );
-        }
-    }
-
     /// BIP-371 metadata cannot describe a non-taproot output, so only rule (A)
     /// can accept it. The enclave controls key-path taproot inputs only, so a
     /// P2WPKH input never passes rule (A).
@@ -716,77 +662,11 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    /// A Colored input on a script tree: `leaf` under `internal`, with our
-    /// Colored key claimed in the leaf. Script-path, so never ours.
-    fn script_path_input_naming_our_colored_key(
-        keys: &KeyManager,
-        leaf: ScriptBuf,
-        internal: XOnlyPublicKey,
-    ) -> (ScriptBuf, bitcoin::psbt::Input) {
-        let secp = Secp256k1::new();
-        let (our, path) = our_colored_key(keys);
-        let leaf_hash = TapLeafHash::from_script(&leaf, LeafVersion::TapScript);
-        let info = TaprootBuilder::new()
-            .add_leaf(0, leaf.clone())
-            .unwrap()
-            .finalize(&secp, internal)
-            .unwrap();
-        let spk = ScriptBuf::new_p2tr(&secp, internal, info.merkle_root());
-        let control = info
-            .control_block(&(leaf.clone(), LeafVersion::TapScript))
-            .unwrap();
-        let mut input = bitcoin::psbt::Input {
-            witness_utxo: Some(TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: spk.clone(),
-            }),
-            tap_internal_key: Some(internal),
-            ..Default::default()
-        };
-        input
-            .tap_scripts
-            .insert(control, (leaf, LeafVersion::TapScript));
-        input
-            .tap_key_origins
-            .insert(our, (vec![leaf_hash], (*keys.master_fingerprint(), path)));
-        (spk, input)
-    }
-
-    /// Send-RGB change oracle: bridge asset change must not go to the script of
-    /// an input that only names our key in one leaf.
-    #[test]
-    fn change_oracle_rejects_output_on_a_foreign_input_script() {
-        let keys = km();
-        let (our, _) = our_colored_key(&keys);
-
-        // Input 0: the bridge's own Colored key-path input.
-        let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
-        let bridge_spk = anchor_input(&mut psbt, 0, &keys, AccountType::Colored, 0, 0, 1_000);
-        psbt.unsigned_tx.output[0].script_pubkey = bridge_spk;
-        assert!(self_owned_output_indices(&psbt, &keys).contains(&0));
-
-        // Input 1: attacker internal key, one leaf that names our key.
-        let leaf = ScriptBuilder::new()
-            .push_x_only_key(&our)
-            .push_opcode(OP_CHECKSIG)
-            .into_script();
-        let (spk, input) =
-            script_path_input_naming_our_colored_key(&keys, leaf, foreign_xonly(0xB1));
-        let mut txin = psbt.unsigned_tx.input[0].clone();
-        txin.previous_output.vout = 1;
-        psbt.unsigned_tx.input.push(txin);
-        psbt.inputs.push(input);
-        psbt.unsigned_tx.output[0].script_pubkey = spk;
-
-        assert!(!self_owned_output_indices(&psbt, &keys).contains(&0));
-    }
-
     // === custody must not depend on merge progress ===
 
     /// Results of the plain-BTC sats gate and the ownership resolvers for one PSBT.
     struct Gates {
         owned: HashSet<Vec<u8>>,
-        indices: HashSet<u32>,
         btc: Option<String>,
     }
 
@@ -803,7 +683,6 @@ pub(crate) mod tests {
         };
         Gates {
             owned: self_controlled_input_scripts_scoped(psbt, keys, None),
-            indices: self_owned_output_indices(psbt, keys),
             btc: (account == AccountType::Vanilla)
                 .then(|| validate_btc_request(&req, &btc_cfg, keys).err())
                 .flatten()
@@ -967,7 +846,6 @@ pub(crate) mod tests {
             // rule refuses. This test makes sure the set does not change on a
             // merge. A non-empty change leg under merge is tested in
             // `psbt_validation::tests::anchor::change_leg_survives_merging_our_own_signature`.
-            assert_eq!(s.before.indices, HashSet::new(), "{tag}: indices before");
             assert_eq!(s.before.btc, None, "{tag}: plain-BTC gate before");
             assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
             assert!(s.tx_unchanged, "{tag}: tx or prevouts changed");
@@ -980,12 +858,6 @@ pub(crate) mod tests {
                 failures.push(format!(
                     "{tag}: owned scripts after merging A: {} of 2",
                     s.after.owned.len()
-                ));
-            }
-            if s.after.indices != s.before.indices {
-                failures.push(format!(
-                    "{tag}: owned outputs after merging A: {:?}",
-                    s.after.indices
                 ));
             }
             if s.second_pass != (1, true, true) {
@@ -1035,13 +907,9 @@ pub(crate) mod tests {
         let owned_all = self_controlled_input_scripts_scoped(&unsigned, &keys, None);
         let owned_vanilla =
             self_controlled_input_scripts_scoped(&unsigned, &keys, Some(AccountType::Vanilla));
-        let indices = self_owned_output_indices(&unsigned, &keys);
         let txid = unsigned.unsigned_tx.compute_txid();
         assert_eq!(owned_all.len(), 3);
         assert_eq!(owned_vanilla.len(), 2);
-        // Only output 2 is on the single Colored input script. Asset change is
-        // bound to that script, so the Vanilla outputs are not change.
-        assert_eq!(indices, HashSet::from([2]));
 
         // Sign every input once, then apply each subset of the signatures.
         let mut signed = unsigned.clone();
@@ -1066,11 +934,6 @@ pub(crate) mod tests {
                 self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla)),
                 owned_vanilla,
                 "subset {mask:03b}: Vanilla-scoped scripts moved"
-            );
-            assert_eq!(
-                self_owned_output_indices(&psbt, &keys),
-                indices,
-                "subset {mask:03b}: owned outputs moved"
             );
             assert_eq!(psbt.unsigned_tx.compute_txid(), txid);
 

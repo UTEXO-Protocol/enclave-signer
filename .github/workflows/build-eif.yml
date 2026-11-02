@@ -4,9 +4,8 @@ name: "Build EIF"
 # publishes everything to S3 under an immutable git-SHA path. Runtime hosts then
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
-# Builds four variants (matrix): combined (retired swap flow, historical name +
-# S3 path), rgb (retired swap flow), rgb-mint and rgb-burn (production). The ccd
-# image is not built here: it has no EVM pins, so its release build refuses
+# Builds two variants (matrix): rgb-mint and rgb-burn, each under its own S3
+# subpath. The ccd image is not built here: it has no EVM pins, so its release build refuses
 # every Sign. Build it locally with Dockerfile.enclave.ccd.
 # Deploy whichever the target host needs.
 #
@@ -66,20 +65,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Combined (rgb + rgb-swap + ccd), retired swap flow. Keeps the
-          # historical eif name and S3 path.
-          - variant: combined
-            dockerfile: Dockerfile.enclave
-            eif_name: utexo-bridge-enclave.eif
-            s3_subpath: ""
-            artifact_suffix: ""
-          # RGB-only single-network EIF, send/receive flow (`rgb-swap`, retired).
-          - variant: rgb
-            dockerfile: Dockerfile.enclave.rgb
-            eif_name: utexo-bridge-enclave-rgb.eif
-            s3_subpath: "rgb/"
-            artifact_suffix: "-rgb"
-          # RGB-only single-network EIFs, mint/burn flow. Two signer roles,
+          # RGB single-network EIFs. Two signer roles,
           # each its own enclave with its own PCR0 and seed: the mint signer
           # (EVM -> RGB) and the burn signer (RGB -> EVM).
           - variant: rgb-mint

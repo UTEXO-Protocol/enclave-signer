@@ -141,7 +141,7 @@ Four crates plus the infrastructure they touch:
   protocol, the operator CLI, and the `attest-verify` CLI.
 
 **Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
-`ccd`, exactly one of `rgb-swap` / `rgb-mint-burn`, `evm-rpc`, `bfa-mint`,
+`ccd`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
 or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
 enables `kms-persistence`. Production images are built with
@@ -307,9 +307,7 @@ SecurityPolicy = Production {
   `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
   `SetEndpoints` enforces the measured network digest, and operators approve
   KMS inputs separately.
-  A build fails with both RGB flows
-  (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
-  both signer roles or with neither.
+  A build fails with both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
@@ -488,15 +486,10 @@ fields, and a mismatch refuses (`validate_burn_id`, both routes). The contract
 derives and checks it again and reverts on a mismatch (`InvalidBurnId`); the
 in-enclave check fails earlier and names the expected value.
 
-Which consignment shape a build signs is chosen at compile time by its RGB
-flow feature (`rgb-swap` or `rgb-mint-burn`, exactly one). Production uses
-mint/burn only; the swap flow is retired but stays in the tree. A **swap**
-enclave signs `TS_TRANSFER` unlocks; a **mint/burn** enclave signs `TS_BURN` unlocks and
-nothing else, binding the release to the payout target the burn transition
-commits to (`burnReason`). The BFA line is a mint/burn build
-(`bfa-mint`), where a deposit is a BFA `mint` against a verified `FundsIn`
-lock. The two flows are separate instances with separate PCR0s -- neither
-binary contains the other's rules. A mint/burn build is further split by
+A mint/burn enclave signs `TS_BURN` unlocks and nothing else, binding the
+release to the payout target the burn transition commits to (`burnReason`).
+The BFA line is a mint/burn build (`bfa-mint`), where a deposit is a BFA
+`mint` against a verified `FundsIn` lock. A mint/burn build is further split by
 signer role: the **mint signer** compiles only the EVM -> RGB direction (mint
 PSBT, `SignBtc`, `SignRightsRefill`), the **burn signer** only the RGB -> EVM direction
 (`fundsOut`, gas tx). Each refuses the other direction, runs on its own seed,
@@ -1086,9 +1079,7 @@ pins the spent right (mint signer); disallowed output script or value cap exceed
 ## 13. Implementation status
 
 The production images are the mint signer (`Dockerfile.enclave.mint`) and the
-burn signer (`Dockerfile.enclave.burn`). The tree also has swap, combined and
-CCD builds. The swap flow is retired. The default feature set still has
-`rgb-swap` and `ccd`. A build choice is not evidence of the deployed image.
+burn signer (`Dockerfile.enclave.burn`). The tree also has a CCD build. The default feature set is `ccd`. A build choice is not evidence of the deployed image.
 `Dockerfile.enclave.ccd` sets no EVM pins, so its release image refuses every
 EVM signature and every plain-BTC PSBT. CI does not build or publish it.
 

@@ -2,7 +2,9 @@
 //! deposit mints with a BFA `mint`. A withdrawal destroys units with a BFA
 //! `burn`.
 //!
-//! See [`super`] for the reason for a separate file and the shared item names.
+//! The checks here authorize value to move. Shared code that is not
+//! flow-specific: consignment parsing ([`super::validation`]), SPV anchoring,
+//! and the PSBT mechanics in [`super::psbt_validation`].
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::is_mint_transition;

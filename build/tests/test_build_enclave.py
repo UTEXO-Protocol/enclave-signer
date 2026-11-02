@@ -10,8 +10,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 RGB_RECIPES = (
-    'Dockerfile.enclave',
-    'Dockerfile.enclave.rgb',
     'Dockerfile.enclave.mint',
     'Dockerfile.enclave.burn',
 )
@@ -181,19 +179,10 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 42, result.stderr)
                     self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
 
-    def test_combined_forwards_asset_and_explicit_debug_together(self):
-        result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
-                             ENCLAVE_DEBUG_FEATURES='allow-debug-pcrs')
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), [
-            'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
-            'ENCLAVE_DEBUG_FEATURES=allow-debug-pcrs',
-        ])
-
     def test_no_recipe_forwards_kms_pins(self):
         pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '12' * 20)
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
+                       'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
                 self.assertEqual(result.returncode, 42, result.stderr)
@@ -231,8 +220,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertFalse(self.argv.exists())
 
     def test_make_old_targets_have_no_kms_dependency_or_arguments(self):
-        for target in ('build_enclave', 'build_enclave_rgb',
-                       'build_enclave_ccd', 'build_enclave_dev'):
+        for target in ('build_enclave_ccd',):
             with self.subTest(target=target):
                 result = self.invoke_make(target)
                 self.assertEqual(result.returncode, 2, result.stderr)  # Reaches Docker.
@@ -250,7 +238,7 @@ class BuildArgumentsTests(unittest.TestCase):
         }
         for name, body in stubs.items():
             (self.bin / name).write_text(body)
-        result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset')
+        result = self.invoke('Dockerfile.enclave.mint', RGB_ASSET_ID='rgb:test-bfa-asset')
         self.assertEqual(result.returncode, 0, result.stderr)
         env = json.loads((self.base / 'out/IMAGE-ENV.json').read_text())
         self.assertEqual(env, ['EVM_CHAIN_ID=42161'])
@@ -261,7 +249,7 @@ class BuildArgumentsTests(unittest.TestCase):
 
     def test_every_recipe_takes_the_deploy_key_and_the_mirror_token_as_secrets(self):
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
+                       'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)

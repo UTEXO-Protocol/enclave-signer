@@ -112,7 +112,7 @@ tonic-prost = "0.14"
 ciborium = "0.2"
 # Real enclave (mock-attestation, seed-import) for end-to-end tests of the
 # CLI verifier against a live enclave and gRPC stack.
-utexo-bridge-enclave = { path = "../enclave", features = ["mock-attestation", "allow-seed-import"] }
+utexo-bridge-enclave = { path = "../enclave", features = ["rgb", "burn-signer", "mock-attestation", "allow-seed-import"] }
 # Self-signed certificate for the header-sync TLS test, made in-process.
 # The mTLS tests use openssl (tests/fixtures/parent-pki.sh).
 rcgen = "0.14"
