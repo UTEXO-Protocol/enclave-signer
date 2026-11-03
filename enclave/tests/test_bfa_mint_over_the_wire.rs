@@ -825,7 +825,7 @@ impl std::io::Write for DeadCaller {
 fn a_lost_response_keeps_the_deposit_retryable() {
     let built = build(None);
     let ctx = context(
-        &built.deposit.contract_id,
+        bridge_config(&built.deposit.contract_id),
         deposit_chain(&built, LOCK_BLOCK, LOCK_BLOCK, vec![]),
     );
 

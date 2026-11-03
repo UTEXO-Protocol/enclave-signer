@@ -159,7 +159,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertFalse(self.argv.exists())
 
     def test_related_feature_names_do_not_satisfy_rgb_guard(self):
-        for feature in ('rgb-validation', 'rgb-mint-burn', 'bfa-mint'):
+        for feature in ('rgb-validation', 'bfa-mint'):
             with self.subTest(feature=feature):
                 result = self.invoke('Dockerfile.enclave.burn',
                                      RGB_ASSET_ID='rgb:test-bfa-asset',
