@@ -46,7 +46,8 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
 `/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
-carry them, and the attested policy commits them:
+carry them. Production policy commits them; Development policy does not.
+Operators must approve the launch values:
 
 | Setting | Value |
 | --- | --- |
@@ -61,7 +62,7 @@ different recovered seed and makes missing storage fail before generation; no
 pin makes an existing object fail before decryption. There is no creation switch.
 A development image built with `allow-seed-import` and launched with all KMS
 values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
-A verifier checks them with `attest-verify --expect-kms-key-arn`,
+For Production policy, a verifier checks them with `attest-verify --expect-kms-key-arn`,
 `--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
@@ -130,7 +131,7 @@ resource policies with these permissions:
 | `s3:ListBucket` | The containing bucket, so an absent object is distinguishable from access denial. |
 
 Both KMS operations must require recipient attestation with the approved
-production PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
+mint image PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
 exactly these public encryption-context fields:
 
 ```json

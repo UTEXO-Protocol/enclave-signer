@@ -153,6 +153,26 @@ jobs:
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 
+      - name: Check release (without SPV, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo check --release -p utexo-bridge-enclave --no-default-features --features vsock,$role
+          done
+      - name: Test (without SPV, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib a_release_build_refuses_a_plaintext_indexer
+          done
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_bfa_mint_over_the_wire
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_signing test_sign_btc
+      - name: Clippy (without SPV, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only -- -D warnings
+          done
+
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
       # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors
       # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
@@ -283,12 +303,7 @@ jobs:
           fi
           echo "OK: release build correctly rejected '${{ matrix.feature }}' via the compile_error guard"
 
-  # Assert that enabling `rgb-validation` without `spv` fails to compile via the
-  # `compile_error!` in lib.rs. Without SPV, a consignment's
-  # witness txs are anchored only through the host-controlled indexer,
-  # so the enclave must never be built that way. Runs separately from `ci`
-  # because the build is expected to fail. Unlike `release-guards` this is not
-  # release-specific — the combination is unsafe in every profile.
+  # Reject unsupported feature combinations at compile time.
   feature-guards:
     runs-on: ubuntu-latest
 
@@ -321,14 +336,29 @@ jobs:
           key: ${{ runner.os }}-cargo-feature-guards-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-feature-guards-
 
-      - name: Assert rgb-validation without spv is rejected
+      - name: Assert indexer-only builds cannot import seeds or mock attestation
+        run: |
+          for role in mint-signer burn-signer; do
+            for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
+              if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$role,$forbidden" 2>build.log; then
+                echo "::error::build unexpectedly compiled with $role,$forbidden"
+                exit 1
+              fi
+              if ! grep -q "rgb-validation without spv requires real attestation" build.log; then
+                cat build.log
+                exit 1
+              fi
+            done
+          done
+
+      - name: Assert bare rgb-validation without a signer role is rejected
         run: |
           if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
             echo "::error::build unexpectedly SUCCEEDED with rgb-validation but no spv — the compile_error guard is missing or not firing"
             exit 1
           fi
-          if ! grep -q "rgb-validation requires spv" build.log; then
-            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation requires spv)"
+          if ! grep -q "rgb-validation without spv requires mint-signer or burn-signer" build.log; then
+            echo "::error::build failed, but not via the expected compile_error guard (rgb-validation without spv requires mint-signer or burn-signer)"
             cat build.log
             exit 1
           fi
