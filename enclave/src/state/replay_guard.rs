@@ -21,8 +21,9 @@ pub(super) const DEFAULT_NONCE_MAX: usize = 10_000;
 /// second request for the same deposit is refused. A retry of the same
 /// request does not reach the enclave: the parent answers it from the reply
 /// it kept (parent `signed_responses`). One hour covers the listener's retry
-/// backoff and the usual confirmation of the first transaction, and lets a
-/// mint that did not confirm be rebuilt with a higher fee the same hour.
+/// backoff and the usual confirmation of the first transaction. The PSBT is
+/// not part of the key, so a mint rebuilt for the same deposit (other inputs,
+/// higher fee) is refused until the hour has passed.
 /// Safety does not rest on it: every signed mint spends the pinned right
 /// output (mint-flow.md §6).
 /// See [`super::EnclaveState::op_replay_guard`].

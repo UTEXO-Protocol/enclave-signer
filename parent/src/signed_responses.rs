@@ -10,8 +10,9 @@
 //!
 //! A retry of the same request is answered from here without a second
 //! exchange. A retry that arrives while the first exchange is still waiting on
-//! the enclave joins it and gets its result, so the enclave never sees two
-//! copies of one request.
+//! the enclave joins it and gets the reply itself over a watch channel, also
+//! when the store keeps nothing (a reply above the byte limit) or evicts it at
+//! once. So the enclave never sees two copies of one request in flight.
 //!
 //! The parent is untrusted; this is a delivery aid, not a security control. A
 //! wrong stored reply fails in the node or in rgb-lib, as any wrong parent
@@ -50,15 +51,16 @@ pub enum Claim {
 }
 
 enum Slot {
-    /// An exchange is running. `true` is sent when it stored a reply; a
-    /// dropped sender means it failed and the waiters try themselves.
-    InFlight(watch::Receiver<bool>),
+    /// An exchange is running. Its reply is sent on the channel; a dropped
+    /// sender with no reply means it failed and the waiters try themselves.
+    InFlight(watch::Receiver<Option<SignedPsbtResponse>>),
     Done(SignedPsbtResponse),
 }
 
 struct State {
     slots: HashMap<[u8; 32], Slot>,
-    /// Finished entries, oldest first, for age and capacity eviction.
+    /// Finished entries, oldest first, for age and capacity eviction. Its
+    /// length is the count of kept replies; `slots` also holds in-flight keys.
     order: VecDeque<([u8; 32], Instant)>,
     bytes: usize,
 }
@@ -102,17 +104,17 @@ pub struct SignedResponses {
 pub struct Lead {
     cache: Arc<SignedResponses>,
     key: [u8; 32],
-    done: Option<watch::Sender<bool>>,
+    done: Option<watch::Sender<Option<SignedPsbtResponse>>>,
 }
 
 impl Lead {
-    /// Store `response` for the key and wake the waiters.
+    /// Store `response` for the key and hand it to the waiters.
     pub fn complete(mut self, response: &SignedPsbtResponse) {
         let Some(done) = self.done.take() else {
             return;
         };
         self.cache.store(self.key, response, Instant::now());
-        let _ = done.send(true);
+        done.send_replace(Some(response.clone()));
     }
 }
 
@@ -152,7 +154,8 @@ impl SignedResponses {
     }
 
     /// Claim `key`: a stored reply, or the lead on a new exchange. A claim on a
-    /// key whose exchange is in flight waits for its result.
+    /// key whose exchange is in flight waits for it and gets its reply; if the
+    /// exchange fails, the claim looks again and may lead.
     pub async fn claim(self: &Arc<Self>, key: [u8; 32]) -> Claim {
         loop {
             let mut waiter = {
@@ -163,7 +166,7 @@ impl SignedResponses {
                     Some(Slot::Done(response)) => return Claim::Serve(response.clone()),
                     Some(Slot::InFlight(rx)) => rx.clone(),
                     None => {
-                        let (tx, rx) = watch::channel(false);
+                        let (tx, rx) = watch::channel(None);
                         c.slots.insert(key, Slot::InFlight(rx));
                         return Claim::Lead(Lead {
                             cache: Arc::clone(self),
@@ -173,8 +176,14 @@ impl SignedResponses {
                     }
                 }
             };
-            // Stored (Ok) or abandoned (Err): either way look again.
+            // A reply comes on the channel itself, so a waiter does not
+            // depend on the store keeping it. A failed exchange sends none:
+            // look again.
             let _ = waiter.changed().await;
+            let reply = waiter.borrow_and_update().clone();
+            if let Some(response) = reply {
+                return Claim::Serve(response);
+            }
         }
     }
 
@@ -188,7 +197,8 @@ impl SignedResponses {
             return;
         }
         c.evict_expired(self.ttl, now);
-        while c.slots.len() >= self.max_entries || c.bytes + size > self.max_bytes {
+        // Count kept replies only: in-flight keys hold no reply.
+        while c.order.len() >= self.max_entries || c.bytes + size > self.max_bytes {
             if !c.evict_oldest() {
                 break;
             }
@@ -256,6 +266,28 @@ mod tests {
         assert_eq!(waiter.await.unwrap(), reply(9));
     }
 
+    /// A waiter gets the reply from the channel, also when the store keeps
+    /// nothing (above the byte limit): it does not lead a second exchange.
+    #[tokio::test]
+    async fn a_waiter_gets_a_reply_the_store_did_not_keep() {
+        let cache = SignedResponses::new(DEFAULT_TTL, 8, 10);
+        let first = lead(cache.claim([1; 32]).await);
+
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move { served(cache.claim([1; 32]).await) })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        first.complete(&reply(4));
+        assert_eq!(waiter.await.unwrap(), reply(4));
+        assert_eq!(
+            cache.stored(),
+            0,
+            "a 64-byte reply is above the 10-byte budget"
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_exchange_releases_the_waiter_to_lead() {
         let cache = SignedResponses::new(DEFAULT_TTL, 8, 1 << 20);
@@ -307,6 +339,20 @@ mod tests {
         lead(cache.claim([1; 32]).await).complete(&reply(1));
         assert_eq!(cache.stored(), 0);
         assert!(matches!(cache.claim([1; 32]).await, Claim::Lead(_)));
+    }
+
+    /// Exchanges in flight do not count against the count limit.
+    #[tokio::test]
+    async fn in_flight_exchanges_do_not_take_the_place_of_kept_replies() {
+        let cache = SignedResponses::new(DEFAULT_TTL, 2, 1 << 20);
+        let _a = lead(cache.claim([10; 32]).await);
+        let _b = lead(cache.claim([11; 32]).await);
+
+        lead(cache.claim([1; 32]).await).complete(&reply(1));
+        lead(cache.claim([2; 32]).await).complete(&reply(2));
+        assert_eq!(cache.stored(), 2);
+        assert_eq!(served(cache.claim([1; 32]).await), reply(1));
+        assert_eq!(served(cache.claim([2; 32]).await), reply(2));
     }
 
     #[test]

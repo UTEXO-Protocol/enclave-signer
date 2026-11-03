@@ -154,6 +154,38 @@ async fn a_retry_of_the_same_request_is_answered_without_a_second_exchange() {
     assert_eq!(seen.load(Ordering::SeqCst), 1, "the enclave signed once");
 }
 
+/// The first caller gives up while the enclave signs (its gRPC deadline ends
+/// first), so its handler is gone when the reply arrives. The reply is kept
+/// anyway: a retry after the enclave answered gets it, and the enclave signed
+/// once.
+#[tokio::test]
+async fn a_reply_outlives_a_caller_that_gave_up() {
+    let (enclave_port, seen) = start_counting_enclave(Duration::from_millis(600));
+    let grpc_port = start_parent(enclave_port, Duration::from_secs(60)).await;
+    let mut client = client(grpc_port).await;
+
+    let mut first = tonic::Request::new(rgb_sign_request(vec![0x55; 32]));
+    first.set_timeout(Duration::from_millis(100));
+    let err = client.sign(first).await.unwrap_err();
+    assert!(
+        matches!(
+            err.code(),
+            tonic::Code::DeadlineExceeded | tonic::Code::Cancelled
+        ),
+        "the first call gives up: {err:?}"
+    );
+
+    // The enclave answers at about 600 ms.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let retry = client
+        .sign(rgb_sign_request(vec![0x55; 32]))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retry.signature, vec![0x55; 32], "the signed PSBT");
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the enclave signed once");
+}
+
 /// A retry that arrives while the first exchange is still waiting on the
 /// enclave joins it: one exchange, both callers get the reply.
 #[tokio::test]

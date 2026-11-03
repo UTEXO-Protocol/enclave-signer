@@ -587,10 +587,13 @@ An in-memory replay cache (1-hour TTL, 100,000-entry cap) checks requests keyed 
 `(chain_id, bridge_contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)`
 and is committed only after the enclave writes the response; a failed write
 releases it. A successful write does not prove receipt by the caller. A lost
-response can therefore leave a committed entry; the parent keeps the reply of
-every bridge sign for an hour and answers a retry of the same request itself
-(parent `signed_responses`), so the enclave sees the retry only after a parent
-restart. The cache is not durable or shared across replicas. Capacity pressure
+response can therefore leave a committed entry. The parent keeps the reply of
+an EVM -> RGB sign for an hour and answers a retry of the same request itself
+(parent `signed_responses`). An identical retry still reaches the enclave, and
+is refused, when the parent has no reply for it: the parent did not read the
+reply, the reply was above `SIGNED_RESPONSE_MAX_BYTES`, the parent dropped it
+at `SIGNED_RESPONSE_MAX_ENTRIES` or `SIGNED_RESPONSE_MAX_BYTES`, or the parent
+restarted. The cache is not durable or shared across replicas. Capacity pressure
 removes the oldest entries.
 Bitcoin prevents a double spend of the same UTXO. The cache does not prevent
 another PSBT for the deposit after restart, expiry, eviction, or on another enclave.

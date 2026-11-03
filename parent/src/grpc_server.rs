@@ -134,8 +134,7 @@ fn is_timeout(e: &io::Error) -> bool {
 
 /// A socket timeout gives the same status as the outer timer. Any other
 /// socket failure is a transport fault the caller may retry: the enclave
-/// commits a replay key only after its write succeeded, and answers an
-/// identical retry from its stored response, so a retry is safe.
+/// commits a replay key only after its write succeeds.
 fn io_status(e: ParentError, context: &str) -> Status {
     match e {
         ParentError::Io(e) if is_timeout(&e) => timed_out(),
@@ -1195,5 +1194,25 @@ mod tests {
             }
         });
         assert_stops_at_deadline(tcp(addr), health());
+    }
+
+    /// A socket failure that is not a timeout is `Unavailable`, which the
+    /// node retries: the enclave read the request and closed the connection.
+    #[test]
+    fn a_closed_connection_is_unavailable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let _: EnclaveRequest = framing::read_message(&mut peer).unwrap();
+        });
+        let err = exchange(&tcp(addr), &health(), Instant::now() + BUDGET, None).unwrap_err();
+        assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    }
+
+    /// The enclave must give up before the parent (see `ENCLAVE_TIMEOUT`).
+    #[test]
+    fn the_parent_waits_longer_than_the_enclave_socket_deadline() {
+        assert!(ENCLAVE_TIMEOUT > utexo_bridge_enclave::conn::TOTAL_REQUEST_TIMEOUT);
     }
 }

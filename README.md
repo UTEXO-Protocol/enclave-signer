@@ -216,7 +216,7 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   enclave clients can also submit headers. The sync reads headers from
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
 - The parent opens one new TCP or vsock connection per enclave RPC, with a
-  30 s timeout.
+  40 s timeout.
 - `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
   clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
   the enclave.

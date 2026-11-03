@@ -375,10 +375,14 @@ it is signed.
 - **S7.6** The replay reservation is committed after the response write
   succeeds. A failed write releases it. A successful write does not prove
   that the caller received the response. The parent therefore keeps the
-  reply of every bridge sign from the moment it reads it, for one hour, and
-  answers a retry of the same request itself; a retry of a request still in
-  flight waits for that exchange. The enclave refuses a retry only when the
-  parent lost the reply (a parent restart) or the request differs.
+  reply of an EVM -> RGB sign from the moment it reads it, for one hour, and
+  answers a retry of the same request itself. A retry of a request still in
+  flight waits for that exchange and gets its reply. The enclave refuses a
+  retry when the request differs, and refuses an identical retry until its
+  hour has passed when the parent has no reply for it: the parent did not
+  read the reply, the reply was above `SIGNED_RESPONSE_MAX_BYTES`, the parent
+  dropped it at `SIGNED_RESPONSE_MAX_ENTRIES` or `SIGNED_RESPONSE_MAX_BYTES`,
+  or the parent restarted.
 
 ## 6. Replay
 

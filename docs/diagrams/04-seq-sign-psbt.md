@@ -40,7 +40,7 @@ sequenceDiagram
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))
-    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is a different request or a parent restart)
+    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is usually a different request; an identical retry gets here when the parent has no reply for it: not read, above the byte limit, dropped at the count or byte limit, or a parent restart)
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission

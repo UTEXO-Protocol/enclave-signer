@@ -120,12 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
         .load_shed(true)
-        // Rotate connections, but never cut a request: after GOAWAY an
-        // in-flight stream gets the whole request timeout to finish. A
-        // shorter grace lost a mint signature the enclave had already
-        // written, and the retry was refused as a replay.
+        // Rotate connections. With a grace set, tonic 0.14 sends no GOAWAY at
+        // the age: it closes the connection at age plus grace, so rotation can
+        // cut a request still in flight. A cut EVM->RGB sign is not lost: the
+        // parent keeps its reply and answers the retry (`signed_responses`).
         .max_connection_age(Duration::from_secs(300))
-        .max_connection_age_grace(Duration::from_secs(cfg.grpc_request_timeout_secs))
+        .max_connection_age_grace(Duration::from_secs(30))
         .concurrency_limit_per_connection(per_conn)
         .max_concurrent_streams(Some(per_conn as u32))
         .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))
