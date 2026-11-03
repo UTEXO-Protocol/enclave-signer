@@ -25,6 +25,8 @@ pub use attestation_verify::{
 /// production policy pinned to one of them must use Bitcoin mainnet.
 pub const MAINNET_EVM_CHAIN_IDS: [u64; 2] = [1, 42161];
 
+const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature = "spv")));
+
 /// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 // One instance per enclave, so the variant size difference is not important.
@@ -107,6 +109,8 @@ pub struct ProductionPolicy {
 /// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
+    /// Bitcoin finality is trusted from the indexer.
+    IndexerTrusted,
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
     /// `mock-attestation` feature: zero-PCR attestation documents.
@@ -166,6 +170,13 @@ impl SecurityPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
     ) -> Self {
+        if ctx.rgb_validation && INDEXER_TRUSTED {
+            return Self::dev(if bridge.validate_indexer_only().is_ok() {
+                DevReason::IndexerTrusted
+            } else {
+                DevReason::Unconfigured
+            });
+        }
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
         if ctx.mock_attestation {
@@ -204,7 +215,7 @@ impl SecurityPolicy {
             evm_source,
             electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
-            // `rgb-validation` implies `spv` (lib.rs `compile_error!`).
+            // RGB builds without SPV returned the Development policy above.
             btc_source: BtcDataSource::SpvVerified,
             // The same pins that `validate_gas_tx_request` enforces, so the
             // attested and the enforced rules agree.
@@ -298,12 +309,18 @@ impl SecurityPolicy {
         self.attested().to_bytes()
     }
 
-    /// Fail-closed launch gate. A release `rgb-validation` build MUST resolve
-    /// to a valid [`SecurityPolicy::Production`], or `SetEndpoints` fails.
+    /// Require a valid policy for this build before accepting `SetEndpoints`.
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
-    ///
-    /// Debug, test and non-bridge builds are exempt.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
+        // resolve() produces IndexerTrusted only after checking network/pins.
+        if ctx.rgb_validation && INDEXER_TRUSTED {
+            return match self {
+                Self::Development {
+                    reason: DevReason::IndexerTrusted,
+                } => Ok(()),
+                _ => Err("RGB validation without SPV requires a valid public-signet policy".into()),
+            };
+        }
         if ctx.debug_or_test || !ctx.rgb_validation {
             return Ok(());
         }

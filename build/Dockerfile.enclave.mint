@@ -44,9 +44,10 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
+ARG ENCLAVE_FEATURES=vsock,rgb,mint-signer
 RUN --mount=type=secret,id=lib_key \
     --mount=type=secret,id=rgb_deps_token \
-    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,rgb,mint-signer
+    sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
 
 
 # --- Runtime ---
@@ -82,13 +83,11 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 
 # The mint signer restores its KMS-protected seed instead of peer cloning.
 
-# Pinned bridge/indexer config - identical to Dockerfile.enclave; keep the two in
-# lockstep. `rgb` implies `spv` + `rgb-validation`, so this is a release
-# bridge-signing build and `SecurityPolicy::assert_valid_for_build` refuses to
-# boot without these pins (enclave/src/policy.rs). Public
-# identifiers, baked so PCR0 commits to them. Stage runs on Bitcoin MAINNET +
-# Arbitrum One (chain_id 42161). Electrum is set at launch. The enclave pins its
-# host to 127.0.0.1 and reaches it over the vsock forwarder (host runs
+# Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
+# (chain_id 42161), SPV and Production policy. Without SPV, Development policy
+# requires BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none and ENDPOINTS_SHA256.
+# Electrum is set at launch. The enclave pins its host to 127.0.0.1 and reaches
+# it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
@@ -97,12 +96,20 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # deployment. An empty value fails the build (`test -n` below).
 #   --build-arg RGB_ASSET_ID=rgb:<the issued BFA contract id>
 # Note the pin is single-valued, so this EIF signs for the BFA asset only.
+ARG EVM_CHAIN_ID=42161
+ARG EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A
+ARG FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951
+ARG TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
+ARG BITCOIN_NETWORK=bitcoin
+ARG BTC_RELAY_MODE=required
+ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
-ENV EVM_CHAIN_ID=42161 \
-    EVM_PROXY_CONTRACT_ADDRESS=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
+ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
+    EVM_CHAIN_ID=${EVM_CHAIN_ID} \
+    EVM_PROXY_CONTRACT_ADDRESS=${EVM_PROXY_CONTRACT_ADDRESS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
-    BITCOIN_NETWORK=bitcoin
+    BITCOIN_NETWORK=${BITCOIN_NETWORK}
 
 # In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
@@ -115,9 +122,9 @@ ENV EVM_CHAIN_ID=42161 \
 # points FundsIn verification at the wrong contract.
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
-# The Electrum URL and the EVM RPC host, CA and TLS port are not in the
-# image. The operator sets them at launch (SetEndpoints), and the attestation
-# commits them. See docs/tee-spec.md.
+# The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
+# Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
+# pin binds them instead.
 # SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
@@ -126,14 +133,16 @@ ENV EVM_CHAIN_ID=42161 \
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
 # witness mint is refused after its lock. Measured, not attested.
 # RGB_MAX_UNOWNED_SATS: the sats budget of the signer (S7.1). A mint signer does
-# not boot below MINT_WITNESS_SAT, so it carries the same value.
-ENV EVM_FINALITY_TAG=safe \
+# not boot below MINT_WITNESS_SAT, so it defaults to the same value.
+ARG RGB_MAX_UNOWNED_SATS=1500
+ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
+    BTC_RELAY_MODE=${BTC_RELAY_MODE} \
+    EVM_FINALITY_TAG=safe \
     SPV_MIN_CONFIRMATIONS=3 \
-    FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951 \
-    TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
+    FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
+    TOKEN_CONTRACT=${TOKEN_CONTRACT} \
     BTC_MAX_TOTAL_SATS=1000000 \
-    MINT_WITNESS_SAT=1500 \
-    RGB_MAX_UNOWNED_SATS=1500
+    MINT_WITNESS_SAT=1500
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.
