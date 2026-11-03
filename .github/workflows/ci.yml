@@ -88,7 +88,8 @@ jobs:
               exit 1
             fi
           done
-          cargo metadata --locked --format-version 1 > metadata.json
+          # The default set has no RGB, so ask for rgb-lib's crate explicitly.
+          cargo metadata --locked --format-version 1 --features utexo-bridge-enclave/rgb-validation > metadata.json
           python3 - <<'EOF'
           import json, tomllib
           lib = next(p for p in json.load(open('metadata.json'))['packages'] if p['name'] == 'rgb-lib')
