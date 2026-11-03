@@ -106,7 +106,7 @@ if declares_build_arg ENCLAVE_FEATURES; then
         exit 1
     fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS ENDPOINTS_SHA256; do
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
             BUILD_ARGS+=(--build-arg "$arg=${!arg}")
             echo "    build override: $arg=${!arg}"
