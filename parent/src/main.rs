@@ -80,7 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind the probe first, so a bad HEALTH_PORT fails at boot.
     let health_listener = health::bind(health_addr).await?;
-    let service = ParentAdapterService::new(target);
+    let service = ParentAdapterService::with_signed_responses(
+        target,
+        utexo_bridge_parent::signed_responses::SignedResponses::new(
+            Duration::from_secs(cfg.signed_response_ttl_secs),
+            cfg.signed_response_max_entries,
+            cfg.signed_response_max_bytes,
+        ),
+    );
 
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop
@@ -113,8 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
         .load_shed(true)
+        // Rotate connections, but never cut a request: after GOAWAY an
+        // in-flight stream gets the whole request timeout to finish. A
+        // shorter grace lost a mint signature the enclave had already
+        // written, and the retry was refused as a replay.
         .max_connection_age(Duration::from_secs(300))
-        .max_connection_age_grace(Duration::from_secs(30))
+        .max_connection_age_grace(Duration::from_secs(cfg.grpc_request_timeout_secs))
         .concurrency_limit_per_connection(per_conn)
         .max_concurrent_streams(Some(per_conn as u32))
         .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))

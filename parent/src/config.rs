@@ -33,6 +33,17 @@ pub struct Config {
     /// Time limit for each gRPC handler.
     pub grpc_request_timeout_secs: u64,
 
+    /// How long the reply of an EVM->RGB bridge sign is kept for a retry of
+    /// the same request (see `signed_responses`). The enclave's own replay
+    /// window is one hour.
+    pub signed_response_ttl_secs: u64,
+
+    /// Count limit of kept replies.
+    pub signed_response_max_entries: usize,
+
+    /// Byte limit over all kept replies.
+    pub signed_response_max_bytes: usize,
+
     /// Host for the `GET /health` readiness endpoint (default loopback).
     /// Deploy polls it from the parent host. Do not expose it off-host.
     /// Unlike `grpc_host`, do not set it to 0.0.0.0 in Docker.
@@ -57,6 +68,9 @@ impl Config {
             grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
             grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
             grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),
+            signed_response_ttl_secs: env_or("SIGNED_RESPONSE_TTL_SECS", 3600u64),
+            signed_response_max_entries: env_or("SIGNED_RESPONSE_MAX_ENTRIES", 1024usize),
+            signed_response_max_bytes: env_or("SIGNED_RESPONSE_MAX_BYTES", 16usize << 20),
             health_host: std::env::var("HEALTH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             health_port: env_or("HEALTH_PORT", 5001),
         }

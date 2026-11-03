@@ -583,12 +583,15 @@ and head correctness: the checks above cannot reject a self-consistent false
 history solely because the approved provider invented it (Sec 2). The source, hostname
 and CA SHA-256 are committed into the attested policy (Sec 4).
 
-An in-memory replay cache (24-hour TTL, 100,000-entry cap) checks requests keyed by
+An in-memory replay cache (1-hour TTL, 100,000-entry cap) checks requests keyed by
 `(chain_id, bridge_contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)`
 and is committed only after the enclave writes the response; a failed write
 releases it. A successful write does not prove receipt by the caller. A lost
-response can therefore leave a committed entry. The cache is not durable or
-shared across replicas. Capacity pressure removes the oldest entries.
+response can therefore leave a committed entry; the parent keeps the reply of
+every bridge sign for an hour and answers a retry of the same request itself
+(parent `signed_responses`), so the enclave sees the retry only after a parent
+restart. The cache is not durable or shared across replicas. Capacity pressure
+removes the oldest entries.
 Bitcoin prevents a double spend of the same UTXO. The cache does not prevent
 another PSBT for the deposit after restart, expiry, eviction, or on another enclave.
 
@@ -1099,8 +1102,9 @@ Known limits. Read them before deployment.
   to `MAX_CONSIGNMENT_BYTES` per request, and removed once rgb-lib
   validated and inspected it, or refused it.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
-  after 24 hours. The 100,000-entry cap can remove entries earlier. A successful
-  response write can commit an entry even when the caller receives no response.
+  after one hour. The 100,000-entry cap can remove entries earlier. A successful
+  response write can commit an entry even when the caller receives no response;
+  the parent's kept reply answers a retry of the same request.
   The parent proof is the real bound: every signature for one mint spends the
   same UTXO, so Bitcoin confirms at most one.
 - **Witness mint recipient (accepted V1 risk, CTO 2026-10-30).** A witness
