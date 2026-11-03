@@ -1,10 +1,9 @@
 //! Plain data extracted from a validated consignment.
 //!
-//! All of it passed rgbstd validation. The rest of the enclave reads these
+//! All of it passed rgb-lib validation. The rest of the enclave reads these
 //! shapes and does not parse RGB again.
 
 use super::bfa::VerifiedLock;
-use super::reject_list::RejectScope;
 
 /// Data extracted from a successfully validated RGB consignment.
 #[derive(Debug, Clone, Default)]
@@ -52,13 +51,13 @@ pub struct ValidatedConsignment {
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`
     /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
-    /// NOT from the flat rgb-lib inspection.
+    /// NOT from the flat summary.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` when the
     /// settling transition is the type this flow signs on a deposit, or a burn.
     /// `None` for a consignment with no bundles or another transition type.
-    /// Validation refuses a consignment where this OpId and the flat parser's
+    /// Validation refuses a consignment where this OpId and the flat summary's
     /// `last_transition.op_id` differ.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that are **not mined**, in **display (big-endian) byte
@@ -78,8 +77,6 @@ pub struct ValidatedConsignment {
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
     pub mint_locks: Vec<VerifiedLock>,
-    /// What the reject-list check walks. `None` for an asset without a list.
-    pub reject_scope: Option<RejectScope>,
 }
 
 impl ValidatedConsignment {
@@ -96,8 +93,8 @@ impl ValidatedConsignment {
     }
 }
 
-/// Flat summary of one RGB state transition, read by rgb-lib's inspection.
-/// Local types keep rgb-lib out of the public API.
+/// Flat summary of one RGB state transition, read by rgb-lib's inspection
+/// (`rgb_lib::no_wallet::RgbTransitionInfo`). Local types keep it out of the public API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransitionSummary {
     /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from
@@ -108,8 +105,8 @@ pub struct TransitionSummary {
     /// `TS_BURN` or `TS_MINT` to classify the EVM action.
     pub transition_type: u16,
     /// Sum of all fungible amounts in the output assignments. For a Transfer,
-    /// this is recipient plus change. For a Burn, it is its change only: the
-    /// destroyed amount is in [`Self::burned_asset_amount`].
+    /// this is recipient plus change. For a Burn, it is 0: the schema gives it
+    /// no outputs, and the destroyed amount is in [`Self::burned_asset_amount`].
     pub total_output_amount: u64,
     /// Sum of the fungible amounts on `OS_ASSET` output assignments only.
     /// BFA has no other fungible type, so this equals

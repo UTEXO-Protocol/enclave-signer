@@ -3,7 +3,7 @@
 //! the parent, where `vsock-proxy` relays it to the real endpoint.
 //!
 //! Trust boundary: the host controls this path. It can drop, delay, reorder or
-//! forge bytes. The enclave verifies all data from it (SPV, rgbstd validation,
+//! forge bytes. The enclave verifies all data from it (SPV, rgb-lib validation,
 //! in-enclave TLS) and never trusts it as input.
 //!
 //! The listener is loopback only, but it is a generic egress path: any code in

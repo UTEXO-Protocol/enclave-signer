@@ -1,6 +1,6 @@
 # Burn destination record
 
-Status: V1 draft. This file is the normative format. The enclave code is
+Status: V1 published. This file is the normative format. The enclave code is
 `enclave/src/networks/evm/burn_destination.rs`.
 
 ## Why
@@ -59,7 +59,7 @@ Fields:
 
 | Field | Type | Rule |
 |---|---|---|
-| `destinationChainId` | uint64 | Bridge route chain id: the `destinationChainId` of `fundsOut` / `lzFundsOut`. Not 0. |
+| `destinationChainId` | uint64 | Bridge route chain id: the `destinationChainId` of `fundsOut` / `lzFundsOut`. Not 0. With `dstEid` 0 it must equal `EVM_CHAIN_ID`. With a non-zero `dstEid` it must not. |
 | `dstEid` | uint32 | LayerZero endpoint id. `0` = direct `fundsOut` on the Bridge chain. |
 | `recipient` | bytes | Chain-native payee, 1 to 32 bytes. Direct route: exactly 20 bytes. |
 

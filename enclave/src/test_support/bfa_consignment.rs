@@ -1,16 +1,17 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
-//! genesis, then mints, transfers of units or rights and burns, each in a
-//! witness tx that commits its bundle in an OP_RETURN output. Each one is
-//! committed as rgb-lib does it, through psbtu's `rgb_commit`, so its PSBT is
-//! the one a signer gets. Tests need no stored V1 fixture. Deterministic:
-//! fixed times, nonces, blinding and entropy.
+//! genesis, then mints, transfers of units, propagates of rights and burns,
+//! each in a witness tx that commits its bundle in an OP_RETURN output. Each one is
+//! committed as rgb-lib f3975623 does it, through psbtu's `rgb_commit`, which
+//! gives the fascia, then the RGB keys stripped, so its PSBT and fascia are the
+//! ones a signer gets. Tests need no stored V1 fixture. Deterministic: fixed
+//! times, nonces, blinding and entropy.
 //!
 //! It uses only external crates, so integration tests include it with
 //! `#[path]`.
 
 use std::collections::BTreeMap;
 
-use amplify::confinement::{Confined, NonEmptyVec};
+use amplify::confinement::{Confined, U32};
 use amplify::{ByteArray, Bytes20, Bytes32};
 use bitcoin::blockdata::opcodes::all::OP_RETURN;
 use bitcoin::blockdata::script::Builder;
@@ -18,8 +19,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::{absolute, transaction, Amount, OutPoint, ScriptBuf, Sequence, Transaction};
 use bitcoin::{TxIn, TxOut, Witness};
-use psrgbt::{RgbOutExt, RgbPsbtExt};
-use rgbstd::containers::{ConsignmentVer, FileContent, TerminalSeals, Transfer, WitnessBundle};
+use psrgbt::{
+    RgbOutExt, RgbPsbtExt, PSBT_MPC_PREFIX, PSBT_OPRET_PREFIX, PSBT_RGB_PREFIX, PSBT_TAPRET_PREFIX,
+};
+use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, Transfer, WitnessBundle};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -27,8 +30,8 @@ use rgbstd::rgbcore::commit_verify::mpc::{
 };
 use rgbstd::rgbcore::commit_verify::{CommitId, EmbedCommitVerify, TryCommitVerify};
 use rgbstd::stl::{
-    AssetSpec, BlockNumber, BridgeLocation, BurnReason, ContractTerms, EvmAddress, EvmContract,
-    RejectListLocation, RicardianContract,
+    BlockNumber, BridgeLocation, BurnReason, ContractTerms, EvmAddress, EvmContract, Name,
+    RejectListLocation, RicardianContract, UnicodeTicker,
 };
 use rgbstd::txout::CloseMethod;
 use rgbstd::validation::{DbcProof, SchemaRules};
@@ -38,6 +41,7 @@ use rgbstd::{
     Transition, TransitionBundle,
 };
 use schemata::{BridgedFungibleAsset, OS_ASSET, OS_MINT};
+use strict_encoding::StrictSerialize;
 
 /// The genesis timestamp of every generated asset.
 pub const ISSUED_AT: i64 = 1_700_000_000;
@@ -55,26 +59,49 @@ pub struct Utxo {
 pub struct Mint {
     pub opid: OpId,
     pub amount: u64,
-    pub after_block: u64,
+    pub before_block: u64,
 }
 
-/// One transition committed in its witness tx, and the PSBT of that tx.
+/// One transition committed in its witness tx, the PSBT of that tx with its
+/// RGB keys stripped, and the fascia rgb-lib writes for it.
 #[derive(Debug, Clone)]
 pub struct Committed {
     pub opid: OpId,
     pub tx: Transaction,
-    // Only the mint signer's tests read the PSBT.
+    // Only the mint signer's tests read the PSBT and the fascia.
     #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
     pub psbt: Psbt,
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fascia: Fascia,
 }
 
 impl Committed {
-    fn of(opid: OpId, psbt: Psbt) -> Self {
+    fn of(opid: OpId, psbt: Psbt, fascia: Fascia) -> Self {
         Self {
             opid,
             tx: psbt.unsigned_tx.clone(),
             psbt,
+            fascia,
         }
+    }
+
+    /// The fascia file bytes, as the bridge sends them.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fn fascia_bytes(&self) -> Vec<u8> {
+        fascia_bytes(&self.fascia)
+    }
+
+    /// The committed transition, as the fascia discloses it.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fn transition(&self) -> Transition {
+        self.fascia
+            .bundles()
+            .values()
+            .flat_map(|bundle| bundle.known_transitions.iter())
+            .find(|known| known.opid == self.opid)
+            .expect("the fascia discloses the committed transition")
+            .transition
+            .clone()
     }
 }
 
@@ -96,10 +123,12 @@ pub struct Issue {
     pub rights: Vec<OutPoint>,
     pub reject_list: Option<RejectListLocation>,
     pub chain_net: ChainNet,
+    /// The outpoint of the genesis link right, if the asset has one.
+    pub link_right: Option<OutPoint>,
 }
 
 impl Issue {
-    /// One mint right per outpoint, on regtest, without a reject list.
+    /// One mint right per outpoint, on regtest, without a reject list or link right.
     pub fn new(chain_id: u64, bridge: [u8; 20], rights: Vec<OutPoint>) -> Self {
         Self {
             chain_id,
@@ -107,6 +136,7 @@ impl Issue {
             rights,
             reject_list: None,
             chain_net: ChainNet::BitcoinRegtest,
+            link_right: None,
         }
     }
 }
@@ -151,10 +181,11 @@ impl History {
             BridgedFungibleAsset::schema_rules(),
             issue.chain_net,
         )
-        .add_global_state(
-            "spec",
-            AssetSpec::new("BUSDT", "Bridged USDT", Precision::Micro),
-        )
+        .add_global_state("ticker", UnicodeTicker::from("BUSDT"))
+        .unwrap()
+        .add_global_state("name", Name::from("Bridged USDT"))
+        .unwrap()
+        .add_global_state("precision", Precision::Micro)
         .unwrap()
         .add_global_state(
             "terms",
@@ -175,6 +206,10 @@ impl History {
         for (i, right) in issue.rights.iter().enumerate() {
             let seal = GenesisSeal::with_blinding(right.txid, right.vout, 0x1000 + i as u64);
             builder = builder.add_rights("mintRight", seal).unwrap();
+        }
+        if let Some(link) = issue.link_right {
+            let seal = GenesisSeal::with_blinding(link.txid, link.vout, 0x1100);
+            builder = builder.add_rights("linkRight", seal).unwrap();
         }
         let genesis = builder
             .issue_contract_raw(ISSUED_AT)
@@ -220,18 +255,22 @@ impl History {
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Transaction {
-        self.commit_psbt(transitions, inputs, outputs).unsigned_tx
+        self.commit_psbt(transitions, inputs, outputs).tx
     }
 
     /// [`Self::commit`] as rgb-lib's `prepare_rgb_psbt` does it: each
     /// transition pushed to the PSBT, the OP_RETURN marked as host with the
-    /// entropy, then `rgb_commit`. Returns the committed PSBT.
+    /// entropy, then [`rgb_commit`]. Named by the last transition's opid.
     pub fn commit_psbt(
         &mut self,
         transitions: Vec<Transition>,
         inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
-    ) -> Psbt {
+    ) -> Committed {
+        let opid = transitions
+            .last()
+            .expect("a bundle commits a transition")
+            .id();
         // psbtu orders known transitions by a hash map; the bundle keeps ours.
         let bundle = bundle_of(transitions.clone());
         let tree = self.mpc_tree(&bundle);
@@ -239,9 +278,9 @@ impl History {
         for transition in transitions {
             psbt.push_rgb_transition(transition).unwrap();
         }
-        rgb_commit(&mut psbt, 0, tree.entropy());
+        let fascia = rgb_commit(&mut psbt, 0, tree.entropy());
         self.push_bundle(bundle, psbt.unsigned_tx.clone(), tree);
-        psbt
+        Committed::of(opid, psbt, fascia)
     }
 
     /// [`Self::commit`] for a bundle the caller built, which no PSBT holds.
@@ -297,36 +336,36 @@ impl History {
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Committed {
         let mint = self
-            .mint_transition(right, amount, after_block, to)
+            .mint_transition(right, amount, before_block, to)
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs)
+        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
     }
 
     /// [`Self::mint`] in the old form, which passes a new right on to vout 1.
-    /// rgb-lib no longer builds it, and the mint signer refuses it.
+    /// The schema refuses it now; a refusal fixture only.
     pub fn mint_keeping_right(
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> (Committed, Utxo) {
         let mint = self
-            .mint_transition(right, amount, after_block, to)
+            .mint_transition(right, amount, before_block, to)
             .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, self.nonce))
             .unwrap()
             .complete_transition()
             .unwrap();
-        let minted = self.commit_mint(mint, amount, after_block, right, extra_inputs, outputs);
+        let minted = self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs);
         let kept = Utxo {
             opout: Opout::new(minted.opid, OS_MINT, 0),
             outpoint: OutPoint::new(minted.tx.compute_txid(), 1),
@@ -339,13 +378,13 @@ impl History {
         &mut self,
         right: Utxo,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         to: BuilderSeal<GraphSeal>,
     ) -> TransitionBuilder {
         self.transition("mint")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap()
-            .add_metadata("afterBlock", BlockNumber::from(after_block))
+            .add_metadata("beforeBlock", BlockNumber::from(before_block))
             .unwrap()
             .add_global_state("issuedSupply", RgbAmount::from(amount))
             .unwrap()
@@ -359,32 +398,31 @@ impl History {
         &mut self,
         mint: Transition,
         amount: u64,
-        after_block: u64,
+        before_block: u64,
         right: Utxo,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
     ) -> Committed {
-        let opid = mint.id();
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let psbt = self.commit_psbt(vec![mint], inputs, outputs);
+        let minted = self.commit_psbt(vec![mint], inputs, outputs);
         self.mints.push(Mint {
-            opid,
+            opid: minted.opid,
             amount,
-            after_block,
+            before_block,
         });
-        Committed::of(opid, psbt)
+        minted
     }
 
     /// Mints `amount` to a revealed seal on vout 2 of its witness tx, so a
     /// later transition can spend it. Returns the units.
-    pub fn mint_owned(&mut self, right: Utxo, amount: u64, after_block: u64) -> Utxo {
+    pub fn mint_owned(&mut self, right: Utxo, amount: u64, before_block: u64) -> Utxo {
         let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 0x2000 + self.nonce));
         let minted = self.mint(
             right,
             amount,
-            after_block,
+            before_block,
             to,
             vec![],
             vec![dust(0x01), dust(0x02)],
@@ -416,19 +454,17 @@ impl History {
         outputs: Vec<TxOut>,
     ) -> Committed {
         let send = self.rights_transition(right, vouts);
-        let opid = send.id();
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let psbt = self.commit_psbt(vec![send], inputs, outputs);
-        Committed::of(opid, psbt)
+        self.commit_psbt(vec![send], inputs, outputs)
     }
 
-    /// The transfer [`Self::send_rights`] commits, for a bundle the caller
-    /// builds.
+    /// The propagate [`Self::send_rights`] commits, for a bundle the caller
+    /// builds. Rights move only by propagate, one right in.
     pub fn rights_transition(&mut self, right: Utxo, vouts: &[u32]) -> Transition {
         let mut send = self
-            .transition("transfer")
+            .transition("propagate")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap();
         for &vout in vouts {
@@ -463,8 +499,9 @@ impl History {
         }
     }
 
-    /// Burns `burned` of `input` (holding `held`) and keeps the rest as
-    /// change on vout 1. `None` leaves the global out.
+    /// Burns `burned` of `input` (holding `held`). The rest goes to vout 1 as
+    /// rgb-lib does it: a split transfer first, then the burn of its output.
+    /// `None` burns it all without the global, which consensus refuses.
     pub fn burn(
         &mut self,
         input: Utxo,
@@ -472,13 +509,62 @@ impl History {
         burned: Option<u64>,
         reason: Option<[u8; 32]>,
     ) -> Committed {
-        let burn = self.burn_transition(input, held, burned, reason);
-        let opid = burn.id();
-        let psbt = self.commit_psbt(vec![burn], vec![input.outpoint], vec![dust(0x04)]);
-        Committed::of(opid, psbt)
+        let transitions = self.burn_transitions(input, held, burned, reason);
+        self.commit_psbt(transitions, vec![input.outpoint], vec![dust(0x04)])
     }
 
-    /// The transition [`Self::burn`] commits, for a bundle the caller builds.
+    /// The transitions [`Self::burn`] commits, in bundle order: the split, if
+    /// there is change, then the burn.
+    pub fn burn_transitions(
+        &mut self,
+        input: Utxo,
+        held: u64,
+        burned: Option<u64>,
+        reason: Option<[u8; 32]>,
+    ) -> Vec<Transition> {
+        let change = burned.map_or(0, |burned| held - burned);
+        if change == 0 {
+            return vec![self.burn_transition(input, held, burned, reason)];
+        }
+        let (split, burnable) = self.split(input, held, change);
+        let burn = self.burn_transition(burnable, held - change, burned, reason);
+        vec![split, burn]
+    }
+
+    /// The split of a burn with change: `change` to vout 1, the rest to a seal
+    /// on the outpoint the burn tx spends, as rgb-lib puts it.
+    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo) {
+        let burnable_seal = GraphSeal::with_blinding(
+            input.outpoint.txid,
+            input.outpoint.vout,
+            0x6000 + self.nonce,
+        );
+        let split = self
+            .transition("transfer")
+            .add_input(input.opout, AllocatedState::from(RevealedValue::from(held)))
+            .unwrap()
+            .add_fungible_state(
+                "assetOwner",
+                GraphSeal::with_blinded_vout(1u32, self.nonce),
+                change,
+            )
+            .unwrap()
+            .add_fungible_state("assetOwner", burnable_seal, held - change)
+            .unwrap()
+            .complete_transition()
+            .unwrap();
+        let opout = Opout::new(split.id(), OS_ASSET, seal_index(&split, burnable_seal));
+        (
+            split,
+            Utxo {
+                opout,
+                outpoint: input.outpoint,
+            },
+        )
+    }
+
+    /// The burn of the whole of `input` (holding `held`), for a bundle the
+    /// caller builds. The schema gives a burn no outputs.
     pub fn burn_transition(
         &mut self,
         input: Utxo,
@@ -503,45 +589,33 @@ impl History {
                 )
                 .unwrap();
         }
-        let change = held - burned.unwrap_or(0);
-        if change > 0 {
-            burn = burn
-                .add_fungible_state(
-                    "assetOwner",
-                    GraphSeal::with_blinded_vout(1u32, self.nonce),
-                    change,
-                )
-                .unwrap();
-        }
         burn.complete_transition().unwrap()
     }
 
-    /// The consignment, with `terminals` on the last bundle.
-    pub fn transfer_with(&self, terminals: Vec<BuilderSeal<GraphSeal>>) -> Transfer {
-        let mut transfer = Transfer {
+    /// The consignment of the history.
+    pub fn as_transfer(&self) -> Transfer {
+        Transfer {
             version: ConsignmentVer::V1,
             transfer: true,
-            terminals: Default::default(),
             genesis: self.genesis.clone(),
             bundles: Confined::try_from(self.bundles.clone()).unwrap(),
-        };
-        if let (Some(last), Some((first, rest))) = (self.bundles.last(), terminals.split_first()) {
-            let mut seals = NonEmptyVec::with(*first);
-            for seal in rest {
-                seals.push(*seal).unwrap();
-            }
-            transfer
-                .terminals
-                .insert(last.bundle.bundle_id(), TerminalSeals::from(seals))
-                .unwrap();
         }
-        transfer
     }
 
     /// The TFR file bytes, as the bridge sends them.
-    pub fn consignment(&self, terminals: Vec<BuilderSeal<GraphSeal>>) -> Vec<u8> {
-        save(&self.transfer_with(terminals))
+    pub fn consignment(&self) -> Vec<u8> {
+        save(&self.as_transfer())
     }
+}
+
+/// The index of the `OS_ASSET` output on `seal`: the builder sorts outputs by seal.
+fn seal_index(transition: &Transition, seal: GraphSeal) -> u16 {
+    let assigns = transition.assignments.get(&OS_ASSET).unwrap().as_fungible();
+    let no = assigns
+        .iter()
+        .position(|a| a.revealed_seal() == Some(seal))
+        .unwrap();
+    u16::try_from(no).unwrap()
 }
 
 /// The rights `sent` made, one per vout of `vouts` in ascending order, as
@@ -571,14 +645,42 @@ pub fn witness_psbt(inputs: Vec<OutPoint>, outputs: Vec<TxOut>) -> Psbt {
     Psbt::from_unsigned_tx(witness_tx(inputs, outputs)).unwrap()
 }
 
-/// Commits the RGB data `psbt` holds as rgb-lib does: output `host` is the
-/// opret host with `entropy`, then psbtu's `rgb_commit`.
-pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) {
+/// Commits `psbt` as rgb-lib f3975623 does: opret host `host` with `entropy`,
+/// psbtu's `rgb_commit`, then the RGB keys stripped. Returns the fascia.
+pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) -> Fascia {
     let output = &mut psbt.outputs[host];
     output.set_opret_host();
     output.set_mpc_entropy(entropy).unwrap();
     psbt.set_rgb_close_method(CloseMethod::OpretFirst);
-    psbt.rgb_commit().unwrap();
+    let fascia = psbt.rgb_commit().unwrap();
+    strip_rgb_data(psbt);
+    fascia
+}
+
+/// rgb-lib's `strip_rgb_data`: drops the RGB, MPC, OPRET and TAPRET
+/// proprietary keys from the global map, the inputs and the outputs.
+fn strip_rgb_data(psbt: &mut Psbt) {
+    let is_rgb = |key: &bitcoin::psbt::raw::ProprietaryKey| {
+        [
+            &PSBT_RGB_PREFIX[..],
+            &PSBT_MPC_PREFIX[..],
+            &PSBT_OPRET_PREFIX[..],
+            &PSBT_TAPRET_PREFIX[..],
+        ]
+        .contains(&key.prefix.as_slice())
+    };
+    psbt.proprietary.retain(|key, _| !is_rgb(key));
+    for input in &mut psbt.inputs {
+        input.proprietary.retain(|key, _| !is_rgb(key));
+    }
+    for output in &mut psbt.outputs {
+        output.proprietary.retain(|key, _| !is_rgb(key));
+    }
+}
+
+/// The fascia file bytes, as rgb-lib's `write_fascia` writes them.
+pub fn fascia_bytes(fascia: &Fascia) -> Vec<u8> {
+    fascia.to_strict_serialized::<U32>().unwrap().release()
 }
 
 /// A 1000-sat output to a throwaway P2WPKH.

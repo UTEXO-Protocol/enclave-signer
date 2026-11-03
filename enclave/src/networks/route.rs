@@ -57,6 +57,10 @@ pub struct ValidationContext<'a> {
     /// `None` fails the mint closed.
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
     pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
+    /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
+    /// keys are not held across I/O. `None` fails the mint closed.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
     /// Binds each BFA mint anchor of a consignment to an EVM lock. `None` on
     /// builds without `bfa-validation`: a consignment with a mint anchor is
     /// then refused.
@@ -125,7 +129,7 @@ pub struct DestinationProof {
     pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
     /// `utxob:...` seals of the send-RGB confidential recipient legs. They are
     /// bound to the deposit invoice after that receipt is verified. Empty for
-    /// EVM destinations and builds without the bind.
+    /// EVM destinations, witness mints and builds without the bind.
     pub rgb_recipient_seals: Vec<String>,
 }
 

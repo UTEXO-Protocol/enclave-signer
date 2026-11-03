@@ -10,6 +10,7 @@ pub(crate) mod bfa_ids {
     pub const TS_TRANSFER: u16 = 10000;
     pub const TS_BURN: u16 = 8010;
     pub const TS_MINT: u16 = 8013;
+    pub const TS_PROPAGATE: u16 = 8014;
     pub const OS_ASSET: u16 = 4000;
     pub const OS_MINT: u16 = 4013;
 }

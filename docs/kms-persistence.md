@@ -6,7 +6,7 @@ the enclave loads the saved blob, decrypts it with KMS recipient attestation,
 and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
 KMS Sign.
 
-The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
+The measured mint image compiles in `CUSTODY_FLOW`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
@@ -88,7 +88,8 @@ With storage settings absent, the parent does not start the custody broker.
 The AWS SDK obtains and refreshes credentials. Use a dedicated EC2 instance
 role with IMDSv2. The custody listener admits `ENCLAVE_VSOCK_CID` by
 default. `KMS_ALLOWED_CIDS` can explicitly allow comma-separated replica
-CIDs sharing the same logical signer. Every allowed CID receives the **full
+CIDs sharing the same logical signer. When set, it replaces the default, so
+list the primary CID too. Every allowed CID receives the **full
 role**, so give it only this signer's KMS/S3 permissions. A CID is a routing
 address, not attested image identity.
 
@@ -116,7 +117,9 @@ the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
 host deployment. Do not run a second listener on `8003` or `8004`.
 
-The deployment scripts pass enclave KMS settings at launch. They do not provision the KMS relay, broker storage settings, or AWS policies.
+`deploy/deploy-host.sh` deploys only the combined image, so it does not launch the mint signer.
+Set the mint signer's KMS values with `cli set-endpoints`.
+No deployment script provisions the KMS relay, broker storage settings, or AWS policies.
 
 ## AWS permissions and persistence
 
@@ -138,11 +141,12 @@ exactly these public encryption-context fields:
 {"application":"utexo-enclave-signer","flow":"rgb-mint","seed_id":"YOUR_SEED_ID","bitcoin_network":"bitcoin"}
 ```
 
-The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
+The flow is the compiled [`CUSTODY_FLOW`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
 context automatically; policies must match it exactly.
 
-Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
+Use the actual network: `bitcoin`, `testnet`, `testnet4`, `signet`, or `regtest`.
+A `signetcustom` image uses `signet`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when
 another identity policy grants broader access. Keep the signer role free of
 unrelated policies, policy-management privileges, object/version deletion and

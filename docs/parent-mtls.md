@@ -1,7 +1,10 @@
 # Parent mTLS and access to the enclave
 
 The parent serves `parent.ParentService` over gRPC. It requires mTLS unless
-it runs in the loopback test mode. Source: `parent/src/transport_security.rs`.
+it runs in the loopback test mode. A debug build with the `insecure-dev`
+feature also serves plaintext with no ACL, on any address. Its clients then
+accept plaintext to any host. A release build refuses that feature at compile
+time. Source: `parent/src/transport_security.rs`.
 
 ## Configuration
 
@@ -10,7 +13,7 @@ it runs in the loopback test mode. Source: `parent/src/transport_security.rs`.
 | `GRPC_TLS_CERT_FILE` | Server certificate chain (PEM). |
 | `GRPC_TLS_KEY_FILE` | Server private key (PEM). |
 | `GRPC_TLS_CLIENT_CA_FILE` | CA that signs the client certificates (PEM). A client without a certificate from this CA fails the handshake. |
-| `GRPC_TLS_ACL_FILE` | Client ACL. One `<leaf_sha256> <role>` line per client. `<leaf_sha256>` is the SHA-256 of the client leaf certificate (DER), 64 hex characters. `#` starts a comment. At most 512 lines. |
+| `GRPC_TLS_ACL_FILE` | Client ACL. One `<leaf_sha256> <role>` line per client. `<leaf_sha256>` is the SHA-256 of the client leaf certificate (DER), 64 hex characters. `#` starts a comment. At most 512 identities. |
 | `GRPC_MAX_CONNECTIONS` | Open connection cap, `1..4096`, default `64`. |
 | `GRPC_CLONE_MAX_PER_MINUTE` | `Clone` calls per minute for all clients, `1..10000`, default `30`. |
 | `GRPC_ATTEST_MAX_PER_MINUTE` | `AttestedPublicKey` calls per minute for all clients, `1..10000`, default `6`. |

@@ -1,6 +1,6 @@
 //! The PSBT rules of a rights refill (`SignRightsRefill`): one `mintRight` in,
 //! 2..=255 rights out to the enclave's own Colored outputs, no units moved.
-//! The rules read the committed transition from the PSBT, with no
+//! The rules read the committed transition from the fascia, with no
 //! consignment. The rule ids (G1, RR*) are those of `docs/mint-flow.md`
 //! section 8.
 
@@ -25,7 +25,7 @@ pub const MAX_REFILL_FEE_INPUTS: usize = 1;
 /// hostile fee input.
 pub const MIN_REFILL_RIGHTS: usize = 2;
 
-/// rgb-lib counts rights in a u8. Mirrors it only: RR9, RR12 and RR13 carry
+/// Our own cap: rgb-lib has no limit since ae85958. RR9, RR12 and RR13 carry
 /// the security.
 pub const MAX_REFILL_RIGHTS: usize = 255;
 
@@ -59,11 +59,11 @@ fn refill_colored_inputs(psbt: &Psbt, keys: &KeyManager) -> Result<Vec<usize>> {
     Ok(colored)
 }
 
-/// RR6-RR8: one transfer that closes one right and makes rights only, on its
+/// RR6-RR8: one propagate that closes one right and makes rights only, on its
 /// own tx. Returns the closed right (for RR11) and the new rights' vouts (RR9).
 pub fn refill_rights(committed: &Committed) -> Result<(Opout, Vec<u32>)> {
     let transition = &committed.transition;
-    assert_transfer(transition)?;
+    assert_propagate(transition)?;
     let right = single_right_input(transition, "a rights refill")?;
     assert_rights_only(transition)?;
     let seals: Vec<OutputSeal> = transition
@@ -74,13 +74,13 @@ pub fn refill_rights(committed: &Committed) -> Result<(Opout, Vec<u32>)> {
     Ok((right, assert_refill_rights(&seals)?))
 }
 
-/// RR6: a burn or a mint is not a refill.
-fn assert_transfer(transition: &Transition) -> Result<()> {
-    if transition.transition_type != schemata::TS_TRANSFER {
+/// RR6: rights move only by propagate; a transfer, a burn or a mint is not a refill.
+fn assert_propagate(transition: &Transition) -> Result<()> {
+    if transition.transition_type != schemata::TS_PROPAGATE {
         return Err(EnclaveError::CrossCheck(format!(
-            "rights refill requires a transfer transition (transition_type = {}, want {})",
+            "rights refill requires a propagate transition (transition_type = {}, want {})",
             transition.transition_type,
-            schemata::TS_TRANSFER
+            schemata::TS_PROPAGATE
         )));
     }
     Ok(())

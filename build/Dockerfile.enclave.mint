@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
-# rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
-# never in a layer, the image or PCR0.
+# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+#   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
@@ -46,6 +46,7 @@ ENV CARGO_INCREMENTAL=0 \
 # Two roles, two PCR0s, two seeds, two running enclaves.
 ARG ENCLAVE_FEATURES=vsock,rgb,mint-signer
 RUN --mount=type=secret,id=lib_key \
+    --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
 
 
@@ -128,14 +129,20 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # In practice that is the rights send that made the right; 3 matches the bridge's
 # INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
 # The connector must pass mint_begin min_confirmations of at least this value.
-ARG RGB_MAX_UNOWNED_SATS=""
+# MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
+# (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
+# witness mint is refused after its lock. Measured, not attested.
+# RGB_MAX_UNOWNED_SATS: the sats budget of the signer (S7.1). A mint signer does
+# not boot below MINT_WITNESS_SAT, so it defaults to the same value.
+ARG RGB_MAX_UNOWNED_SATS=1500
 ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
     BTC_RELAY_MODE=${BTC_RELAY_MODE} \
     EVM_FINALITY_TAG=safe \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \
-    BTC_MAX_TOTAL_SATS=1000000
+    BTC_MAX_TOTAL_SATS=1000000 \
+    MINT_WITNESS_SAT=1500
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.

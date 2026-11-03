@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Concordium-only enclave image (vsock + ccd) - handles the Concordium bridge
-# rgb-lib comes from the private UTEXO-Protocol/rgb-lib-bfa mirror, so the build
-# needs the BuildKit secret lib_key (the rgb-lib-bfa deploy key). The secret is
-# never in a layer, the image or PCR0.
-# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY -f build/Dockerfile.enclave.ccd .
+# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
+#   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN -f build/Dockerfile.enclave.ccd .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 
@@ -38,6 +38,7 @@ ENV CARGO_INCREMENTAL=0 \
 # Cargo still loads every git source of the lock, so it fetches the rgb-lib
 # mirror too.
 RUN --mount=type=secret,id=lib_key \
+    --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features vsock,ccd
 
 

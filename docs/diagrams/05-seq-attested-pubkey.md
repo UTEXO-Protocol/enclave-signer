@@ -23,7 +23,9 @@ sequenceDiagram
     Parent->>Parent: require len(nonce) == 32
     Parent->>Srv: GetAttestedPublicKeyRequest{nonce}
 
-    Srv->>State: get_keys() (requires Phase::Active)
+    Srv->>Srv: require SetEndpoints done, else NotReady
+    Srv->>State: get_keys()
+    Note over Parent,State: No keys yet - the enclave attests the policy only,<br/>with no public_key. The parent refuses that answer.
     State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key + address, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored, ccd_ed25519_pub}
 
     Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse

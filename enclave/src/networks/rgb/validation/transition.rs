@@ -39,7 +39,7 @@ pub fn single_global<const N: usize>(
     Ok(Some(bytes))
 }
 
-/// The seal of an output as the flat parser shows it.
+/// The seal of an output as the flat summary shows it.
 pub fn output_seal(seal: &BuilderSeal<GraphSeal>) -> OutputSeal {
     match seal {
         BuilderSeal::Revealed(seal) => OutputSeal::Revealed {

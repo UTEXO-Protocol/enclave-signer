@@ -170,7 +170,7 @@ policy_commitment =
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
-    spv_min_confirmations_be4                       // required Bitcoin witness depth
+    spv_min_confirmations_be4                       // required Bitcoin witness depth (the mint signer does not check it)
     u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
@@ -217,12 +217,18 @@ default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
 attested value with the same parser as the SPV chain, and an unknown name does
 not boot.
 
-The tuple omits concrete sats budgets, the Electrum/Esplora
+The tuple omits the sats values, the Electrum/Esplora
 URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
 release image accepts only `ssl://` or `https://` for the Electrum/Esplora
 URL, so PCR0 covers it. Only a dev build (and thus a development policy)
 accepts `tcp://` or `http://`. Matching policies do not prove specific
 endpoint ports.
+
+The sats values are image env, so PCR0 measures them. The policy does not
+commit `BTC_MAX_UNOWNED_SATS`, `RGB_MAX_UNOWNED_SATS` or `MINT_WITNESS_SAT`,
+and `attest-verify` has no flag for them. `BTC_MAX_TOTAL_SATS` shows only as
+`allow_vanilla_psbt`: a non-zero value allows plain-BTC signing, except on a
+burn signer.
 
 Image-baked values remain measured in the EIF. The endpoints are not in the
 image; the operator sets them and the KMS values once at launch
@@ -323,6 +329,7 @@ attest-verify \
     --pcr1 <96-hex-chars> \
     --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
+    --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-evm-finality-tag safe \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
@@ -388,7 +395,10 @@ Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
 `AttestedPublicKey` still refuses an answer without keys.
 
 `deploy/deploy-host.sh` runs `utexo-bridge-parent-cli verify-launch` on each
-enclave after `set-endpoints`. It verifies the document for a fresh nonce
+enclave after `set-endpoints`. The script deploys only the combined image
+(`utexo-bridge-enclave.eif`) and passes `SIGNER_ROLE=combined`. For a mint or
+burn signer, run `set-endpoints` and `verify-launch --signer-role mint` (or
+`burn`) yourself. `verify-launch` verifies the document for a fresh nonce
 against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,

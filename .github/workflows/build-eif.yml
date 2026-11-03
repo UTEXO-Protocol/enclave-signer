@@ -24,6 +24,9 @@ name: "Build EIF"
 #   secrets.RGB_LIB_BFA_DEPLOY_KEY             deploy key for UTEXO-Protocol/rgb-lib-bfa
 #                                              (the rgb-lib mirror of the EIF and parent
 #                                               builds; passed as a BuildKit secret, not in PCR0)
+#   secrets.RGB_PRIVATE_DEPS_TOKEN             read token for the UTEXO-Protocol/<repo>-s-bfa
+#                                              mirrors of the RGB protocol crates rgb-lib pins
+#                                              (BuildKit secret rgb_deps_token, not in PCR0)
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
 #                                               artifacts are only attached to the run)
@@ -97,6 +100,7 @@ jobs:
           PRIVATE_DEPS_DIR: ${{ runner.temp }}/private-deps
           FEDERATED_SIGNER_PROTO_DEPLOY_KEY: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
           RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
         run: sh build/prepare-private-deps.sh
 
       - name: Set up Docker Buildx

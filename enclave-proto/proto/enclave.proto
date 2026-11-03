@@ -219,8 +219,13 @@ message RgbDestination {
   // 7 was mint_ancestors, dropped: deposit ids are derived from the mint.
   reserved 7;
   reserved "mint_ancestors";
-  // PSBT of the tx that created the right a mint spends; it pins that UTXO.
-  bytes parent_psbt = 8;
+  // 8 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  reserved 8;
+  reserved "parent_psbt";
+  // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
+  bytes fascia = 9;
+  // Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
+  bytes parent_fascia = 10;
 }
 
 message MerkleProofEntry {
@@ -231,14 +236,13 @@ message MerkleProofEntry {
 }
 
 message EvmSignatureResponse {
-  bytes signature = 1; // 65-byte Ethereum signature: r || s || v.
-  // The exact fundsOut calldata the signature commits to. For the RGB->EVM
-  // fundsOut path the enclave derives the OpId-bound fields (burnId,
-  // settlementData/fundsInIds) from the validated consignment and rewrites
-  // them, so this MAY differ from the call_data sent in EvmDestination. The
-  // caller MUST submit these bytes on-chain (the EIP-712 digest is keccak256
-  // over this calldata). Equal to the request's call_data on non-fundsOut /
-  // non-rgb-validation paths.
+  // 65-byte signature: r (32) || s (32) || v (1). v is the raw recovery id,
+  // 0 or 1, not 27 or 28.
+  bytes signature = 1;
+  // The request's call_data, unchanged. The enclave validates it as canonical
+  // ABI and signs the EIP-712 TeeFundsOut digest built from the validated
+  // fields; it never rewrites the calldata and never signs its keccak256. The
+  // caller submits these bytes on-chain with the signature.
   bytes call_data = 2;
 }
 
@@ -262,14 +266,19 @@ message SignBtcRequest {
 // BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
 // 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
 // source and no EVM deposit, so only the mint signer handles it, by shape alone, from
-// the PSBT's own RGB data. Response is a SignedPsbtResponse.
+// its fascia. Response is a SignedPsbtResponse.
 message SignRightsRefillRequest {
   reserved 2, 3;
   reserved "consignment", "consignment_hash";
   bytes psbt_bytes = 1;
   string asset_id = 4;
-  // PSBT of the tx that created the right the refill spends; it pins that UTXO.
-  bytes parent_psbt = 5;
+  // 5 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  reserved 5;
+  reserved "parent_psbt";
+  // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
+  bytes fascia = 6;
+  // Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
+  bytes parent_fascia = 7;
 }
 
 message SignRawMessageRequest {
@@ -406,6 +415,9 @@ message SetEndpointsRequest {
   string kms_region = 6; // AWS region of the KMS key.
   string kms_seed_id = 7; // Name of the seed object the parent stores.
   string kms_expected_evm_address = 8; // 20-byte hex EVM address the seed must give. Empty: none.
+  // Absolute HTTP path, e.g. /v3/<API_KEY>. Empty means /. No query or fragment.
+  // May contain credentials: do not log it or publish it in attestation data.
+  string evm_rpc_path = 9;
 }
 
 message SetEndpointsResponse {}
