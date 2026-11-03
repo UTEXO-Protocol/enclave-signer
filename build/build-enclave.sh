@@ -13,6 +13,8 @@
 #   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
 #                    (mint, burn)
+#   KMS_ALLOWED_ACCOUNT_IDS  mint only: AWS accounts of the seed KMS key; the
+#                    recipe fails the build without it
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
@@ -105,7 +107,8 @@ if declares_build_arg ENCLAVE_FEATURES; then
         exit 1
     fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256; do
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256 \
+        KMS_ALLOWED_ACCOUNT_IDS; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
             BUILD_ARGS+=(--build-arg "$arg=${!arg}")
             echo "    build override: $arg=${!arg}"

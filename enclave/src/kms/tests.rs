@@ -564,3 +564,31 @@ mod exchanges {
         }
     }
 }
+
+#[test]
+fn account_pin_refuses_a_key_in_another_account() {
+    let cfg = config();
+    // KEY_ARN is in account 123456789012.
+    cfg.validate_account("123456789012").unwrap();
+    cfg.validate_account(" 111111111111 , 123456789012 ")
+        .unwrap();
+    let e = cfg
+        .validate_account("999999999999")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("does not pin"), "{e}");
+    let foreign = KmsConfig {
+        key_arn: "arn:aws:kms:eu-west-1:999999999999:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            .into(),
+        ..config()
+    };
+    foreign.validate().unwrap();
+    assert!(foreign.validate_account("123456789012").is_err());
+}
+
+#[test]
+fn account_pin_refuses_a_malformed_list() {
+    for bad in ["12345", "12345678901a", "123456789012,abc"] {
+        assert!(config().validate_account(bad).is_err(), "{bad}");
+    }
+}

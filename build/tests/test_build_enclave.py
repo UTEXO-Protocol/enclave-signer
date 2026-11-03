@@ -54,7 +54,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
                     'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
-                    'ENCLAVE_FEATURES', *MEASURED_PINS):
+                    'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -120,6 +120,19 @@ class BuildArgumentsTests(unittest.TestCase):
                      if 'build override:' in line],
                     [f'build override: {key}={value}' for key, value in applied.items()],
                 )
+
+    def test_kms_account_pin_reaches_only_the_recipe_that_declares_it(self):
+        for role, forwarded in (('mint', True), ('burn', False)):
+            with self.subTest(role=role):
+                result = self.invoke(f'Dockerfile.enclave.{role}',
+                                     RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     ENCLAVE_FEATURES=f'vsock,{role}-signer',
+                                     BITCOIN_NETWORK='signet',
+                                     KMS_ALLOWED_ACCOUNT_IDS='123456789012')
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertEqual(
+                    'KMS_ALLOWED_ACCOUNT_IDS=123456789012' in self.captured_build_args(),
+                    forwarded)
 
     def test_optional_overrides_do_not_leak_into_legacy_or_ccd_recipes(self):
         for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb', 'Dockerfile.enclave.ccd',

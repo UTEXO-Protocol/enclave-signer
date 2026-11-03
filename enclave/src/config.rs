@@ -701,6 +701,11 @@ impl Endpoints {
                 seed_id: req.kms_seed_id.clone(),
             };
             config.validate().map_err(|e| e.to_string())?;
+            config
+                .validate_account(
+                    &std::env::var(crate::kms::ALLOWED_ACCOUNTS_ENV).unwrap_or_default(),
+                )
+                .map_err(|e| e.to_string())?;
             // The Electrum pin must not catch the KMS host.
             if electrum_host == config.endpoint_host() {
                 return Err(format!("electrum_url host {electrum_host} is the KMS host"));

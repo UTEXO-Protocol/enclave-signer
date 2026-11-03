@@ -104,7 +104,13 @@ ARG BTC_RELAY_MODE=required
 ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
-ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
+# The AWS accounts the seed KMS key may live in (comma-separated 12-digit ids).
+# Without it the host could name a key in its own account at bootstrap.
+#   --build-arg KMS_ALLOWED_ACCOUNT_IDS=<account id of the federation KMS key>
+ARG KMS_ALLOWED_ACCOUNT_IDS=""
+RUN test -n "$KMS_ALLOWED_ACCOUNT_IDS"
+ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
+    ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
     EVM_CHAIN_ID=${EVM_CHAIN_ID} \
     EVM_PROXY_CONTRACT_ADDRESS=${EVM_PROXY_CONTRACT_ADDRESS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \

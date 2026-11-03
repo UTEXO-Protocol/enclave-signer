@@ -59,6 +59,22 @@ const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
 /// measured image. Host requests and env cannot change it.
 pub const CUSTODY_FLOW: &str = "rgb-mint";
 
+/// Image env var: the AWS accounts a KMS key may live in. It is in the measured
+/// image, so the host cannot change it.
+pub const ALLOWED_ACCOUNTS_ENV: &str = "KMS_ALLOWED_ACCOUNT_IDS";
+
+#[cfg(any(debug_assertions, test))]
+fn require_pinned_accounts() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(debug_assertions, test)))]
+fn require_pinned_accounts() -> Result<()> {
+    Err(fail(
+        "KMS_ALLOWED_ACCOUNT_IDS is not pinned in the image - refusing a host-chosen KMS account",
+    ))
+}
+
 /// Public KMS config. The operator sets it once at launch (`SetEndpoints`).
 /// The attested policy commits it.
 #[derive(Debug, Clone)]
@@ -123,6 +139,38 @@ impl KmsConfig {
         {
             return Err(fail(
                 "KMS_SEED_ID must be 1-128 ASCII letters, digits, dots, underscores or hyphens",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The key must be in an AWS account the image pins. `allowed` is the
+    /// comma-separated list of 12-digit account ids from the measured image env
+    /// ([`ALLOWED_ACCOUNTS_ENV`]). Else the host could name a key in its own
+    /// account and decrypt the seed it is given. With no list, a dev or test
+    /// build skips the check and a release build refuses.
+    pub fn validate_account(&self, allowed: &str) -> Result<()> {
+        let allowed: Vec<&str> = allowed
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if allowed.is_empty() {
+            return require_pinned_accounts();
+        }
+        if allowed
+            .iter()
+            .any(|id| id.len() != 12 || !id.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(fail(
+                "KMS_ALLOWED_ACCOUNT_IDS must list 12-digit AWS account ids",
+            ));
+        }
+        // `validate` has checked the shape: field 4 is the account id.
+        let account = self.key_arn.split(':').nth(4).unwrap_or_default();
+        if !allowed.contains(&account) {
+            return Err(fail(
+                "KMS_KEY_ARN is in an AWS account this image does not pin (KMS_ALLOWED_ACCOUNT_IDS)",
             ));
         }
         Ok(())

@@ -53,6 +53,7 @@ Operators must approve the launch values:
 | --- | --- |
 | `KMS_KEY_ARN` | Full symmetric `ENCRYPT_DECRYPT` KMS key ARN; no alias. |
 | `KMS_REGION` | Region matching that key, for example `eu-central-1`. |
+| `KMS_ALLOWED_ACCOUNT_IDS` | Image build arg, not a launch value: the 12-digit AWS account ids the key may live in, comma-separated. A release image refuses a key ARN outside them, so the host cannot name a key in its own account. |
 | `KMS_SEED_ID` | Stable signer ID: 1–128 ASCII letters, digits, `.`, `_`, `-`. |
 | `KMS_EXPECTED_EVM_ADDRESS` | Empty for first bootstrap; then the verified EVM address, 40 hex digits with optional `0x`. |
 
