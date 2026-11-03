@@ -113,7 +113,6 @@ pub(super) fn handle_sign_psbt(
     req: RgbDestination,
     #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
-
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.
     let sign_colored = || {
