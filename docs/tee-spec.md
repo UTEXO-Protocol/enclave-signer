@@ -866,8 +866,7 @@ For an RGB-source request, the SPV layer enforces these rules:
    Check inclusion against the stored header with a path of at most 32 levels.
    Require the transaction position to be consumed by the path, one bit per
    level. Refuse a path on which a hashed node is a 64-byte transaction
-   (CVE-2017-12842). The path length is not bound to the block's tree depth;
-   that needs a coinbase proof, which the request does not carry.
+   (CVE-2017-12842).
    Require at least `SPV_MIN_CONFIRMATIONS` confirmations (default 3). On the
    testnets min-difficulty blocks count, for testing convenience: testnets
    carry no production value.
