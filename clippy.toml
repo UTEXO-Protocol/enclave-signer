@@ -1,7 +1,7 @@
 # Invariant 3 of the BFA port: a BFA consignment is validated only through
-# rgb-lib's validate_consignment_with_resolver, which confirms a mint anchor
+# rgb-lib's validate_consignment_with_resolver, which confirms a mint claim
 # only through our resolver of bound locks.
 disallowed-methods = [
     { path = "rgbstd::containers::Consignment::validate", reason = "invariant 3: validate through rgb-lib validate_consignment_with_resolver with our resolvers" },
-    { path = "rgbstd::validation::PendingValidation::resolve_anchor", reason = "invariant 3: anchors are confirmed only inside rgb-lib, through the bound-lock resolver" },
+    { path = "rgbstd::validation::PendingValidation::resolve_claim", reason = "invariant 3: claims are confirmed only inside rgb-lib, through the bound-lock resolver" },
 ]

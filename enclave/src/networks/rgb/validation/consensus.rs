@@ -8,8 +8,8 @@
 //! - each witness takes its tx from the consignment and its on-chain status
 //!   from a [`WitnessCheck`]: it must be mined, at `SPV_MIN_CONFIRMATIONS`
 //!   depth from the enclave's tip;
-//! - each BFA mint anchor is confirmed only against the lock an
-//!   [`AnchorBinder`] binds to it, with no RPC;
+//! - each BFA mint claim is confirmed only against the lock an
+//!   [`AnchorBinder`] binds to its `LockId`, with no RPC;
 //! - the reject list comes from the enclave's reader, after the asset bind.
 //!
 //! Validation returns no amounts or burn facts, so rgb-lib's
@@ -23,7 +23,7 @@ use rgb_lib::no_wallet::{
     ValidationOptions, WitnessValidationStatus,
 };
 use rgb_lib::BitcoinNetwork;
-use rgbstd::containers::{ConsignmentExt, FileContent, ResolveAnchor, Transfer};
+use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
 
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
@@ -111,7 +111,7 @@ impl RgbValidator {
             let validation = validate_consignment_with_resolver(
                 path,
                 &resolvers.witnesses,
-                resolvers.anchors.as_ref().map(|a| a as &dyn ResolveAnchor),
+                resolvers.anchors.as_ref().map(|a| a as &dyn ResolveClaim),
                 resolvers.list.as_ref().map(|l| l as &dyn ResolveRejectList),
                 None,
                 &options,
@@ -325,7 +325,7 @@ pub(super) fn validation_error(
 ) -> EnclaveError {
     use rgb_lib::Error as E;
     let text = match &e {
-        E::NoAnchorResolver => "consignment carries BFA mint anchors, but this build binds none \
+        E::NoClaimResolver => "consignment carries BFA mint claims, but this build binds none \
                                 (built without bfa-validation) - refusing to validate"
             .to_string(),
         E::NoRejectListResolver => "the asset declares a reject list, but this build cannot read \
@@ -346,7 +346,7 @@ pub(super) fn validation_error(
             "RGB consignment validation failed: the mint anchors were bound on EVM chain \
              {actual}, but the asset's bridge lives on chain {expected} - refusing to validate"
         ),
-        E::MintEventNotFound { opid } => format!(
+        E::MintLockNotFound { opid } => format!(
             "RGB consignment validation failed: mint {opid} has no bound lock that confirms it - \
              refusing to validate"
         ),

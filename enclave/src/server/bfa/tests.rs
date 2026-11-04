@@ -60,13 +60,14 @@ mod burn {
     fn anchor(tag: u8, amount: u64, in_last_bundle: bool) -> MintAnchor {
         MintAnchor {
             opid: [tag; 32],
+            lock_id: [tag | 0x40; 32],
             amount,
             before_block: 110,
             in_last_bundle,
         }
     }
 
-    /// Finding 47: a burn's locks come from its mints alone.
+    /// Finding 47: a burn's locks come from its mints alone, keyed by lockId.
     #[test]
     fn derives_every_lock_from_its_anchor_without_rpc() {
         let ctx = context(config(), Box::new(NoRpc));
@@ -76,10 +77,15 @@ mod burn {
         assert_eq!(bound.evm_chain_id, CHAIN_ID);
         assert_eq!(bound.locks.len(), 2);
         for (lock, a) in bound.locks.iter().zip(&anchors) {
-            assert_eq!(lock.mint_opid, a.opid);
+            assert_eq!(lock.lock_id, a.lock_id);
             assert_eq!(lock.minted, a.amount);
             assert_eq!(lock.net_amount, a.amount);
             assert_eq!(
+                lock.operation_id,
+                rgb_mint_deposit_id(&ctx.bridge_config, &a.lock_id, a.amount).unwrap()
+            );
+            // The deposit id of the bare OpId is not one a burn may cite.
+            assert_ne!(
                 lock.operation_id,
                 rgb_mint_deposit_id(&ctx.bridge_config, &a.opid, a.amount).unwrap()
             );
@@ -119,52 +125,38 @@ mod burn {
 #[cfg(evm_to_rgb)]
 mod mint {
     use super::*;
-    use crate::networks::evm::events::{LogEntry, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG};
     use crate::networks::rgb::psbt_validation::{MintFacts, MintRecipient};
-    use crate::test_support::{abi_word, bridge_funds_in_data, FakeEvm};
-    use sha3::{Digest, Keccak256};
+    use crate::networks::rgb::validation::lock_id;
+    use crate::test_support::{mint_deposit, FakeEvm};
+    use bitcoin::hashes::Hash;
 
     const TX: [u8; 32] = [0xee; 32];
+    const OPID: [u8; 32] = [2; 32];
 
-    fn topic0(sig: &str) -> [u8; 32] {
-        Keccak256::digest(sig.as_bytes()).into()
+    /// `LockId(opid, txid)` of mint `opid` in the bitcoin tx tagged `tx`.
+    fn lock_of(opid: [u8; 32], tx: u8) -> [u8; 32] {
+        lock_id(
+            rgbstd::OpId::from(opid),
+            bitcoin::Txid::from_byte_array([tx; 32]),
+        )
     }
 
-    /// A deposit for mint `opid` of `amount`, with `operation_id`, at block 100.
-    fn deposit(opid: [u8; 32], amount: u64, operation_id: [u8; 32]) -> FakeEvm {
-        let logs = vec![
-            LogEntry {
-                address: BRIDGE,
-                topics: vec![topic0(FUNDS_IN_SIG), abi_word(0xdead), opid],
-                data: abi_word(amount).to_vec(),
-            },
-            LogEntry {
-                address: BRIDGE,
-                topics: vec![topic0(BRIDGE_FUNDS_IN_SIG), operation_id],
-                data: bridge_funds_in_data(amount, amount, 0, ""),
-            },
-        ];
-        FakeEvm {
-            receipt: Some(ReceiptData {
-                status_success: true,
-                block_number: 100,
-                block_hash: [0x42; 32],
-                logs,
-            }),
-            chain_id: CHAIN_ID,
-        }
+    /// The lockId of the mint the tests sign: [`OPID`] in the tx tagged `0x33`.
+    fn lock() -> [u8; 32] {
+        lock_of(OPID, 0x33)
     }
 
-    fn paid(opid: [u8; 32], amount: u64) -> FakeEvm {
-        let id = rgb_mint_deposit_id(&config(), &opid, amount).unwrap();
-        deposit(opid, amount, id)
+    fn paid(lock_id: [u8; 32], amount: u64) -> FakeEvm {
+        let id = rgb_mint_deposit_id(&config(), &lock_id, amount).unwrap();
+        mint_deposit(BRIDGE, lock_id, amount, id)
     }
 
-    /// The mint a PSBT commits: `issued` units of mint `[2; 32]`, before block 110.
+    /// The mint a PSBT commits: `issued` units of mint [`OPID`], before block 110.
     fn mint(issued: u64) -> MintFacts {
         MintFacts {
             right: rgbstd::Opout::new(rgbstd::OpId::from([1; 32]), schemata::OS_MINT, 0),
-            opid: [2; 32],
+            opid: OPID,
+            lock_id: lock(),
             issued,
             before_block: 110,
             recipient: MintRecipient::Blinded("utxob:recipient".into()),
@@ -173,7 +165,7 @@ mod mint {
 
     /// The deposit id that S2.3 bound for this mint.
     fn request_id(mint: &MintFacts) -> [u8; 32] {
-        rgb_mint_deposit_id(&config(), &mint.opid, mint.issued).unwrap()
+        rgb_mint_deposit_id(&config(), &mint.lock_id, mint.issued).unwrap()
     }
 
     fn bind(ctx: &ServerContext, mint: &MintFacts) -> String {
@@ -186,11 +178,11 @@ mod mint {
     /// the mint's OpId can share the tx.
     #[test]
     fn binds_the_mint_to_its_receipt() {
-        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        let ctx = context(config(), Box::new(paid(lock(), 100)));
         bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100)).unwrap();
 
-        let mut node = paid([2; 32], 100);
-        let other = paid([2; 32], 50).receipt.unwrap().logs;
+        let mut node = paid(lock(), 100);
+        let other = paid(lock(), 50).receipt.unwrap().logs;
         node.receipt.as_mut().unwrap().logs.splice(0..0, other);
         let ctx = context(config(), Box::new(node));
         bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100)).unwrap();
@@ -199,7 +191,7 @@ mod mint {
     #[test]
     fn binds_the_mint_among_other_deposits_in_one_tx() {
         // (a) A second RGB deposit: its FundsIn and its BridgeFundsIn.
-        let other_rgb = paid([3; 32], 50).receipt.unwrap().logs;
+        let other_rgb = paid(lock_of([3; 32], 0x33), 50).receipt.unwrap().logs;
         // (b) A deposit on another route: one BridgeFundsIn to chain 42161.
         let mut data = bridge_funds_in_data(50, 50, 0, "");
         let dest_chain = 192..224;
@@ -214,7 +206,7 @@ mod mint {
             data,
         }];
         for (case, other) in [("rgb", other_rgb), ("other route", other_route)] {
-            let mut node = paid([2; 32], 100);
+            let mut node = paid(lock(), 100);
             node.receipt.as_mut().unwrap().logs.splice(0..0, other);
             let ctx = context(config(), Box::new(node));
             bind_mint_deposit(&ctx, &TX, &request_id(&mint(100)), &mint(100))
@@ -224,7 +216,7 @@ mod mint {
 
     #[test]
     fn refuses_a_request_id_that_is_not_the_mints() {
-        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        let ctx = context(config(), Box::new(paid(lock(), 100)));
         let err = bind_mint_deposit(&ctx, &TX, &[0xd3; 32], &mint(100))
             .unwrap_err()
             .to_string();
@@ -233,21 +225,40 @@ mod mint {
 
     #[test]
     fn refuses_a_shadow_deposit_for_the_same_mint() {
-        let ctx = context(config(), Box::new(deposit([2; 32], 100, [0xd2; 32])));
+        let ctx = context(
+            config(),
+            Box::new(mint_deposit(BRIDGE, lock(), 100, [0xd2; 32])),
+        );
         let err = bind(&ctx, &mint(100));
         assert!(err.contains("no BridgeFundsIn log"), "{err}");
     }
 
     #[test]
     fn refuses_deposit_of_other_amount() {
-        let ctx = context(config(), Box::new(paid([2; 32], 99)));
+        let ctx = context(config(), Box::new(paid(lock(), 99)));
         let err = bind(&ctx, &mint(100));
         assert!(err.contains("no FundsIn log"), "{err}");
     }
 
     #[test]
     fn refuses_deposit_of_other_opid() {
-        let ctx = context(config(), Box::new(paid([3; 32], 100)));
+        let ctx = context(config(), Box::new(paid(lock_of([3; 32], 0x33), 100)));
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("no FundsIn log"), "{err}");
+    }
+
+    /// A lock under the bare OpId is not the lock of the mint in its tx.
+    #[test]
+    fn refuses_deposit_keyed_by_the_bare_opid() {
+        let ctx = context(config(), Box::new(paid(OPID, 100)));
+        let err = bind(&ctx, &mint(100));
+        assert!(err.contains("no FundsIn log"), "{err}");
+    }
+
+    /// The same mint in another tx (a rebuilt or RBF tx) has another lockId.
+    #[test]
+    fn refuses_deposit_for_the_mint_in_another_tx() {
+        let ctx = context(config(), Box::new(paid(lock_of(OPID, 0x34), 100)));
         let err = bind(&ctx, &mint(100));
         assert!(err.contains("no FundsIn log"), "{err}");
     }
@@ -255,7 +266,7 @@ mod mint {
     /// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.
     #[test]
     fn refuses_deposit_at_or_after_before_block() {
-        let ctx = context(config(), Box::new(paid([2; 32], 100)));
+        let ctx = context(config(), Box::new(paid(lock(), 100)));
         for before_block in [100, 99] {
             let late = MintFacts {
                 before_block,
@@ -270,7 +281,7 @@ mod mint {
     fn refuses_a_node_on_another_chain() {
         let node = FakeEvm {
             chain_id: 1,
-            ..paid([2; 32], 100)
+            ..paid(lock(), 100)
         };
         let ctx = context(config(), Box::new(node));
         let err = bind(&ctx, &mint(100));
@@ -318,7 +329,7 @@ mod mint {
                 ..config()
             };
             let covered = TaggedHeads {
-                node: paid([2; 32], 100),
+                node: paid(lock(), 100),
                 covered: tag,
             };
             let ctx = context(cfg.clone(), Box::new(covered));
@@ -333,7 +344,7 @@ mod mint {
                 EvmFinalityTag::Safe
             };
             let below = TaggedHeads {
-                node: paid([2; 32], 100),
+                node: paid(lock(), 100),
                 covered: other,
             };
             let ctx = context(cfg, Box::new(below));
@@ -355,7 +366,7 @@ mod mint {
     }
 
     const DERIVED: VerifiedLock = VerifiedLock {
-        mint_opid: [1; 32],
+        lock_id: [1; 32],
         minted: 100,
         operation_id: [0xd1; 32],
         net_amount: 100,

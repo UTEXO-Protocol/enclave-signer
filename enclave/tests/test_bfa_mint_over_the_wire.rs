@@ -37,16 +37,16 @@ use bitcoin::{
 };
 use rgbinvoice::{Beneficiary, RgbInvoiceBuilder, XChainNet};
 use rgbstd::containers::{
-    AnchorResolverError, ConsignmentExt, FileContent, ResolveAnchor, Transfer,
+    ClaimResolverError, ConsignmentExt, FileContent, LockId, ResolveClaim, Transfer,
 };
 use rgbstd::contract::IssuerWrapper;
 use rgbstd::stl::{BridgeLocation, RejectListLocation};
 use rgbstd::validation::{
-    ExternalAnchor, Failure, ResolveWitness, ValidationConfig, ValidationError,
-    WitnessResolverError, WitnessStatus,
+    Claim, Failure, ResolveWitness, ValidationConfig, ValidationError, WitnessResolverError,
+    WitnessStatus,
 };
 use rgbstd::vm::WitnessOrd;
-use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, OpId, Opout, SecretSeal};
+use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, Opout, SecretSeal};
 use schemata::BridgedFungibleAsset;
 use sha3::{Digest, Keccak256};
 use utexo_bridge_enclave::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
@@ -89,7 +89,7 @@ const LIST: [u8; 20] = [0x4e; 20];
 // The two logs `handle_sign` reads from the deposit receipt, in the shape
 // `IBridge.sol` emits them.
 sol! {
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed lockId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
@@ -297,18 +297,18 @@ fn log<E: SolEvent>(event: &E) -> LogEntry {
     }
 }
 
-/// The EVM deposit receipt: `FundsIn` with the mint OpId and `BridgeFundsIn`
+/// The EVM deposit receipt: `FundsIn` under `lock_id` and `BridgeFundsIn`
 /// with the invoice, both from the pinned contract, at `block`. The enclave
 /// reads this receipt and does not trust the listener.
 fn deposit_receipt(
-    mint_opid: &OpId,
+    lock_id: [u8; 32],
     operation_id: [u8; 32],
     invoice: &str,
     block: u64,
 ) -> ReceiptData {
     let funds_in = FundsIn {
         sender: [0xde; 20].into(),
-        rgbOpId: alloy_primitives::U256::from_be_bytes(bfa_consignment::opid_bytes(*mint_opid)),
+        lockId: alloy_primitives::U256::from_be_bytes(lock_id),
         amount: MINTED,
     };
     let bridge_funds_in = BridgeFundsIn {
@@ -434,7 +434,7 @@ fn bridge_config(contract_id: &ContractId) -> BridgeConfig {
 fn operation_id(deposit: &Deposit) -> [u8; 32] {
     utexo_bridge_enclave::networks::evm::events::rgb_mint_deposit_id(
         &bridge_config(&deposit.contract_id),
-        &bfa_consignment::opid_bytes(deposit.mint.opid),
+        &deposit.mint.lock_id(),
         MINTED,
     )
     .unwrap()
@@ -548,7 +548,7 @@ fn deposit_chain(
 ) -> DepositChain {
     DepositChain {
         receipt: deposit_receipt(
-            &built.deposit.mint.opid,
+            built.deposit.mint.lock_id(),
             operation_id(&built.deposit),
             &built.deposit.invoice,
             lock_block,
@@ -721,20 +721,17 @@ impl ResolveWitness for ChainWith {
     }
 }
 
-/// The consumer's view of the EVM chain: the deposit's `FundsIn` exists.
-struct LockedOnChain(OpId);
+/// The consumer's view of the EVM chain: the deposit's `FundsIn` exists
+/// under this lockId.
+struct LockedOnChain(LockId);
 
-impl ResolveAnchor for LockedOnChain {
-    fn evm_chain_id(&self) -> Result<u64, AnchorResolverError> {
+impl ResolveClaim for LockedOnChain {
+    fn evm_chain_id(&self) -> Result<u64, ClaimResolverError> {
         Ok(EVM_CHAIN_ID)
     }
-    fn is_confirmed(
-        &self,
-        _: &BridgeLocation,
-        anchor: &ExternalAnchor,
-    ) -> Result<bool, AnchorResolverError> {
-        let ExternalAnchor::Mint { opid, amount, .. } = anchor;
-        Ok(*opid == self.0 && *amount == MINTED)
+    fn is_confirmed(&self, _: &BridgeLocation, claim: &Claim) -> Result<bool, ClaimResolverError> {
+        let Claim::Lock { amount, .. } = claim;
+        Ok(LockId::from(claim) == self.0 && *amount == MINTED)
     }
 }
 
@@ -751,7 +748,7 @@ fn consumer_validates(deposit: &Deposit, chain: Vec<Transaction>) -> Result<(), 
         transfer.validate_deterministic(&BridgedFungibleAsset::schema_rules(), &config)?;
     let location = BridgedFungibleAsset::bridge_location(pending.consignment().genesis()).unwrap();
     pending
-        .resolve_all_anchors(location, &LockedOnChain(deposit.mint.opid))
+        .resolve_all_claims(location, &LockedOnChain(deposit.mint.lock_id().into()))
         .expect("the consumer confirms the mint against its lock");
     pending.pending().resolve_all(&ChainWith(chain))?;
     assert!(pending.pending().is_resolved());
@@ -931,6 +928,32 @@ fn refuses_a_lock_above_the_finality_head() {
     assert_eq!(error.code, 8, "the caller must recognize a finality wait");
     let refusal = refusal(&response);
     assert!(refusal.contains("above RPC finalized block"), "{refusal}");
+}
+
+/// The built deposit over the wire, its `FundsIn` naming `lock_id`.
+fn drive_locked(built: &Built, lock_id: [u8; 32]) -> EnclaveResponse {
+    let mut chain = deposit_chain(built, LOCK_BLOCK, LOCK_BLOCK, vec![]);
+    chain.receipt = deposit_receipt(
+        lock_id,
+        operation_id(&built.deposit),
+        &built.deposit.invoice,
+        LOCK_BLOCK,
+    );
+    let ctx = context(bridge_config(&built.deposit.contract_id), chain);
+    sign_over_the_wire(&ctx, sign_request(built))
+}
+
+/// The lock names `LockId(opid, txid)` of the signed tx: a deposit under the
+/// bare OpId, or under the OpId in another tx, backs no signature.
+#[test]
+fn refuses_a_deposit_not_locked_under_the_mint_lock_id() {
+    let built = build(None);
+    let opid = built.deposit.mint.opid;
+    let other_tx = bfa_consignment::lock_id_bytes(opid, Txid::from_byte_array([0x42; 32]));
+    for lock_id in [bfa_consignment::opid_bytes(opid), other_tx] {
+        let refusal = refusal(&drive_locked(&built, lock_id));
+        assert!(refusal.contains("lockId mismatch"), "{refusal}");
+    }
 }
 
 /// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.

@@ -543,14 +543,14 @@ mod settlement {
     use alloy_sol_types::SolValue;
 
     const LOCK_A: VerifiedLock = VerifiedLock {
-        mint_opid: [0x51; 32],
+        lock_id: [0x51; 32],
         minted: 100,
         operation_id: [0xA1; 32],
         net_amount: 950,
     };
 
     const LOCK_B: VerifiedLock = VerifiedLock {
-        mint_opid: [0x62; 32],
+        lock_id: [0x62; 32],
         minted: 30,
         operation_id: [0xB2; 32],
         net_amount: 20,
@@ -635,8 +635,8 @@ mod settlement {
     }
 
     #[test]
-    fn rejects_a_citation_of_the_mint_opid_instead_of_the_bridge_record() {
-        let err = check(&[LOCK_A.mint_opid[0]], &[LOCK_A]).unwrap_err();
+    fn rejects_a_citation_of_the_mint_lock_id_instead_of_the_bridge_record() {
+        let err = check(&[LOCK_A.lock_id[0]], &[LOCK_A]).unwrap_err();
         assert!(err.to_string().contains("settlementData mismatch"), "{err}");
     }
 
@@ -716,7 +716,7 @@ mod lz_route {
     const BURNED: u64 = 1000;
 
     const LOCK: VerifiedLock = VerifiedLock {
-        mint_opid: [0x51; 32],
+        lock_id: [0x51; 32],
         minted: 100,
         operation_id: [0xA1; 32],
         net_amount: 950,

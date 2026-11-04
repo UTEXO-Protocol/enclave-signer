@@ -70,7 +70,7 @@ pub(super) fn handle_sign(
         })
     };
 
-    // Binds each BFA mint anchor of a consignment to its derived lock.
+    // Binds each BFA mint claim of a consignment to the lock its lockId derives.
     #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
     let anchor_binder =
         |bridge: &crate::networks::rgb::validation::BfaBridge,
@@ -466,9 +466,10 @@ fn verify_funds_in_deposit(
 
     // Recipient bind. The checks above prove the amount, not the recipient.
     // The v2 Bridge `fundsIn` refuses a non-empty RGB destinationAddress, so
-    // the deposit has no invoice. Then the OpId binds the recipient:
-    // `decode_funds_in` requires the deposit rgbOpId to be the signed mint
-    // transition, and that transition commits to its recipient seals.
+    // the deposit has no invoice. Then the lockId binds the recipient:
+    // `decode_funds_in` requires the deposit lockId to name the signed mint
+    // transition in the signed tx. The transition commits to its recipient
+    // seals and the tx to a witness mint's output script.
     // A legacy deposit with an invoice also gets the seal bind.
     if verified.destination_address.trim().is_empty() {
         return Ok(None);
@@ -1035,7 +1036,7 @@ mod indexer_only_bindings {
         let mut recipient = [0u8; 32];
         recipient[12..].fill(0x42);
         let lock = VerifiedLock {
-            mint_opid: [0x61; 32],
+            lock_id: [0x61; 32],
             minted: 1_000,
             operation_id: [0xa1; 32],
             net_amount: 1_000,

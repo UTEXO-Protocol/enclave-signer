@@ -185,9 +185,10 @@ pub fn validate_funds_out_source_burn_tx_id(
 /// `abi.encode(bytes32[] operationIds)` and requires a `FundsIn` record for
 /// each id, but does not know which deposits are behind a burn. Each id hashes
 /// its deposit's netAmount, so no amounts are cited. The enclave derives one
-/// deposit id per ancestry mint ([`crate::networks::evm::events::derived_lock`])
-/// without reading the chain. That deposit's existence is enforced by
-/// `beforeFundsOut`, so the release route must use `RgbSettlementModule`.
+/// deposit id per ancestry mint from its lockId, `LockId(opid, witness txid)`
+/// ([`crate::networks::evm::events::derived_lock`]), without reading the
+/// chain. `beforeFundsOut` enforces that deposit's existence, so the release
+/// route must use `RgbSettlementModule`.
 /// The cited set must equal the derived ancestry, id for id.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending

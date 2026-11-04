@@ -22,7 +22,7 @@ use bitcoin::{TxIn, TxOut, Witness};
 use psrgbt::{
     RgbOutExt, RgbPsbtExt, PSBT_MPC_PREFIX, PSBT_OPRET_PREFIX, PSBT_RGB_PREFIX, PSBT_TAPRET_PREFIX,
 };
-use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, Transfer, WitnessBundle};
+use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, LockId, Transfer, WitnessBundle};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -54,12 +54,21 @@ pub struct Utxo {
     pub outpoint: OutPoint,
 }
 
-/// A mint the history made, as its anchor names it.
+/// A mint the history made, as its claim names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mint {
     pub opid: OpId,
+    /// The txid of the mint's witness tx, which its lockId commits to.
+    pub witness_id: bitcoin::Txid,
     pub amount: u64,
     pub before_block: u64,
+}
+
+impl Mint {
+    /// The lockId its EVM lock is keyed by.
+    pub fn lock_id(&self) -> [u8; 32] {
+        lock_id_bytes(self.opid, self.witness_id)
+    }
 }
 
 /// One transition committed in its witness tx, the PSBT of that tx with its
@@ -83,6 +92,12 @@ impl Committed {
             psbt,
             fascia,
         }
+    }
+
+    /// The lockId of this transition in this tx, as a mint's lock names it.
+    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    pub fn lock_id(&self) -> [u8; 32] {
+        lock_id_bytes(self.opid, self.tx.compute_txid())
     }
 
     /// The fascia file bytes, as the bridge sends them.
@@ -146,9 +161,14 @@ pub fn outpoint(tag: u8, vout: u32) -> OutPoint {
     OutPoint::new(bitcoin::Txid::from_byte_array([tag; 32]), vout)
 }
 
-/// The OpId as the EVM `FundsIn` topic and the bridge carry it.
+/// The OpId as the bridge carries it.
 pub fn opid_bytes(opid: OpId) -> [u8; 32] {
     opid.to_byte_array()
+}
+
+/// `LockId(opid, witness_id)` as the EVM `FundsIn` topic and the deposit id carry it.
+pub fn lock_id_bytes(opid: OpId, witness_id: bitcoin::Txid) -> [u8; 32] {
+    LockId::with(opid, witness_id).to_byte_array()
 }
 
 /// `burnReason` in the bridge format: 12 zero bytes, then the EVM address.
@@ -393,7 +413,7 @@ impl History {
     }
 
     /// Commits `mint` in a tx that spends `right`, then `extra_inputs`, and
-    /// records its anchor.
+    /// records its claim.
     fn commit_mint(
         &mut self,
         mint: Transition,
@@ -409,6 +429,7 @@ impl History {
         let minted = self.commit_psbt(vec![mint], inputs, outputs);
         self.mints.push(Mint {
             opid: minted.opid,
+            witness_id: minted.tx.compute_txid(),
             amount,
             before_block,
         });
