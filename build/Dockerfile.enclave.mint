@@ -128,10 +128,11 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
 # Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
 # pin binds them instead.
-# SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
-# In practice that is the rights send that made the right; 3 matches the bridge's
-# INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
-# The connector must pass mint_begin min_confirmations of at least this value.
+# SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
+# the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
+# Here it only decides when the health check reports the SPV header chain
+# synced, that many blocks past the checkpoint. The burn image keeps 6, the
+# depth it checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
 # witness mint is refused after its lock. Measured, not attested.
