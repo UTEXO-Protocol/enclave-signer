@@ -792,9 +792,9 @@ fn block_with_a_64_byte_tx() -> (
 }
 
 /// The consignment's only witness txid is b, the second half of the mined
-/// 64-byte tx X, proven at position 1 of a tree one level deeper than the
-/// block's, with path [a, t1, n23]. The gate (`validate_source_chain`) and the
-/// consensus input (`proven_witnesses`) both refuse it, and nothing is pinned.
+/// 64-byte tx X, proven with path [a, t1, n23]. The gate
+/// (`validate_source_chain`) and the consensus input (`proven_witnesses`) both
+/// refuse it, and nothing is pinned.
 #[test]
 fn burn_gate_refuses_a_half_of_a_mined_64_byte_tx() {
     let (chain, a, b, t1, n23, _) = block_with_a_64_byte_tx();

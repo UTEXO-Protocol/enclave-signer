@@ -12,13 +12,11 @@
 //! duplicate in the path, so this verifier does not make it.
 //!
 //! The path length is not bound to the block's tree depth: a proof carries
-//! no coinbase proof or transaction count to derive it from. Two refusals
-//! keep a proof from naming a leaf the block does not have. The position
-//! must be consumed by the path, one bit per sibling. And no node hashed on
-//! the path may itself be a 64-byte transaction, because the txid of such a
-//! transaction is the hash of its two 32-byte halves, so either half would
-//! pass as a txid one level deeper (CVE-2017-12842). `MAX_MERKLE_PATH_DEPTH`
-//! bounds the hashing a prover can cause.
+//! no coinbase proof or transaction count. Two refusals cover that. The
+//! position must be consumed by the path, one bit per sibling. And no node
+//! hashed on the path may be a 64-byte transaction, because its txid is the
+//! hash of its two halves (CVE-2017-12842). `MAX_MERKLE_PATH_DEPTH` bounds
+//! the hashing a prover can cause.
 
 use bitcoin::hashes::{sha256d, Hash};
 
@@ -47,25 +45,21 @@ pub enum MerkleError {
     /// `position` has a set bit at or above `depth`. A path of `depth`
     /// siblings reaches only the leaves 0 to 2^depth - 1.
     PositionOutOfRange { position: u32, depth: usize },
-    /// The two 32-byte children hashed at path `level` are together a
-    /// 64-byte transaction. A half of it would then pass as a txid one level
-    /// below it (CVE-2017-12842).
+    /// The 64 bytes hashed at path `level` are a transaction, not two hashes
+    /// (see the module doc).
     TransactionShapedNode { level: usize },
 }
 
 /// Bitcoin's MAX_MONEY in satoshis. Consensus refuses an output above it.
 const MAX_MONEY_SATS: u64 = 21_000_000 * 100_000_000;
 
-/// True when `node` is the legacy serialization of a transaction with one
-/// input and one output and an output value in the money range.
-///
-/// Layout of such a transaction (s = scriptSig length, p = scriptPubKey
-/// length): version [0,4), input count [4], prevout [5,41), s [41],
-/// scriptSig [42,42+s), sequence [42+s,46+s), output count [46+s],
-/// value [47+s,55+s), p [55+s], scriptPubKey [56+s,56+s+p),
-/// lock time [56+s+p,60+s+p). The length is 60 + s + p, so 64 bytes means
-/// s + p = 4. Two inputs (41 bytes each) or two outputs (9 bytes each) do
-/// not fit in 64 bytes, and consensus refuses zero inputs or zero outputs.
+/// True when `node` is the legacy serialization of a one-input, one-output
+/// transaction with a value in the money range. That is every 64-byte
+/// transaction: the fixed fields take 60 bytes, so the scriptSig (s bytes)
+/// and the scriptPubKey (p bytes) share the other 4. Two inputs or two
+/// outputs do not fit, and consensus refuses zero inputs or zero outputs.
+/// Offsets: input count [4], s [41], output count [46+s], value [47+s,55+s),
+/// p [55+s].
 fn is_64_byte_transaction(node: &[u8; 64]) -> bool {
     if node[4] != 1 {
         return false;
@@ -86,10 +80,8 @@ fn is_64_byte_transaction(node: &[u8; 64]) -> bool {
 /// An empty `path` is valid: a block with only the coinbase has txid ==
 /// merkle root.
 ///
-/// The path length is not bound to the block's tree depth. Two refusals keep
-/// a proof from naming a leaf the block does not have: a `position` bit that
-/// no sibling consumes, and a 64-byte node that is also a transaction (then a
-/// half of that transaction poses as a txid one level deeper).
+/// Refuses a `position` that the path cannot reach, and a node that is a
+/// 64-byte transaction (see the module doc).
 pub fn verify_merkle_proof(
     txid: &Sha256d,
     position: u32,
@@ -119,9 +111,7 @@ pub fn verify_merkle_proof(
             buf[32..].copy_from_slice(&current);
         }
 
-        // A real tree node hashes two 32-byte hashes. If these 64 bytes are
-        // also a transaction, `current` may be a half of a mined 64-byte tx
-        // and not a txid at all.
+        // A node is two hashes. Refuse one that is also a transaction.
         if is_64_byte_transaction(&buf) {
             return Err(MerkleError::TransactionShapedNode { level: i });
         }
@@ -428,9 +418,9 @@ mod tests {
         assert!(shaped > 5_000, "too few positives exercised: {shaped}");
     }
 
-    /// The construction behind CVE-2017-12842 with a real 64-byte X mined at
-    /// position 0 of a four-transaction block: each half of X, proven one level
-    /// deeper, is refused at level 0. The honest proofs of the same block pass.
+    /// A 64-byte X mined at position 0 of a four-transaction block: each half
+    /// of X, proven as a leaf, is refused at level 0. The honest proofs of the
+    /// same block pass.
     #[test]
     fn refuses_a_half_of_a_64_byte_transaction_as_a_leaf() {
         for s in 0..=4 {
@@ -465,11 +455,10 @@ mod tests {
         }
     }
 
-    /// A node that is not a transaction is accepted at any depth. The
-    /// predicate is as narrow as the attack: sha256d(a || b) of a
-    /// non-transaction a || b is no mined txid short of a SHA-256d collision,
-    /// so no block can present such a node. Binding the tree depth itself
-    /// needs a coinbase proof, which the request does not carry.
+    /// A node that is not a transaction is accepted at any depth: without a
+    /// SHA-256d collision, no block can present such a node as a txid. Binding
+    /// the tree depth itself needs a coinbase proof, which the request does
+    /// not carry.
     #[test]
     fn a_node_that_is_not_a_transaction_is_accepted_at_any_depth() {
         let a: Sha256d = [0xA1; 32];

@@ -11,8 +11,7 @@
 //! 3. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
 //!    header at `block_height`. The path has at most `MAX_MERKLE_PATH_DEPTH`
 //!    siblings, `tx_position` is consumed by it, and no node on it is a
-//!    64-byte transaction (a half of one would pose as a txid one level
-//!    deeper; see `spv::merkle`).
+//!    64-byte transaction (see `spv::merkle`).
 //! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
 //!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
 //!    Bridge spec section 11 forbids trust in only the most recent anchoring
@@ -414,7 +413,7 @@ fn verify_one_proof(
         )),
         MerkleError::TransactionShapedNode { level } => EnclaveError::Spv(format!(
             "merkle_proofs[{index}]: the merkle node at level {level} is a 64-byte \
-             transaction, so txid {} may be a half of it (CVE-2017-12842)",
+             transaction, not a pair of hashes (txid {})",
             hex::encode(proof.txid.as_slice())
         )),
     })?;
