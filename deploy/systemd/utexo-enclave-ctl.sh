@@ -16,9 +16,9 @@ set -uo pipefail
 ACTION="${1:?usage: utexo-enclave-ctl.sh start|check|stop <cid>}"
 CID="${2:?cid required}"
 # systemd gives `start` the values in /etc/utexo/enclave.env. `check` takes
-# the four keys below from this file only, and a key that is not in the file
+# the three keys below from this file only, and a key that is not in the file
 # gets its default. A drop-in or the systemd manager can still give `start` a
-# value for such a key, but deploy-host.sh writes all four keys. `check`
+# value for such a key, but deploy-host.sh writes all three keys. `check`
 # refuses a file that it cannot read. It reads only these plain lines:
 # - KEY=value. The key has only ASCII letters, digits and `_`, and its first
 #   character is not a digit. The key and the `=` can have blanks around
@@ -65,7 +65,7 @@ if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
     '') echo "cannot read $ENV_FILE. systemd gives start the values in this file. Run check as root or as a user that can read the file." >&2; exit 1 ;;
     *) echo "line $bad of $ENV_FILE is not a plain line. Write the file again with plain KEY=value lines, comment lines and blank lines only (README)." >&2; exit 1 ;;
   esac
-  for key in ENCLAVE_MEMORY ENCLAVE_CIDS NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
+  for key in ENCLAVE_MEMORY NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
     value="$(awk -v k="$key" -v q="'" '
       { l = $0; sub(/^[ \t\r]+/, "", l); n = index(l, "=") }
       n > 0 && substr(l, 1, n - 1) ~ ("^" k "[ \t]*$") {
@@ -181,32 +181,10 @@ case "$ACTION" in
       echo "ENCLAVE_MEMORY=$MEM MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
       exit 1
     fi
-    # One enclave is the default. The operator opts into more with an explicit
-    # CID list; no separate count can disagree with the deployment.
-    read -r -a CIDS <<< "${ENCLAVE_CIDS:-16}"
-    COUNT="${#CIDS[@]}"
-    if [ "$COUNT" -eq 0 ]; then
-      echo "ENCLAVE_CIDS must contain at least one CID" >&2
-      exit 1
-    fi
-    SEEN=" "
-    for CONFIGURED_CID in "${CIDS[@]}"; do
-      case "$CONFIGURED_CID" in
-        16|18|20) ;;
-        *) echo "ENCLAVE_CIDS must list unique CIDs from 16, 18 and 20, got '$CONFIGURED_CID'" >&2; exit 1 ;;
-      esac
-      case "$SEEN" in
-        *" $CONFIGURED_CID "*) echo "ENCLAVE_CIDS must not repeat CID $CONFIGURED_CID" >&2; exit 1 ;;
-      esac
-      SEEN="$SEEN$CONFIGURED_CID "
-    done
-    LABEL=enclaves
-    [ "$COUNT" -eq 1 ] && LABEL=enclave
     if [ "$ACTION" = check ]; then
-      # The pool must hold every enclave of the host at this value. The
-      # allocator applies the file at its next start, and the kernel holds
-      # the pages now.
-      need=$((COUNT * MEM))
+      # Each control invocation checks exactly one enclave. Operators run the
+      # command again for any other CID.
+      need=$MEM
       file="$(file_pool_mib)"
       # The allocator refuses a value that is not a number, and it reads a
       # leading zero as an octal number.
@@ -214,15 +192,15 @@ case "$ACTION" in
         ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $POOL_FILE, got '$file'" >&2; exit 1 ;;
       esac
       if [ "$file" -lt "$need" ]; then
-        echo "memory_mib in $POOL_FILE is $file MiB, and $COUNT $LABEL (ENCLAVE_CIDS) of $MEM MiB need $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "memory_mib in $POOL_FILE is $file MiB, and one enclave of $MEM MiB needs $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
         exit 1
       fi
       held="$(pages_mib nr_hugepages)"
       if [ "$held" -lt "$need" ]; then
-        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and $COUNT $LABEL (ENCLAVE_CIDS) of $MEM MiB need $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and one enclave of $MEM MiB needs $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
         exit 1
       fi
-      echo "CID $CID: $COUNT $LABEL of $MEM MiB fit: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
+      echo "CID $CID: one enclave of $MEM MiB fits: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
       exit 0
     fi
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
