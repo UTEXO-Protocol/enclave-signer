@@ -127,6 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = server
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
+        // Inside the limit: the shape check holds each body it reads.
+        .layer(utexo_bridge_parent::request_shape::ShapeLayer)
         .load_shed(true)
         // tonic 0.14.9 skips GOAWAY when both age and grace are set.
         // LimitedSocket enforces the drain deadline.
