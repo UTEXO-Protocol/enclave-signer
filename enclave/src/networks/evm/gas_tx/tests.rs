@@ -802,11 +802,11 @@ fn eip1559_with_empty_access_list_entries(n: usize) -> Vec<u8> {
     tx
 }
 
-/// The item cap is exact: 1024 items decode, 1025 do not.
+/// The item limit is exact: 1024 items decode, 1025 do not.
 #[test]
-fn rlp_item_cap_is_exact() {
-    let at_cap = eip1559_with_empty_access_list_entries(MAX_RLP_ITEMS - 10);
-    assert!(validate_gas_tx_request(&req(at_cap), &cfg()).is_ok());
+fn rlp_item_limit_is_exact() {
+    let at_limit = eip1559_with_empty_access_list_entries(MAX_RLP_ITEMS - 10);
+    assert!(validate_gas_tx_request(&req(at_limit), &cfg()).is_ok());
 
     let over = eip1559_with_empty_access_list_entries(MAX_RLP_ITEMS - 9);
     let err = validate_gas_tx_request(&req(over), &cfg()).unwrap_err();
@@ -816,11 +816,11 @@ fn rlp_item_cap_is_exact() {
     );
 }
 
-/// The largest unsigned_tx the byte cap allows, filled with one-byte empty
-/// lists, is refused by the item cap before the decoder builds its tree.
-/// Without the cap it decoded into a tree of more than a GiB and was signed.
+/// The largest unsigned_tx the byte limit allows, filled with one-byte empty
+/// lists, is refused by the item limit before the decoder builds its tree.
+/// Without the limit it decoded into a tree of more than a GiB and was signed.
 #[test]
-fn a_byte_cap_size_access_list_is_refused() {
+fn a_byte_limit_size_access_list_is_refused() {
     let tx = eip1559_with_empty_access_list_entries(MAX_GAS_TX_BYTES - 64);
     assert!(tx.len() <= MAX_GAS_TX_BYTES);
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
@@ -830,9 +830,9 @@ fn a_byte_cap_size_access_list_is_refused() {
     );
 }
 
-/// An unsigned_tx above the byte cap is refused before it is decoded.
+/// An unsigned_tx above the byte limit is refused before it is decoded.
 #[test]
-fn an_unsigned_tx_over_the_byte_cap_is_refused() {
+fn an_unsigned_tx_over_the_byte_limit_is_refused() {
     let tx = eip1559_with_empty_access_list_entries(MAX_GAS_TX_BYTES);
     assert!(tx.len() > MAX_GAS_TX_BYTES);
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
@@ -849,7 +849,7 @@ fn long_calldata_is_one_item() {
     assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
 }
 
-/// Nested lists down to the depth cap, repeated up to the byte cap.
+/// Nested lists down to the depth limit, repeated up to the byte limit.
 fn eip1559_with_deep_access_list(bytes: usize) -> Vec<u8> {
     // One entry: MAX_RLP_DEPTH nested one-item lists.
     // The body is depth 0 and the access list depth 1, so the entry can
@@ -884,7 +884,7 @@ fn gas_tx_decoding_stays_within_the_request_memory_factor() {
 
     let frame = crate::framing::MAX_MESSAGE_SIZE as usize - 64;
     let shapes: [(&str, Vec<u8>); 4] = [
-        // The byte cap refuses this one before any decode. The item cap
+        // The byte limit refuses this one before any decode. The item limit
         // refuses the next two after 1024 items. Only the calldata shape
         // decodes in full.
         (
@@ -892,14 +892,14 @@ fn gas_tx_decoding_stays_within_the_request_memory_factor() {
             eip1559_with_empty_access_list_entries(frame),
         ),
         (
-            "byte cap of empty lists",
+            "byte limit of empty lists",
             eip1559_with_empty_access_list_entries(MAX_GAS_TX_BYTES - 64),
         ),
         (
-            "byte cap of deep lists",
+            "byte limit of deep lists",
             eip1559_with_deep_access_list(MAX_GAS_TX_BYTES - 64),
         ),
-        ("byte cap of calldata", {
+        ("byte limit of calldata", {
             let mut data = ALLOWED_SELECTOR.to_vec();
             data.resize(MAX_GAS_TX_BYTES - 128, 0xab);
             eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 0, &data)

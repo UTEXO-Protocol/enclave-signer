@@ -9,9 +9,9 @@ use crate::proto::EnclaveRequest;
 /// Maximum size of one framed message. A request is one message, so it holds
 /// the consignment, the Merkle proofs and the calldata.
 ///
-/// Sized for the default request caps in [`crate::config`]: 12 MiB consignment,
-/// 8 MiB proof bytes, and protobuf overhead for 16_384 proof entries. The
-/// parent has the same constant.
+/// Sized for the default request limits in [`crate::config`]: a 10 MiB
+/// consignment, 8 MiB of proof bytes, and protobuf overhead for 16_384 proof
+/// entries. The parent has the same constant.
 pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
 /// Maximum protobuf field occurrences in one request. The shape check counts
@@ -301,26 +301,30 @@ mod tests {
         peak::assert_within_request_bound("read_request of empty proof entries", wire.len(), peak);
     }
 
-    /// The element cap is exact. A `Sign` frame with `n` empty entries has
+    /// The element limit is exact. A `Sign` frame with `n` empty entries has
     /// 2 + 2n occurrences: `sign`, `rgb_source`, one for each entry and one
-    /// for its path element. The frame at the cap is the most a request can
+    /// for its path element. The frame at the limit is the most a request can
     /// expand, and it stays within the request bound.
     #[test]
-    fn the_wire_element_cap_is_exact() {
+    fn the_wire_element_limit_is_exact() {
         use crate::memory::peak;
 
-        let (at_cap, decoded, peak) = peak::measure(
+        let (at_limit, decoded, peak) = peak::measure(
             || sign_frame_with_empty_proof_entries((MAX_WIRE_ELEMENTS - 2) / 2),
             |wire| read_request(&mut Cursor::new(wire)).unwrap(),
         );
-        peak::assert_within_request_bound("read_request at the element cap", at_cap.len(), peak);
-        // The frame has exactly the cap in occurrences, so the model and the
+        peak::assert_within_request_bound(
+            "read_request at the element limit",
+            at_limit.len(),
+            peak,
+        );
+        // The frame has exactly the limit in occurrences, so the model and the
         // request bound meet here.
-        let elements = count_request_elements(&at_cap[4..]).unwrap();
+        let elements = count_request_elements(&at_limit[4..]).unwrap();
         assert_eq!(elements, MAX_WIRE_ELEMENTS);
         peak::assert_within_model(
-            "read_request at the element cap",
-            at_cap.len(),
+            "read_request at the element limit",
+            at_limit.len(),
             elements,
             peak,
         );
@@ -341,12 +345,12 @@ mod tests {
         assert!(err.contains("more than"), "got: {err}");
     }
 
-    /// The largest real burn request passes the shape check: the proof cap
-    /// of entries, each with a full mainnet path, and a consignment that the
-    /// walk skips as bytes.
+    /// The largest real burn request passes the shape check. It has as many
+    /// proof entries as the proof limit allows, each with a full mainnet
+    /// path. The walk skips its consignment as bytes.
     #[test]
     fn the_largest_burn_request_passes_the_shape_check() {
-        use crate::config::DEFAULT_MAX_MERKLE_PROOFS;
+        use crate::config::{DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS};
         use crate::proto::sign_request::SourceNetwork;
         use crate::proto::{MerkleProofEntry, RgbSource, SignRequest};
 
@@ -364,7 +368,7 @@ mod tests {
                     asset_id: "rgb:test".into(),
                     // Bytes that look like protobuf keys. The walk skips them
                     // without counting them.
-                    consignment: vec![0x32; 12 * 1024 * 1024],
+                    consignment: vec![0x32; DEFAULT_MAX_CONSIGNMENT_BYTES],
                     consignment_hash: vec![0x22; 32],
                     merkle_proofs: vec![entry; DEFAULT_MAX_MERKLE_PROOFS],
                     commission: 0,

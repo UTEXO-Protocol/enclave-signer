@@ -144,13 +144,19 @@ fn load_bounded(
     lists: &ListAccess<'_>,
 ) -> Result<(Transfer, Option<RejectListContract>)> {
     // TFR only: a validated copy (VTF), a contract (CON) and V0 fail here.
-    let transfer = Transfer::load(Cursor::new(bytes)).map_err(|e| {
+    let decoded = Transfer::load(Cursor::new(bytes)).map_err(|e| {
         tracing::warn!(
             bytes_len = bytes.len(),
             "consignment deserialization failed: {e}"
         );
         EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
     })?;
+    // The decoder doubles a list when it grows, so a decoded list can take
+    // twice the heap of its items. A clone keeps each list at its length.
+    // This copy stays alive while rgb-lib validates, so the clone lowers the
+    // validation peak (`memory.rs`).
+    let transfer = decoded.clone();
+    drop(decoded);
     assert_bfa_genesis(&transfer.genesis)?;
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
     let list = reject_list(&transfer.genesis)?;

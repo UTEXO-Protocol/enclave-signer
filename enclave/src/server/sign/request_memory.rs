@@ -1,8 +1,8 @@
 //! The request memory model (`memory.rs`), measured on a whole request. The
 //! measurement covers the frame read, the shape check, the decode and
 //! `dispatch`, with the decoded request alive while the source is validated.
-//! The per-parser tests measure each parser alone. This one measures them
-//! together with the held request.
+//! The other memory tests measure one parser at a time. This one measures
+//! the parsers together with the held request.
 
 use std::io::Cursor;
 
@@ -138,7 +138,7 @@ fn a_burn_request_through_dispatch_stays_within_the_request_bound() {
     );
 }
 
-/// The same at the history the request caps are sized for (`config.rs`).
+/// The same at the history the request limits are sized for (`config.rs`).
 /// Slow in a debug build.
 #[test]
 #[ignore = "a history of 10_000 transfers; run it on request"]

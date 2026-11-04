@@ -48,6 +48,23 @@ pub enum VerifyError {
 
 pub type Result<T> = std::result::Result<T, VerifyError>;
 
+/// The most bytes a document may have before any parse. A real Nitro document
+/// is a few KiB: the COSE wrapper, the PCRs, the certificate with its chain,
+/// and the small user fields. A larger input is refused before the CBOR
+/// decode, because a decoded CBOR element takes far more memory than its
+/// bytes.
+pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
+
+fn check_document_size(doc: &[u8]) -> Result<()> {
+    if doc.len() > MAX_DOCUMENT_BYTES {
+        return Err(VerifyError::Attestation(format!(
+            "attestation document is {} bytes; the limit is {MAX_DOCUMENT_BYTES}",
+            doc.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Expected PCR values of a trusted enclave. They come out-of-band (release
 /// artifact, on-chain config or operator flag). The verifier compares them
 /// byte for byte with the document PCRs.
@@ -406,6 +423,7 @@ IwLz3/Y=
         root_der: &[u8],
         at: CheckTime,
     ) -> Result<(AttestationDocument, Vec<u8>)> {
+        super::check_document_size(doc)?;
         let cose = CoseSign1::from_bytes(doc)?;
         verify_cose_alg_es384(&cose.protected)?;
         let payload = cose
@@ -682,9 +700,10 @@ IwLz3/Y=
         Ok(())
     }
 
+    /// The unprotected header (element 1) is not read. It is not copied out
+    /// of the decoded value either: a hostile document can make it large.
     pub(super) struct CoseSign1 {
         protected: Vec<u8>,
-        _unprotected: ciborium::Value,
         pub payload: Option<Vec<u8>>,
         pub signature: Vec<u8>,
     }
@@ -720,7 +739,6 @@ IwLz3/Y=
                 .as_bytes()
                 .ok_or_else(|| VerifyError::Attestation("invalid protected header".into()))?
                 .clone();
-            let unprotected = arr[1].clone();
             let payload = if arr[2].is_null() {
                 None
             } else {
@@ -738,7 +756,6 @@ IwLz3/Y=
 
             Ok(Self {
                 protected,
-                _unprotected: unprotected,
                 payload,
                 signature,
             })
@@ -1316,6 +1333,7 @@ mod mock {
         expected_pcrs: &ExpectedPcrs,
         expected_nonce: Option<&[u8; 32]>,
     ) -> Result<(AttestationDocument, Vec<u8>)> {
+        super::check_document_size(doc)?;
         let attestation: AttestationDocument = ciborium::from_reader(doc)
             .map_err(|e| VerifyError::Attestation(format!("failed to parse mock doc: {e}")))?;
 
@@ -1331,6 +1349,29 @@ mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A document over the size limit is refused before any parse, on the
+    /// real and the mock path. At the limit the parse runs.
+    #[test]
+    fn a_document_over_the_size_limit_is_refused_before_the_parse() {
+        let over = vec![0xf6u8; MAX_DOCUMENT_BYTES + 1];
+        let err = verify_attestation(&over, &ExpectedPcrs::zero(), None).unwrap_err();
+        assert!(err.to_string().contains("the limit is"), "{err}");
+        #[cfg(feature = "mock")]
+        {
+            let err = verify_mock_attestation(&over, &ExpectedPcrs::zero(), None).unwrap_err();
+            assert!(err.to_string().contains("the limit is"), "{err}");
+        }
+
+        // At the limit the parse runs: it reads one CBOR null, which is not
+        // the COSE array.
+        let at_limit = vec![0xf6u8; MAX_DOCUMENT_BYTES];
+        let err = verify_attestation(&at_limit, &ExpectedPcrs::zero(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("COSE_Sign1 must be array"),
+            "{err}"
+        );
+    }
 
     // Test the zero-PCR check when allow-debug-pcrs is disabled. (F03-AF-12)
     #[cfg(not(feature = "allow-debug-pcrs"))]

@@ -9,11 +9,34 @@
 //!                             + MAX_WIRE_ELEMENTS * WIRE_ELEMENT_BYTES
 //! ```
 //!
-//! The first term covers every parser: each byte of input costs at most
-//! `REQUEST_MEMORY_FACTOR` bytes of heap. The second term covers the
-//! protobuf decode. A repeated element can be 2 bytes on the wire and about
-//! 80 bytes in memory. So `framing::check_request_shape` counts the elements
-//! before the decode and refuses more than `MAX_WIRE_ELEMENTS`.
+//! The first term covers most parsers that grow with their input: each byte
+//! costs at most `REQUEST_MEMORY_FACTOR` bytes of heap. The second term
+//! covers the protobuf decode. A repeated element can be 2 bytes on the wire
+//! and about 80 bytes in memory. So `framing::check_request_shape` counts the
+//! elements before the decode and refuses more than `MAX_WIRE_ELEMENTS`.
+//!
+//! A few parsers take more than the factor on the densest inputs measured.
+//! Each has a size limit, and at that limit it fits the bound of the largest
+//! frame, `request_bound(MAX_MESSAGE_SIZE)`. That is the heap each worker
+//! holds:
+//!
+//! - PSBTs, at most `MAX_PSBT_BYTES` (1 MiB): about 102 times for one input
+//!   and outputs that each carry two empty records. A request holds at most
+//!   two parsed PSBTs at once, a PSBT and its parent.
+//! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`
+//!   (64 KiB): about 48 times for a document of CBOR nulls.
+//! - Consignments, at most `max_consignment_bytes` (10 MiB): about 43 times
+//!   for transfers that turn one mint right into tens of thousands. The
+//!   sender sets part of the rate through the order of the OpIds, which sets
+//!   how full RGB validation keeps its B-trees. Validation of the densest
+//!   chain found took 430 MiB at the limit. A whole burn request with such a
+//!   consignment takes about 529 MiB by the test's count. That is less than
+//!   the 544 MiB each worker holds. A smaller frame with such a consignment
+//!   can take more than its own request bound. Validation clones the decoded
+//!   consignment, so each decoded list keeps only its length. It refuses
+//!   terminals that name more than 4096 outputs (`MAX_TERMINAL_OUTPUTS`).
+//!   `MAX_CONSIGNMENT_BYTES` can lower the limit, and the enclave refuses to
+//!   start with a larger value.
 //!
 //! [`crate::conn::WORKER_THREADS`] requests run at once, each at most
 //! [`crate::framing::MAX_MESSAGE_SIZE`] bytes. Add the memory the enclave uses
@@ -26,36 +49,82 @@
 //! Responses from the pinned EVM RPC and the Bitcoin indexer are outside the
 //! model. TLS pins their senders, and the host cannot change them.
 //!
-//! The factor is a tested rule, not an estimate. Each request type with a
-//! large input has a test. The test runs the largest input and fails when the
-//! peak is above the factor (`peak::assert_within_factor`). A parser whose
-//! output grows faster than its input fails that test instead of reaching an
-//! image. The tests live next to the code they measure: `framing`, the gas
-//! transaction decoder, consignment validation and PSBT parsing.
+//! The model is a tested rule, not an estimate. Each parser of a request byte
+//! field has a size limit, a measured factor, or both:
+//!
+//! - the frame (`MAX_MESSAGE_SIZE`) and its elements (`MAX_WIRE_ELEMENTS`),
+//! - consignments (`max_consignment_bytes`), and the outputs that their
+//!   terminals name (`MAX_TERMINAL_OUTPUTS`),
+//! - PSBTs (`MAX_PSBT_BYTES`),
+//! - gas transactions (`MAX_GAS_TX_BYTES`, `MAX_RLP_ITEMS`),
+//! - attestation documents (`attestation_verify::MAX_DOCUMENT_BYTES`),
+//! - fundsOut calldata (`MAX_FUNDS_OUT_CALL_DATA_LEN`),
+//! - the EVM RPC CA certificate (`MAX_EVM_RPC_CA_DER_BYTES`),
+//! - the `SetEndpoints` strings (`MAX_ENDPOINT_STRING_BYTES`),
+//! - an imported mnemonic, on `allow-seed-import` builds only,
+//! - headers (`MAX_HEADERS_PER_SUBMIT`) and Merkle paths
+//!   (`MAX_MERKLE_PATH_DEPTH`).
+//!
+//! The other byte fields are fixed-size, refused before use, never read, or
+//! read once into a buffer of their own size (the encrypted clone seed). The
+//! asset ids and the cloning secret have no upper limit, and no parser reads
+//! them: they are only compared, hashed or stored. No build reads
+//! `EvmSource.token` or `EvmSource.recipient`, and the mint signer does not
+//! read the destination consignment or its hash. They take memory only in
+//! the decode, which the frame term covers. An error text can quote request
+//! data, so dispatch cuts it to 1 KiB before it logs or returns it. The log
+//! formatter keeps a buffer as large as the longest line it wrote on each
+//! thread.
+//!
+//! The tests measure the frame, consignment, PSBT, gas transaction and
+//! attestation document parsers on the densest shapes measured. The other
+//! parsers have small size limits and refusal tests. The frame, PSBT,
+//! attestation document and gas transaction tests run at the limits. The
+//! consignment tests run histories of 2 000 and 10 000 transfers, and four
+//! wide shapes at two sizes each. A test fails when the peak is above the
+//! factor (`peak::assert_within_factor`), the request bound, or the heap each
+//! worker holds. A parser whose output grows faster than its input fails such
+//! a test instead of reaching an image. `#[ignore]` marks the slow tests with
+//! a history of 10 000 transfers, and CI runs them on the burn set. The tests
+//! live next to the code they measure: `framing`, `config`, the gas
+//! transaction decoder, consignment validation, PSBT parsing and attestation
+//! documents. The tests of whole requests through `dispatch` are in
+//! `server::sign::request_memory` and `server::rights_refill`.
 //!
 //! Connections waiting in the queue hold no heap: a worker reads the frame
 //! only when it starts the request.
+//!
+//! Consignment validation also uses RAM outside the heap. rgb-lib reads a
+//! consignment only from a file, so validation writes the bytes to a scratch
+//! file in `std::env::temp_dir()`. In the enclave, `/tmp` is a tmpfs, so the
+//! file takes up to `max_consignment_bytes` of RAM for each request. The heap
+//! meter does not count it. The file exists only after validation releases
+//! its decoded copy, when the heap is below the request peak. A one-off run
+//! that counted the file as heap measured the same peaks.
 
 use crate::conn::WORKER_THREADS;
 use crate::framing::{MAX_MESSAGE_SIZE, MAX_WIRE_ELEMENTS};
 use crate::policy::BuildContext;
 
-/// Upper bound on the heap one request uses, as a multiple of its input size.
-/// Every request type with a large input has a test against this bound. The
-/// largest measured value is consignment validation, at about 15 times the
-/// consignment. Reading a frame takes 3 times the frame. The gas transaction
-/// and PSBT parsers stay under 2. A whole burn request through `dispatch`,
-/// with the decoded request held during validation, peaks at about 15 times
-/// its frame, or 14.5 beyond the element term (`server::sign::request_memory`).
-/// The tests count requested bytes on the calling thread. Allocator overhead
-/// and fragmentation come out of the baseline, and a parser that moves work
-/// to other threads needs its own meter.
+/// Upper bound on the heap one request uses, as a multiple of its input size,
+/// for most parsers that grow with their input. Reading a frame takes 3 times
+/// the frame. Consignment validation of a long history takes about 11 times
+/// the consignment. The gas transaction parser stays under 0.1, and a PSBT
+/// whose bytes sit in large records about 1.5. A whole burn request through
+/// `dispatch` holds the decoded request during validation. It peaks at about
+/// 10.7 times its frame beyond the element term
+/// (`server::sign::request_memory`). The parsers that take more on the
+/// densest inputs measured have size limits (module docs). The tests count
+/// requested bytes on the calling thread. The baseline includes allocator
+/// overhead and fragmentation, and a parser that moves work to other threads
+/// needs its own meter.
 pub const REQUEST_MEMORY_FACTOR: usize = 20;
 
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
 /// covers the struct in its vector, a vector header, and the copy a growing
 /// vector holds during a move. The measured value is about 80 bytes per
-/// occurrence at the element cap (`framing::tests::the_wire_element_cap_is_exact`).
+/// occurrence at the element limit
+/// (`framing::tests::the_wire_element_limit_is_exact`).
 pub const WIRE_ELEMENT_BYTES: usize = 128;
 
 /// The second term of the request bound: the most the protobuf decode of one
@@ -82,14 +151,30 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// The least `nitro-cli run-enclave --memory` value, in MiB. `MemTotal` in
 /// `/proc/meminfo` leaves out the memory the kernel keeps for itself, and the
 /// root file system of the image sits in RAM too. So the launch value is
-/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 896 MiB to spare. A debug image
-/// at this value must report a `MemTotal` of at least the minimum. Record the
-/// reading here when a deploy measures it. The deploy scripts, the README,
-/// the spec and `build/deploy-to-ec2.sh` carry this value and the minimum as
-/// literals, and a test pins them to the constants. The deploy scripts refuse
-/// a smaller `ENCLAVE_MEMORY`. The host allocator must hold this much for
-/// every enclave it runs.
-pub const RUN_ENCLAVE_MEMORY_MIB: usize = 3584;
+/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 1408 MiB to spare.
+///
+/// The value is a whole number of GiB. nitro-cli gives an enclave whole
+/// hugepages, 1 GiB pages first, and the allocator reserves its pool the same
+/// way. A value such as 3584 MiB takes three 1 GiB pages and 256 pages of
+/// 2 MiB. When no 2 MiB page is free, it takes a fourth 1 GiB page. So a pool
+/// of three times 3584 MiB can hold only two such enclaves. At 4096 MiB,
+/// three enclaves take exactly 12288 MiB, with any mix of 1 GiB and 2 MiB
+/// pages.
+///
+/// No `MemTotal` reading at this value is on record yet. To take one, run one
+/// image at this value with `ENCLAVE_DEBUG_MODE=1`. Make sure that
+/// `nitro-cli describe-enclaves` shows this value in `MemoryMiB`. Then read
+/// `total_mib` in the "memory check passed" line on `nitro-cli console`. It
+/// must be at least the minimum. Record the reading here.
+///
+/// The deploy scripts, the README, the spec and `build/deploy-to-ec2.sh`
+/// carry this value and the minimum as literals, and a test pins them to the
+/// constants. The deploy scripts refuse a smaller `ENCLAVE_MEMORY`, or one
+/// that is not a whole number of GiB. `deploy-host.sh` and
+/// `utexo-enclave-ctl.sh check` also refuse a hugepage pool that cannot hold
+/// every enclave of the host at the launch value. `utexo-enclave-ctl.sh
+/// start` refuses only when the free hugepages cannot hold its own enclave.
+pub const RUN_ENCLAVE_MEMORY_MIB: usize = 4096;
 
 // The largest four requests fit in the part above the baseline, and the
 // kernel and the root file system get at least 512 MiB of the launch value.
@@ -99,11 +184,17 @@ const _: () = assert!(
 const _: () = assert!(MIN_ENCLAVE_MEMORY_BYTES == 2688 * 1024 * 1024);
 const _: () =
     assert!(RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024 - MIN_ENCLAVE_MEMORY_BYTES >= 512 * 1024 * 1024);
+// nitro-cli gives an enclave whole 1 GiB pages first, so the launch value is a
+// whole number of GiB.
+const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 
 /// Refuses to start a release build with less usable memory than
-/// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. Debug and test
+/// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. `main` panics on
+/// the refusal. A release build on a host with no `/proc/meminfo` refuses to
+/// start too, for example the TCP fallback of `main` on macOS. Debug and test
 /// builds run in local stacks of any size and on other operating systems, so
-/// they log a warning instead.
+/// they log a warning instead. A pass logs the total at info level, which is
+/// how a deploy reads `MemTotal` (see [`RUN_ENCLAVE_MEMORY_MIB`]).
 pub fn check_at_boot(ctx: &BuildContext) -> Result<(), String> {
     check(total_memory_bytes(), ctx)
 }
@@ -252,7 +343,7 @@ pub(crate) mod peak {
     /// Fails when `peak` is above the model for a request of `frame_len`
     /// bytes with `elements` field occurrences: the factor plus
     /// `WIRE_ELEMENT_BYTES` for each element. Tighter than the request bound,
-    /// which takes the element cap. For a whole request through `dispatch`.
+    /// which takes the element limit. For a whole request through `dispatch`.
     pub(crate) fn assert_within_model(what: &str, frame_len: usize, elements: usize, peak: usize) {
         let elements_bytes = super::WIRE_ELEMENT_BYTES * elements;
         let budget = super::REQUEST_MEMORY_FACTOR * frame_len + elements_bytes;
@@ -309,7 +400,7 @@ mod tests {
         assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok());
         let err = check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(false)).unwrap_err();
         assert!(err.contains("2687 MiB of usable memory"), "{err}");
-        assert!(err.contains("--memory at least 3584 MiB"), "{err}");
+        assert!(err.contains("--memory at least 4096 MiB"), "{err}");
         let err = check(None, &build(false)).unwrap_err();
         assert!(err.contains("total memory unknown"), "{err}");
     }
