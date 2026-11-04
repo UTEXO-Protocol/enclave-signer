@@ -64,6 +64,16 @@ case "$ACTION" in
   start)
     : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
+    # The enclave refuses to start below 2688 MiB of usable memory
+    # (enclave/src/memory.rs), and the kernel keeps part of the launch value.
+    # Refuse a value under 3072 MiB here, where the message is read.
+    case "$MEM" in
+      ''|*[!0-9]*|????????*) echo "ENCLAVE_MEMORY must be a whole number of MiB with at most 7 digits, got '$MEM'" >&2; exit 1 ;;
+    esac
+    if [ "$MEM" -lt 3072 ]; then
+      echo "ENCLAVE_MEMORY=$MEM MiB is below the 3072 MiB minimum (enclave/src/memory.rs)" >&2
+      exit 1
+    fi
     # Hold a host-wide lock so only one run-enclave runs at a time (anti-race).
     # `nitro-cli` children are spawned with fd 9 closed (9>&-) so an occasionally
     # orphaned/lingering run-enclave can never keep holding the lock and deadlock

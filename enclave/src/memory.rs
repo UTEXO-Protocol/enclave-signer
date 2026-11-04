@@ -1,9 +1,8 @@
 //! The request memory model.
 //!
 //! The enclave has a fixed amount of RAM and no swap. When a process outgrows
-//! it, the kernel ends the process and every key that lives only in memory.
-//! So the heap a request can use must have a bound that does not depend on
-//! the request content:
+//! it, the kernel ends the process. So the heap a request can use must have a
+//! bound that does not depend on the request content:
 //!
 //! ```text
 //! peak heap of one request <= REQUEST_MEMORY_FACTOR * frame bytes
@@ -19,7 +18,10 @@
 //! [`crate::conn::WORKER_THREADS`] requests run at once, each at most
 //! [`crate::framing::MAX_MESSAGE_SIZE`] bytes. Add the memory the enclave uses
 //! with no request in flight, and the result is [`MIN_ENCLAVE_MEMORY_BYTES`].
-//! [`check_at_boot`] refuses to start a release build on less.
+//! [`check_at_boot`] refuses to start a release build on less usable memory,
+//! or with no readable total. The kernel keeps part of the launch value for
+//! itself, so `run-enclave --memory` must give at least
+//! [`RUN_ENCLAVE_MEMORY_MIB`].
 //!
 //! Responses from the pinned EVM RPC and the Bitcoin indexer are outside the
 //! model. TLS pins their senders, and the host cannot change them.
@@ -40,15 +42,15 @@ use crate::policy::BuildContext;
 
 /// Upper bound on the heap one request uses, as a multiple of its input size.
 /// Every request type with a large input has a test against this bound. The
-/// largest measured value is consignment validation, at about 15.5 times the
+/// largest measured value is consignment validation, at about 15 times the
 /// consignment. Reading a frame takes 3 times the frame. The gas transaction
 /// and PSBT parsers stay under 2.
 pub const REQUEST_MEMORY_FACTOR: usize = 20;
 
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
 /// covers the struct in its vector, a vector header, and the copy a growing
-/// vector holds during a move. The measured value is about 80 bytes for an
-/// empty proof entry.
+/// vector holds during a move. The measured value is about 80 bytes per
+/// occurrence at the element cap (`framing::tests::the_wire_element_cap_is_exact`).
 pub const WIRE_ELEMENT_BYTES: usize = 128;
 
 /// The second term of the request bound: the most the protobuf decode of one
@@ -67,50 +69,66 @@ pub const fn request_bound(frame: usize) -> usize {
 /// each well under 200 MiB.
 pub const BASELINE_BYTES: usize = 512 * 1024 * 1024;
 
-/// Memory the enclave needs to serve `WORKER_THREADS` largest requests at
-/// once. `nitro-cli run-enclave --memory` must give at least this much. The
-/// deploy scripts use 3072 MiB.
+/// Usable memory the enclave needs to serve `WORKER_THREADS` largest requests
+/// at once. The boot check requires this much in `MemTotal`.
 pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
     BASELINE_BYTES + WORKER_THREADS * request_bound(MAX_MESSAGE_SIZE as usize);
 
-// The deploy scripts and the README run the enclave with 3072 MiB. The
-// largest four requests fit in the part above the baseline.
-const _: () = assert!(MIN_ENCLAVE_MEMORY_BYTES <= 3072 * 1024 * 1024);
+/// The least `nitro-cli run-enclave --memory` value, in MiB. `MemTotal` in
+/// `/proc/meminfo` leaves out the memory the kernel keeps for itself. So the
+/// launch value is above [`MIN_ENCLAVE_MEMORY_BYTES`]. The deploy scripts,
+/// the README, the spec and `build/deploy-to-ec2.sh` carry this value and the
+/// minimum as literals, and a test pins them to the constants. The deploy
+/// scripts refuse a smaller `ENCLAVE_MEMORY`.
+pub const RUN_ENCLAVE_MEMORY_MIB: usize = 3072;
+
+// The largest four requests fit in the part above the baseline, and the
+// kernel gets at least 256 MiB of the launch value.
 const _: () = assert!(
     MIN_ENCLAVE_MEMORY_BYTES - BASELINE_BYTES == 4 * (24 * 1024 * 1024 * 20 + 64 * 1024 * 1024)
 );
 const _: () = assert!(MIN_ENCLAVE_MEMORY_BYTES == 2688 * 1024 * 1024);
+const _: () =
+    assert!(RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024 - MIN_ENCLAVE_MEMORY_BYTES >= 256 * 1024 * 1024);
 
-/// Refuses to start a release build with less memory than
-/// [`MIN_ENCLAVE_MEMORY_BYTES`]. Debug and test builds run in local stacks of
-/// any size, so they log a warning instead. When the check cannot read the
-/// total memory (no `/proc/meminfo`), it logs a warning and continues.
+/// Refuses to start a release build with less usable memory than
+/// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. Debug and test
+/// builds run in local stacks of any size and on other operating systems, so
+/// they log a warning instead.
 pub fn check_at_boot(ctx: &BuildContext) -> Result<(), String> {
-    let Some(total) = total_memory_bytes() else {
-        tracing::warn!(
-            required_mib = MIN_ENCLAVE_MEMORY_BYTES / (1024 * 1024),
-            "total memory unknown; skipping the memory check"
-        );
-        return Ok(());
-    };
+    check(total_memory_bytes(), ctx)
+}
+
+/// The boot check for a known total. `None` means `/proc/meminfo` could not
+/// be read or has no `MemTotal` line.
+fn check(total: Option<usize>, ctx: &BuildContext) -> Result<(), String> {
     let required_mib = MIN_ENCLAVE_MEMORY_BYTES / (1024 * 1024);
-    let total_mib = total / (1024 * 1024);
-    if total >= MIN_ENCLAVE_MEMORY_BYTES {
-        tracing::info!(total_mib, required_mib, "memory check passed");
-        return Ok(());
-    }
-    let msg = format!(
-        "enclave has {total_mib} MiB of memory, and {required_mib} MiB are needed for \
-         {WORKER_THREADS} requests of {} MiB at a memory factor of {REQUEST_MEMORY_FACTOR} \
-         plus {} MiB of decoded elements each (run-enclave --memory)",
-        MAX_MESSAGE_SIZE / (1024 * 1024),
-        ELEMENTS_BYTES / (1024 * 1024)
-    );
+    let problem = match total {
+        Some(total) if total >= MIN_ENCLAVE_MEMORY_BYTES => {
+            let total_mib = total / (1024 * 1024);
+            tracing::info!(total_mib, required_mib, "memory check passed");
+            return Ok(());
+        }
+        Some(total) => format!(
+            "enclave has {} MiB of usable memory, and {required_mib} MiB are needed for \
+             {WORKER_THREADS} requests of {} MiB at a memory factor of {REQUEST_MEMORY_FACTOR} \
+             plus {} MiB of decoded elements each, and a {} MiB baseline; give run-enclave \
+             --memory at least {RUN_ENCLAVE_MEMORY_MIB} MiB",
+            total / (1024 * 1024),
+            MAX_MESSAGE_SIZE / (1024 * 1024),
+            ELEMENTS_BYTES / (1024 * 1024),
+            BASELINE_BYTES / (1024 * 1024)
+        ),
+        None => format!(
+            "total memory unknown: /proc/meminfo has no readable MemTotal line, and \
+             {required_mib} MiB of usable memory are needed"
+        ),
+    };
     if ctx.debug_or_test {
-        tracing::warn!("{msg}; continuing in a debug build");
+        tracing::warn!("{problem}; continuing in a debug build");
         return Ok(());
     }
-    Err(msg)
+    Err(problem)
 }
 
 /// Total memory from `/proc/meminfo`, or `None` where it cannot be read.
@@ -250,10 +268,89 @@ mod tests {
         assert_eq!(parse_mem_total("MemTotal: lots kB\n"), None);
     }
 
+    fn build(debug_or_test: bool) -> BuildContext {
+        BuildContext {
+            debug_or_test,
+            ..BuildContext::current()
+        }
+    }
+
+    #[test]
+    fn a_release_build_refuses_too_little_or_unknown_memory() {
+        assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok());
+        let err = check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(false)).unwrap_err();
+        assert!(err.contains("2687 MiB of usable memory"), "{err}");
+        assert!(err.contains("--memory at least 3072 MiB"), "{err}");
+        let err = check(None, &build(false)).unwrap_err();
+        assert!(err.contains("total memory unknown"), "{err}");
+    }
+
     #[test]
     fn a_debug_build_only_warns() {
-        // A test build is a debug build in the model: it never refuses.
+        assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(true)).is_ok());
+        assert!(check(None, &build(true)).is_ok());
+        // A test build is a debug build in the model: the real check never
+        // refuses, whatever the machine has.
         assert!(check_at_boot(&BuildContext::current()).is_ok());
+    }
+
+    /// The scripts and documents carry the two memory values as literals.
+    /// This pins the literals to the constants.
+    #[test]
+    fn the_scripts_and_documents_carry_the_memory_values() {
+        let min = MIN_ENCLAVE_MEMORY_BYTES / (1024 * 1024);
+        let run = RUN_ENCLAVE_MEMORY_MIB;
+        let refusal = [
+            format!("-lt {run} "),
+            format!("below the {run} MiB minimum"),
+            format!("below {min} MiB of usable memory"),
+        ];
+        let checks: [(&str, &str, usize, Vec<String>); 5] = [
+            // The host script has the check twice: at the top and in the
+            // embedded control script.
+            (
+                "deploy/deploy-host.sh",
+                include_str!("../../deploy/deploy-host.sh"),
+                2,
+                refusal.to_vec(),
+            ),
+            (
+                "deploy/systemd/utexo-enclave-ctl.sh",
+                include_str!("../../deploy/systemd/utexo-enclave-ctl.sh"),
+                1,
+                refusal.to_vec(),
+            ),
+            (
+                "README.md",
+                include_str!("../../README.md"),
+                1,
+                vec![
+                    format!("--memory {run} "),
+                    format!("needs {min} MiB of usable"),
+                ],
+            ),
+            (
+                "docs/tee-spec.md",
+                include_str!("../../docs/tee-spec.md"),
+                1,
+                vec![format!("({min} MiB)"), format!("at least {run} MiB")],
+            ),
+            (
+                "build/deploy-to-ec2.sh",
+                include_str!("../../build/deploy-to-ec2.sh"),
+                1,
+                vec![format!("--memory {run} ")],
+            ),
+        ];
+        for (file, text, times, needles) in checks {
+            for needle in needles {
+                let found = text.matches(needle.as_str()).count();
+                assert!(
+                    found >= times,
+                    "{file} says {needle:?} {found} times, not {times}"
+                );
+            }
+        }
     }
 
     #[test]
