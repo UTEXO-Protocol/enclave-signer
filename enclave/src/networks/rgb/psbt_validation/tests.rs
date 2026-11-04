@@ -1645,9 +1645,9 @@ fn dense_psbt(total: usize, shape: Dense) -> Vec<u8> {
 /// PSBT size limit. They parse at more than the factor. The densest shape
 /// measured is one input and outputs that each carry two empty records. It
 /// parses at about 102 times its bytes, because the first record of a map
-/// allocates a whole B-tree leaf. A request holds at most two parsed PSBTs
-/// at once, a PSBT and its parent. The test checks that two of each shape
-/// fit the heap each worker holds. That request also holds the decoded
+/// allocates a whole B-tree leaf. A request holds one parsed PSBT at a time,
+/// and a mint parses its fascias beside it. The test checks that two of each
+/// shape fit the heap each worker holds. That request also holds the decoded
 /// elements, and the read and decode of its frame of `MAX_MESSAGE_SIZE` take
 /// 3 times the frame.
 #[test]

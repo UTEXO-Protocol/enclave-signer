@@ -3125,7 +3125,7 @@ fn wide_split(outputs: u16) -> History {
 /// transfer can spend.
 fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64) -> Utxo {
     let mut send = history
-        .transition("transfer")
+        .transition("propagate")
         .add_input(input.opout, AllocatedState::Void)
         .unwrap();
     for no in 0..outputs {
@@ -3226,7 +3226,7 @@ fn dense_rights_burn(sends: u8, outputs: u16) -> History {
         // and on vout 3 it sorts last. The other rights share vout 2.
         let vout = if k == 1 { 1u32 } else { 3 };
         let mut send = history
-            .transition("transfer")
+            .transition("propagate")
             .add_input(right.opout, AllocatedState::Void)
             .unwrap()
             .add_rights("mintRight", GraphSeal::with_blinded_vout(vout, 1))
@@ -3285,20 +3285,19 @@ fn validation_peak(history: impl FnOnce() -> History) -> (usize, usize) {
 /// densest shapes measured takes more than the factor. Each output of a wide
 /// transfer of rights is about 14 bytes of consignment, and of a split about
 /// 23. RGB validation keeps two records of more than 100 bytes for each, in
-/// two B-trees. Each further byte of mint rights takes about 37 to 43 bytes
-/// of heap, and each further byte of a fungible split about 24. The mint and
+/// two B-trees. Each further byte of mint rights takes about 46 to 53 bytes
+/// of heap, and each further byte of a fungible split about 31. The mint and
 /// the burn add about 2 MiB that does not grow with the consignment.
 ///
 /// The test measures each shape at two sizes. It takes the heap of each
 /// further byte from the difference, and the rest as the part that does not
 /// grow. The rate changes a little with the size. The sender also sets it
 /// through the order of the OpIds ([`dense_rights_burn`]). At the test sizes,
-/// rights with random OpIds give 37.5, and 39.1 on the asset with a reject
-/// list. The densest layout found gives 42.4. A one-off chain of that layout
-/// at the 10 MiB limit took 430 MiB, 43.3 times its size. The split
-/// gives 24.2 between 10 000 and 20 000 outputs. A split of fewer outputs
-/// takes less per output, so the test measures the split at 10 000 outputs
-/// or more. The test adds 1.5 to each rate it measures.
+/// rights with random OpIds give 46.0, the same on the asset with a reject
+/// list. The densest layout found gives 52.7. The split gives 31.2 between
+/// 10 000 and 20 000 outputs. A split of fewer outputs takes less per output,
+/// so the test measures the split at 10 000 outputs or more. The test adds
+/// 1.5 to each rate it measures.
 ///
 /// It then checks that a whole burn request at the limits fits the heap
 /// each worker holds. That request carries a consignment of the shape at

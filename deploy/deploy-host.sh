@@ -37,7 +37,7 @@ EIF="$DIR/utexo-bridge-enclave.eif"
 SRC="s3://$BUCKET/eif/$GIT_SHA"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
 ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-4096}"
-# A release enclave refuses to start below 2688 MiB of usable memory
+# A release enclave refuses to start below 3072 MiB of usable memory
 # (enclave/src/memory.rs). The kernel keeps part of the launch value for
 # itself, so the launch value must be at least 4096 MiB. Refuse here, where
 # the message is read, instead of on the enclave console.
@@ -372,7 +372,7 @@ pages_mib() {
 
 case "$ACTION" in
   start|check)
-    # The enclave refuses to start below 2688 MiB of usable memory
+    # The enclave refuses to start below 3072 MiB of usable memory
     # (enclave/src/memory.rs), and the kernel keeps part of the launch value.
     # Refuse a value under 4096 MiB here, where the message is read.
     case "$MEM" in

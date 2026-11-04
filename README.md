@@ -504,7 +504,7 @@ There is no cap unless `CLONE_EXPORT_HARD_CAP` is set.
 ### Production (Nitro)
 
 `--memory` must be at least 4096 MiB, a whole number of GiB. The enclave
-needs 2688 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
+needs 3072 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
 the root file system keep part of the launch value. nitro-cli gives an enclave
 whole hugepages, 1 GiB pages first. A value that is not a whole number of GiB
 can take a further 1 GiB page, so the deploy scripts refuse it.
@@ -564,7 +564,7 @@ A new launch value needs one `MemTotal` reading before release. Run one image
 at that value with `ENCLAVE_DEBUG_MODE=1`, and make sure that
 `nitro-cli describe-enclaves` shows that value in `MemoryMiB`. On
 `nitro-cli console`, the "memory check passed" line gives `total_mib`, which
-must be at least 2688.
+must be at least 3072.
 
 ```bash
 nitro-cli run-enclave --cpu-count 2 --memory 4096 --enclave-cid 16 \

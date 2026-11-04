@@ -166,7 +166,7 @@ pages_mib() {
 
 case "$ACTION" in
   start|check)
-    # The enclave refuses to start below 2688 MiB of usable memory
+    # The enclave refuses to start below 3072 MiB of usable memory
     # (enclave/src/memory.rs), and the kernel keeps part of the launch value.
     # Refuse a value under 4096 MiB here, where the message is read.
     case "$MEM" in

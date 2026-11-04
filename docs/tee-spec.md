@@ -160,14 +160,16 @@ forwarders. They bridge over vsock to host-side `vsock-proxy` instances
 
 **Request memory model** (`memory.rs`). The enclave has a fixed amount of
 memory and no swap. So the heap one request can use has a bound that depends
-only on its size. The bound is `REQUEST_MEMORY_FACTOR` (20) times the frame,
+only on its size. The bound is `REQUEST_MEMORY_FACTOR` (24) times the frame,
 plus 64 MiB for the decoded protobuf elements. Most parsers that grow with
 their input stay within the factor. Reading a frame takes 3 times the frame.
-Consignment validation of a long history takes about 11 times the
-consignment. The gas transaction parser stays under 0.1, and a PSBT whose
-bytes sit in large records takes about 1.5. A whole burn request through
-`dispatch` holds the decoded request during validation. It peaks at about
-10.7 times its frame beyond the element term.
+Consignment validation of a long history takes about 21 times the
+consignment, because rgb-lib decodes a second copy while the enclave keeps its
+own. A fascia of many rights takes about 11 times its bytes. The gas
+transaction parser stays under 0.1, and a PSBT whose bytes sit in large
+records takes about 1.5. A whole burn request through `dispatch` holds the
+decoded request during validation. It peaks at about 20 times its frame beyond
+the element term.
 
 Some parsers take more on the densest inputs measured, and each has a size
 limit:
@@ -176,24 +178,26 @@ limit:
   times, 1 MiB limit
 - an attestation document of CBOR nulls: about 48 times, 64 KiB limit
 - a consignment of transfers that turn one mint right into tens of
-  thousands: about 43 times, 10 MiB limit
+  thousands: about 53 times, 10 MiB limit
 
-At those limits each fits the bound of the largest frame, 544 MiB, which each
-worker holds. A request holds at most two parsed PSBTs at once. Validation
-of the densest consignment measured took 430 MiB at the limit. A burn request
-with it takes about 529 MiB by the test's count. The sender sets part of the
-rate through the order of the OpIds, which sets how full RGB validation keeps
-its B-trees. Validation clones the decoded consignment, so each decoded list
-keeps only its length. `MAX_CONSIGNMENT_BYTES` can lower that limit, and the
-enclave refuses to start with a larger value.
+At those limits each fits the bound of the largest frame, 640 MiB, which each
+worker holds. A request holds one parsed PSBT at a time, and a fascia has the
+PSBT limit. A burn request with the densest consignment measured takes about
+632 MiB at the limit by the test's count. The real peak is lower, because the
+cost gate of validation refuses a chain this dense above about 2 MiB. The
+sender sets part of the rate through the order of the OpIds, which sets how
+full RGB validation keeps its B-trees. Validation clones the decoded
+consignment, so each decoded list keeps only its length.
+`MAX_CONSIGNMENT_BYTES` can lower that limit, and the enclave refuses to start
+with a larger value.
 
-The tests measure the frame, consignment, PSBT, gas transaction and
+The tests measure the frame, consignment, PSBT, fascia, gas transaction and
 attestation document parsers on the densest shapes measured. The other parsers
 have small size limits and refusal tests. The remaining request fields are
 fixed-size, refused before use, never read, or only compared, hashed or read
 once. `memory.rs` names the ones with no upper limit. Four workers, the bound
 for a 24 MiB frame and a 512 MiB baseline give the minimum usable memory
-(2688 MiB). A release build reads `MemTotal` from `/proc/meminfo` at boot. It
+(3072 MiB). A release build reads `MemTotal` from `/proc/meminfo` at boot. It
 refuses to start with less, or with no readable total. `MemTotal` leaves out
 the memory the kernel keeps for itself, so `run-enclave --memory` must give
 at least 4096 MiB, a whole number of GiB. The deploy scripts use that value

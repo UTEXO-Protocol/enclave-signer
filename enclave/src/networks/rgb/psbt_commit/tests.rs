@@ -182,11 +182,10 @@ fn refuses_a_fascia_of_a_sibling_tx_with_the_same_commitment() {
 }
 
 #[test]
-fn refuses_a_fascia_over_16_mib() {
-    let err = parse_fascia(&vec![0u8; U24 + 1], "fascia")
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("fascia is too large"), "{err}");
+fn refuses_a_fascia_over_the_psbt_size_limit() {
+    let bytes = vec![0u8; crate::config::MAX_PSBT_BYTES + 1];
+    let err = parse_fascia(&bytes, "fascia").unwrap_err().to_string();
+    assert!(err.contains("the limit is"), "{err}");
 }
 
 // ===== F3: the close method =====
@@ -495,4 +494,34 @@ fn refuses_transition_of_other_contract() {
     });
     let err = refusal(&tx, &fascia, ours.contract_id);
     assert!(err.contains("belongs to contract"), "{err}");
+}
+
+/// The request memory model (`memory.rs`): a fascia is a parser of a request
+/// byte field. The densest fascia measured is one propagate of 43 681 rights
+/// that share an output, about 14 bytes each. The decoder doubles a list of
+/// that length, so it takes twice its length. The parse stays within the
+/// factor.
+#[test]
+fn fascia_parsing_stays_within_the_request_memory_factor() {
+    use crate::memory::peak;
+
+    let (mut history, rights) = issued(0xB1, &[0xA0]);
+    let mut send = history
+        .transition("propagate")
+        .add_input(rights[0].opout, AllocatedState::Void)
+        .unwrap();
+    for no in 0..43_681u64 {
+        let seal = GraphSeal::with_blinded_vout(1u32, 0x10_0000 + no);
+        send = send.add_rights("mintRight", seal).unwrap();
+    }
+    let send = send.complete_transition().unwrap();
+    let sent = history.commit_psbt(vec![send], vec![rights[0].outpoint], vec![p2tr(1)]);
+
+    let (bytes, parsed, peak) = peak::measure(
+        || sent.fascia_bytes(),
+        |bytes| parse_fascia(bytes, "fascia").map(|_| ()),
+    );
+    parsed.unwrap();
+    assert!(bytes.len() > 600_000, "the fascia is not wide");
+    peak::assert_within_factor("fascia parse", bytes.len(), peak);
 }

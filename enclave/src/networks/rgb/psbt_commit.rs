@@ -50,7 +50,8 @@ pub fn pinned_contract(cfg: &BridgeConfig) -> Result<ContractId> {
 }
 
 /// The strict-encoded fascia in the request field `field`, decoded as rgb-lib
-/// reads its fascia file. Capped at U24 (16 MiB), below the 24 MiB frame.
+/// reads its fascia file. A fascia holds a tx and its RGB data, so the PSBT
+/// size limit applies to it too (`memory.rs`).
 pub fn parse_fascia(bytes: &[u8], field: &str) -> Result<Fascia> {
     if bytes.is_empty() {
         return Err(EnclaveError::CrossCheck(format!(
@@ -58,6 +59,7 @@ pub fn parse_fascia(bytes: &[u8], field: &str) -> Result<Fascia> {
              tx's fascia"
         )));
     }
+    crate::config::check_psbt_size(field, bytes)?;
     let bytes = Confined::<Vec<u8>, 0, U24>::try_from(bytes.to_vec())
         .map_err(|e| EnclaveError::CrossCheck(format!("{field} is too large: {e}")))?;
     Fascia::from_strict_serialized::<U24>(bytes)

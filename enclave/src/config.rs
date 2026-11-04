@@ -25,7 +25,7 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// 8_932_069 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
 ///
 /// The memory model sets the upper end. Validation of the densest
-/// consignment measured takes about 43 times its bytes. At this size, a burn
+/// consignment measured takes about 53 times its bytes. At this size, a burn
 /// request with such a consignment fits the heap each worker holds
 /// (`memory.rs`), with little room left. So the enclave refuses to start
 /// with a larger value ([`parse_consignment_limit`]).
