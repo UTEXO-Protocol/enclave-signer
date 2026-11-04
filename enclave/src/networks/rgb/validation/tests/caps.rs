@@ -401,7 +401,7 @@ fn the_walk_cost_stops_past_its_cap() {
     assert!(reject_walk_cost(&transfer, 1) > 1);
 }
 
-/// rgb-consensus af0b751d builds its DAG in linear time, so a burn of 8193
+/// rgb-consensus d4bbbce builds its DAG in linear time, so a burn of 8193
 /// rights (8192^2 was the cap before) passes the gate and reaches rgb-lib.
 #[test]
 fn a_burn_of_8193_rights_passes_the_gate_and_reaches_rgb_lib() {

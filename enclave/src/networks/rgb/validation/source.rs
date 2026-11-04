@@ -305,7 +305,7 @@ mod indexer_only_source {
                 locks: anchors
                     .iter()
                     .map(|a| VerifiedLock {
-                        mint_opid: a.opid,
+                        lock_id: a.lock_id,
                         minted: a.amount,
                         operation_id: [0xd0; 32],
                         net_amount: a.amount,

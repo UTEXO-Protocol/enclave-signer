@@ -100,14 +100,16 @@ Before it signs, the mint signer:
    was a propagate of one right that put that right alone on its own output,
    and the PSBT spends that output, its only input. So every signature for
    this mint spends the same UTXO.
-5. Binds the deposit: a `FundsIn` for the mint's OpId and the deposit id it
+5. Binds the deposit: a `FundsIn` for the mint's lockId and the deposit id it
    derives, before its `beforeBlock` and covered by the `EVM_FINALITY_TAG` head,
-   read from a node on the pinned chain.
-6. Binds the recipient. The v2 Bridge deposit names the mint OpId, and the
-   mint commits to the user's seal. A legacy deposit has an RGB invoice. Then
-   the mint's one blinded seal must equal that invoice. A witness seal
-   commits only its vout, not the script there: an accepted V1 risk
-   ([mint flow](docs/mint-flow.md) section 11).
+   read from a node on the pinned chain. The lockId is `LockId(opid, txid)` of
+   the mint and the PSBT's tx, so the mint tx must never change after the lock
+   (no RBF, rebuild or batching): a retry signs the same PSBT.
+6. Binds the recipient. The v2 Bridge deposit names the mint's lockId, which
+   commits to the user's seal and, for a witness seal, to the script of the
+   user's output. A legacy deposit has an RGB invoice. Then the mint's one
+   blinded seal must equal that invoice ([mint flow](docs/mint-flow.md)
+   section 11).
 7. Checks the Bitcoin fee and the sats paid out: none for a blinded mint,
    exactly `MINT_WITNESS_SAT` to the user's output for a witness mint.
 8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
@@ -271,9 +273,10 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
   mirror of the RGB-Tools release, `UTEXO-Protocol/rgb-lib-bfa`, through the
   `github-rgb-lib` SSH alias (deploy key `lib_key`). The RGB protocol crates
   it pins come from the `[patch.crates-io]` of `Cargo.toml` and
-  `parent/Cargo.toml`: `ssh://git@github.com/rgb-tools-devs/<repo>.git` at
-  full revs, which builds map to our `UTEXO-Protocol/<repo>-s-bfa` mirrors
-  (`build/map-rgb-mirrors.sh`, a token in a credential helper). The parent
+  `parent/Cargo.toml`: public `https://github.com/rgb-protocol/<repo>` at the
+  full revs of rgb-lib's own `[patch]`. The build scripts still require the
+  `rgb_deps_token` secret (`build/map-rgb-mirrors.sh`), which no longer maps
+  any URL. The parent
   also needs read access to `federated-signer-proto` through the
   `github-federated-signer` SSH alias. CI wires them in
   `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_DEPLOY_KEY`,
@@ -329,9 +332,9 @@ mint enclave gets the other KMS values at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
 Every enclave image needs, at build time, the deploy key of
-`UTEXO-Protocol/rgb-lib-bfa` (`RGB_LIB_BFA_DEPLOY_KEY`) and a token that reads
-the `UTEXO-Protocol/<repo>-s-bfa` mirrors of the RGB protocol crates
-(`RGB_PRIVATE_DEPS_TOKEN`), or `lib_key` and `rgb_deps_token` files in
+`UTEXO-Protocol/rgb-lib-bfa` (`RGB_LIB_BFA_DEPLOY_KEY`) and the
+`RGB_PRIVATE_DEPS_TOKEN` token, which the scripts still require although the
+RGB protocol crates are now public, or `lib_key` and `rgb_deps_token` files in
 `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes them as the BuildKit secrets
 `lib_key` and `rgb_deps_token`, and `build/with-private-deps.sh enclave` reads
 them for the cargo build only. They are never in a layer, the image or PCR0.
@@ -370,16 +373,16 @@ and the mint build fails when that variable is unset.
 It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
 This file accompanies the EIF in the Actions artifact and S3 bundle.
 
-This release needs a new asset. rgb-schemas 641a06f changes the BFA schema id
-from `rgb:sch:Ryl5eQZ3IHrU05e3AWdQZJR4FB5GvxZPy96cwhJiApc#amazon-norway-harris`
-to `rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture`,
-and `assert_bfa_genesis` refuses any other id. Before deploying these signers:
+This release needs a new asset. rgb-schemas b3f88f2 (rgb-lib bfa.6) changes
+the BFA schema id from
+`rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture`
+to `rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album`,
+and `assert_bfa_genesis` refuses any other id. Mint locks are keyed by
+lockId, not OpId, so mints locked by OpId do not validate either. The old
+asset is not carried over: its units cannot move to the new asset.
 
-1. Holders of the old asset redeem it (burn and release) while the old burn
-   signers still run. Once the new burn signers replace them, every burn of
-   the old asset is refused, and its units cannot move to the new asset.
-2. Reissue the BFA on the new schema.
-3. Set `RGB_ASSET_ID` (and the repository variable `BFA_RGB_ASSET_ID`) to the
+1. Reissue the BFA on the new schema.
+2. Set `RGB_ASSET_ID` (and the repository variable `BFA_RGB_ASSET_ID`) to the
    new contract id for both the mint and the burn image, and rebuild both.
 
 To reproduce a published EIF, use its recorded asset id, not the current
@@ -391,13 +394,12 @@ Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
 registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
-Every image resolves the private rgb-lib mirror and the RGB protocol crate
-mirrors: supply the `lib_key` and `rgb_deps_token` secrets.
-`build/with-private-deps.sh` refuses to start cargo without either. It maps
-each `ssh://git@github.com/rgb-tools-devs/<repo>.git` of the `[patch]` to
-`https://github.com/UTEXO-Protocol/<repo>-s-bfa.git` (branch `rgb-tools-bfa`
-holds the pinned revs), and a credential helper scoped to those four URLs
-reads the token from its file, so it never sits in a URL cargo could print.
+Every image resolves the private rgb-lib mirror: supply the `lib_key`
+secret. The scripts also still require `rgb_deps_token`, though the protocol
+crates now come from public repos and the mapping below matches no URL.
+`build/with-private-deps.sh` refuses to start cargo without either. Its
+`rgb-tools-devs` to `-s-bfa` mirror mapping is unused now: every `[patch]`
+entry points at a public `rgb-protocol` repo.
 `Dockerfile.parent` also resolves `federated-signer-proto`: its deploy key as
 `federated_key`. Credentials are mounted as BuildKit secrets during Cargo's
 build step; they are not copied into image layers.
@@ -822,7 +824,7 @@ The default set is `ccd`.
 | `bfa-mint` | `rgb-validation`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |
 | `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
-| `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
+| `bfa-validation` | `evm-rpc` | Binds BFA mint claims to EVM locks by lockId. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |
 | `spv` | `rgb-validation` | In-enclave Bitcoin header chain and witness inclusion proofs. |
 | `rgb-validation` | rgb crates | In-enclave consignment validation. Uses SPV or indexer confirmations. |
 | `evm-rpc` | `rgb-validation` | In-enclave `FundsIn` verification over JSON-RPC, TLS to a pinned host and CA. Without it the enclave refuses every bridge PSBT. |

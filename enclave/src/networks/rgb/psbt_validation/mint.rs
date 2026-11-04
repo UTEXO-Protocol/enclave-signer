@@ -1,5 +1,5 @@
 //! The mint rules (`Sign`, EVM -> RGB) on the committed transition: what the
-//! VM's `sas` and `pma` and the former consignment binds enforced, read from
+//! VM's `sas` and `plc` and the former consignment binds enforced, read from
 //! the fascia, and the sats rule of its PSBT. The rule ids (M1-M8) are those of
 //! `docs/mint-flow.md` section 5.
 
@@ -12,7 +12,7 @@ use rgbstd::{BuilderSeal, Opout, Transition};
 use super::super::btc_ownership;
 use super::super::flow;
 use super::super::psbt_commit::{single_right_input, witness_vout, Committed};
-use super::super::validation::{output_seal, single_global};
+use super::super::validation::{lock_id, output_seal, single_global};
 use super::assert_keeps_all_sats;
 use crate::error::{EnclaveError, Result};
 use crate::keys::KeyManager;
@@ -49,6 +49,9 @@ pub fn assert_mint_shape(psbt: &Psbt) -> Result<()> {
 pub struct MintFacts {
     pub right: Opout,
     pub opid: [u8; 32],
+    /// `LockId(opid, txid)` of the PSBT's tx: the id its `FundsIn` lock must name.
+    /// F2 fixes that txid, so any other tx of this mint names another lock.
+    pub lock_id: [u8; 32],
     /// `issuedSupply`, equal to the units of its one asset leg.
     pub issued: u64,
     /// `beforeBlock`: its EVM lock must be in an earlier block.
@@ -100,6 +103,7 @@ pub fn mint_facts(committed: &Committed) -> Result<MintFacts> {
     Ok(MintFacts {
         right,
         opid: committed.opid.to_byte_array(),
+        lock_id: lock_id(committed.opid, committed.txid),
         issued,
         before_block,
         recipient,
@@ -210,7 +214,7 @@ fn assert_asset_assignments_only(transition: &Transition) -> Result<()> {
 }
 
 /// M4: exactly `issuedSupply` (> 0) and `beforeBlock`, each 8 LE bytes, the
-/// bytes the VM's `sas` and `pma` read. Nothing else rides along.
+/// bytes the VM's `sas` and `plc` read. Nothing else rides along.
 fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
     let globals: Vec<_> = transition.globals.keys().collect();
     let metadata: Vec<_> = transition.metadata.keys().collect();

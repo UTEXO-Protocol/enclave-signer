@@ -264,6 +264,8 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     assert_eq!(minted.unwrap(), (MINTED, vec![recipient().to_string()]));
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
+    // M6 reads the lock of this mint in this exact tx.
+    assert_eq!(bound.lock_id, mint.lock_id());
     assert_eq!((bound.issued, bound.before_block), (MINTED, BEFORE_BLOCK));
     assert_eq!(
         bound.recipient,
@@ -644,6 +646,7 @@ fn binds_a_valid_witness_mint() {
     assert_eq!(minted.unwrap(), (MINTED, vec![]));
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
+    assert_eq!(bound.lock_id, mint.lock_id());
     assert_eq!(bound.recipient, MintRecipient::Witness { vout: 1 });
 }
 
@@ -726,12 +729,12 @@ fn refuses_a_witness_mint_with_two_unowned_outputs() {
     assert!(err.contains("pays 2500 sat to outputs"), "{err}");
 }
 
-/// Accepted V1 risk (CTO 2026-10-30): the OpId commits the seal's vout, not the
-/// script on it. One mint transition commits in a tx that pays the user and in
-/// one that pays anyone else, and both pass every rule, under the one OpId the
-/// deposit binds. A host that controls the bridge can redirect a witness mint.
+/// The OpId commits the seal's vout, not the script on it (V1 risk, CTO
+/// 2026-10-30). One mint transition in a tx paying the user and in one paying
+/// anyone else passes every route rule under one OpId. The lockId commits the
+/// tx too, so M6 binds the user's lock to the user's tx alone.
 #[test]
-fn witness_mint_opid_does_not_bind_the_recipient_script() {
+fn witness_mint_lock_id_binds_the_recipient_script() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
@@ -762,11 +765,27 @@ fn witness_mint_opid_does_not_bind_the_recipient_script() {
     );
     assert_ne!(to_user.tx.compute_txid(), to_host.tx.compute_txid());
     assert_eq!(to_user.opid, to_host.opid);
-    for made in [&to_user, &to_host] {
+    assert_ne!(to_user.lock_id(), to_host.lock_id());
+
+    // The depositor locked the user's tx; M6 checks that lock's FundsIn.
+    let bridge = [0xB1; 20];
+    let deposit = crate::test_support::mint_deposit(bridge, to_user.lock_id(), MINTED, [0xd0; 32]);
+    let m6 = |made: &Made| {
         let (minted, bound) = run_mint(&destination(&history, made, &seed), &pinned(&history));
         assert_eq!(minted.unwrap(), (MINTED, vec![]));
-        assert_eq!(bound.unwrap().opid, gen::opid_bytes(to_user.opid));
-    }
+        let bound = bound.expect("the binder ran");
+        crate::networks::evm::events::verify_rgb_funds_in(
+            &deposit,
+            &bridge,
+            attestation_verify::EvmFinalityTag::Safe,
+            &[0xee; 32],
+            &bound.lock_id,
+            bound.before_block,
+        )
+    };
+    m6(&to_user).expect("the user's tx is the one locked");
+    let err = m6(&to_host).unwrap_err().to_string();
+    assert!(err.contains("lockId mismatch"), "{err}");
 }
 
 // ===== the rights refill =====
@@ -944,7 +963,7 @@ fn consensus(
             locks: seen
                 .iter()
                 .map(|a| validation::VerifiedLock {
-                    mint_opid: a.opid,
+                    lock_id: a.lock_id,
                     minted: a.amount,
                     operation_id: [0xd0; 32],
                     net_amount: a.amount,

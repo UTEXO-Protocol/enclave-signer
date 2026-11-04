@@ -38,13 +38,13 @@ sol! {
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed lockId, uint64 amount);
 }
 
 const BRIDGE: [u8; 20] = [0xB1; 20];
 const TX: [u8; 32] = [0x11; 32];
 const OP_ID: [u8; 32] = [0xAB; 32];
-const MINT_OPID: [u8; 32] = [0xCD; 32];
+const MINT_LOCK_ID: [u8; 32] = [0xCD; 32];
 /// The mint's `beforeBlock`: the lock is at block 100.
 const BEFORE_BLOCK: u64 = 110;
 /// Hex of the CA's DER.
@@ -89,7 +89,7 @@ fn log_json(topics: &[alloy_primitives::B256], data: &[u8], index: u8) -> String
 
 /// A successful receipt at block 100 with one `BridgeFundsIn` from `BRIDGE`
 /// (gross 1000, commission 50, recipient `INVOICE`) and one `FundsIn` that
-/// locks 950 for the mint `MINT_OPID`.
+/// locks 950 under the mint lockId `MINT_LOCK_ID`.
 fn forged_receipt() -> String {
     let event = BridgeFundsIn {
         operationId: OP_ID.into(),
@@ -107,7 +107,7 @@ fn forged_receipt() -> String {
     };
     let lock = FundsIn {
         sender: [0xde; 20].into(),
-        rgbOpId: U256::from_be_bytes(MINT_OPID),
+        lockId: U256::from_be_bytes(MINT_LOCK_ID),
         amount: 950,
     };
     let bridge_topics: Vec<_> = event.encode_topics().iter().map(|t| t.0).collect();
@@ -395,7 +395,7 @@ fn non_default_port_reaches_listener_with_host_header() {
         &BRIDGE,
         EvmFinalityTag::Safe,
         &TX,
-        &MINT_OPID,
+        &MINT_LOCK_ID,
         &OP_ID,
         950,
         BEFORE_BLOCK,
@@ -429,7 +429,7 @@ fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
         &BRIDGE,
         EvmFinalityTag::Safe,
         &TX,
-        &MINT_OPID,
+        &MINT_LOCK_ID,
         &OP_ID,
         950,
         BEFORE_BLOCK,
@@ -463,7 +463,7 @@ fn pinned_rpc_uses_latest_safe_and_finalized_tags() {
             &BRIDGE,
             tag,
             &TX,
-            &MINT_OPID,
+            &MINT_LOCK_ID,
             &OP_ID,
             950,
             BEFORE_BLOCK,
@@ -492,7 +492,7 @@ fn pinned_rpc_requires_configured_tag_and_matching_canonical_block() {
                 "a receipt above the {tag} head or outside the canonical chain must not authorize signing"
             );
             assert!(
-                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_OPID, &OP_ID, 950, BEFORE_BLOCK).is_err(),
+                verify_rgb_funds_in(&*client, &BRIDGE, tag, &TX, &MINT_LOCK_ID, &OP_ID, 950, BEFORE_BLOCK).is_err(),
                 "a receipt above the {tag} head or outside the canonical chain must not authorize a mint lock"
             );
         }
@@ -538,7 +538,7 @@ fn tls_failure_refuses_to_sign() {
                 &BRIDGE,
                 EvmFinalityTag::Safe,
                 &TX,
-                &MINT_OPID,
+                &MINT_LOCK_ID,
                 &OP_ID,
                 950,
                 BEFORE_BLOCK
@@ -563,7 +563,7 @@ fn proxy_env_has_no_effect() {
         &BRIDGE,
         EvmFinalityTag::Safe,
         &TX,
-        &MINT_OPID,
+        &MINT_LOCK_ID,
         &OP_ID,
         950,
         BEFORE_BLOCK,
@@ -586,7 +586,7 @@ fn pinned_ca_is_the_only_trusted_root() {
             &BRIDGE,
             EvmFinalityTag::Safe,
             &TX,
-            &MINT_OPID,
+            &MINT_LOCK_ID,
             &OP_ID,
             950,
             BEFORE_BLOCK
@@ -607,7 +607,7 @@ fn timeout_refuses_to_sign() {
         &BRIDGE,
         EvmFinalityTag::Safe,
         &TX,
-        &MINT_OPID,
+        &MINT_LOCK_ID,
         &OP_ID,
         950,
         BEFORE_BLOCK,
@@ -631,7 +631,7 @@ fn pinned_host_redirect_is_not_followed() {
             &BRIDGE,
             EvmFinalityTag::Safe,
             &TX,
-            &MINT_OPID,
+            &MINT_LOCK_ID,
             &OP_ID,
             950,
             BEFORE_BLOCK
@@ -665,7 +665,7 @@ fn host_forged_receipt_is_refused() {
             &BRIDGE,
             EvmFinalityTag::Safe,
             &TX,
-            &MINT_OPID,
+            &MINT_LOCK_ID,
             &OP_ID,
             950,
             BEFORE_BLOCK,
