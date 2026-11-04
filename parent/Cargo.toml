@@ -44,7 +44,7 @@ path = "src/bin/attest_verify.rs"
 
 [dependencies]
 prost = "0.14"
-tonic = { version = "0.14", features = ["tls-ring"] }
+tonic = { version = "0.14.9", features = ["tls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http = "1"
 # GlobalConcurrencyLimitLayer limits requests across connections. (F03-AF-13)
