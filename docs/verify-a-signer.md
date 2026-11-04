@@ -139,7 +139,7 @@ bash build/verify-signer.sh https://<published location>/attestation-16.json \
   --expect-rgb-asset-id 'rgb:<BFA contract id>' \
   --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-  --expect-evm-finality-tag safe \
+  --expect-evm-finality-tag finalized \
   --expect-spv-min-confirmations 6 \
   --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-electrum-host <electrum host> \

@@ -152,7 +152,7 @@ fn parse_evm_finality_tag(
 ) -> std::result::Result<EvmFinalityTag, String> {
     match value {
         Ok(value) => value.parse(),
-        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Safe),
+        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Finalized),
         Err(std::env::VarError::NotUnicode(_)) => Err("value must be valid Unicode".into()),
     }
 }
@@ -206,7 +206,7 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
-            evm_finality_tag: EvmFinalityTag::Safe,
+            evm_finality_tag: EvmFinalityTag::Finalized,
             token_contract: [0u8; 20],
             bitcoin_network: BitcoinNetwork::Mainnet,
             btc_relay_mode: BtcRelayMode::Required,
@@ -916,7 +916,7 @@ mod tests {
     fn finality_tag_env_defaults_only_when_absent() {
         assert_eq!(
             parse_evm_finality_tag(Err(std::env::VarError::NotPresent)).unwrap(),
-            EvmFinalityTag::Safe
+            EvmFinalityTag::Finalized
         );
         for (value, tag) in [
             ("latest", EvmFinalityTag::Latest),

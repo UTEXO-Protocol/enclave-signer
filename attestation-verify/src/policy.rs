@@ -72,8 +72,8 @@ pub enum EvmDataSource {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EvmFinalityTag {
     Latest = 0,
-    #[default]
     Safe = 1,
+    #[default]
     Finalized = 2,
 }
 
@@ -202,7 +202,7 @@ pub enum AttestedPolicy {
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
-        /// Required RPC head tag, selected at boot (default `safe`).
+        /// Required RPC head tag, selected at boot (default `finalized`).
         evm_finality_tag: EvmFinalityTag,
         /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
         spv_min_confirmations: u32,
@@ -587,8 +587,8 @@ mod tests {
     }
 
     #[test]
-    fn finality_tags_are_strict_and_default_to_safe() {
-        assert_eq!(EvmFinalityTag::default(), EvmFinalityTag::Safe);
+    fn finality_tags_are_strict_and_default_to_finalized() {
+        assert_eq!(EvmFinalityTag::default(), EvmFinalityTag::Finalized);
         for (text, tag, wire) in [
             ("latest", EvmFinalityTag::Latest, 0),
             ("safe", EvmFinalityTag::Safe, 1),

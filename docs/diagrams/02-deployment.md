@@ -78,7 +78,7 @@ flowchart TB
   signer derives the mint-ancestry deposit ids with no RPC read. A build without
   it refuses bridge PSBTs. Operators MUST run the host `vsock-proxy` allowlist
   on 8002. Receipt checks require the head selected by `EVM_FINALITY_TAG`
-  (default `safe`) and canonical block-hash agreement. An unsupported tag
+  (`finalized`) and canonical block-hash agreement. An unsupported tag
   refuses signing. See the README env table.
 - **Endpoints at launch**: `utexo-enclave-ctl.sh start` sends `set-endpoints`
   once to each fresh enclave (Electrum URL, EVM RPC host, CA, TLS port, and

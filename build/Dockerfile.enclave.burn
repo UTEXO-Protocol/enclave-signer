@@ -132,7 +132,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # pin binds them instead.
 # SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1), attested.
 ENV BTC_RELAY_MODE=${BTC_RELAY_MODE} \
-    EVM_FINALITY_TAG=safe \
+    EVM_FINALITY_TAG=finalized \
     SPV_MIN_CONFIRMATIONS=6 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \

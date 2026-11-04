@@ -138,7 +138,7 @@ refuses it.
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
 | `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition that may make a right a mint spends (PP4). |
-| `EVM_FINALITY_TAG` | `finalized` (mint image) | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
+| `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
 | `SPV_MIN_CONFIRMATIONS` | 3 (mint image) | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
@@ -339,12 +339,11 @@ it is signed.
   RPC. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`). The receipt
   block must be before `beforeBlock`, with no lower bound (rgb-lib
   `mint_lock_status`: receivers refuse a lock at or after it), at or below
-  the RPC's `EVM_FINALITY_TAG` block (`safe` by default), and its
-  `blockHash` must match the canonical block at its height. The tagged head
-  is read again afterwards to detect a reorg. A receiving rgb-lib wallet
-  confirms the mint only once the lock is `finalized`, so with `safe` the
-  user sees the mint later than the enclave signs it. A production policy
-  refuses `latest`.
+  the RPC's `EVM_FINALITY_TAG` block (`finalized`), and its `blockHash` must
+  match the canonical block at its height. The tagged head is read again
+  afterwards to detect a reorg. A receiving rgb-lib wallet also confirms the
+  mint only once the lock is `finalized`. A production policy refuses
+  `latest`.
 - **S6.1** The amount must cover the minted units plus the commission.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal.

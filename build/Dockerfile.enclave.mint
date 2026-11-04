@@ -116,7 +116,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
 # Production accepts safe or finalized and refuses latest at boot; missing tag
-# support refuses signing. The mint image takes finalized, like the federation
+# support refuses signing. Every image takes finalized, like the federation
 # listener: RGB receivers accept a mint only once its lock is finalized, so
 # signing earlier gains no time, and a mint signed over a lock that is then
 # reorged out loses its mint right.
