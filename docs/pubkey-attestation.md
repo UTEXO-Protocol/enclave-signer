@@ -191,9 +191,10 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
-and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
-in the mint image).
+V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`;
+`finalized` in the mint image, `safe` in the burn image), and to
+`spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3 in the
+mint image).
 Every EVM `FundsIn` receipt must be at or below the selected head, with its
 block hash matching the canonical block at that height. The enclave
 revalidates the selected head snapshot to detect a reorg. The enclave trusts
@@ -365,7 +366,7 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-finality-tag safe \
+    --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \

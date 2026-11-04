@@ -63,8 +63,8 @@ AWS KMS and its access policies. The Bridge contract and its governance are
 trusted: the enclave pins the Bridge address, not its code, so an upgraded
 Bridge could emit fake `FundsIn` events and back unbacked mints. EVM deposits,
 the BFA mint lock included, must be covered by the RPC head selected by
-`EVM_FINALITY_TAG`, default `safe`, and match the canonical block hash at
-their height; the RPC is trusted for that tag.
+`EVM_FINALITY_TAG` (default `safe`; the mint image pins `finalized`), and match
+the canonical block hash at their height; the RPC is trusted for that tag.
 On Arbitrum, `latest` accepts the current L2 tip with sequencer and L1 reorg
 risk; `safe` waits for the batch to be posted and covered by L1's safe head,
 with residual L1 reorg risk; `finalized` waits for L1 finalized coverage.

@@ -116,7 +116,10 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
 # Production accepts safe or finalized and refuses latest at boot; missing tag
-# support refuses signing.
+# support refuses signing. The mint image takes finalized, like the federation
+# listener: RGB receivers accept a mint only once its lock is finalized, so
+# signing earlier gains no time, and a mint signed over a lock that is then
+# reorged out loses its mint right.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
@@ -137,7 +140,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 ARG RGB_MAX_UNOWNED_SATS=1500
 ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
     BTC_RELAY_MODE=${BTC_RELAY_MODE} \
-    EVM_FINALITY_TAG=safe \
+    EVM_FINALITY_TAG=finalized \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \
