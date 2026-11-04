@@ -20,7 +20,7 @@ use super::types::ValidatedConsignment;
 use super::witness::ConfirmedWitnesses;
 use crate::error::EnclaveError;
 use crate::error::Result;
-use crate::networks::rgb::spv::{verify_merkle_proof, Network};
+use crate::networks::rgb::spv::{verify_merkle_proof, Network, MAX_MERKLE_PATH_DEPTH};
 use rgbstd::indexers::electrum_blocking::electrum_client;
 use rgbstd::indexers::esplora_blocking::esplora_client;
 use rgbstd::indexers::esplora_blocking::EsploraClient;
@@ -424,6 +424,13 @@ pub(super) fn assert_in_block(
         ));
     }
     let pos = u32::try_from(proof.pos).map_err(|_| "the merkle position is not a u32")?;
+    // Bound the hashing before it starts, as the burn path does in `proof_txid`.
+    if proof.merkle.len() > MAX_MERKLE_PATH_DEPTH {
+        return Err(format!(
+            "its merkle proof has {} siblings, more than any block's tree has levels ({MAX_MERKLE_PATH_DEPTH})",
+            proof.merkle.len()
+        ));
+    }
     // Electrum sends the path in display order.
     let path: Vec<[u8; 32]> = proof
         .merkle

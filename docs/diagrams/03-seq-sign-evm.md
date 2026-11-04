@@ -55,7 +55,7 @@ sequenceDiagram
     Srv->>Spv: validate_spv_proofs(witness_txids, proofs)
     Spv->>Spv: exact set-equality(expected txids, proofs)
     loop each MerkleProofEntry
-        Spv->>Spv: merkle path depth ≤ 32
+        Spv->>Spv: merkle path depth ≤ 32, position consumed, no 64-byte-tx node
         Spv->>Chain: header_at(block_height)
         Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (default 3, attested)
         Spv->>Spv: verify_merkle_proof(txid, position, path, root)

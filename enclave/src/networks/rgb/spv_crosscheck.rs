@@ -9,7 +9,10 @@
 //! 2. **Cross-network**: the consignment `chain_net` matches the compiled
 //!    network. This stops a regtest consignment on a mainnet enclave.
 //! 3. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
-//!    header at `block_height`.
+//!    header at `block_height`. The path has at most `MAX_MERKLE_PATH_DEPTH`
+//!    siblings, `tx_position` is consumed by it, and no node on it is a
+//!    64-byte transaction (a half of one would pose as a txid one level
+//!    deeper; see `spv::merkle`).
 //! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
 //!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
 //!    Bridge spec section 11 forbids trust in only the most recent anchoring
@@ -60,13 +63,8 @@ pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 /// `time = far_future` would defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
-/// Maximum sibling hashes in one Merkle path. Depth d covers up to 2^d
-/// transactions, and a 4 MB block holds far fewer than 2^17. Thus 32 never
-/// rejects a real proof and bounds the hashing a hostile host can cause.
-/// `validate_spv_proofs` checks it before any hashing. Compile-time and in
-/// PCR0, so the host cannot change it.
 #[cfg(rgb_to_evm)]
-pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
+pub use crate::networks::rgb::spv::MAX_MERKLE_PATH_DEPTH;
 
 /// Validates the Bitcoin anchoring of the RGB source before signing.
 ///
@@ -409,6 +407,15 @@ fn verify_one_proof(
         }
         MerkleError::BadSiblingLength { index: j, len } => EnclaveError::Spv(format!(
             "merkle_proofs[{index}].merkle_path[{j}] has wrong length {len}"
+        )),
+        MerkleError::PositionOutOfRange { position, depth } => EnclaveError::Spv(format!(
+            "merkle_proofs[{index}]: tx_position {position} is out of reach of a \
+             {depth}-sibling merkle_path"
+        )),
+        MerkleError::TransactionShapedNode { level } => EnclaveError::Spv(format!(
+            "merkle_proofs[{index}]: the merkle node at level {level} is a 64-byte \
+             transaction, so txid {} may be a half of it (CVE-2017-12842)",
+            hex::encode(proof.txid.as_slice())
         )),
     })?;
 
