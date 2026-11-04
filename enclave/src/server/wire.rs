@@ -36,7 +36,7 @@ fn process_connection(
     deadline: std::time::Instant,
 ) -> Result<()> {
     tracing::debug!("reading request");
-    let request: EnclaveRequest = framing::read_message(&mut stream)?;
+    let request: EnclaveRequest = framing::read_request(&mut stream)?;
 
     let (response, reservation) = dispatch(request, ctx, deadline);
 

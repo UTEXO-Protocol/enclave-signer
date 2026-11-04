@@ -1475,3 +1475,78 @@ mod anchor {
         }
     }
 }
+
+/// A BIP-174 PSBT whose input maps carry proprietary records adding up to
+/// `extra` bytes, with one output. Only the shape matters: the parser must
+/// read it whole. Consensus decoding reads one map through a 4 MB window, so
+/// the records are spread over as many inputs as they need.
+fn psbt_with_large_input_records(extra: usize) -> Vec<u8> {
+    const RECORD: usize = 3_400_000;
+    fn compact_size(n: usize, out: &mut Vec<u8>) {
+        match n {
+            0..=0xfc => out.push(n as u8),
+            0xfd..=0xffff => {
+                out.push(0xfd);
+                out.extend_from_slice(&(n as u16).to_le_bytes());
+            }
+            _ => {
+                out.push(0xfe);
+                out.extend_from_slice(&(n as u32).to_le_bytes());
+            }
+        }
+    }
+    let inputs = extra.div_ceil(RECORD).max(1);
+
+    // Unsigned tx: version 2, `inputs` inputs (empty script, no witness),
+    // one output with an empty script, locktime 0.
+    let mut tx = 2u32.to_le_bytes().to_vec();
+    compact_size(inputs, &mut tx);
+    for i in 0..inputs {
+        tx.extend_from_slice(&[0x11; 32]);
+        tx.extend_from_slice(&(i as u32).to_le_bytes());
+        tx.push(0);
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+    }
+    tx.push(1);
+    tx.extend_from_slice(&1_000u64.to_le_bytes());
+    tx.push(0);
+    tx.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut psbt = b"psbt\xff".to_vec();
+    // Global map: PSBT_GLOBAL_UNSIGNED_TX only.
+    psbt.push(1);
+    psbt.push(0x00);
+    compact_size(tx.len(), &mut psbt);
+    psbt.extend_from_slice(&tx);
+    psbt.push(0x00);
+    // One input map per input, each with a proprietary record.
+    let mut left = extra;
+    for _ in 0..inputs {
+        let value = left.min(RECORD);
+        if value > 0 {
+            let key = [0xfc, 0x04, b't', b'e', b's', b't', 0x01];
+            compact_size(key.len(), &mut psbt);
+            psbt.extend_from_slice(&key);
+            compact_size(value, &mut psbt);
+            psbt.resize(psbt.len() + value, 0xab);
+            left -= value;
+        }
+        psbt.push(0x00);
+    }
+    psbt.push(0x00); // one empty output map
+    psbt
+}
+
+/// The request memory model (`memory.rs`): parsing a PSBT of the largest
+/// frame size uses a small multiple of its bytes.
+#[test]
+fn psbt_parsing_stays_within_the_request_memory_factor() {
+    use crate::memory::peak;
+
+    let (bytes, parsed, peak) = peak::measure(
+        || psbt_with_large_input_records(crate::framing::MAX_MESSAGE_SIZE as usize - 1024),
+        |bytes| super::parse_psbt_shape(bytes).map(|p| p.inputs.len()),
+    );
+    assert_eq!(parsed.unwrap(), 8);
+    peak::assert_within_factor("PSBT parsing", bytes.len(), peak);
+}
