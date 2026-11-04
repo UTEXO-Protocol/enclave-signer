@@ -9,6 +9,16 @@
 //! schema knows, and refuses more than [`MAX_WIRE_ELEMENTS`]. Only then does
 //! tonic decode the message.
 //!
+//! The layer also limits the `Sign` requests at once. Only `Sign` can carry
+//! a large body, so each `Sign` request holds a permit until it ends. A
+//! `Sign` request above the permits gets `UNAVAILABLE` at once. Every other
+//! request needs no permit, and its body can have at most
+//! [`MAX_OTHER_MESSAGE_SIZE`] bytes. So a health probe, such as the
+//! `PublicKey` call of the signer node, still gets an answer while `Sign`
+//! requests run. When its probe fails, the signer node reports the parent as
+//! unreachable. After a probe that gets `UNAVAILABLE`, it also opens a new
+//! connection, and that cancels each request on the old connection.
+//!
 //! The walk enters only the message fields that hold a repeated field, as
 //! [`Schema::child`] lists them. It skips a `bytes` field such as the
 //! consignment and never reads it as protobuf. When a request message of
@@ -18,12 +28,14 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use bytes::{Buf, Bytes};
 use http_body_util::BodyExt;
 use prost::encoding::{decode_key, decode_varint, skip_field, DecodeContext, WireType};
+use tokio::sync::Semaphore;
 use tonic::{body::Body, server::NamedService, Status};
 use tower::{Layer, Service};
 
@@ -35,6 +47,11 @@ use crate::grpc_server::ParentAdapterService;
 /// enclave. The largest real request is a burn with 16 384 proofs of 13 path
 /// elements each. It has about 280 000 occurrences.
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
+
+/// The most bytes of the message of any request but `Sign`. The largest one
+/// in use is `Clone`, which carries an attestation document of a few KiB. The
+/// enclave refuses a document of more than 64 KiB.
+pub const MAX_OTHER_MESSAGE_SIZE: usize = 256 * 1024;
 
 /// The gRPC prefix of each message: a compression flag and a 4-byte length.
 const GRPC_PREFIX: usize = 5;
@@ -116,21 +133,41 @@ fn walk(mut buf: &[u8], schema: Schema, left: &mut usize) -> Result<(), Status> 
 }
 
 /// Reads the whole body of each request and checks its shape before tonic
-/// decodes it. Add it inside the concurrency limit, so that the bodies it
-/// holds count against that limit.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ShapeLayer;
+/// decodes it. Each `Sign` request also holds one of `max_sign` permits until
+/// it ends, and a `Sign` request above them gets `UNAVAILABLE` before its
+/// body is read. Add the layer inside the global concurrency limit, so that
+/// the bodies it holds count against that limit.
+#[derive(Clone, Debug)]
+pub struct ShapeLayer {
+    sign_permits: Arc<Semaphore>,
+    max_sign: usize,
+}
+
+impl ShapeLayer {
+    pub fn new(max_sign: usize) -> Self {
+        Self {
+            sign_permits: Arc::new(Semaphore::new(max_sign)),
+            max_sign,
+        }
+    }
+}
 
 impl<S> Layer<S> for ShapeLayer {
     type Service = ShapeService<S>;
     fn layer(&self, inner: S) -> Self::Service {
-        ShapeService { inner }
+        ShapeService {
+            inner,
+            sign_permits: self.sign_permits.clone(),
+            max_sign: self.max_sign,
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct ShapeService<S> {
     inner: S,
+    sign_permits: Arc<Semaphore>,
+    max_sign: usize,
 }
 
 impl<S> Service<http::Request<Body>> for ShapeService<S>
@@ -148,12 +185,28 @@ where
     }
 
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+        let method = method_of(req.uri().path()).to_owned();
+        let permit = if method == "Sign" {
+            match self.sign_permits.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let status = Status::unavailable(format!(
+                        "the parent serves at most {} Sign requests at once",
+                        self.max_sign
+                    ));
+                    return Box::pin(async move { Ok(status.into_http()) });
+                }
+            }
+        } else {
+            None
+        };
         // Call the instance that `poll_ready` made ready, and keep a clone.
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
+            let _permit = permit;
             let (parts, body) = req.into_parts();
-            let bytes = match checked_body(parts.uri.path(), body).await {
+            let bytes = match checked_body(&method, body).await {
                 Ok(bytes) => bytes,
                 Err(status) => return Ok(status.into_http()),
             };
@@ -163,15 +216,26 @@ where
     }
 }
 
-/// Reads at most one gRPC message of at most [`MAX_MESSAGE_SIZE`] bytes and
-/// checks its shape. Returns the body to pass on.
-async fn checked_body(path: &str, body: Body) -> Result<Bytes, Status> {
-    let prefix = format!(
-        "/{}/",
-        <ParentServiceServer<ParentAdapterService> as NamedService>::NAME
-    );
-    let method = path.strip_prefix(&prefix).unwrap_or_default();
-    let limit = MAX_MESSAGE_SIZE as usize + GRPC_PREFIX;
+/// The RPC name in a request path, for example `Sign`, or "" for a path of
+/// another service.
+fn method_of(path: &str) -> &str {
+    let service = <ParentServiceServer<ParentAdapterService> as NamedService>::NAME;
+    path.strip_prefix('/')
+        .and_then(|rest| rest.strip_prefix(service))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or_default()
+}
+
+/// Reads at most one gRPC message and checks its shape. The message of
+/// `Sign` can have [`MAX_MESSAGE_SIZE`] bytes, and the message of any other
+/// method [`MAX_OTHER_MESSAGE_SIZE`]. Returns the body to pass on.
+async fn checked_body(method: &str, body: Body) -> Result<Bytes, Status> {
+    let message = if method == "Sign" {
+        MAX_MESSAGE_SIZE as usize
+    } else {
+        MAX_OTHER_MESSAGE_SIZE
+    };
+    let limit = message + GRPC_PREFIX;
     let bytes = http_body_util::Limited::new(body, limit)
         .collect()
         .await
