@@ -5,8 +5,10 @@
 //! `submit_headers`. Each header must pass the linkage check against its
 //! predecessor and be at most 2 hours ahead of the enclave clock. It must also
 //! be newer than the median time past of the eleven blocks below it, as in
-//! Bitcoin Core. That rule starts at the eleventh block above the checkpoint.
-//! Mainnet and the testnets also check PoW and nBits.
+//! Bitcoin Core. A chain from genesis takes the median of the blocks it has,
+//! as Core does. Above any other checkpoint, the rule starts at the eleventh
+//! block above the checkpoint. Mainnet and the testnets also check PoW and
+//! nBits.
 //!
 //! On the testnets a block more than 20 minutes after its parent may use the
 //! minimum difficulty. Such blocks count toward confirmations and freshness
@@ -411,13 +413,9 @@ impl HeaderChain {
         staged: &[(Header, BlockHash)],
     ) -> Result<Option<u32>> {
         let first = height.saturating_sub(MEDIAN_TIME_SPAN as BlockHeight);
-        let first = if first >= self.base_height {
-            first
-        } else if self.base_height == 0 {
-            0
-        } else {
+        if first < self.base_height {
             return Ok(None);
-        };
+        }
         let mut times = Vec::with_capacity(MEDIAN_TIME_SPAN);
         for h in first..height {
             times.push(self.block_at(h, batch_start_height, staged)?.0);

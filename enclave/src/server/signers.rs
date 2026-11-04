@@ -11,12 +11,14 @@ use crate::proto::*;
 #[cfg(feature = "ccd")]
 use crate::state::EnclaveState;
 
-/// Check that all pinned Bitcoin blocks still have the same hash, then run
-/// `sign` with the header-chain lock still held.
+/// Check that all pinned Bitcoin blocks still have the same hash and at least
+/// the depth their check required. Then run `sign` with the header-chain lock
+/// still held.
 ///
 /// Each SPV check releases the lock at return. Another worker can accept a
 /// reorg in that gap (F05-NEW-AF-08). An extension does not change the pinned
-/// heights, so signing continues. A reorg that replaces a pin is refused here.
+/// heights, so signing continues. This function refuses a reorg that replaces
+/// a pin, or that leaves a pinned block shallower than its check required.
 /// The lock is held until `sign` returns, so no header update can land between
 /// the check and the key use. Lock order: header chain, then key state.
 #[cfg(feature = "rgb-validation")]

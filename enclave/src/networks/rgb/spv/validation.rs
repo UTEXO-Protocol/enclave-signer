@@ -1,10 +1,9 @@
 //! Per-header validation functions. They hold no chain state.
 //!
-//! `HeaderChain` gives the prior-header context. These functions check
-//! linkage to the predecessor, the time against the enclave clock, the time
-//! against the median time past of the eleven blocks below, PoW and the
-//! `nBits` for the height. On testnet4 they also check the BIP94 timewarp
-//! rule.
+//! `HeaderChain` gives the prior-header context. These functions check the
+//! linkage to the predecessor, PoW and the `nBits` for the height. They also
+//! check the time against the enclave clock and against the median time past
+//! of the blocks below. On testnet4 they also check the BIP94 timewarp rule.
 //!
 //! Per network:
 //!
@@ -16,9 +15,11 @@
 //!   the retarget starts from the first block of the period, and that block
 //!   may not be more than 600 s older than its parent.
 //! - Signet: this implementation skips PoW and `nBits` checks. It also cannot
-//!   verify the BIP-325 challenge because the request has no coinbase witness.
-//!   Per-header validation checks only chain linkage and the clock bound.
-//! - Regtest: chain linkage and the clock bound only.
+//!   check the BIP-325 challenge because the request has no coinbase witness.
+//!   Per-header validation checks only chain linkage, the clock bound and the
+//!   median-time-past rule.
+//! - Regtest: chain linkage, the clock bound and the median-time-past rule
+//!   only.
 
 use bitcoin::block::Header;
 use bitcoin::pow::CompactTarget;
@@ -173,10 +174,12 @@ pub fn median_time_past(times: &mut [u32]) -> u32 {
 }
 
 /// Core's `time-too-old` rule: a block's time is newer than the median time
-/// past of the [`MEDIAN_TIME_SPAN`] blocks below it. It applies on every
-/// network, as in Core. `None` skips the rule. The chain has no times below
-/// its checkpoint, and a median of fewer blocks could be stricter than
-/// Core's. So the rule starts where the chain holds all eleven times.
+/// past of the [`MEDIAN_TIME_SPAN`] blocks below it. Near genesis a block has
+/// fewer blocks below it, and Core takes the median of those. The rule applies
+/// on every network, as in Core. `None` skips the rule. Above a checkpoint
+/// that is not genesis, the chain has no times below the checkpoint. A median
+/// of fewer blocks could then be stricter than Core's. So there the rule
+/// starts where the chain holds all eleven times.
 pub fn check_time_too_old(
     height: BlockHeight,
     time: u32,

@@ -190,7 +190,7 @@ pub enum SpvError {
 
     #[error(
         "header at height {height} has time {time}, at or before the median time past \
-         {median_time_past} of the eleven blocks below it"
+         {median_time_past} of the blocks below it"
     )]
     TimeTooOld {
         height: BlockHeight,
