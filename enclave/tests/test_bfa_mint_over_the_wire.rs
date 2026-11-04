@@ -882,7 +882,7 @@ fn refuses_a_lock_above_the_finality_head() {
     };
     assert_eq!(error.code, 8, "the caller must recognize a finality wait");
     let refusal = refusal(&response);
-    assert!(refusal.contains("above RPC safe block"), "{refusal}");
+    assert!(refusal.contains("above RPC finalized block"), "{refusal}");
 }
 
 /// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.
