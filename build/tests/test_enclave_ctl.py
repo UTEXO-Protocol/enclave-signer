@@ -90,15 +90,15 @@ os.execvp(args[0], args)
 
     def test_too_little_memory_is_refused_before_run_enclave(self):
         for script in (CTL, self.embedded):
-            for memory in ('2688', '3071', '0'):
+            for memory in ('2688', '3583', '0'):
                 with self.subTest(script=script.name, memory=memory):
                     result = self.start(script, memory)
                     self.assert_refused(
-                        result, f'ENCLAVE_MEMORY={memory} MiB is below the 3072 MiB minimum')
+                        result, f'ENCLAVE_MEMORY={memory} MiB is below the 3584 MiB minimum')
 
     def test_a_value_that_is_not_a_number_is_refused(self):
         for script in (CTL, self.embedded):
-            for memory in ('3g', '3072 ', '-3072', '3072.0', '99999999999999999999'):
+            for memory in ('3g', '3584 ', '-3584', '3584.0', '99999999999999999999'):
                 with self.subTest(script=script.name, memory=memory):
                     result = self.start(script, memory)
                     self.assert_refused(result, 'ENCLAVE_MEMORY must be a whole number of MiB')
@@ -107,7 +107,7 @@ os.execvp(args[0], args)
         if not bash_expands_empty_arrays():
             self.skipTest('bash 4.4 or later is needed for the start path')
         for script in (CTL, self.embedded):
-            for memory, expected in ((None, '3072'), ('3072', '3072'), ('4096', '4096')):
+            for memory, expected in ((None, '3584'), ('3584', '3584'), ('4096', '4096')):
                 with self.subTest(script=script.name, memory=memory):
                     if self.calls.exists():
                         self.calls.unlink()
@@ -122,7 +122,7 @@ os.execvp(args[0], args)
             PATH=self.env['PATH'], GIT_SHA='0' * 40, BUCKET='bucket',
             AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base),
         )
-        for memory, text in (('2688', 'is below the 3072 MiB minimum'),
+        for memory, text in (('2688', 'is below the 3584 MiB minimum'),
                              ('3g', 'must be a whole number of MiB')):
             with self.subTest(memory=memory):
                 result = subprocess.run(

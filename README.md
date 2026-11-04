@@ -503,11 +503,13 @@ There is no cap unless `CLONE_EXPORT_HARD_CAP` is set.
 
 ### Production (Nitro)
 
-`--memory` must be at least 3072 MiB. The enclave needs 2688 MiB of usable
-memory (`enclave/src/memory.rs`), and the kernel keeps part of the launch value.
+`--memory` must be at least 3584 MiB. The enclave needs 2688 MiB of usable
+memory (`enclave/src/memory.rs`), and the kernel and the root file system keep
+part of the launch value. The host allocator must hold `ENCLAVE_MEMORY` for
+every enclave it runs: three replicas need 10752 MiB.
 
 ```bash
-nitro-cli run-enclave --cpu-count 2 --memory 3072 --enclave-cid 16 \
+nitro-cli run-enclave --cpu-count 2 --memory 3584 --enclave-cid 16 \
   --eif-path build/utexo-bridge-enclave.eif
 
 # Host-side proxies (allowlist each upstream)
