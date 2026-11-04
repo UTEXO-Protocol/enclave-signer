@@ -165,7 +165,7 @@ fn server_requiring(min_confirmations: u32) -> u16 {
 /// Readiness uses the configured depth, not the default.
 #[test]
 fn readiness_follows_the_configured_depth() {
-    let shallow = SPV_MIN_CONFIRMATIONS - 3;
+    let shallow = SPV_MIN_CONFIRMATIONS - 1;
     let port = server_requiring(shallow);
     submit_chain(port, shallow, now_unix());
     assert!(

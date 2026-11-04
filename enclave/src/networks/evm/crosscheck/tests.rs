@@ -925,7 +925,6 @@ mod lz_route {
 
 mod btc_relay {
     use super::*;
-    use crate::config::DEFAULT_SPV_MIN_CONFIRMATIONS;
     use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use crate::test_support::ANY_HEADER_CLOCK;
@@ -942,10 +941,14 @@ mod btc_relay {
         0x1f, 0x20,
     ];
 
+    /// Depth that these tests require. It does not follow the default: the
+    /// reorg tests need a depth above the 4 blocks that they leave.
+    const MIN_CONFIRMATIONS: u32 = 6;
+
     /// Block holding [`WITNESS_TXID`]. Its ten prior timestamps are above
     /// the checkpoint.
     const ANCHOR_HEIGHT: u32 = 11;
-    /// Default tip: leaves the anchor 7 deep, past `SPV_MIN_CONFIRMATIONS`.
+    /// Default tip: leaves the anchor 7 deep, past [`MIN_CONFIRMATIONS`].
     const TIP_HEIGHT: u32 = 17;
 
     /// Encode `n` as a big-endian 32-byte ABI word.
@@ -1153,7 +1156,7 @@ mod btc_relay {
             chain,
             &ChainPins::new(),
             mode,
-            DEFAULT_SPV_MIN_CONFIRMATIONS,
+            MIN_CONFIRMATIONS,
         )
     }
 
@@ -1536,7 +1539,7 @@ mod btc_relay {
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
-            DEFAULT_SPV_MIN_CONFIRMATIONS,
+            MIN_CONFIRMATIONS,
         )
         .unwrap_err();
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
@@ -1613,7 +1616,7 @@ mod btc_relay {
             chain,
             &pins,
             BtcRelayMode::Required,
-            DEFAULT_SPV_MIN_CONFIRMATIONS,
+            MIN_CONFIRMATIONS,
         )
         .expect("terminal check passes on the fixture chain");
         pins
@@ -1697,7 +1700,7 @@ mod btc_relay {
             &chain,
             &pins,
             BtcRelayMode::Required,
-            DEFAULT_SPV_MIN_CONFIRMATIONS,
+            MIN_CONFIRMATIONS,
         )
         .unwrap();
         let pinned = [ANCHOR_HEIGHT, latest].map(|h| chain.hash_at(h));
@@ -1886,7 +1889,7 @@ mod btc_relay {
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
-            DEFAULT_SPV_MIN_CONFIRMATIONS,
+            MIN_CONFIRMATIONS,
         )
         .unwrap_err();
         assert!(

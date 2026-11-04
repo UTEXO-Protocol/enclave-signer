@@ -131,8 +131,8 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
 # Here it only decides when the health check reports the SPV header chain
-# synced, that many blocks past the checkpoint. The burn image keeps 6, the
-# depth it checks every burn witness at.
+# synced, that many blocks past the checkpoint. Every image sets 3, the depth
+# the burn signer checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
 # witness mint is refused after its lock. Measured, not attested.

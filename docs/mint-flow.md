@@ -139,7 +139,7 @@ refuses it.
 | `OS_MINT` | 4013 | The mint right (`mintRight`). Declarative: it holds no units. |
 | `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition that may make a right a mint spends (PP4). |
 | `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
-| `SPV_MIN_CONFIRMATIONS` | 3 (mint image) | Image env, attested. Zero stops the boot. No mint check reads it. |
+| `SPV_MIN_CONFIRMATIONS` | 3 | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
 | Fascia size | 16 MiB (`U24`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |

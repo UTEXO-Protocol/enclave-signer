@@ -136,7 +136,7 @@ Before it signs, the burn signer:
    The mint signer reads no list. Any read failure refuses, so burn hosts
    need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 2. Checks that each Bitcoin transaction of the consignment is in its own
-   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
+   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (3).
    The chain tip must be less than 2 hours old.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
@@ -606,7 +606,7 @@ Data sources and transport:
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host vsock-proxy port for AWS KMS. |
 | `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. Every image sets `finalized`. |
-| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
+| `SPV_MIN_CONFIRMATIONS` | `3` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Every image sets 3; no mint check reads it. |
 | `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats a witness mint pays to the user's output. Unset or empty gives 1500; a non-number or a value outside 546 to 10000 stops the boot (every image parses it). It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that ([mint flow](docs/mint-flow.md) M8). Baked into the mint image (1500), so PCR0 measures it; not attested. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |

@@ -864,7 +864,7 @@ For an RGB-source request, the SPV layer enforces these rules:
 4. Require one Merkle proof for each consignment witness transaction.
    Reject missing, extra, or duplicate proofs.
    Check inclusion against the stored header with a path of at most 32 levels.
-   Require at least `SPV_MIN_CONFIRMATIONS` confirmations (default 6). On the
+   Require at least `SPV_MIN_CONFIRMATIONS` confirmations (default 3). On the
    testnets min-difficulty blocks count, for testing convenience: testnets
    carry no production value.
    Record the hash and the required depth of each block a check used. Check

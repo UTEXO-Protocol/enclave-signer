@@ -97,7 +97,7 @@ sequenceDiagram
 | `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list is. The enclave reads only an `IRgbRejectList` contract on `EVM_CHAIN_ID` (B3.7). |
 | `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
+| `SPV_MIN_CONFIRMATIONS` | 3 | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
 | `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
 | `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | Maximum distance from the BtcRelay tip to the enclave tip. |
@@ -234,7 +234,7 @@ meets the reorganization limits. Signet and regtest skip proof-of-work and
 - **B3.4** Each Merkle path must be at most 32 levels. Each proof must verify
   against the header that the enclave stores at that height.
 - **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
-  blocks deep (default 6). On the testnets min-difficulty blocks count.
+  blocks deep (default 3). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights, hashes and required depths it
   used. Just before it uses the key, it checks that no hash changed and no
   block is shallower than the depth its check required.

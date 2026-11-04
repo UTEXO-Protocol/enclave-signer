@@ -137,7 +137,7 @@ struct Cli {
     expect_token_contract: Option<String>,
 
     /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
-    /// Default: the shipped image value, 3 for mint and 6 otherwise.
+    /// Default: 3, the value of every shipped image.
     #[arg(long)]
     expect_spv_min_confirmations: Option<u32>,
 
@@ -306,17 +306,11 @@ fn parse_expect_evm_finality_tag(value: Option<EvmFinalityTag>) -> Result<EvmFin
     }
 }
 
-/// The `SPV_MIN_CONFIRMATIONS` of the shipped image of `role` (a test reads the Dockerfiles).
-fn default_spv_min_confirmations(role: SignerRole) -> u32 {
-    if role == SignerRole::Mint {
-        3
-    } else {
-        6
-    }
-}
+/// The `SPV_MIN_CONFIRMATIONS` of every shipped image (a test reads the Dockerfiles).
+const IMAGE_SPV_MIN_CONFIRMATIONS: u32 = 3;
 
-fn parse_expect_spv_min_confirmations(value: Option<u32>, role: SignerRole) -> Result<u32> {
-    Some(value.unwrap_or(default_spv_min_confirmations(role)))
+fn parse_expect_spv_min_confirmations(value: Option<u32>) -> Result<u32> {
+    Some(value.unwrap_or(IMAGE_SPV_MIN_CONFIRMATIONS))
         .filter(|n| *n > 0)
         .context("--expect-spv-min-confirmations must be greater than zero")
 }
@@ -415,7 +409,6 @@ async fn run(cli: Cli) -> Result<()> {
             token_contract: parse_expect_token_contract(&cli.expect_token_contract)?,
             spv_min_confirmations: parse_expect_spv_min_confirmations(
                 cli.expect_spv_min_confirmations,
-                signer_role,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
             gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
@@ -489,31 +482,19 @@ mod tests {
     }
 
     #[test]
-    fn spv_depth_defaults_to_the_image_value_of_the_role() {
-        for (role, dockerfile) in [
-            (
-                SignerRole::Mint,
-                include_str!("../../../build/Dockerfile.enclave.mint"),
-            ),
-            (
-                SignerRole::Burn,
-                include_str!("../../../build/Dockerfile.enclave.burn"),
-            ),
-            (
-                SignerRole::Combined,
-                include_str!("../../../build/Dockerfile.enclave"),
-            ),
+    fn spv_depth_defaults_to_the_image_value() {
+        for dockerfile in [
+            include_str!("../../../build/Dockerfile.enclave.mint"),
+            include_str!("../../../build/Dockerfile.enclave.burn"),
+            include_str!("../../../build/Dockerfile.enclave"),
         ] {
             assert_eq!(
-                parse_expect_spv_min_confirmations(None, role).unwrap(),
+                parse_expect_spv_min_confirmations(None).unwrap(),
                 image_spv_depth(dockerfile)
             );
         }
-        assert_eq!(
-            parse_expect_spv_min_confirmations(Some(6), SignerRole::Mint).unwrap(),
-            6
-        );
-        assert!(parse_expect_spv_min_confirmations(Some(0), SignerRole::Mint).is_err());
+        assert_eq!(parse_expect_spv_min_confirmations(Some(6)).unwrap(), 6);
+        assert!(parse_expect_spv_min_confirmations(Some(0)).is_err());
     }
 
     #[test]
