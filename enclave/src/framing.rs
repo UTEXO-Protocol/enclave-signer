@@ -102,8 +102,15 @@ impl Schema {
 /// knows. The shape check or the decode refuses a frame that is not valid
 /// protobuf.
 pub fn check_request_shape(frame: &[u8]) -> Result<()> {
+    count_request_elements(frame).map(|_| ())
+}
+
+/// The field occurrences of a request frame, or the refusal of
+/// [`check_request_shape`]. The memory tests use the count.
+pub(crate) fn count_request_elements(frame: &[u8]) -> Result<usize> {
     let mut left = MAX_WIRE_ELEMENTS;
-    walk(frame, Schema::Request, &mut left)
+    walk(frame, Schema::Request, &mut left)?;
+    Ok(MAX_WIRE_ELEMENTS - left)
 }
 
 fn shape_error(e: prost::DecodeError) -> EnclaveError {
@@ -307,6 +314,16 @@ mod tests {
             |wire| read_request(&mut Cursor::new(wire)).unwrap(),
         );
         peak::assert_within_request_bound("read_request at the element cap", at_cap.len(), peak);
+        // The frame has exactly the cap in occurrences, so the model and the
+        // request bound meet here.
+        let elements = count_request_elements(&at_cap[4..]).unwrap();
+        assert_eq!(elements, MAX_WIRE_ELEMENTS);
+        peak::assert_within_model(
+            "read_request at the element cap",
+            at_cap.len(),
+            elements,
+            peak,
+        );
         let Some(enclave_request::Request::Sign(sign)) = decoded.request else {
             panic!("not a Sign request");
         };

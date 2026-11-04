@@ -44,7 +44,9 @@ use crate::policy::BuildContext;
 /// Every request type with a large input has a test against this bound. The
 /// largest measured value is consignment validation, at about 15 times the
 /// consignment. Reading a frame takes 3 times the frame. The gas transaction
-/// and PSBT parsers stay under 2.
+/// and PSBT parsers stay under 2. A whole burn request through `dispatch`,
+/// with the decoded request held during validation, peaks at about 15 times
+/// its frame, or 14.5 beyond the element term (`server::sign::request_memory`).
 pub const REQUEST_MEMORY_FACTOR: usize = 20;
 
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
@@ -237,6 +239,26 @@ pub(crate) mod peak {
             peak <= budget,
             "{what}: peak heap {peak} bytes is above the request bound of {budget} bytes \
              for a {frame_len}-byte frame"
+        );
+    }
+
+    /// Fails when `peak` is above the model for a request of `frame_len`
+    /// bytes with `elements` field occurrences: the factor plus
+    /// `WIRE_ELEMENT_BYTES` for each element. Tighter than the request bound,
+    /// which takes the element cap. For a whole request through `dispatch`.
+    pub(crate) fn assert_within_model(what: &str, frame_len: usize, elements: usize, peak: usize) {
+        let elements_bytes = super::WIRE_ELEMENT_BYTES * elements;
+        let budget = super::REQUEST_MEMORY_FACTOR * frame_len + elements_bytes;
+        // Signed: below zero when the element term alone covers the peak.
+        let beyond = (peak as f64 - elements_bytes as f64) / frame_len.max(1) as f64;
+        println!(
+            "{what}: {frame_len} frame bytes, {elements} elements ({elements_bytes} bytes), \
+             peak heap {peak} bytes, factor {beyond:.2} beyond the elements, model {budget} bytes"
+        );
+        assert!(
+            peak <= budget,
+            "{what}: peak heap {peak} bytes is above the model of {budget} bytes for a \
+             {frame_len}-byte frame with {elements} elements"
         );
     }
 
