@@ -123,21 +123,31 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # points FundsIn verification at the wrong contract.
 # The burn signer also signs the gas tx that submits `fundsOut`
 # (`SignRawDigest`). That fails closed unless GAS_TX_ALLOWED_TO,
-# GAS_TX_MAX_GAS_LIMIT and GAS_TX_MAX_FEE_PER_GAS are all pinned; only the first
-# is baked here, so this image signs no gas tx yet. The plain-BTC (`SignBtc`)
+# GAS_TX_MAX_GAS_LIMIT and GAS_TX_MAX_FEE_PER_GAS are all pinned; the default
+# zero limits refuse gas signing until configured. The plain-BTC (`SignBtc`)
 # path is not compiled in.
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
 # Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
 # pin binds them instead.
 # SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1), attested.
+ARG GAS_TX_ALLOWED_TO=${FUNDS_IN_CONTRACT}
+ARG GAS_TX_MAX_GAS_LIMIT=0
+ARG GAS_TX_MAX_FEE_PER_GAS=0
+ARG GAS_TX_MAX_VALUE_WEI=0
+ARG GAS_TX_ALLOWED_SELECTORS=""
 ENV BTC_RELAY_MODE=${BTC_RELAY_MODE} \
     EVM_FINALITY_TAG=finalized \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \
-    GAS_TX_ALLOWED_TO=${FUNDS_IN_CONTRACT}
+    GAS_TX_ALLOWED_TO=${GAS_TX_ALLOWED_TO} \
+    GAS_TX_MAX_GAS_LIMIT=${GAS_TX_MAX_GAS_LIMIT} \
+    GAS_TX_MAX_FEE_PER_GAS=${GAS_TX_MAX_FEE_PER_GAS} \
+    GAS_TX_MAX_VALUE_WEI=${GAS_TX_MAX_VALUE_WEI} \
+    GAS_TX_ALLOWED_SELECTORS=${GAS_TX_ALLOWED_SELECTORS}
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.
-ENV RUST_LOG=info
+ARG RUST_LOG=info
+ENV RUST_LOG=${RUST_LOG}
 ENTRYPOINT ["/app/entrypoint.sh"]

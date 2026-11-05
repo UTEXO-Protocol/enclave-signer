@@ -61,6 +61,12 @@ IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # output .eif and its SHA256SUMS entry; the default keeps the historical
 # artifact name.
 DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint, .burn or .ccd)}"
+BUILD_PROFILE="${BUILD_PROFILE:-default}"
+case "$BUILD_PROFILE" in
+    default) ;;
+    stage-signet) source "$SCRIPT_DIR/profiles/stage-signet.sh" ;;
+    *) echo "Error: unknown BUILD_PROFILE: $BUILD_PROFILE" >&2; exit 1 ;;
+esac
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
 
@@ -124,7 +130,9 @@ if declares_build_arg ENCLAVE_FEATURES; then
         exit 1
     fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256; do
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256 \
+        GAS_TX_ALLOWED_TO GAS_TX_MAX_GAS_LIMIT GAS_TX_MAX_FEE_PER_GAS GAS_TX_MAX_VALUE_WEI \
+        GAS_TX_ALLOWED_SELECTORS RUST_LOG; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
             BUILD_ARGS+=(--build-arg "$arg=${!arg}")
             echo "    build override: $arg=${!arg}"
