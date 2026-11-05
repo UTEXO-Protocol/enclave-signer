@@ -125,10 +125,16 @@ mod burn {
 #[cfg(evm_to_rgb)]
 mod mint {
     use super::*;
+    use crate::networks::evm::events::{LogEntry, BRIDGE_FUNDS_IN_SIG};
     use crate::networks::rgb::psbt_validation::{MintFacts, MintRecipient};
     use crate::networks::rgb::validation::lock_id;
-    use crate::test_support::{mint_deposit, FakeEvm};
+    use crate::test_support::{abi_word, bridge_funds_in_data, mint_deposit, FakeEvm};
     use bitcoin::hashes::Hash;
+    use sha3::{Digest, Keccak256};
+
+    fn topic0(sig: &str) -> [u8; 32] {
+        Keccak256::digest(sig.as_bytes()).into()
+    }
 
     const TX: [u8; 32] = [0xee; 32];
     const OPID: [u8; 32] = [2; 32];
