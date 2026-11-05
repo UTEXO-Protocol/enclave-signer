@@ -973,7 +973,7 @@ fn refuses_a_deposit_not_locked_under_the_mint_lock_id() {
     let other_tx = bfa_consignment::lock_id_bytes(opid, Txid::from_byte_array([0x42; 32]));
     for lock_id in [bfa_consignment::opid_bytes(opid), other_tx] {
         let refusal = refusal(&drive_locked(&built, lock_id));
-        assert!(refusal.contains("lockId mismatch"), "{refusal}");
+        assert!(refusal.contains("no FundsIn log"), "{refusal}");
     }
 }
 

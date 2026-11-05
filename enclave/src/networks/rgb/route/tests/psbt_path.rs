@@ -780,12 +780,14 @@ fn witness_mint_lock_id_binds_the_recipient_script() {
             attestation_verify::EvmFinalityTag::Safe,
             &[0xee; 32],
             &bound.lock_id,
+            &[0xd0; 32],
+            MINTED,
             bound.before_block,
         )
     };
     m6(&to_user).expect("the user's tx is the one locked");
     let err = m6(&to_host).unwrap_err().to_string();
-    assert!(err.contains("lockId mismatch"), "{err}");
+    assert!(err.contains("no FundsIn log"), "{err}");
 }
 
 // ===== the rights refill =====
