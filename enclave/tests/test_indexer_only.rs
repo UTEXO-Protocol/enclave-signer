@@ -180,7 +180,10 @@ fn indexer_only_is_ready_without_headers_only_after_keys_and_endpoints() {
 #[test]
 #[cfg(feature = "burn-signer")]
 fn indexer_only_burn_refuses_kms_fields() {
-    assert!(Endpoints::parse(&endpoints()).unwrap().kms.is_none());
+    assert!(Endpoints::parse(&endpoints(), &[], true)
+        .unwrap()
+        .kms
+        .is_none());
     for field in 0..4 {
         let mut request = endpoints();
         match field {
@@ -189,7 +192,7 @@ fn indexer_only_burn_refuses_kms_fields() {
             2 => request.kms_seed_id = "stage".into(),
             _ => request.kms_expected_evm_address = "ab".repeat(20),
         }
-        assert!(Endpoints::parse(&request).is_err());
+        assert!(Endpoints::parse(&request, &[], true).is_err());
     }
 }
 
@@ -280,7 +283,10 @@ fn indexer_only_burn_installs_a_runtime_donor_secret() {
 #[test]
 #[cfg(feature = "mint-signer")]
 fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
-    let kms = Endpoints::parse(&endpoints()).unwrap().kms.unwrap();
+    let kms = Endpoints::parse(&endpoints(), &[], true)
+        .unwrap()
+        .kms
+        .unwrap();
     assert_eq!(kms.seed_id, "signet-mint");
     assert!(kms.expected_evm_address.is_none());
     let port = start();
@@ -296,7 +302,7 @@ fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
     for mutate in malformed {
         let mut request = endpoints();
         mutate(&mut request);
-        assert!(Endpoints::parse(&request).is_err());
+        assert!(Endpoints::parse(&request, &[], true).is_err());
         assert!(matches!(
             send(port, Request::SetEndpoints(request)),
             Response::Error(_)
@@ -310,7 +316,7 @@ fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
         utexo_bridge_enclave::config::chain_endpoints_sha256(&endpoints()),
     );
     assert_eq!(
-        Endpoints::parse(&pinned)
+        Endpoints::parse(&pinned, &[], true)
             .unwrap()
             .kms
             .unwrap()

@@ -171,7 +171,14 @@ pub struct BridgeConfig {
     /// Measured commitment to chain endpoint hosts, ports and RPC CA. KMS
     /// launch fields remain runtime inputs, as in production recovery.
     pub endpoints_sha256: Option<[u8; 32]>,
+    /// The AWS accounts a KMS key may live in (`KMS_ALLOWED_ACCOUNT_IDS`). Image
+    /// env, so PCR0 measures it. Empty when unset; a release mint image then
+    /// refuses every key in `SetEndpoints`.
+    pub kms_allowed_accounts: Vec<String>,
 }
+
+/// Image env var: the AWS accounts a KMS key may live in.
+pub const KMS_ALLOWED_ACCOUNTS_ENV: &str = "KMS_ALLOWED_ACCOUNT_IDS";
 
 /// Env var selecting [`BtcRelayMode`].
 pub const BTC_RELAY_MODE_ENV: &str = "BTC_RELAY_MODE";
@@ -244,6 +251,7 @@ impl Default for BridgeConfig {
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
             mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
             endpoints_sha256: None,
+            kms_allowed_accounts: Vec::new(),
         }
     }
 }
@@ -430,6 +438,10 @@ impl BridgeConfig {
                 std::env::var("ENDPOINTS_SHA256").ok().as_deref(),
             )
             .unwrap_or_else(|e| panic!("{e}")),
+            kms_allowed_accounts: parse_kms_allowed_accounts(
+                std::env::var(KMS_ALLOWED_ACCOUNTS_ENV).ok().as_deref(),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
         }
     }
 
@@ -490,6 +502,28 @@ pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u
     kms_seed_id.clear();
     kms_expected_evm_address.clear();
     Sha256::digest(network.encode_to_vec()).into()
+}
+
+/// Parses `KMS_ALLOWED_ACCOUNT_IDS`: comma-separated 12-digit AWS account ids.
+/// Unset or blank gives an empty list. A malformed entry is an error, so a bad
+/// image does not boot with a partial list.
+pub fn parse_kms_allowed_accounts(value: Option<&str>) -> std::result::Result<Vec<String>, String> {
+    let ids: Vec<String> = value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .collect();
+    if ids
+        .iter()
+        .any(|id| id.len() != 12 || !id.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(format!(
+            "{KMS_ALLOWED_ACCOUNTS_ENV} must list 12-digit AWS account ids"
+        ));
+    }
+    Ok(ids)
 }
 
 fn parse_endpoints_sha256(value: Option<&str>) -> std::result::Result<Option<[u8; 32]>, String> {
@@ -611,8 +645,14 @@ impl Endpoints {
     }
 
     /// Check the values this build uses. A value the build does not use
-    /// must be empty.
-    pub fn parse(req: &crate::proto::SetEndpointsRequest) -> std::result::Result<Self, String> {
+    /// must be empty. `kms_accounts` is the image's account list
+    /// ([`BridgeConfig::kms_allowed_accounts`]). With no list, `allow_unpinned`
+    /// (a dev or test build) skips the account check and a release build refuses.
+    pub fn parse(
+        req: &crate::proto::SetEndpointsRequest,
+        kms_accounts: &[String],
+        allow_unpinned: bool,
+    ) -> std::result::Result<Self, String> {
         // Each string is short: a URL, a host name, an ARN of at most 2048
         // bytes, a region, a seed id or an address. The parsers below split
         // them into parts, which take more memory than their bytes. So the
@@ -702,9 +742,7 @@ impl Endpoints {
             };
             config.validate().map_err(|e| e.to_string())?;
             config
-                .validate_account(
-                    &std::env::var(crate::kms::ALLOWED_ACCOUNTS_ENV).unwrap_or_default(),
-                )
+                .validate_account(kms_accounts, allow_unpinned)
                 .map_err(|e| e.to_string())?;
             // The Electrum pin must not catch the KMS host.
             if electrum_host == config.endpoint_host() {
@@ -730,6 +768,8 @@ impl Endpoints {
         };
         #[cfg(not(feature = "kms-persistence"))]
         let kms = {
+            // This build takes no KMS key, so it has no account list to apply.
+            let _ = (kms_accounts, allow_unpinned);
             for (name, value) in kms_values {
                 unused(name, value.is_empty())?;
             }
@@ -1213,7 +1253,20 @@ mod tests {
     ) -> std::result::Result<Endpoints, String> {
         let mut req = valid();
         edit(&mut req);
-        Endpoints::parse(&req)
+        Endpoints::parse(&req, &[], true)
+    }
+
+    #[test]
+    fn the_account_list_parses_ids_and_refuses_a_malformed_entry() {
+        assert_eq!(parse_kms_allowed_accounts(None), Ok(vec![]));
+        assert_eq!(parse_kms_allowed_accounts(Some(" , ")), Ok(vec![]));
+        assert_eq!(
+            parse_kms_allowed_accounts(Some(" 111111111111 , 123456789012 ")),
+            Ok(vec!["111111111111".to_string(), "123456789012".to_string()])
+        );
+        for bad in ["12345", "12345678901a", "123456789012,abc"] {
+            assert!(parse_kms_allowed_accounts(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

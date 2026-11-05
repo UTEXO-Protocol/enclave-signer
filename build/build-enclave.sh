@@ -94,6 +94,23 @@ if declares_build_arg RGB_ASSET_ID; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
+# The mint recipe pins the AWS accounts of the seed KMS key. Refuse a missing
+# or malformed list here, before the long build: the recipe's own check only
+# tests that it is not empty.
+if declares_build_arg KMS_ALLOWED_ACCOUNT_IDS; then
+    if [ -z "${KMS_ALLOWED_ACCOUNT_IDS:-}" ]; then
+        echo "Error: $DOCKERFILE requires KMS_ALLOWED_ACCOUNT_IDS (the AWS account id of the seed KMS key)." >&2
+        echo "       Set KMS_ALLOWED_ACCOUNT_IDS=<12-digit id>[,<12-digit id>...] and re-run." >&2
+        exit 1
+    fi
+    if ! [[ "$KMS_ALLOWED_ACCOUNT_IDS" =~ ^[0-9]{12}(,[0-9]{12})*$ ]]; then
+        echo "Error: KMS_ALLOWED_ACCOUNT_IDS must be comma-separated 12-digit AWS account ids, got '$KMS_ALLOWED_ACCOUNT_IDS'." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "KMS_ALLOWED_ACCOUNT_IDS=$KMS_ALLOWED_ACCOUNT_IDS")
+    echo "    kms accounts : $KMS_ALLOWED_ACCOUNT_IDS"
+fi
+
 # Optional measured configuration for the mint/burn recipes. Unset values
 # retain each Dockerfile's production defaults.
 if declares_build_arg ENCLAVE_FEATURES; then
@@ -107,8 +124,7 @@ if declares_build_arg ENCLAVE_FEATURES; then
         exit 1
     fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256 \
-        KMS_ALLOWED_ACCOUNT_IDS; do
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
             BUILD_ARGS+=(--build-arg "$arg=${!arg}")
             echo "    build override: $arg=${!arg}"

@@ -19,6 +19,7 @@ KMS_PINS = dict(
     KMS_REGION='eu-west-1',
     KMS_SEED_ID='mint-signer-1',
 )
+ACCOUNTS = '123456789012'
 MEASURED_PINS = dict(
     BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
@@ -58,6 +59,7 @@ class BuildArgumentsTests(unittest.TestCase):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
+            KMS_ALLOWED_ACCOUNT_IDS=ACCOUNTS,
             RGB_LIB_BFA_DEPLOY_KEY='fixture-deploy-key-not-a-real-credential',
             RGB_PRIVATE_DEPS_TOKEN='fixture-mirror-token-not-a-real-credential',
             OUT_DIR=str(self.base / 'out'),
@@ -74,6 +76,13 @@ class BuildArgumentsTests(unittest.TestCase):
             capture_output=True, text=True,
         )
 
+    def base_args(self, recipe):
+        """Build args every RGB recipe gets. The mint recipe also pins the KMS accounts."""
+        args = ['SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset']
+        if recipe.endswith('.mint'):
+            args.append(f'KMS_ALLOWED_ACCOUNT_IDS={ACCOUNTS}')
+        return args
+
     def captured_build_args(self):
         argv = json.loads(self.argv.read_text())
         self.assertEqual(argv[:2], ['buildx', 'build'])
@@ -89,6 +98,30 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertIn('requires RGB_ASSET_ID', result.stderr)
                 self.assertFalse(self.argv.exists())
 
+    def test_mint_recipe_rejects_a_missing_or_malformed_account_list_before_docker(self):
+        for value, message in (
+            ('', 'requires KMS_ALLOWED_ACCOUNT_IDS'),
+            (' ', 'comma-separated 12-digit'),
+            (',', 'comma-separated 12-digit'),
+            ('12345', 'comma-separated 12-digit'),
+            ('12345678901a', 'comma-separated 12-digit'),
+            (f'{ACCOUNTS},', 'comma-separated 12-digit'),
+            (f'{ACCOUNTS}, {ACCOUNTS}', 'comma-separated 12-digit'),
+        ):
+            with self.subTest(value=value):
+                result = self.invoke('Dockerfile.enclave.mint', RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     KMS_ALLOWED_ACCOUNT_IDS=value)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.argv.exists())
+
+    def test_mint_recipe_forwards_a_list_of_accounts(self):
+        accounts = f'{ACCOUNTS},111111111111'
+        result = self.invoke('Dockerfile.enclave.mint', RGB_ASSET_ID='rgb:test-bfa-asset',
+                             KMS_ALLOWED_ACCOUNT_IDS=accounts)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIn(f'KMS_ALLOWED_ACCOUNT_IDS={accounts}', self.captured_build_args())
+
     def test_rgb_asset_forwarded_once_without_implicit_debug(self):
         # Endpoint and KMS values in the caller's env never reach the build.
         for recipe in RGB_RECIPES:
@@ -98,9 +131,7 @@ class BuildArgumentsTests(unittest.TestCase):
                                      EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab',
                                      **KMS_PINS)
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_build_args(), [
-                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
-                ])
+                self.assertEqual(self.captured_build_args(), self.base_args(recipe))
                 self.assertNotIn('build override:', result.stdout)
 
     def test_role_overrides_are_forwarded_and_logged_only_when_declared(self):
@@ -112,7 +143,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 42, result.stderr)
                 applied = dict(overrides)
                 self.assertCountEqual(self.captured_build_args(), [
-                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                    *self.base_args(f'Dockerfile.enclave.{role}'),
                     *(f'{key}={value}' for key, value in applied.items()),
                 ])
                 self.assertCountEqual(
@@ -143,7 +174,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 42, result.stderr)
                 expected = ['SOURCE_DATE_EPOCH=1700000000']
                 if recipe in RGB_RECIPES:
-                    expected.append('RGB_ASSET_ID=rgb:test-bfa-asset')
+                    expected = self.base_args(recipe)
                 self.assertEqual(self.captured_build_args(), expected)
                 self.assertNotIn('build override:', result.stdout)
 
@@ -154,9 +185,8 @@ class BuildArgumentsTests(unittest.TestCase):
                 result = self.invoke(f'Dockerfile.enclave.{role}',
                                      RGB_ASSET_ID='rgb:test-bfa-asset', **empty)
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_build_args(), [
-                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
-                ])
+                self.assertEqual(self.captured_build_args(),
+                                 self.base_args(f'Dockerfile.enclave.{role}'))
                 self.assertNotIn('build override:', result.stdout)
 
     def test_non_signet_roles_require_rgb_before_docker(self):
@@ -201,7 +231,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 42, result.stderr)
                 expected = ['SOURCE_DATE_EPOCH=1700000000']
                 if recipe in RGB_RECIPES:
-                    expected.append('RGB_ASSET_ID=rgb:test-bfa-asset')
+                    expected = self.base_args(recipe)
                 self.assertEqual(self.captured_build_args(), expected)
 
     def invoke_make(self, target, **extra):
@@ -211,7 +241,7 @@ class BuildArgumentsTests(unittest.TestCase):
             env=dict(self.env, **extra), capture_output=True, text=True,
         )
 
-    def test_make_mint_passes_only_the_asset_as_environment_argument(self):
+    def test_make_mint_passes_the_asset_and_the_account_list_as_environment_arguments(self):
         pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '34' * 20,
                     RGB_ASSET_ID='rgb:test-bfa-asset')
         result = self.invoke_make('build_enclave_mint', **pins)
@@ -220,9 +250,10 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(argv[0], 'build')
         self.assertIn('./build/Dockerfile.enclave.mint', argv)
         self.assertEqual([argv[i + 1] for i, arg in enumerate(argv) if arg == '--build-arg'],
-                         ['RGB_ASSET_ID'])
-        self.assertEqual(json.loads(self.docker_env.read_text())['RGB_ASSET_ID'],
-                         'rgb:test-bfa-asset')
+                         ['RGB_ASSET_ID', 'KMS_ALLOWED_ACCOUNT_IDS'])
+        docker_env = json.loads(self.docker_env.read_text())
+        self.assertEqual(docker_env['RGB_ASSET_ID'], 'rgb:test-bfa-asset')
+        self.assertEqual(docker_env['KMS_ALLOWED_ACCOUNT_IDS'], ACCOUNTS)
         self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
         self.assertIn('id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN', argv)
 
@@ -230,6 +261,13 @@ class BuildArgumentsTests(unittest.TestCase):
         result = self.invoke_make('build_enclave_mint')
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('RGB_ASSET_ID required', result.stderr)
+        self.assertFalse(self.argv.exists())
+
+    def test_make_mint_rejects_a_missing_account_list_before_docker(self):
+        result = self.invoke_make('build_enclave_mint', RGB_ASSET_ID='rgb:test-bfa-asset',
+                                  KMS_ALLOWED_ACCOUNT_IDS='')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('KMS_ALLOWED_ACCOUNT_IDS required', result.stderr)
         self.assertFalse(self.argv.exists())
 
     def test_make_old_targets_have_no_kms_dependency_or_arguments(self):

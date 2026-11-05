@@ -12,6 +12,7 @@ DOCKER_AUTH_ARGS ?= --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY --secret id=r
 IMAGE_ENCLAVE_MINT_BACKUP ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(CURRENT_DATE_TIME)-$(LATEST_COMMIT)
 IMAGE_ENCLAVE_MINT_LATEST ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(IMAGE_TAG)
 build_enclave_mint: export RGB_ASSET_ID := $(RGB_ASSET_ID)
+build_enclave_mint: export KMS_ALLOWED_ACCOUNT_IDS := $(KMS_ALLOWED_ACCOUNT_IDS)
 
 .PHONY: build_parent push_parent build_parent_dev push_parent_dev build_enclave_ccd push_enclave_ccd build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
 
@@ -34,10 +35,11 @@ push_parent_dev: ## Push parent dev image tags.
 
 check_mint_config:
 	@: "$${RGB_ASSET_ID:?RGB_ASSET_ID required for RGB mint builds}"
+	@: "$${KMS_ALLOWED_ACCOUNT_IDS:?KMS_ALLOWED_ACCOUNT_IDS required for RGB mint builds}"
 
 build_enclave_mint: check_mint_config ## Build RGB mint signer image with KMS seed persistence.
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
+	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
 
 push_enclave_mint: ## Push RGB mint signer image.
 	docker push $(IMAGE_ENCLAVE_MINT_BACKUP) && \

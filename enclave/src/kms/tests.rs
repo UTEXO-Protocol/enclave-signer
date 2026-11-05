@@ -565,15 +565,20 @@ mod exchanges {
     }
 }
 
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|id| id.to_string()).collect()
+}
+
 #[test]
 fn account_pin_refuses_a_key_in_another_account() {
     let cfg = config();
     // KEY_ARN is in account 123456789012.
-    cfg.validate_account("123456789012").unwrap();
-    cfg.validate_account(" 111111111111 , 123456789012 ")
+    cfg.validate_account(&ids(&["123456789012"]), false)
+        .unwrap();
+    cfg.validate_account(&ids(&["111111111111", "123456789012"]), false)
         .unwrap();
     let e = cfg
-        .validate_account("999999999999")
+        .validate_account(&ids(&["999999999999"]), false)
         .unwrap_err()
         .to_string();
     assert!(e.contains("does not pin"), "{e}");
@@ -583,12 +588,19 @@ fn account_pin_refuses_a_key_in_another_account() {
         ..config()
     };
     foreign.validate().unwrap();
-    assert!(foreign.validate_account("123456789012").is_err());
+    assert!(foreign
+        .validate_account(&ids(&["123456789012"]), true)
+        .is_err());
 }
 
+/// With no list, a release build refuses every key and a dev or test build
+/// skips the check.
 #[test]
-fn account_pin_refuses_a_malformed_list() {
-    for bad in ["12345", "12345678901a", "123456789012,abc"] {
-        assert!(config().validate_account(bad).is_err(), "{bad}");
-    }
+fn a_release_build_with_no_account_list_refuses() {
+    let e = config()
+        .validate_account(&[], false)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not pinned"), "{e}");
+    config().validate_account(&[], true).unwrap();
 }
