@@ -49,9 +49,6 @@ pub fn pinned_contract(cfg: &BridgeConfig) -> Result<ContractId> {
     })
 }
 
-/// The most bytes of one fascia: the `U24` confinement bound.
-const MAX_FASCIA_BYTES: usize = (1 << 24) - 1;
-
 /// The strict-encoded fascia in the request field `field`, decoded as rgb-lib
 /// reads its fascia file. A fascia holds a tx and its RGB data, so the PSBT
 /// size limit applies to it too (`memory.rs`).
