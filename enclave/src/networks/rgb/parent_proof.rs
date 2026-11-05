@@ -1,7 +1,8 @@
 //! The parent proof (PP1-PP7): the rgb-lib fascia of the tx that made the right
-//! a mint or a refill spends. It pins that right's UTXO, so every signature for
-//! one transition spends the same outpoint and a replay conflicts with the
-//! first. The rule ids are those of `docs/mint-flow.md` section 5, Stage 5.
+//! a mint or a refill spends. It pins that right's UTXO, so signatures that
+//! share the supplied parent spend the same outpoint and a replay conflicts
+//! with the first. A different parent tx conflicts with the real one on
+//! Bitcoin; requests are not compared with each other. The rule ids are those of `docs/mint-flow.md` section 5, Stage 5.
 
 use bitcoin::psbt::Psbt;
 use bitcoin::OutPoint;

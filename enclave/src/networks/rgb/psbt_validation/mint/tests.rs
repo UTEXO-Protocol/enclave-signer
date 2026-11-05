@@ -240,3 +240,37 @@ fn refuses_a_witness_output_on_the_right_input_script() {
     let err = refusal(&psbt, &keys, &witness_at(1));
     assert!(err.contains("an output of this enclave"), "{err}");
 }
+
+// ===== M0: the cheap shape check =====
+
+#[test]
+fn accepts_one_input_and_few_outputs() {
+    let keys = fx::km();
+    super::assert_mint_shape(&mint_psbt(&keys)).unwrap();
+}
+
+#[test]
+fn refuses_a_mint_with_too_many_inputs() {
+    let keys = fx::km();
+    let mut psbt = mint_psbt(&keys);
+    while psbt.unsigned_tx.input.len() <= super::MINT_MAX_INPUTS {
+        let extra = psbt.unsigned_tx.input[0].clone();
+        psbt.unsigned_tx.input.push(extra);
+        psbt.inputs.push(Default::default());
+    }
+    let err = super::assert_mint_shape(&psbt).unwrap_err().to_string();
+    assert!(err.contains("inputs, at most"), "{err}");
+}
+
+#[test]
+fn refuses_a_mint_with_too_many_outputs() {
+    let keys = fx::km();
+    let mut psbt = mint_psbt(&keys);
+    while psbt.unsigned_tx.output.len() <= super::MINT_MAX_OUTPUTS {
+        let out = psbt.unsigned_tx.output[0].clone();
+        psbt.unsigned_tx.output.push(out);
+        psbt.outputs.push(Default::default());
+    }
+    let err = super::assert_mint_shape(&psbt).unwrap_err().to_string();
+    assert!(err.contains("outputs, at most"), "{err}");
+}
