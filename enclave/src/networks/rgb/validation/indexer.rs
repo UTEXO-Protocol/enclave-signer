@@ -104,11 +104,6 @@ impl RgbValidator {
         self.timeout_secs = secs;
         self
     }
-
-    /// The timeout of an indexer read: `limit`, or the value of a test.
-    fn timeout_of(&self, limit: u64) -> u64 {
-        self.timeout_secs.unwrap_or(limit)
-    }
 }
 
 impl RgbValidator {
