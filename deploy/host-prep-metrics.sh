@@ -78,7 +78,8 @@ for CID in "${CIDS[@]}"; do
 
   RESP=0
   if [ "$RUN" = "1" ] && [ -x "$CLI" ]; then
-    if "$CLI" --addr "vsock://${CID}:5000" get-keys >/dev/null 2>&1; then RESP=1; fi
+    # The CLI is ubuntu-owned, so never run it as root.
+    if runuser -u ubuntu -- "$CLI" --addr "vsock://${CID}:5000" get-keys >/dev/null 2>&1; then RESP=1; fi
   fi
 
   D="Dimensions=[{Name=Host,Value=${IID}},{Name=Cid,Value=${CID}}]"

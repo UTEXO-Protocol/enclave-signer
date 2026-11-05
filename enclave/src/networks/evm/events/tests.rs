@@ -602,7 +602,7 @@ mod finality {
             },
             #[cfg(feature = "bfa-validation")]
             |provider, tag| {
-                verify_rgb_funds_in(provider, &BRIDGE, tag, &TX, &word(0xab), AFTER_BLOCK)
+                verify_rgb_funds_in(provider, &BRIDGE, tag, &TX, &word(0xab), BEFORE_BLOCK)
                     .map(|_| ())
             },
         ]
@@ -1004,9 +1004,9 @@ fn rejects_funds_in_with_unexpected_layout() {
     assert!(decode_funds_in(&extra, &word(0xab)).is_err());
 }
 
-/// The mint's `afterBlock` in the lock tests: the lock is at block 100.
+/// The mint's `beforeBlock` in the lock tests: the lock is at block 100.
 #[cfg(feature = "bfa-validation")]
-const AFTER_BLOCK: u64 = 90;
+const BEFORE_BLOCK: u64 = 110;
 
 /// A real deposit tx emits both: the RGB companion (minted amount) and the
 /// BridgeFundsIn record (operationId, netAmount). Block 100.
@@ -1035,7 +1035,7 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
             EvmFinalityTag::Safe,
             &TX,
             &word(0xab),
-            AFTER_BLOCK
+            BEFORE_BLOCK
         )
         .unwrap(),
         VerifiedLock {
@@ -1047,25 +1047,49 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
     );
 }
 
-/// An RGB receiver accepts only a lock in a block after `afterBlock`.
+/// An RGB receiver accepts only a lock in a block before `beforeBlock`.
 #[cfg(feature = "bfa-validation")]
 #[test]
-fn verify_rgb_funds_in_refuses_a_lock_at_or_before_after_block() {
+fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
     let p = lock_provider();
-    for after_block in [100, 101] {
+    for before_block in [100, 99] {
         let e = verify_rgb_funds_in(
             &p,
             &BRIDGE,
             EvmFinalityTag::Safe,
             &TX,
             &word(0xab),
-            after_block,
+            before_block,
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("is not after the mint's afterBlock"), "got: {e}");
+        assert!(
+            e.contains("is not before the mint's beforeBlock"),
+            "got: {e}"
+        );
     }
-    assert!(verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 99).is_ok());
+    assert!(verify_rgb_funds_in(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &word(0xab), 101).is_ok());
+}
+
+/// rgb-lib f3975623 has no scan window: a lock far below `beforeBlock` still counts.
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
+    let p = lock_provider();
+    for before_block in [100 + 500_001, u64::MAX] {
+        assert!(
+            verify_rgb_funds_in(
+                &p,
+                &BRIDGE,
+                EvmFinalityTag::Safe,
+                &TX,
+                &word(0xab),
+                before_block
+            )
+            .is_ok(),
+            "{before_block}"
+        );
+    }
 }
 
 #[cfg(feature = "bfa-validation")]
@@ -1096,7 +1120,7 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap_err()
     .to_string();
@@ -1118,7 +1142,7 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap_err()
     .to_string();
@@ -1142,7 +1166,7 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
         EvmFinalityTag::Safe,
         &TX,
         &word(0xab),
-        AFTER_BLOCK,
+        BEFORE_BLOCK,
     )
     .unwrap_err()
     .to_string();

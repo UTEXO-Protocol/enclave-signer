@@ -1235,7 +1235,7 @@ mod anchor {
         );
     }
 
-    /// The two consignment walks (flat parser vs rgbstd) must agree on the
+    /// The two consignment walks (flat summary vs rgbstd) must agree on the
     /// operation of the signed tx. If `last_transition` is not in the
     /// committed group, the binds check a different operation.
     #[test]

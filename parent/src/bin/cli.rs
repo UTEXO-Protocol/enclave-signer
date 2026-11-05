@@ -121,9 +121,12 @@ enum Command {
         /// Hex-encoded RGB consignment bytes
         #[arg(long, default_value = "")]
         consignment: String,
-        /// Hex-encoded PSBT of the tx that made the spent mint right
+        /// Hex-encoded rgb-lib fascia of the PSBT's tx
         #[arg(long, default_value = "")]
-        parent_psbt: String,
+        fascia: String,
+        /// Hex-encoded rgb-lib fascia of the tx that made the spent mint right
+        #[arg(long, default_value = "")]
+        parent_fascia: String,
     },
     /// Get the enclave SPV chain tip (height and hash).
     /// The parent header sync reads it to find where to continue.
@@ -135,6 +138,10 @@ enum Command {
     /// Set the chain endpoints and the KMS values once, after launch. The
     /// enclave rejects a second call.
     SetEndpoints {
+        /// Print the chain-endpoint SHA-256 (excluding KMS fields) without contacting
+        /// an enclave. Uses the same flags, environment and CA file as launch.
+        #[arg(long)]
+        print_sha256: bool,
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
@@ -154,17 +161,17 @@ enum Command {
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
-    /// Verify a fresh burn-key attestation and export its bundle.
-    /// Check it offline with attest-verify --from-file.
+    /// Verify a fresh key attestation and export its bundle.
+    /// Check production bundles offline with attest-verify --from-file.
     ExportAttestation {
         /// `PCR.json` of the release. With `--mock`, zero PCRs by default.
         #[arg(long, required_unless_present = "mock")]
         pcr_file: Option<PathBuf>,
         /// `IMAGE-ENV.json` of the release: the env of the measured image.
-        #[arg(long, required_unless_present = "mock")]
+        #[arg(long, required_unless_present_any = ["mock", "allow_development_policy"])]
         image_env: Option<PathBuf>,
-        /// Role of the deployed image.
-        #[arg(long, value_parser = ["combined", "burn"], required_unless_present = "mock")]
+        /// Role of the deployed production image.
+        #[arg(long, value_parser = ["combined", "burn"], required_unless_present_any = ["mock", "allow_development_policy"])]
         signer_role: Option<String>,
         /// The bundle file to write.
         #[arg(long)]
@@ -176,6 +183,10 @@ enum Command {
         /// For tests only.
         #[arg(long)]
         mock: bool,
+        /// Expect Development policy with real NSM verification and approved
+        /// nonzero PCRs. The policy does not separately attest endpoints or role.
+        #[arg(long, requires = "pcr_file", conflicts_with = "mock")]
+        allow_development_policy: bool,
         /// The values that `set-endpoints` sent.
         #[command(flatten)]
         endpoints: EndpointArgs,
@@ -271,7 +282,35 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_region: args.kms_region.unwrap_or_default(),
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
+        // This enclave does not read it: it requests the EVM RPC at `/`.
+        evm_rpc_path: String::new(),
     }
+}
+
+/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
+fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    let mut network = request.clone();
+    // New schema fields must be explicitly classified as hashed or excluded.
+    let SetEndpointsRequest {
+        electrum_url: _,
+        evm_rpc_host: _,
+        evm_rpc_ca_der: _,
+        evm_rpc_tls_port: _,
+        // Hashed: the enclave requests `/` and never reads it, so only the empty
+        // path this CLI sends matches the pin.
+        evm_rpc_path: _,
+        kms_key_arn,
+        kms_region,
+        kms_seed_id,
+        kms_expected_evm_address,
+    } = &mut network;
+    kms_key_arn.clear();
+    kms_region.clear();
+    kms_seed_id.clear();
+    kms_expected_evm_address.clear();
+    Sha256::digest(network.encode_to_vec()).into()
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -511,7 +550,8 @@ fn main() {
             evm_event_finalized,
             rgb_asset_id,
             consignment,
-            parent_psbt,
+            fascia,
+            parent_fascia,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
@@ -537,10 +577,17 @@ fn main() {
                 use sha3::{Digest, Keccak256};
                 Keccak256::digest(&consignment_bytes).to_vec()
             };
-            let parent_psbt = match hex::decode(&parent_psbt) {
+            let fascia = match hex::decode(&fascia) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("Invalid hex parent PSBT: {}", e);
+                    eprintln!("Invalid hex fascia: {}", e);
+                    process::exit(1);
+                }
+            };
+            let parent_fascia = match hex::decode(&parent_fascia) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid hex parent fascia: {}", e);
                     process::exit(1);
                 }
             };
@@ -588,7 +635,8 @@ fn main() {
                 rgb_asset_id,
                 consignment: consignment_bytes,
                 consignment_hash,
-                parent_psbt,
+                fascia,
+                parent_fascia,
             };
             match client.sign_psbt(req) {
                 Ok(r) => {
@@ -632,8 +680,16 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SetEndpoints { endpoints } => {
-            match client.set_endpoints(endpoints_request(endpoints)) {
+        Command::SetEndpoints {
+            print_sha256,
+            endpoints,
+        } => {
+            let request = endpoints_request(endpoints);
+            if print_sha256 {
+                println!("{}", hex::encode(endpoints_sha256(&request)));
+                return;
+            }
+            match client.set_endpoints(request) {
                 Ok(()) => println!("Endpoints set"),
                 Err(e) => fail(e.to_string()),
             }
@@ -656,6 +712,7 @@ fn main() {
             out,
             expect_evm_address,
             mock,
+            allow_development_policy,
             endpoints,
         } => {
             if let Err(e) = export_attestation(
@@ -666,6 +723,7 @@ fn main() {
                 &out,
                 expect_evm_address.as_deref(),
                 mock,
+                allow_development_policy,
                 endpoints,
             ) {
                 eprintln!("FAIL: {e:#}");
@@ -793,6 +851,7 @@ fn export_attestation(
     out: &std::path::Path,
     expect_evm_address: Option<&str>,
     mock: bool,
+    allow_development_policy: bool,
     endpoints: EndpointArgs,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
@@ -801,7 +860,20 @@ fn export_attestation(
     use utexo_bridge_parent::launch_check;
 
     let pcrs = pcr_file.map_or(Ok(ExpectedPcrs::zero()), read_pcrs)?;
-    let (mode, expected) = if mock {
+    let (mode, expected) = if allow_development_policy {
+        anyhow::ensure!(!mock, "--allow-development-policy conflicts with --mock");
+        for (name, pcr) in [
+            ("PCR0", pcrs.pcr0),
+            ("PCR1", pcrs.pcr1),
+            ("PCR2", pcrs.pcr2),
+        ] {
+            anyhow::ensure!(
+                pcr != [0; 48],
+                "Development policy requires independently approved nonzero {name}; Nitro debug mode is not supported"
+            );
+        }
+        (VerifyMode::Real, AttestedPolicy::Development)
+    } else if mock {
         (VerifyMode::Mock, AttestedPolicy::Development)
     } else {
         let role = match signer_role {
@@ -975,6 +1047,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn endpoints_digest_matches_the_enclave_golden_vector() {
+        let cli = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::SetEndpoints {
+                print_sha256: true,
+                ..
+            }
+        ));
+        // The enclave uses its vendored protobuf schema; the parent uses the
+        // upstream crate. This shared vector detects schema/encoding drift.
+        let mut request = SetEndpointsRequest {
+            electrum_url: "ssl://electrum.test:50002".into(),
+            evm_rpc_host: "rpc.test".into(),
+            evm_rpc_ca_der: vec![1, 2, 3],
+            evm_rpc_tls_port: 443,
+            kms_key_arn: "key".into(),
+            kms_region: "region".into(),
+            kms_seed_id: "seed".into(),
+            kms_expected_evm_address: "address".into(),
+            evm_rpc_path: String::new(),
+        };
+        assert_eq!(
+            hex::encode(endpoints_sha256(&request)),
+            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+        );
+        // The EVM RPC path is a network input: another path misses the pin.
+        let other_path = SetEndpointsRequest {
+            evm_rpc_path: "/v2/key".into(),
+            ..request.clone()
+        };
+        assert_ne!(
+            hex::encode(endpoints_sha256(&other_path)),
+            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+        );
+        // KMS bootstrap/recovery inputs are deliberately outside the chain pin.
+        for field in [
+            &mut request.kms_key_arn,
+            &mut request.kms_region,
+            &mut request.kms_seed_id,
+            &mut request.kms_expected_evm_address,
+        ] {
+            field.clear();
+        }
+        assert_eq!(
+            hex::encode(endpoints_sha256(&request)),
+            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+        );
+    }
+
+    #[test]
     fn submit_headers_is_not_a_command() {
         let err = Cli::try_parse_from([
             "utexo-bridge-parent-cli",
@@ -1030,5 +1153,74 @@ mod tests {
         let cli = Cli::try_parse_from(args("burn")).unwrap();
         assert!(matches!(cli.command, Command::ExportAttestation { .. }));
         assert!(Cli::try_parse_from(args("mint")).is_err());
+    }
+
+    /// rgb-lib f3975623 strips the PSBT, so the parent's PSBT gave way to two fascias.
+    #[test]
+    fn sign_psbt_takes_the_fascia_and_the_parent_fascia() {
+        let sign_psbt = |flag: &'static str| {
+            Cli::try_parse_from([
+                "utexo-bridge-parent-cli",
+                "sign-psbt",
+                "--psbt",
+                "70736274",
+                "--fascia",
+                "aa",
+                flag,
+                "bb",
+            ])
+        };
+        let Command::SignPsbt {
+            fascia,
+            parent_fascia,
+            ..
+        } = sign_psbt("--parent-fascia").unwrap().command
+        else {
+            panic!("expected sign-psbt");
+        };
+        assert_eq!((fascia.as_str(), parent_fascia.as_str()), ("aa", "bb"));
+        assert!(sign_psbt("--parent-psbt").is_err());
+    }
+
+    #[test]
+    fn development_export_requires_pcrs_and_conflicts_with_mock() {
+        let args = [
+            "cli",
+            "export-attestation",
+            "--allow-development-policy",
+            "--pcr-file",
+            "PCR.json",
+            "--out",
+            "attestation.json",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ExportAttestation {
+                allow_development_policy: true,
+                mock: false,
+                ..
+            }
+        ));
+        let mut mock = args.to_vec();
+        mock.push("--mock");
+        assert!(Cli::try_parse_from(mock).is_err());
+        assert!(Cli::try_parse_from([
+            "cli",
+            "export-attestation",
+            "--allow-development-policy",
+            "--out",
+            "attestation.json"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "cli",
+            "export-attestation",
+            "--pcr-file",
+            "PCR.json",
+            "--out",
+            "attestation.json"
+        ])
+        .is_err());
     }
 }

@@ -1,35 +1,43 @@
 //! `validate_destination_anchor` and `validate_rights_refill` on the mint
-//! signer: generated rgb-lib-shaped PSBTs, each with the PSBT of the tx that
-//! made its right. Then parity with the consensus path on the same fixtures.
+//! signer: generated rgb-lib-shaped PSBTs, stripped of their RGB keys, each with
+//! its fascia and the fascia of the tx that made its right. Then parity with the
+//! consensus path on the same fixtures.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use amplify::confinement::SmallBlob;
-use bitcoin::psbt::raw::ProprietaryKey;
+use amplify::confinement::{NonEmptyOrdMap, SmallBlob};
+use bitcoin::bip32::ChildNumber;
 use bitcoin::psbt::{Psbt, PsbtSighashType};
-use bitcoin::{Amount, TxOut};
-use psrgbt::{RgbPropKeyExt, RgbPsbtExt};
+use bitcoin::{Amount, ScriptBuf, TxOut};
+use psrgbt::RgbPsbtExt;
+use rgbstd::containers::Fascia;
 use rgbstd::contract::{AllocatedState, TransitionBuilder};
 use rgbstd::{
-    BuilderSeal, GlobalValues, GraphSeal, MetaValue, Operation, RevealedData, SecretSeal,
-    Transition,
+    BuilderSeal, GlobalValues, GraphSeal, MetaValue, RevealedData, SecretSeal, Transition,
 };
 
 use super::*;
-use crate::config::BridgeConfig;
+use crate::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::btc_ownership::tests as fx;
-use crate::networks::rgb::psbt_validation::{fee_key_path_inputs_scoped, MintFacts};
+use crate::networks::rgb::psbt_validation::{
+    assert_mint_sats, fee_key_path_inputs_scoped, MintFacts, MintRecipient,
+};
 use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::proto::SignRightsRefillRequest;
 use crate::test_support::bfa_consignment::{self as gen, Committed as Made, History, Issue, Utxo};
 
 const MINTED: u64 = 100_000;
-const AFTER_BLOCK: u64 = 90;
+const BEFORE_BLOCK: u64 = 110;
 /// Sats on each right's UTXO; they pay the mint's fee.
 const RIGHT_SATS: u64 = 3_000;
 const CHANGE_SATS: u64 = 2_000;
+/// What a witness mint pays its depositor, at the default `MINT_WITNESS_SAT`.
+const WITNESS_SATS: u64 = DEFAULT_MINT_WITNESS_SAT;
+/// The fee of a witness mint: its right pays it, the witness output and the change.
+const WITNESS_MINT_FEE: u64 = 300;
+const WITNESS_CHANGE_SATS: u64 = RIGHT_SATS - WITNESS_SATS - WITNESS_MINT_FEE;
 
 /// Our Colored key-path output at `[0, index]`.
 fn ours(keys: &KeyManager, index: u32, sats: u64) -> TxOut {
@@ -61,13 +69,49 @@ fn our_input(psbt: &mut Psbt, keys: &KeyManager, index: u32) {
     fx::anchor_input(psbt, 0, keys, AccountType::Colored, 0, index, RIGHT_SATS);
 }
 
+/// The rule C metadata the wallet writes for our change at `[0, 99]` on `vout`.
+fn claim_change(psbt: &mut Psbt, keys: &KeyManager, vout: usize) {
+    let change = [ChildNumber::from(0), ChildNumber::from(99)];
+    fx::claim_output(psbt, vout, keys, AccountType::Colored, &change);
+}
+
 /// A mint of `MINTED` on seed right 0 to the depositor, change to `[0, 99]`.
 fn mint_on(history: &mut History, right: Utxo, keys: &KeyManager) -> Made {
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(right, MINTED, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(right, MINTED, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, keys, 1);
+    claim_change(&mut mint.psbt, keys, 1);
     mint
+}
+
+/// The depositor's witness output: a script the enclave does not hold.
+fn depositor(sats: u64) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(sats),
+        script_pubkey: fx::foreign_address(0xD1),
+    }
+}
+
+/// A mint of `MINTED` on seed right 0 to the witness seal on `seal_vout`. The
+/// tx pays `outputs` from vout 1, then our change of the rest less the fee.
+fn witness_mint_paying(seal_vout: u32, outputs: Vec<TxOut>) -> (History, Made, Made) {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let to = BuilderSeal::from(GraphSeal::with_blinded_vout(seal_vout, 5));
+    let change = outputs.len() + 1;
+    let paid: u64 = outputs.iter().map(|o| o.value.to_sat()).sum();
+    let change_sats = RIGHT_SATS - WITNESS_MINT_FEE - paid;
+    let outputs = [outputs, vec![ours(&keys, 99, change_sats)]].concat();
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], outputs);
+    our_input(&mut mint.psbt, &keys, 1);
+    claim_change(&mut mint.psbt, &keys, change);
+    (history, seed, mint)
+}
+
+/// A valid witness mint: `WITNESS_SATS` to the depositor on vout 1.
+fn valid_witness_mint() -> (History, Made, Made) {
+    witness_mint_paying(1, vec![depositor(WITNESS_SATS)])
 }
 
 /// The mint destination of `mint`, whose right `parent` made.
@@ -75,7 +119,8 @@ fn destination(history: &History, mint: &Made, parent: &Made) -> RgbDestination 
     RgbDestination {
         psbt_bytes: mint.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: parent.psbt.serialize(),
+        fascia: mint.fascia_bytes(),
+        parent_fascia: parent.fascia_bytes(),
         ..Default::default()
     }
 }
@@ -87,8 +132,16 @@ fn pinned(history: &History) -> BridgeConfig {
     }
 }
 
-/// Runs the mint route with the fixture keys. The binder records the mint.
-fn run_mint(destination: &RgbDestination, cfg: &BridgeConfig) -> (Result<u64>, Option<MintFacts>) {
+type Minted = Result<(u64, Vec<String>)>;
+
+/// Runs the mint route with the fixture keys, M8 on `cfg`'s witness amount
+/// and a binder that records the mint. `edit` can unwire either.
+fn route_mint(
+    destination: &RgbDestination,
+    cfg: &BridgeConfig,
+    commission: u64,
+    edit: impl FnOnce(&mut ValidationContext<'_>),
+) -> (Minted, Option<MintFacts>) {
     let keys = fx::km();
     let chain = crate::test_support::regtest_header_chain();
     let bound = RefCell::new(None);
@@ -99,19 +152,28 @@ fn run_mint(destination: &RgbDestination, cfg: &BridgeConfig) -> (Result<u64>, O
             AccountType::Colored,
         ))
     };
+    let sats = |psbt: &Psbt, recipient: &MintRecipient| {
+        assert_mint_sats(psbt, &keys, recipient, cfg.mint_witness_sat)
+    };
     let binder = |mint: &MintFacts| {
         *bound.borrow_mut() = Some(mint.clone());
         Ok(())
     };
-    let ctx = ValidationContext {
+    let mut ctx = ValidationContext {
         bridge_config: cfg,
         header_chain: &chain,
         chain_pins: &ChainPins::new(),
         psbt_fee_key_paths: Some(&key_paths),
         mint_binder: Some(&binder),
+        mint_sats: Some(&sats),
     };
-    let result = validate_destination_anchor(destination, MINTED, 0, &ctx).map(|(units, _)| units);
+    edit(&mut ctx);
+    let result = validate_destination_anchor(destination, MINTED, commission, &ctx);
     (result, bound.into_inner())
+}
+
+fn run_mint(destination: &RgbDestination, cfg: &BridgeConfig) -> (Minted, Option<MintFacts>) {
+    route_mint(destination, cfg, 0, |_| {})
 }
 
 fn mint_refusal(destination: &RgbDestination, history: &History) -> String {
@@ -131,19 +193,20 @@ fn valid_mint() -> (History, Made, Made) {
 
 /// Commits `mint` (an edited mint transition) on seed right 0, rgb-lib style.
 fn committed_mint(history: &mut History, mint: Transition, right: Utxo) -> Made {
+    committed_bundle(history, vec![mint], right)
+}
+
+/// Commits `transitions` in one bundle on seed right 0, rgb-lib style.
+fn committed_bundle(history: &mut History, transitions: Vec<Transition>, right: Utxo) -> Made {
     let keys = fx::km();
-    let opid = mint.id();
-    let mut psbt = history.commit_psbt(
-        vec![mint],
+    let mut made = history.commit_psbt(
+        transitions,
         vec![right.outpoint],
         vec![ours(&keys, 99, CHANGE_SATS)],
     );
-    our_input(&mut psbt, &keys, 1);
-    Made {
-        opid,
-        tx: psbt.unsigned_tx.clone(),
-        psbt,
-    }
+    our_input(&mut made.psbt, &keys, 1);
+    claim_change(&mut made.psbt, &keys, 1);
+    made
 }
 
 /// A mint transition on `right` of `issued`, open for edits.
@@ -152,7 +215,7 @@ fn mint_builder(history: &mut History, right: Utxo, issued: u64) -> TransitionBu
         .transition("mint")
         .add_input(right.opout, AllocatedState::Void)
         .unwrap()
-        .add_metadata("afterBlock", rgbstd::stl::BlockNumber::from(AFTER_BLOCK))
+        .add_metadata("beforeBlock", rgbstd::stl::BlockNumber::from(BEFORE_BLOCK))
         .unwrap()
         .add_global_state("issuedSupply", rgbstd::Amount::from(issued))
         .unwrap()
@@ -197,27 +260,72 @@ fn blob(bytes: &[u8]) -> SmallBlob {
 #[test]
 fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     let (history, seed, mint) = valid_mint();
-    let (units, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    assert_eq!(units.unwrap(), MINTED);
+    let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(minted.unwrap(), (MINTED, vec![recipient().to_string()]));
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
-    assert_eq!((bound.issued, bound.after_block), (MINTED, AFTER_BLOCK));
-    assert_eq!(bound.recipient_seal, recipient().to_string());
+    assert_eq!((bound.issued, bound.before_block), (MINTED, BEFORE_BLOCK));
+    assert_eq!(
+        bound.recipient,
+        MintRecipient::Blinded(recipient().to_string())
+    );
+}
+
+/// rgb-lib f3975623 strips the PSBT, so a mint without its fascia shows nothing.
+#[test]
+fn refuses_a_mint_without_its_fascia() {
+    let (history, seed, mint) = valid_mint();
+    let destination = RgbDestination {
+        fascia: vec![],
+        ..destination(&history, &mint, &seed)
+    };
+    let (result, bound) = run_mint(&destination, &pinned(&history));
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("fascia required"), "{err}");
+    assert!(!err.contains("parent_fascia"), "{err}");
+    assert!(bound.is_none(), "no deposit is read for a refused mint");
 }
 
 #[test]
-fn refuses_missing_parent_psbt() {
+fn refuses_missing_parent_fascia() {
     let (history, seed, mint) = valid_mint();
     let destination = RgbDestination {
-        parent_psbt: vec![],
+        parent_fascia: vec![],
         ..destination(&history, &mint, &seed)
     };
     let (result, bound) = run_mint(&destination, &pinned(&history));
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("parent_psbt required"));
+        .contains("parent_fascia required"));
     assert!(bound.is_none(), "no deposit is read for a refused mint");
+}
+
+/// RGB keys a host leaves in the PSBT are not read: the fascia's mint binds.
+#[test]
+fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let mut mint = mint_on(&mut history, rights[0], &keys);
+    let other = history.rights_transition(rights[1], &[1]);
+    mint.psbt.push_rgb_transition(other).unwrap();
+    assert!(!mint.psbt.rgb_bundles().unwrap().is_empty());
+    let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(minted.unwrap().0, MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
+}
+
+/// rgb-lib moves a second right of the spent UTXO by a propagate in the mint's
+/// bundle. F6 signs one transition only.
+#[test]
+fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |mint| mint);
+    let side = history.rights_transition(rights[1], &[1]);
+    let mint = committed_bundle(&mut history, vec![mint, side], rights[0]);
+    let err = mint_refusal(&destination(&history, &mint, &seed), &history);
+    assert!(err.contains("discloses 2 transitions"), "{err}");
 }
 
 /// An old-form mint passed its right on. A mint from that right names a mint
@@ -231,7 +339,7 @@ fn refuses_a_mint_whose_right_a_mint_made() {
     let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
     let mint = mint_on(&mut history, kept, &keys);
     let err = mint_refusal(&destination(&history, &mint, &old), &history);
-    assert!(err.contains("not a transfer"), "{err}");
+    assert!(err.contains("not a propagate"), "{err}");
 }
 
 /// Review P1: the mined mint's transition in a new tx that spends another of
@@ -241,13 +349,12 @@ fn refuses_replay_with_a_different_input() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let mint = mint_on(&mut history, rights[0], &keys);
-    let transition = mint.psbt.rgb_transition(mint.opid).unwrap().unwrap();
-    let replay = committed_mint(&mut history, transition, rights[1]);
+    let replay = committed_mint(&mut history, mint.transition(), rights[1]);
     let err = mint_refusal(&destination(&history, &replay, &seed), &history);
     assert!(err.contains("does not spend"), "{err}");
 }
 
-/// The tx commits another contract's bundle too; the PSBT drops its keys.
+/// The tx commits another contract's bundle too; the fascia drops it.
 #[test]
 fn refuses_a_hidden_bundle() {
     let keys = fx::km();
@@ -259,13 +366,17 @@ fn refuses_a_hidden_bundle() {
     let mut psbt = gen::witness_psbt(inputs, vec![ours(&keys, 99, CHANGE_SATS)]);
     psbt.push_rgb_transition(mint).unwrap();
     psbt.push_rgb_transition(hidden).unwrap();
-    gen::rgb_commit(&mut psbt, 0, 0x5eed);
-    psbt.proprietary
-        .remove(&ProprietaryKey::rgb_consumed_by(other.contract_id));
+    let both = gen::rgb_commit(&mut psbt, 0, 0x5eed);
+    let ours_only = both.bundles().get(&history.contract_id).unwrap().clone();
+    let fascia = Fascia::new(
+        both.seal_witness().clone(),
+        NonEmptyOrdMap::with_key_value(history.contract_id, ours_only),
+    );
     our_input(&mut psbt, &keys, 1);
     fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 2, RIGHT_SATS);
     let destination = RgbDestination {
         psbt_bytes: psbt.serialize(),
+        fascia: gen::fascia_bytes(&fascia),
         ..destination(&history, &seed, &seed)
     };
     let err = mint_refusal(&destination, &history);
@@ -321,14 +432,14 @@ fn refuses_extra_global_or_metadata() {
             .insert(schemata::GS_BURNED_ASSET, value)
             .unwrap();
     });
-    assert!(err.contains("issuedSupply and afterBlock only"), "{err}");
+    assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
     let err = edited_mint_refusal(|mint| {
         let extra = rgbstd::MetaType::with(9_999);
         mint.metadata
             .insert(extra, MetaValue::from(blob(&[1])))
             .unwrap();
     });
-    assert!(err.contains("issuedSupply and afterBlock only"), "{err}");
+    assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
 }
 
 #[test]
@@ -348,23 +459,23 @@ fn refuses_zero_issued_supply() {
     let (mut history, seed, rights) = seeded(&keys);
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(&keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(rights[0], 0, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(rights[0], 0, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
     let err = mint_refusal(&destination(&history, &mint, &seed), &history);
     assert!(err.contains("issuedSupply is 0"), "{err}");
 }
 
 #[test]
-fn refuses_after_block_not_8_bytes() {
+fn refuses_before_block_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         mint.metadata
             .insert(
-                schemata::MS_AFTER_BLOCK,
+                schemata::MS_BEFORE_BLOCK,
                 MetaValue::from(blob(&[90, 0, 0, 0])),
             )
             .unwrap();
     });
-    assert!(err.contains("afterBlock is 4 bytes"), "{err}");
+    assert!(err.contains("beforeBlock is 4 bytes"), "{err}");
 }
 
 #[test]
@@ -385,16 +496,20 @@ fn refuses_asset_sum_not_issued_supply() {
     assert!(err.contains("declares issuedSupply"), "{err}");
 }
 
+/// The revealed leg on vout 1, which is our change: the units would stay ours.
 #[test]
-fn refuses_revealed_asset_leg() {
+fn refuses_a_witness_mint_to_an_enclave_output() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
     let change = ours(&keys, 99, CHANGE_SATS);
-    let mut mint = history.mint(rights[0], MINTED, AFTER_BLOCK, to, vec![], vec![change]);
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
-    let err = mint_refusal(&destination(&history, &mint, &seed), &history);
-    assert!(err.contains("revealed seal"), "{err}");
+    claim_change(&mut mint.psbt, &keys, 1);
+    let (result, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("vout 1, an output of this enclave"), "{err}");
+    assert!(bound.is_none(), "no deposit is read for a refused mint");
 }
 
 #[test]
@@ -422,25 +537,9 @@ fn refuses_two_asset_legs() {
 #[test]
 fn refuses_a_mint_above_the_net_deposit() {
     let (history, seed, mint) = valid_mint();
-    let keys = fx::km();
-    let chain = crate::test_support::regtest_header_chain();
-    let key_paths = |psbt: &Psbt| {
-        Ok(fee_key_path_inputs_scoped(
-            psbt,
-            &keys,
-            AccountType::Colored,
-        ))
-    };
-    let binder = |_: &MintFacts| Ok(());
-    let ctx = ValidationContext {
-        bridge_config: &pinned(&history),
-        header_chain: &chain,
-        chain_pins: &ChainPins::new(),
-        psbt_fee_key_paths: Some(&key_paths),
-        mint_binder: Some(&binder),
-    };
-    let err = validate_destination_anchor(&destination(&history, &mint, &seed), MINTED, 1, &ctx)
-        .unwrap_err();
+    let destination = destination(&history, &mint, &seed);
+    let (result, _) = route_mint(&destination, &pinned(&history), 1, |_| {});
+    let err = result.unwrap_err();
     assert!(err.to_string().contains("amount mismatch"), "{err}");
 }
 
@@ -474,7 +573,7 @@ fn refuses_a_mint_with_a_fee_input() {
     let to = BuilderSeal::Concealed(recipient());
     let change = ours(&keys, 99, CHANGE_SATS);
     let extra = vec![rights[1].outpoint];
-    let mut mint = history.mint(rights[0], MINTED, AFTER_BLOCK, to, extra, vec![change]);
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, extra, vec![change]);
     our_input(&mut mint.psbt, &keys, 1);
     fx::anchor_input(
         &mut mint.psbt,
@@ -503,25 +602,171 @@ fn refuses_a_declared_asset_that_is_not_the_pin() {
 #[test]
 fn refuses_a_mint_without_a_deposit_binder() {
     let (history, seed, mint) = valid_mint();
-    let keys = fx::km();
-    let chain = crate::test_support::regtest_header_chain();
-    let key_paths = |psbt: &Psbt| {
-        Ok(fee_key_path_inputs_scoped(
-            psbt,
-            &keys,
-            AccountType::Colored,
-        ))
-    };
-    let ctx = ValidationContext {
-        bridge_config: &pinned(&history),
-        header_chain: &chain,
-        chain_pins: &ChainPins::new(),
-        psbt_fee_key_paths: Some(&key_paths),
-        mint_binder: None,
-    };
-    let err = validate_destination_anchor(&destination(&history, &mint, &seed), MINTED, 0, &ctx)
-        .unwrap_err();
+    let destination = destination(&history, &mint, &seed);
+    let (result, _) = route_mint(&destination, &pinned(&history), 0, |ctx| {
+        ctx.mint_binder = None;
+    });
+    let err = result.unwrap_err();
     assert!(err.to_string().contains("no deposit binder"), "{err}");
+}
+
+/// M8 needs the enclave keys; without them the mint fails closed.
+#[test]
+fn refuses_a_mint_without_a_sats_check() {
+    for (history, seed, mint) in [valid_mint(), valid_witness_mint()] {
+        let destination = destination(&history, &mint, &seed);
+        let (result, bound) = route_mint(&destination, &pinned(&history), 0, |ctx| {
+            ctx.mint_sats = None;
+        });
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("no sats check"), "{err}");
+        assert!(bound.is_none(), "no deposit is read for a refused mint");
+    }
+}
+
+/// M8 refuses on the route, before M6 reads the deposit.
+#[test]
+fn refuses_a_blinded_mint_paying_sats_out() {
+    let (history, seed, mut mint) = valid_mint();
+    mint.psbt.outputs[1] = Default::default();
+    let (result, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("mint PSBT pays 2000 sat"), "{err}");
+    assert!(bound.is_none(), "no deposit is read for a refused mint");
+}
+
+// ===== the witness mint =====
+
+#[test]
+fn binds_a_valid_witness_mint() {
+    let (history, seed, mint) = valid_witness_mint();
+    let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(minted.unwrap(), (MINTED, vec![]));
+    let bound = bound.expect("the binder ran");
+    assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
+    assert_eq!(bound.recipient, MintRecipient::Witness { vout: 1 });
+}
+
+/// BDK drops change below dust; the right then pays only the witness and the fee.
+#[test]
+fn binds_a_witness_mint_without_change() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
+    let outputs = vec![depositor(WITNESS_SATS)];
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], outputs);
+    our_input(&mut mint.psbt, &keys, 1);
+    let (minted, _) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(minted.unwrap(), (MINTED, vec![]));
+}
+
+/// Vout 2 is our change; vout 3 is past the tx's three outputs.
+#[test]
+fn refuses_a_witness_mint_whose_seal_names_another_vout() {
+    for (vout, refusal) in [
+        (2, "vout 2, an output of this enclave"),
+        (3, "vout 3, but its tx has 3 outputs"),
+    ] {
+        let (history, seed, mint) = witness_mint_paying(vout, vec![depositor(WITNESS_SATS)]);
+        let (result, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains(refusal), "{vout}: {err}");
+        assert!(bound.is_none(), "no deposit is read for a refused mint");
+    }
+}
+
+/// The enclave cannot see another tx's output, so it cannot check what it pays.
+#[test]
+fn refuses_a_witness_seal_on_another_tx() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let elsewhere = gen::outpoint(0xC0, 0).txid;
+    let to = BuilderSeal::from(GraphSeal::with_blinding(elsewhere, 1u32, 5));
+    let outputs = vec![
+        depositor(WITNESS_SATS),
+        ours(&keys, 99, WITNESS_CHANGE_SATS),
+    ];
+    let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], outputs);
+    our_input(&mut mint.psbt, &keys, 1);
+    claim_change(&mut mint.psbt, &keys, 2);
+    let err = mint_refusal(&destination(&history, &mint, &seed), &history);
+    assert!(err.contains("vout 1 of another transaction"), "{err}");
+}
+
+#[test]
+fn refuses_a_witness_mint_paying_the_wrong_amount() {
+    for sats in [WITNESS_SATS - 1, WITNESS_SATS + 1] {
+        let (history, seed, mint) = witness_mint_paying(1, vec![depositor(sats)]);
+        let err = mint_refusal(&destination(&history, &mint, &seed), &history);
+        assert!(
+            err.contains(&format!("pays {sats} sat to its recipient's vout 1")),
+            "{err}"
+        );
+    }
+}
+
+/// A witness mint against a config with another amount: the two must match.
+#[test]
+fn refuses_a_witness_mint_for_another_mint_witness_sat() {
+    let (history, seed, mint) = valid_witness_mint();
+    let cfg = BridgeConfig {
+        mint_witness_sat: 1_000,
+        ..pinned(&history)
+    };
+    let (result, _) = run_mint(&destination(&history, &mint, &seed), &cfg);
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("MINT_WITNESS_SAT (1000 sat)"), "{err}");
+}
+
+#[test]
+fn refuses_a_witness_mint_with_two_unowned_outputs() {
+    let outputs = vec![depositor(WITNESS_SATS), gen::dust(0xBB)];
+    let (history, seed, mint) = witness_mint_paying(1, outputs);
+    let err = mint_refusal(&destination(&history, &mint, &seed), &history);
+    assert!(err.contains("pays 2500 sat to outputs"), "{err}");
+}
+
+/// Accepted V1 risk (CTO 2026-10-30): the OpId commits the seal's vout, not the
+/// script on it. One mint transition commits in a tx that pays the user and in
+/// one that pays anyone else, and both pass every rule, under the one OpId the
+/// deposit binds. A host that controls the bridge can redirect a witness mint.
+#[test]
+fn witness_mint_opid_does_not_bind_the_recipient_script() {
+    let keys = fx::km();
+    let (mut history, seed, rights) = seeded(&keys);
+    let to = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
+    let mint = mint_builder(&mut history, rights[0], MINTED)
+        .add_fungible_state("assetOwner", to, MINTED)
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let mut commit_paying = |recipient: ScriptBuf| {
+        let outputs = vec![
+            TxOut {
+                value: Amount::from_sat(WITNESS_SATS),
+                script_pubkey: recipient,
+            },
+            ours(&keys, 99, WITNESS_CHANGE_SATS),
+        ];
+        let mut made = history.commit_psbt(vec![mint.clone()], vec![rights[0].outpoint], outputs);
+        our_input(&mut made.psbt, &keys, 1);
+        claim_change(&mut made.psbt, &keys, 2);
+        made
+    };
+    let to_user = commit_paying(fx::foreign_address(0xAA));
+    let to_host = commit_paying(fx::foreign_address(0xBB));
+
+    assert_ne!(
+        to_user.tx.output[1].script_pubkey,
+        to_host.tx.output[1].script_pubkey
+    );
+    assert_ne!(to_user.tx.compute_txid(), to_host.tx.compute_txid());
+    assert_eq!(to_user.opid, to_host.opid);
+    for made in [&to_user, &to_host] {
+        let (minted, bound) = run_mint(&destination(&history, made, &seed), &pinned(&history));
+        assert_eq!(minted.unwrap(), (MINTED, vec![]));
+        assert_eq!(bound.unwrap().opid, gen::opid_bytes(to_user.opid));
+    }
 }
 
 // ===== the rights refill =====
@@ -539,7 +784,8 @@ fn refill_request(
     let request = SignRightsRefillRequest {
         psbt_bytes: refill.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: parent.psbt.serialize(),
+        fascia: refill.fascia_bytes(),
+        parent_fascia: parent.fascia_bytes(),
     };
     (refill, request)
 }
@@ -577,13 +823,13 @@ fn accepts_a_refill_of_a_refill_made_right() {
 }
 
 #[test]
-fn refuses_a_refill_without_its_parent_psbt() {
+fn refuses_a_refill_without_its_parent_fascia() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let (refill, mut request) = refill_request(&mut history, rights[0], &seed);
-    request.parent_psbt.clear();
+    request.parent_fascia.clear();
     let err = run_refill(&refill, &request, &history).unwrap_err();
-    assert!(err.to_string().contains("parent_psbt required"), "{err}");
+    assert!(err.to_string().contains("parent_fascia required"), "{err}");
 }
 
 #[test]
@@ -595,7 +841,7 @@ fn refuses_a_refill_whose_right_a_mint_made() {
     let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
     let (refill, request) = refill_request(&mut history, kept, &old);
     let err = run_refill(&refill, &request, &history).unwrap_err();
-    assert!(err.to_string().contains("not a transfer"), "{err}");
+    assert!(err.to_string().contains("not a propagate"), "{err}");
 }
 
 #[test]
@@ -629,9 +875,9 @@ fn refuses_a_refill_with_a_non_all_sighash() {
     assert!(err.to_string().contains("non-ALL sighash 0x02"), "{err}");
 }
 
-/// Two transfers in one bundle: a sibling could move a co-located right.
+/// Two propagates in one bundle: a sibling could move a co-located right.
 #[test]
-fn refuses_two_transfers_in_the_signed_bundle() {
+fn refuses_two_propagates_in_the_signed_bundle() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let sends = vec![
@@ -639,23 +885,32 @@ fn refuses_two_transfers_in_the_signed_bundle() {
         history.rights_transition(rights[1], &[3, 4]),
     ];
     let outputs = (3..=6).map(|i| ours(&keys, i, 1_000)).collect();
-    let mut psbt =
+    let mut made =
         history.commit_psbt(sends, vec![rights[0].outpoint, rights[1].outpoint], outputs);
-    our_input(&mut psbt, &keys, 1);
-    fx::anchor_input(&mut psbt, 1, &keys, AccountType::Colored, 0, 2, RIGHT_SATS);
+    our_input(&mut made.psbt, &keys, 1);
+    fx::anchor_input(
+        &mut made.psbt,
+        1,
+        &keys,
+        AccountType::Colored,
+        0,
+        2,
+        RIGHT_SATS,
+    );
     let request = SignRightsRefillRequest {
-        psbt_bytes: psbt.serialize(),
+        psbt_bytes: made.psbt.serialize(),
         asset_id: history.contract_id.to_string(),
-        parent_psbt: seed.psbt.serialize(),
+        fascia: made.fascia_bytes(),
+        parent_fascia: seed.fascia_bytes(),
     };
-    let err = validate_rights_refill(&request, &psbt, &pinned(&history)).unwrap_err();
+    let err = validate_rights_refill(&request, &made.psbt, &pinned(&history)).unwrap_err();
     assert!(err.to_string().contains("discloses 2 transitions"), "{err}");
 }
 
 // ===== parity with the consensus path, while both compile =====
 
-/// Consensus over `bytes` with every witness mined. Returns what it derived
-/// and the mint anchors it asked to bind.
+/// rgb-lib's `validate_consignment_with_resolver` over `bytes`, with every
+/// witness mined. Returns what it derived and the mint anchors it asked to bind.
 fn consensus(
     bytes: &[u8],
 ) -> (
@@ -701,55 +956,83 @@ fn consensus(
                 .collect(),
         })
     };
+    let lists = validation::ListAccess {
+        bind_asset: &|_: &str| Ok(()),
+        read: None,
+    };
     let validated = validator
-        .validate_consignment(bytes, Some(&bind), &witnesses)
+        .validate_consignment(bytes, Some(&bind), &witnesses, &lists)
         .unwrap();
     (validated, anchors.into_inner())
 }
 
 #[test]
-fn a_mint_reads_the_same_from_the_psbt_as_from_consensus() {
+fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
     let (history, seed, mint) = valid_mint();
     let (_, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    let from_psbt = bound.expect("the mint is valid");
+    let from_fascia = bound.expect("the mint is valid");
 
-    let terminals = vec![BuilderSeal::Concealed(recipient())];
-    let (validated, anchors) = consensus(&history.consignment(terminals));
+    let (validated, anchors) = consensus(&history.consignment());
     let [anchor] = anchors.as_slice() else {
         panic!("one mint anchor, got {anchors:?}");
     };
-    assert_eq!(validated.last_transfer_op_id, Some(from_psbt.opid));
-    assert_eq!(anchor.opid, from_psbt.opid);
-    assert_eq!(anchor.amount, from_psbt.issued);
-    assert_eq!(anchor.after_block, from_psbt.after_block);
+    assert_eq!(validated.last_transfer_op_id, Some(from_fascia.opid));
+    assert_eq!(anchor.opid, from_fascia.opid);
+    assert_eq!(anchor.amount, from_fascia.issued);
+    assert_eq!(anchor.before_block, from_fascia.before_block);
     let last = validated.last_transition.unwrap();
-    assert_eq!(last.asset_output_amount, from_psbt.issued);
+    assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
         seals,
         vec![validation::OutputSeal::Confidential {
-            secret_seal: from_psbt.recipient_seal
+            secret_seal: recipient().to_string()
         }]
     );
     assert!(validated.last_mint_rights.is_empty());
     // PP7 pins the UTXO consensus closes.
-    let parent = seed.psbt.serialize();
+    let parent = seed.fascia_bytes();
     let spent =
-        parent_proof::right_input(&mint.psbt, &parent, from_psbt.right, history.contract_id)
+        parent_proof::right_input(&mint.psbt, &parent, from_fascia.right, history.contract_id)
             .unwrap();
     let pinned = mint.psbt.unsigned_tx.input[spent].previous_output;
     assert_eq!(validated.last_closed_seals, vec![pinned]);
 }
 
 #[test]
-fn a_refill_reads_the_same_from_the_psbt_as_from_consensus() {
+fn a_witness_mint_reads_the_same_from_the_fascia_as_from_consensus() {
+    let (history, seed, mint) = valid_witness_mint();
+    let (_, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    let from_fascia = bound.expect("the mint is valid");
+    assert_eq!(from_fascia.recipient, MintRecipient::Witness { vout: 1 });
+
+    let (validated, anchors) = consensus(&history.consignment());
+    let [anchor] = anchors.as_slice() else {
+        panic!("one mint anchor, got {anchors:?}");
+    };
+    assert_eq!(anchor.opid, from_fascia.opid);
+    let last = validated.last_transition.unwrap();
+    assert_eq!(last.asset_output_amount, from_fascia.issued);
+    let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
+    assert_eq!(
+        seals,
+        vec![validation::OutputSeal::Revealed {
+            txid: None,
+            vout: 1
+        }]
+    );
+}
+
+#[test]
+fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let keys = fx::km();
     let (mut history, seed, rights) = seeded(&keys);
     let (refill, request) = refill_request(&mut history, rights[0], &seed);
     let vouts = run_refill(&refill, &request, &history).unwrap();
-    let committed = psbt_commit::committed_transition(&refill.psbt, history.contract_id).unwrap();
+    let committed =
+        psbt_commit::committed_transition(&refill.tx, &refill.fascia, history.contract_id).unwrap();
 
-    let (validated, anchors) = consensus(&history.consignment(vec![]));
+    let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());
     assert_eq!(
         validated.last_transfer_op_id,

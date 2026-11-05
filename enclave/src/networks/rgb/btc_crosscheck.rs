@@ -29,9 +29,10 @@
 //!
 //! Fail-closed: the fee policy and the witness_utxo rule need no config and run
 //! in every build. The amount cap and the unowned budget are operator values.
-//! Non-test `rgb-validation` builds require a non-zero total-input cap.
+//! Non-test builds with `rgb-validation`, and every release build, require a
+//! non-zero total-input cap and a non-zero unowned-output budget.
 //! A zero unowned-output budget rejects unproven outputs but permits self-pay.
-//! Unit tests and builds without `rgb-validation` skip these unset-budget checks.
+//! Unit tests and debug builds without `rgb-validation` skip these checks.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
@@ -91,7 +92,7 @@ pub fn validate_btc_request(
     if unowned_sat > 0 {
         if cfg.btc_max_unowned_sats == 0 {
             // Unset never means "no limit".
-            #[cfg(all(feature = "rgb-validation", not(test)))]
+            #[cfg(all(any(feature = "rgb-validation", not(debug_assertions)), not(test)))]
             {
                 return Err(EnclaveError::CrossCheck(format!(
                     "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove \
@@ -99,7 +100,7 @@ pub fn validate_btc_request(
                      refusing to sign"
                 )));
             }
-            #[cfg(not(all(feature = "rgb-validation", not(test))))]
+            #[cfg(not(all(any(feature = "rgb-validation", not(debug_assertions)), not(test))))]
             tracing::warn!(
                 unowned_sat,
                 "plain-BTC signing: no BTC_MAX_UNOWNED_SATS pinned (non-production build) - \
@@ -127,7 +128,7 @@ pub fn validate_btc_request(
     if cfg.btc_max_total_sats == 0 {
         // Production must not sign without the cap. Nothing else bounds what
         // a host can send to miner fees.
-        #[cfg(all(feature = "rgb-validation", not(test)))]
+        #[cfg(all(any(feature = "rgb-validation", not(debug_assertions)), not(test)))]
         {
             return Err(EnclaveError::CrossCheck(
                 "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned - refusing to sign \
@@ -135,8 +136,9 @@ pub fn validate_btc_request(
                     .into(),
             ));
         }
-        // Builds without rgb-validation, and test builds: dev path only.
-        #[cfg(not(all(feature = "rgb-validation", not(test))))]
+        // Debug builds without rgb-validation, and test builds: dev path only.
+        // A release build always refuses.
+        #[cfg(not(all(any(feature = "rgb-validation", not(debug_assertions)), not(test))))]
         {
             tracing::warn!(
                 "plain-BTC signing: no BTC_MAX_TOTAL_SATS pinned (non-production build) - \
@@ -184,7 +186,7 @@ pub fn validate_rgb_psbt_sats(
 
     if cfg.rgb_max_unowned_sats == 0 {
         // Unset never means "no limit".
-        #[cfg(all(feature = "rgb-validation", not(test)))]
+        #[cfg(all(any(feature = "rgb-validation", not(debug_assertions)), not(test)))]
         {
             return Err(EnclaveError::CrossCheck(
                 "send-RGB signing requires RGB_MAX_UNOWNED_SATS to be pinned - refusing to \
@@ -193,7 +195,7 @@ pub fn validate_rgb_psbt_sats(
                     .into(),
             ));
         }
-        #[cfg(not(all(feature = "rgb-validation", not(test))))]
+        #[cfg(not(all(any(feature = "rgb-validation", not(debug_assertions)), not(test))))]
         {
             tracing::warn!(
                 unowned_sat,

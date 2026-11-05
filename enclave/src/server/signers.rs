@@ -113,11 +113,10 @@ pub(super) fn handle_sign_psbt(
 ) -> Result<EnclaveResponse> {
     // Sats gate. All other send-RGB binds use RGB asset units. Without this
     // gate, a witness tx can satisfy the ledger and still take the BTC backing.
+    // A mint passed M8 in validation, where its recipient is known; this
+    // budget stays a second gate (S7.1).
     let psbt = crate::networks::rgb::psbt_validation::parse_psbt_shape(&req.psbt_bytes)?;
     ctx.state.with_keys(|keys| {
-        // M8: a mint pays no sat out. The budget below stays a second gate.
-        #[cfg(feature = "bfa-mint")]
-        crate::networks::rgb::psbt_validation::assert_keeps_all_sats(&psbt, keys, "mint")?;
         crate::networks::rgb::btc_crosscheck::validate_rgb_psbt_sats(
             &psbt,
             &ctx.bridge_config,

@@ -37,6 +37,15 @@ pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
 /// Default depth of each Bitcoin witness tx before the enclave signs.
 pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 6;
 
+/// Env var of [`BridgeConfig::mint_witness_sat`].
+pub const MINT_WITNESS_SAT_ENV: &str = "MINT_WITNESS_SAT";
+/// Default sats a witness mint pays to its recipient's output.
+pub const DEFAULT_MINT_WITNESS_SAT: u64 = 1_500;
+/// P2PKH dust, the highest of the scripts a `wvout` invoice can name.
+pub const MIN_MINT_WITNESS_SAT: u64 = 546;
+/// A typo guard: every witness mint pays `MINT_WITNESS_SAT` of the bridge's sats.
+pub const MAX_MINT_WITNESS_SAT: u64 = 10_000;
+
 /// Bridge config pinned at enclave boot from env. See module docs.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -91,6 +100,7 @@ pub struct BridgeConfig {
     /// Budget in sats for send-RGB outputs the enclave cannot prove it owns
     /// (`RGB_MAX_UNOWNED_SATS`). The recipient output is blinded, so the enclave
     /// bounds the value that leaves. `0` = unset: production refuses send-RGB.
+    /// A mint signer does not boot below [`Self::mint_witness_sat`].
     pub rgb_max_unowned_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
     /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
@@ -125,6 +135,13 @@ pub struct BridgeConfig {
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
     /// 6, at least 1). Image env, so PCR0 measures it, and attested.
     pub spv_min_confirmations: u32,
+    /// Exact sats a witness mint pays to its recipient's output
+    /// (`MINT_WITNESS_SAT`, default 1500, 546 to 10_000). It must equal the
+    /// connector's value. Image env, so PCR0 measures it; not attested.
+    pub mint_witness_sat: u64,
+    /// Measured commitment to chain endpoint hosts, ports and RPC CA. KMS
+    /// launch fields remain runtime inputs, as in production recovery.
+    pub endpoints_sha256: Option<[u8; 32]>,
 }
 
 /// Env var selecting [`BtcRelayMode`].
@@ -197,11 +214,42 @@ impl Default for BridgeConfig {
             max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
+            mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
+            endpoints_sha256: None,
         }
     }
 }
 
 impl BridgeConfig {
+    /// Required pins when Bitcoin finality is trusted from the indexer.
+    pub fn validate_indexer_only(&self) -> std::result::Result<(), String> {
+        if self.bitcoin_network != BitcoinNetwork::Signet {
+            return Err(
+                "RGB validation without SPV requires BITCOIN_NETWORK=signet (public signet)".into(),
+            );
+        }
+        if self.btc_relay_mode != BtcRelayMode::None {
+            return Err("RGB validation without SPV requires BTC_RELAY_MODE=none".into());
+        }
+        if self.spv_min_confirmations == 0 {
+            return Err(
+                "indexer-trusted validation requires at least one Bitcoin confirmation".into(),
+            );
+        }
+        if self.endpoints_sha256.is_none_or(|hash| hash == [0; 32]) {
+            return Err(
+                "RGB validation without SPV requires a nonzero ENDPOINTS_SHA256 pin".into(),
+            );
+        }
+        if !self.is_configured()
+            || self.funds_in_contract == [0; 20]
+            || self.token_contract == [0; 20]
+        {
+            return Err("RGB validation without SPV requires EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID, FUNDS_IN_CONTRACT and TOKEN_CONTRACT pins".into());
+        }
+        Ok(())
+    }
+
     /// Load from env. An invalid `EVM_FINALITY_TAG` refuses startup.
     pub fn from_env() -> Self {
         let chain_id = std::env::var("EVM_CHAIN_ID")
@@ -269,10 +317,8 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let rgb_max_unowned_sats = std::env::var("RGB_MAX_UNOWNED_SATS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let rgb_max_unowned_sats =
+            parse_rgb_max_unowned_sats(std::env::var("RGB_MAX_UNOWNED_SATS").ok().as_deref());
 
         let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
             .ok()
@@ -329,6 +375,10 @@ impl BridgeConfig {
             parse_spv_min_confirmations(std::env::var(SPV_MIN_CONFIRMATIONS_ENV).ok().as_deref())
                 .unwrap_or_else(|e| panic!("{e}"));
 
+        let mint_witness_sat =
+            parse_mint_witness_sat(std::env::var(MINT_WITNESS_SAT_ENV).ok().as_deref())
+                .unwrap_or_else(|e| panic!("{e}"));
+
         Self {
             chain_id,
             bridge_contract,
@@ -350,7 +400,27 @@ impl BridgeConfig {
             max_merkle_proofs,
             max_total_proof_bytes,
             spv_min_confirmations,
+            mint_witness_sat,
+            endpoints_sha256: parse_endpoints_sha256(
+                std::env::var("ENDPOINTS_SHA256").ok().as_deref(),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
         }
+    }
+
+    /// The mint signer's boot check. S7.1 counts a witness mint's recipient
+    /// output as unowned, so a lower `RGB_MAX_UNOWNED_SATS` (unset is 0) would
+    /// refuse every witness mint after its deposit is locked.
+    pub fn check_mint_witness_budget(&self) -> std::result::Result<(), String> {
+        if self.rgb_max_unowned_sats >= self.mint_witness_sat {
+            return Ok(());
+        }
+        Err(format!(
+            "RGB_MAX_UNOWNED_SATS {} (unset or not a number is 0) is below \
+             {MINT_WITNESS_SAT_ENV} {}: every witness mint would be refused after its \
+             deposit is locked. Set RGB_MAX_UNOWNED_SATS to at least {}",
+            self.rgb_max_unowned_sats, self.mint_witness_sat, self.mint_witness_sat
+        ))
     }
 
     /// True only when all three pin fields are set. Only a full pin allows
@@ -384,6 +454,45 @@ impl BridgeConfig {
     }
 }
 
+/// Commit network inputs without changing the runtime KMS recovery contract.
+/// Hash the decoded request re-encoded with the pinned protobuf schema.
+/// Keep in sync with `parent/src/bin/cli.rs::endpoints_sha256`.
+pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u8; 32] {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    let mut network = request.clone();
+    // New schema fields must be explicitly classified as hashed or excluded.
+    let crate::proto::SetEndpointsRequest {
+        electrum_url: _,
+        evm_rpc_host: _,
+        evm_rpc_ca_der: _,
+        evm_rpc_tls_port: _,
+        // Hashed: the enclave requests `/` and never reads it, so only the empty
+        // path the parent sends matches the pin.
+        evm_rpc_path: _,
+        kms_key_arn,
+        kms_region,
+        kms_seed_id,
+        kms_expected_evm_address,
+    } = &mut network;
+    kms_key_arn.clear();
+    kms_region.clear();
+    kms_seed_id.clear();
+    kms_expected_evm_address.clear();
+    Sha256::digest(network.encode_to_vec()).into()
+}
+
+fn parse_endpoints_sha256(value: Option<&str>) -> std::result::Result<Option<[u8; 32]>, String> {
+    match value {
+        None | Some("") => Ok(None),
+        Some(value) => hex::decode(value)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(Some)
+            .ok_or_else(|| "ENDPOINTS_SHA256 must be exactly 64 hex characters".into()),
+    }
+}
+
 /// Parse `SPV_MIN_CONFIRMATIONS`. Unset or empty gives the default. Zero or a
 /// non-number is an error, so a typo cannot lower the depth.
 pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u32, String> {
@@ -397,6 +506,28 @@ pub fn parse_spv_min_confirmations(value: Option<&str>) -> std::result::Result<u
              or leave it unset for {DEFAULT_SPV_MIN_CONFIRMATIONS}"
         )),
     }
+}
+
+/// Parse `MINT_WITNESS_SAT`. Unset or empty gives the default. A non-number or
+/// a value out of bounds is an error, so a typo cannot change what a mint pays.
+pub fn parse_mint_witness_sat(value: Option<&str>) -> std::result::Result<u64, String> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_MINT_WITNESS_SAT);
+    };
+    match raw.parse::<u64>() {
+        Ok(n) if (MIN_MINT_WITNESS_SAT..=MAX_MINT_WITNESS_SAT).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "{MINT_WITNESS_SAT_ENV} {raw:?} is not valid: set a whole number of sats from \
+             {MIN_MINT_WITNESS_SAT} to {MAX_MINT_WITNESS_SAT}, or leave it unset for \
+             {DEFAULT_MINT_WITNESS_SAT}"
+        )),
+    }
+}
+
+/// Parse `RGB_MAX_UNOWNED_SATS`. Unset or not a number is 0, which refuses
+/// send-RGB in production. Trimmed, so a `\r` from an env file keeps the value.
+pub fn parse_rgb_max_unowned_sats(value: Option<&str>) -> u64 {
+    value.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
 /// Parse 40 hex chars, with or without `0x`, into 20 bytes.
@@ -664,6 +795,99 @@ mod tests {
     use super::*;
     use crate::proto::SetEndpointsRequest;
 
+    #[test]
+    fn endpoints_digest_matches_the_parent_golden_vector_and_excludes_kms() {
+        // The parent uses the upstream protobuf crate; the enclave vendors its
+        // schema. Keep this independently computed wire vector equal in both.
+        let mut request = SetEndpointsRequest {
+            electrum_url: "ssl://electrum.test:50002".into(),
+            evm_rpc_host: "rpc.test".into(),
+            evm_rpc_ca_der: vec![1, 2, 3],
+            evm_rpc_tls_port: 443,
+            kms_key_arn: "key".into(),
+            kms_region: "region".into(),
+            kms_seed_id: "seed".into(),
+            kms_expected_evm_address: "address".into(),
+            evm_rpc_path: String::new(),
+        };
+        let expected = "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9";
+        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
+
+        // The EVM RPC path is a network input: another path misses the pin.
+        let other_path = SetEndpointsRequest {
+            evm_rpc_path: "/v2/key".into(),
+            ..request.clone()
+        };
+        assert_ne!(hex::encode(chain_endpoints_sha256(&other_path)), expected);
+
+        // Runtime seed recovery inputs must not require another measured EIF.
+        for field in [
+            &mut request.kms_key_arn,
+            &mut request.kms_region,
+            &mut request.kms_seed_id,
+            &mut request.kms_expected_evm_address,
+        ] {
+            field.clear();
+        }
+        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
+    }
+
+    #[test]
+    fn endpoints_digest_env_requires_exactly_64_hex_characters() {
+        assert_eq!(parse_endpoints_sha256(None), Ok(None));
+        assert_eq!(parse_endpoints_sha256(Some("")), Ok(None));
+        for value in ["ab".repeat(32), "AB".repeat(32)] {
+            assert_eq!(parse_endpoints_sha256(Some(&value)), Ok(Some([0xab; 32])));
+        }
+        for value in [
+            "a".repeat(63),
+            "a".repeat(65),
+            "gg".repeat(32),
+            format!("0x{}", "ab".repeat(32)),
+            format!(" {}", "ab".repeat(32)),
+            format!("{} ", "ab".repeat(32)),
+        ] {
+            assert!(parse_endpoints_sha256(Some(&value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn endpoints_digest_from_env_installs_or_rejects_the_pin() {
+        const CHILD: &str = "UTEXO_TEST_ENDPOINTS_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let config = BridgeConfig::from_env();
+            assert_eq!(config.endpoints_sha256, Some([0xab; 32]));
+            return;
+        }
+
+        // Isolate environment changes from the other parallel config tests.
+        for (value, valid) in [("ab".repeat(32), true), ("not-a-digest".into(), false)] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::endpoints_digest_from_env_installs_or_rejects_the_pin",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CHILD, "1")
+                .env("ENDPOINTS_SHA256", value)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                valid,
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            if !valid {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("ENDPOINTS_SHA256 must be exactly 64 hex characters"));
+            }
+        }
+    }
+
     /// Every name the SPV chain runs on attests the network a verifier
     /// expects for that same name (W-04: testnet4 attested as mainnet).
     #[test]
@@ -780,6 +1004,65 @@ mod tests {
         for v in ["0", "-1", "six", "6.5", "99999999999"] {
             let err = parse_spv_min_confirmations(Some(v)).unwrap_err();
             assert!(err.contains("at least 1"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn mint_witness_sat_defaults_to_1500_when_unset() {
+        assert_eq!(parse_mint_witness_sat(None), Ok(1_500));
+        assert_eq!(parse_mint_witness_sat(Some(" ")), Ok(1_500));
+    }
+
+    #[test]
+    fn mint_witness_sat_accepts_values_in_bounds() {
+        assert_eq!(parse_mint_witness_sat(Some("546")), Ok(546));
+        assert_eq!(parse_mint_witness_sat(Some(" 1500 ")), Ok(1_500));
+        assert_eq!(parse_mint_witness_sat(Some("10000")), Ok(10_000));
+    }
+
+    #[test]
+    fn mint_witness_sat_rejects_dust_values_above_the_cap_and_garbage() {
+        for v in [
+            "0",
+            "545",
+            "10001",
+            "-1",
+            "1.5",
+            "abc",
+            "99999999999999999999",
+        ] {
+            let err = parse_mint_witness_sat(Some(v)).unwrap_err();
+            assert!(err.contains("from 546 to 10000"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn mint_witness_budget_must_cover_the_witness_output() {
+        let budget = |rgb_max_unowned_sats| BridgeConfig {
+            rgb_max_unowned_sats,
+            ..Default::default()
+        };
+        for sats in [1_500, 10_000] {
+            assert_eq!(budget(sats).check_mint_witness_budget(), Ok(()), "{sats}");
+        }
+        for sats in [0, 1, 1_499] {
+            let err = budget(sats).check_mint_witness_budget().unwrap_err();
+            assert!(err.contains("at least 1500"), "{sats}: {err}");
+            assert!(err.contains("unset or not a number is 0"), "{sats}: {err}");
+        }
+    }
+
+    #[test]
+    fn rgb_max_unowned_sats_ignores_surrounding_whitespace() {
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500")), 1_500);
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500 ")), 1_500);
+        assert_eq!(parse_rgb_max_unowned_sats(Some("1500\r")), 1_500);
+    }
+
+    #[test]
+    fn rgb_max_unowned_sats_is_zero_when_unset_or_not_a_number() {
+        for v in [None, Some(""), Some("abc"), Some("-1"), Some("1.5")] {
+            assert_eq!(parse_rgb_max_unowned_sats(v), 0, "{v:?}");
         }
     }
 

@@ -1,13 +1,13 @@
 //! Route-level RGB validation: the entry points that `networks::route` calls.
 //!
 //! This layer only selects the check for this build. The checks are in the
-//! sibling modules: consignment parsing and rgbstd validation in
+//! sibling modules: consignment parsing and rgb-lib validation in
 //! [`super::validation`], PSBT anchoring in [`super::psbt_validation`], the
 //! mint signer's PSBT core in [`super::psbt_commit`] and
 //! [`super::parent_proof`], and per-flow rules in [`super::flow`].
 //!
-//! The mint signer validates from the PSBT and its parent alone. Every other
-//! RGB build validates a consignment.
+//! The mint signer validates from the PSBT, its fascia and its parent's fascia
+//! alone. Every other RGB build validates a consignment.
 
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 use super::flow;
@@ -196,7 +196,7 @@ fn validated_destination_consignment(
     validation::assert_consignment_size(consignment, ctx.bridge_config, "send-RGB")?;
     // Integrity, not authorization. The listener controls both `consignment`
     // and `consignment_hash`, so a match only proves the wire copy is intact.
-    // Authorization comes from rgbstd validation and the witness-txid bind.
+    // Authorization comes from rgb-lib validation and the witness-txid bind.
     if consignment_hash.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "consignment present but consignment_hash is missing".into(),
@@ -227,30 +227,32 @@ fn validated_destination_consignment(
         allow_unbroadcast_last: true,
         infer_spent_ancestors: true,
     };
-    // The binder derives the lock of each mint in the history.
-    let validated = validator.validate_consignment(consignment, ctx.anchor_binder, &witnesses)?;
-
     // Fail closed on a missing pin, unlike the source direction. An enclave
     // with rgb-validation but no config must not trust the listener.
     // Same as the EVM funds-out `!is_configured()` gate.
-    validation::assert_asset_binding(
-        &validated.contract_id,
-        asset_id,
-        ctx.bridge_config,
-        validation::AssetBindMode::Destination,
-    )?;
-    // After the bind, so only the pinned asset's list is read. The recipient
-    // refuses a transfer whose outputs the list reaches.
-    validation::assert_not_rejected(
-        &validated,
-        ctx.reject_list_reader,
-        validation::RejectCheck::SettlingInputsAndOutputs,
-    )?;
+    let bind_asset = |contract_id: &str| {
+        validation::assert_asset_binding(
+            contract_id,
+            asset_id,
+            ctx.bridge_config,
+            validation::AssetBindMode::Destination,
+        )
+    };
+    // rgb-lib reads the list only after the bind, and refuses a transfer
+    // whose inputs or outputs the list reaches, as the recipient does.
+    let lists = validation::ListAccess {
+        bind_asset: &bind_asset,
+        read: ctx.reject_list_reader,
+    };
+    // The binder derives the lock of each mint in the history.
+    let validated =
+        validator.validate_consignment(consignment, ctx.anchor_binder, &witnesses, &lists)?;
+    bind_asset(&validated.contract_id)?;
     Ok(validated)
 }
 
-/// The mint its PSBT commits, bound to the deposit and the right's UTXO (F1-F7,
-/// PP, M1-M7; M8 runs in the signer). Returns the units and the `utxob:` seal.
+/// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO
+/// (F1-F7, PP, M1-M8). Returns the units and the `utxob:` seal of a blinded mint.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
@@ -260,14 +262,25 @@ pub fn validate_destination_anchor(
 ) -> Result<(u64, Vec<String>)> {
     let psbt = psbt_validation::parse_psbt_shape(&destination.psbt_bytes)?;
     psbt_validation::assert_txid_and_sighash_fixed(&psbt)?;
-    let (pin, committed) = pinned_commitment(&psbt, &destination.asset_id, ctx.bridge_config)?;
+    let (pin, committed) = pinned_commitment(
+        &psbt,
+        &destination.fascia,
+        &destination.asset_id,
+        ctx.bridge_config,
+    )?;
     let mint = psbt_validation::mint_facts(&committed)?;
     psbt_validation::assert_mints_net_deposit(&mint, source_amount, source_commission)?;
     let colored = mint_inputs(&psbt, ctx)?;
-    parent_proof::right_input(&psbt, &destination.parent_psbt, mint.right, pin)?;
+    parent_proof::right_input(&psbt, &destination.parent_fascia, mint.right, pin)?;
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched: the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &colored, "mint")?;
+    let mint_sats = ctx.mint_sats.ok_or_else(|| {
+        crate::error::EnclaveError::CrossCheck(
+            "mint cannot be signed: no sats check is wired in".into(),
+        )
+    })?;
+    mint_sats(&psbt, &mint.recipient)?;
     // Last: the only network read on this path.
     let bind = ctx.mint_binder.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
@@ -275,19 +288,21 @@ pub fn validate_destination_anchor(
         )
     })?;
     bind(&mint)?;
-    Ok((mint.issued, vec![mint.recipient_seal]))
+    Ok((mint.issued, mint.recipient.blinded_seals()))
 }
 
-/// F3-F6 under the `RGB_ASSET_ID` pin, which the request's `asset_id` must
-/// name too. Returns the pin and the committed transition.
+/// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which
+/// `asset_id` must name too. Returns the pin and the committed transition.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 fn pinned_commitment(
     psbt: &bitcoin::psbt::Psbt,
+    fascia: &[u8],
     asset_id: &str,
     cfg: &BridgeConfig,
 ) -> Result<(rgbstd::ContractId, psbt_commit::Committed)> {
     let pin = psbt_commit::pinned_contract(cfg)?;
-    let committed = psbt_commit::committed_transition(psbt, pin)?;
+    let fascia = psbt_commit::parse_fascia(fascia, "fascia")?;
+    let committed = psbt_commit::committed_transition(&psbt.unsigned_tx, &fascia, pin)?;
     validation::assert_asset_binding(
         &pin.to_string(),
         asset_id,
@@ -322,7 +337,7 @@ fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Resul
     Ok(colored)
 }
 
-/// A rights refill from its PSBT and parent alone (F2-F6, RR6-RR8, RR11), no
+/// A refill from its PSBT and the two fascias alone (F2-F6, RR6-RR8, RR11), no
 /// network. Returns the new rights' vouts, which the caller proves ours (RR9).
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub fn validate_rights_refill(
@@ -331,9 +346,9 @@ pub fn validate_rights_refill(
     cfg: &BridgeConfig,
 ) -> Result<Vec<u32>> {
     psbt_validation::assert_txid_and_sighash_fixed(psbt)?;
-    let (pin, committed) = pinned_commitment(psbt, &req.asset_id, cfg)?;
+    let (pin, committed) = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg)?;
     let (right, vouts) = psbt_validation::refill_rights(&committed)?;
-    parent_proof::right_input(psbt, &req.parent_psbt, right, pin)?;
+    parent_proof::right_input(psbt, &req.parent_fascia, right, pin)?;
     Ok(vouts)
 }
 

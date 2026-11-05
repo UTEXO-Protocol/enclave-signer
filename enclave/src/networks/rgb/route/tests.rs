@@ -201,7 +201,7 @@ mod asset_bind {
     /// `psbt_bytes`. PSBT parsing runs after all asset-binding checks, so its
     /// error proves that the binding passed.
     fn destination(asset_id: &str) -> RgbDestination {
-        let consignment = mint().consignment(vec![]);
+        let consignment = mint().consignment();
         RgbDestination {
             operation_idx: 0,
             psbt_bytes: b"not-a-psbt".to_vec(),
@@ -209,7 +209,8 @@ mod asset_bind {
             asset_id: asset_id.into(),
             consignment_hash: Keccak256::digest(&consignment).to_vec(),
             consignment,
-            parent_psbt: vec![],
+            fascia: vec![],
+            parent_fascia: vec![],
         }
     }
 
@@ -316,7 +317,7 @@ mod asset_bind {
             reject_list: Some(gen::evm_reject_list(42161, [0x4e; 20])),
             ..Issue::new(42161, [0xB1; 20], vec![gen::outpoint(0xA0, 0)])
         });
-        let consignment = history.consignment(vec![]);
+        let consignment = history.consignment();
         let id = history.contract_id.to_string();
         let destination = RgbDestination {
             consignment_hash: Keccak256::digest(&consignment).to_vec(),
@@ -344,7 +345,10 @@ mod asset_bind {
         let (history, ..) = listed_mint();
         let right = history.genesis_right(0, gen::outpoint(0xA0, 0)).opout;
         let msg = run_rejecting(right);
-        assert!(msg.contains("reject list: opout"), "{msg}");
+        assert!(
+            msg.contains("Consignment rejected by the reject list"),
+            "{msg}"
+        );
     }
 
     /// The recipient would refuse it, which strands the deposit.
@@ -353,7 +357,10 @@ mod asset_bind {
         let (history, ..) = listed_mint();
         let minted = rgbstd::Opout::new(history.mints[0].opid, schemata::OS_ASSET, 0);
         let msg = run_rejecting(minted);
-        assert!(msg.contains("reject list: opout"), "{msg}");
+        assert!(
+            msg.contains("Consignment rejected by the reject list"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -373,6 +380,6 @@ mod asset_bind {
     // `validation::tests::asset_binding_rule` covers the rule.
 }
 
-/// The mint signer's routes, from the PSBT and its parent alone.
+/// The mint signer's routes, from the PSBT, its fascia and its parent's alone.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 mod psbt_path;

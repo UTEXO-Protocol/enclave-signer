@@ -30,14 +30,22 @@ sequenceDiagram
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
     Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, reject list EVM-only
-    Rgb->>Rgb: phase 1: validate_deterministic(BFA rules, chain_net)<br/>leaves the witnesses and the mint anchors open
-    Rgb->>Bind: AnchorBinder(genesis bridgeLocation, mint anchors)
+    Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
+    Rgb->>Rgb: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
+    Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
+    Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(mint OpId, minted units; no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Rgb: phase 2: each anchor confirmed only against its own lock;<br/>each witness: tx from the consignment, Mined(height) only<br/>from a proven SPV proof (OnChainResolver), else REFUSE; finalize
-    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId; flat parser must agree
-    Rgb->>Rgb: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
+    Rgb->>Rgb: witness resolver: tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
+    opt genesis names a reject list
+        Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
+        Rgb->>Rgb: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
+    end
+    Rgb->>Rgb: the bound locks are the anchors, one for one
+    Rgb->>Rgb: rgb-lib inspect_consignment(All) on the same file:<br/>the flat summary of every transition
+    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId; flat summary must agree
+    Rgb->>Rgb: contract_id == declared asset_id, again
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source, feature spv)
@@ -54,22 +62,19 @@ sequenceDiagram
     end
     Spv->>Chain: pin each proof block (ChainPins)
     Spv-->>Srv: Ok / Spv err
-    opt genesis names a reject list (after the asset bind)
-        Srv->>Srv: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID
-        Srv->>Srv: length() at finalized and latest, entries pages at latest
-        Srv->>Srv: burn inputs reach a rejected opout<br/>before an allowed one => REFUSE
-    end
     Srv->>Srv: source amount := TS_BURN burnedAsset<br/>(other settling transition => REFUSE, host rgb_amount NOT used)
 
     Note over Srv,Evm: 2 — validate_destination (EVM)
     Srv->>Evm: validate_destination(EvmDestination)
     Evm->>Evm: calldata ≥ 4 bytes, ≤ 96 KiB
     Evm->>Evm: selector is fundsOut 0x340276aa or lzFundsOut
+    Evm->>Evm: lz_release present only with lzFundsOut, else REFUSE
     Evm->>Evm: canonical ABI check: decode FundsOutParams,<br/>then re-encode must byte-equal input
+    Evm->>Evm: lzFundsOut only: 1 ≤ minAmountLD ≤ amount,<br/>extraOptions empty or one lzReceive gas option,<br/>no value, gas ≤ 1 000 000
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)
     Evm->>Evm: config pinned? chain_id / proxy_contract == env pins<br/>(unconfigured ⇒ REFUSE on bridge builds)
     Evm->>Evm: calldata destinationChainId:<br/>pools route == pinned chain, LZ route != pinned and > 0
-    Evm->>Evm: deadline strictly in the future
+    Evm->>Evm: deadline after now and ≤ now + 24 h
     Evm-->>Srv: Ok / CrossCheck err
 
     Note over Srv: 3 — validate_route_proofs
@@ -80,11 +85,11 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (both routes: fundsOut and lzFundsOut)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
     Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>burn_destination::resolve(burnReason, record)<br/>V0: burnReason[12..] == calldata recipient, direct only<br/>V1: hash_v1(record) == burnReason, then<br/>destinationChainId, dstEid, recipient == record
-    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData (operationIds, netAmounts) ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
+    Srv->>Cx: validate_funds_out_settlement:<br/>settlementData operationIds ==<br/>BridgeFundsIn records of the verified ancestry locks,<br/>set equality, canonical, non-empty
     Note right of Cx: LayerZero route: recipient = the LayerZero recipient.<br/>Only a V1 burn can leave via LayerZero.
     Cx-->>Srv: Ok / CrossCheck err
 

@@ -27,11 +27,14 @@ fn main() {
     // Pinned bridge config. Committed in attestation `user_data` and checked on
     // every signing request.
     let bridge_config = BridgeConfig::from_env();
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    bridge_config
+        .validate_indexer_only()
+        .expect("invalid indexer-only configuration");
     bootstrap::log_bridge_config(&bridge_config);
 
-    // Fail closed: a release rgb-validation build without a valid Production
-    // policy does not start. Debug, test and non-bridge builds are exempt.
-    // `SetEndpoints` checks the full policy later.
+    // Validate the build policy before starting the server. SetEndpoints
+    // checks endpoint-dependent invariants later.
     let build_ctx = BuildContext::current();
     let policy = SecurityPolicy::resolve(
         &build_ctx,
@@ -41,6 +44,12 @@ fn main() {
         "",
     );
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
+        panic!("{msg}");
+    }
+    // Every mint build refuses unset in S7.1 too, so this stops at boot what
+    // would otherwise strand each witness mint after its lock.
+    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    if let Err(msg) = bridge_config.check_mint_witness_budget() {
         panic!("{msg}");
     }
 

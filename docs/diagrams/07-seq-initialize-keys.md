@@ -18,6 +18,9 @@ sequenceDiagram
     PClient->>Srv: InitializeKeyRequest{seed=[], mnemonic="", cloning_secret}<br/>(length-prefixed proto)
 
     Srv->>Srv: path == "entropy" (no seed, no mnemonic)
+    opt cloning_secret non-empty
+        Srv->>Srv: validate_cloning_secret - strength check before any key exists,<br/>a weak secret leaves the enclave Initial
+    end
     Srv->>Rand: getrandom::fill(&mut entropy[32])
     Rand-->>Srv: 32 bytes
     Srv->>State: initialize_from_entropy(&mut entropy)
@@ -37,8 +40,9 @@ sequenceDiagram
     State->>State: *guard = Phase::Active(Box::new(km))
     State-->>Srv: mnemonic (discarded by handler, never logged)
     opt cloning_secret non-empty
-        Srv->>State: set_donor_cloning_secret(secret) - strength check, kept in SecretBox,<br/>arms this enclave as a clone donor
+        Srv->>State: set_donor_cloning_secret(secret) - kept in SecretBox,<br/>arms this enclave as a clone donor
     end
+    Note over Srv,State: An empty cloning_secret keeps any donor secret<br/>loaded at boot from UTEXO_CLONING_SECRET.
 
     Srv->>State: get_keys()
     State-->>Srv: KeyInfo

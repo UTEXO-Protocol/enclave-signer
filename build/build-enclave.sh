@@ -16,10 +16,13 @@
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   PRIVATE_DEPS_DIR        or a directory with that key in a lib_key file
+#   RGB_PRIVATE_DEPS_TOKEN  token with read access to the UTEXO-Protocol/<repo>-s-bfa
+#                           mirrors of the RGB protocol crates
+#   PRIVATE_DEPS_DIR        or a directory with those in lib_key and rgb_deps_token files
 #
-# rgb-lib comes from the private rgb-lib-bfa mirror. The deploy key goes in a
-# BuildKit secret: never in a build arg, a layer, the image or PCR0.
+# rgb-lib and the RGB protocol crates it pins come from private mirrors. The
+# key and the token go in BuildKit secrets: never in a build arg, a layer, the
+# image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -77,7 +80,10 @@ mkdir -p "$OUT_DIR"
 # Reject a missing asset before the build starts. (F06-AF-38)
 # A fixed ENV asset does not need a build argument.
 BUILD_ARGS=()
-if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
+declares_build_arg() {
+    grep -qE "^[[:space:]]*ARG[[:space:]]+$1([=[:space:]]|$)" "$SCRIPT_DIR/$DOCKERFILE"
+}
+if declares_build_arg RGB_ASSET_ID; then
     if [ -z "${RGB_ASSET_ID:-}" ]; then
         echo "Error: $DOCKERFILE requires RGB_ASSET_ID (the issued BFA contract id, e.g. rgb:<...>)." >&2
         echo "       Set RGB_ASSET_ID=rgb:<contract-id> and re-run; the image build fails without it." >&2
@@ -87,17 +93,48 @@ if grep -qE '^ARG[[:space:]]+RGB_ASSET_ID' "$SCRIPT_DIR/$DOCKERFILE"; then
     echo "    rgb asset id : $RGB_ASSET_ID"
 fi
 
-if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    [ -s "$PRIVATE_DEPS_DIR/lib_key" ] || {
-        echo "Error: $PRIVATE_DEPS_DIR/lib_key is missing or empty." >&2
+# Optional measured configuration for the mint/burn recipes. Unset values
+# retain each Dockerfile's production defaults.
+if declares_build_arg ENCLAVE_FEATURES; then
+    # Match Docker's effective defaults when an override is unset or empty.
+    build_features="${ENCLAVE_FEATURES:-$(sed -n 's/^ARG ENCLAVE_FEATURES=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    bitcoin_network="${BITCOIN_NETWORK:-$(sed -n 's/^ARG BITCOIN_NETWORK=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
+    if [ "$bitcoin_network" != signet ] && \
+        ! grep -qE '(^|[[:space:],])rgb([[:space:],]|$)' <<< "$build_features"; then
+        echo "Error: $DOCKERFILE requires the rgb feature when BITCOIN_NETWORK=$bitcoin_network." >&2
+        echo "       Include rgb in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
         exit 1
-    }
-    SECRET_ARGS=(--secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key")
-elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ]; then
-    SECRET_ARGS=(--secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY)
+    fi
+    for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT RGB_MAX_UNOWNED_SATS ENDPOINTS_SHA256; do
+        if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
+            BUILD_ARGS+=(--build-arg "$arg=${!arg}")
+            echo "    build override: $arg=${!arg}"
+        fi
+    done
+fi
+
+if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
+    for secret in lib_key rgb_deps_token; do
+        [ -s "$PRIVATE_DEPS_DIR/$secret" ] || {
+            echo "Error: $PRIVATE_DEPS_DIR/$secret is missing or empty." >&2
+            exit 1
+        }
+    done
+    SECRET_ARGS=(
+        --secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key"
+        --secret "id=rgb_deps_token,src=$PRIVATE_DEPS_DIR/rgb_deps_token"
+    )
+elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ] && [ -n "${RGB_PRIVATE_DEPS_TOKEN:-}" ]; then
+    SECRET_ARGS=(
+        --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY
+        --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN
+    )
 else
-    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa." >&2
-    echo "       Set RGB_LIB_BFA_DEPLOY_KEY, or PRIVATE_DEPS_DIR with a lib_key file." >&2
+    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa" >&2
+    echo "       and a token with read access to the UTEXO-Protocol/<repo>-s-bfa RGB crate mirrors." >&2
+    echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
+    echo "       lib_key and rgb_deps_token files." >&2
     exit 1
 fi
 

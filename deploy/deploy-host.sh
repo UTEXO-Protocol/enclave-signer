@@ -28,6 +28,7 @@
 set -euo pipefail
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
+[[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "GIT_SHA must be a 40-hex commit" >&2; exit 1; }
 BUCKET="${BUCKET:?BUCKET required (S3 artifact bucket)}"
 REGION="${AWS_REGION:?AWS_REGION required (e.g. eu-central-1)}"
 DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>/<dir>)}"
@@ -62,7 +63,10 @@ declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
 declare -A HPORT=([16]=50061 [18]=50062 [20]=50063)
 
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
-asubuntu(){ su - ubuntu -c "$1"; }
+# No login shell: ubuntu's dotfiles must not run in deploy steps.
+asubuntu(){ runuser -u ubuntu -- env HOME=/home/ubuntu bash -c "$1"; }
+DESC_JSON=$(mktemp)
+trap 'rm -f "$DESC_JSON"' EXIT
 
 # Bind Parent gRPC to the private host address. (F03-AF-13)
 # Set GRPC_HOST to override the address.
@@ -105,20 +109,22 @@ asubuntu "aws s3 cp $SRC/SHA256SUMS               $DIR/SHA256SUMS.eif   --region
 asubuntu "aws s3 cp $SRC/utexo-bridge-parent      $DIR/utexo-bridge-parent     --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/utexo-bridge-parent-cli  $DIR/utexo-bridge-parent-cli --region $REGION --no-progress"
 asubuntu "aws s3 cp $SRC/HOST-SHA256SUMS          $DIR/HOST-SHA256SUMS  --region $REGION --no-progress"
-chmod +x "$DIR/utexo-bridge-parent" "$DIR/utexo-bridge-parent-cli"
-chown ubuntu:ubuntu "$DIR/utexo-bridge-parent" "$DIR/utexo-bridge-parent-cli"
+# ubuntu downloaded these, so ubuntu owns them. chmod as ubuntu: root must not
+# follow a symlink ubuntu put in $DIR.
+asubuntu "chmod +x '$DIR/utexo-bridge-parent' '$DIR/utexo-bridge-parent-cli'"
 
 # --- 2. verify checksums ---------------------------------------------------
-EXP=$(awk '{print $1}' "$DIR/SHA256SUMS.eif")
-ACT=$(sha256sum "$EIF" | awk '{print $1}')
+# Read ubuntu-owned files as ubuntu: root must not follow a symlink there.
+EXP=$(asubuntu "awk '{print \$1}' '$DIR/SHA256SUMS.eif'")
+ACT=$(asubuntu "sha256sum '$EIF'" | awk '{print $1}')
 [ "$EXP" = "$ACT" ] || { log "EIF sha mismatch ($ACT != $EXP)"; exit 1; }
-( cd "$DIR" && sha256sum -c HOST-SHA256SUMS ) || { log "host binary sha mismatch"; exit 1; }
+asubuntu "cd '$DIR' && sha256sum -c HOST-SHA256SUMS" || { log "host binary sha mismatch"; exit 1; }
 log "checksums OK"
 
 # --- 3. pre-flight PCR (static EIF measurement vs manifest) ----------------
 EIF_PCR=$(asubuntu "nitro-cli describe-eif --eif-path $EIF" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["Measurements"]["PCR0"])')
-MAN_PCR=$(python3 -c 'import json;print(json.load(open("'"$DIR"'/PCR.json"))["PCR0"])')
+MAN_PCR=$(asubuntu "cat '$DIR/PCR.json'" | python3 -c 'import json,sys;print(json.load(sys.stdin)["PCR0"])')
 [ "$EIF_PCR" = "$MAN_PCR" ] || { log "PCR0 manifest mismatch ($EIF_PCR != $MAN_PCR)"; exit 1; }
 log "PCR0 (manifest) = $MAN_PCR"
 
@@ -358,11 +364,11 @@ if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
   log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
   # Check the complete CID set, including in debug mode.
   # Read JSON from a file because the Python heredoc uses stdin.
-  asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
-  python3 - "${CIDS[*]}" <<'PY'
+  asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
+  python3 - "${CIDS[*]}" "$DESC_JSON" <<'PY'
 import json, sys
 want = sorted(int(x) for x in sys.argv[1].split())
-d = json.load(open("/tmp/desc.json"))
+d = json.load(open(sys.argv[2]))
 running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
 print("running CIDs (debug):", running, "want:", want)
 if running != want:
@@ -370,15 +376,15 @@ if running != want:
 print(f"OK (debug): exactly {len(want)} enclaves RUNNING")
 PY
 else
-asubuntu 'nitro-cli describe-enclaves' > /tmp/desc.json
+asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
 # F09-AF-07: require the EXACT expected CID set, all in RUNNING state, each with a
 # matching PCR0. Previously an empty enclave list passed silently (no mismatch to
 # find), so a host with zero/partial enclaves could report a "successful" deploy.
-python3 - "$MAN_PCR" "${CIDS[*]}" <<'PY'
+python3 - "$MAN_PCR" "${CIDS[*]}" "$DESC_JSON" <<'PY'
 import json, sys
 man  = sys.argv[1]
 want = sorted(int(x) for x in sys.argv[2].split())
-d = json.load(open("/tmp/desc.json"))
+d = json.load(open(sys.argv[3]))
 running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
 allcids = sorted(e["EnclaveCID"] for e in d)
 print("running CIDs:", allcids, "state=RUNNING:", running, "want:", want)

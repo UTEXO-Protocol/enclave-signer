@@ -13,7 +13,7 @@ sequenceDiagram
     participant RN as Req NSM
     participant DN as Don NSM
 
-    Note over Req,Don: Both enclaves must have IDENTICAL PCR0/1/2<br/>(same compiled binary) and PCR3<br/>(same parent IAM role) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey, a completed clone,<br/>or the legacy UTEXO_CLONING_SECRET env. Never in the image.
+    Note over Req,Don: Both enclaves must have IDENTICAL PCR0/1/2<br/>(same compiled binary) and PCR3<br/>(same parent IAM role) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey or a completed clone.<br/>A release image never carries it. The legacy UTEXO_CLONING_SECRET<br/>env fallback is image env, for dev images only.
 
     Note over Cli,Req: Message 1 - the CLI talks to the requester over the enclave wire<br/>protocol and to the donor through its parent's gRPC Clone RPC
     Op->>Cli: clone --cloning-secret-file --donor-grpc --donor-evm

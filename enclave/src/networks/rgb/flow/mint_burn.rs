@@ -41,9 +41,9 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 /// Returns the asset amount that a withdrawal (`fundsOut`) consignment
 /// destroys, after a check of the transition type.
 ///
-/// The amount is the burn's `burnedAsset` global, never its outputs: a burn
-/// may return change. A burn without the global destroys no asset units, so
-/// it cannot back a release.
+/// The amount is the burn's `burnedAsset` global. A burn has no outputs: its
+/// change is in a split transfer of the same bundle. A burn without the global
+/// destroys no asset units, so it cannot back a release.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     if rgbstd::TransitionType::with(last.transition_type) != schemata::TS_BURN {

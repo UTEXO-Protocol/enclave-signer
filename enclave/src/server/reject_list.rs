@@ -1,5 +1,5 @@
-//! Reads the asset's reject list over the pinned EVM RPC. The walk is in
-//! `networks::rgb::validation::reject_list`.
+//! Reads the asset's reject list over the pinned EVM RPC. rgb-lib walks the
+//! history with its decisions (`networks::rgb::validation::reject_list`).
 
 use std::time::Instant;
 

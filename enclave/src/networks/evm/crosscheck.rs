@@ -151,7 +151,7 @@ pub fn validate_funds_out_source_burn_tx_id(
             "fundsOut requires a consignment with at least one transition".into(),
         ));
     }
-    // The OpId that RGB consensus validated, not the flat parser's copy.
+    // The OpId that RGB consensus validated, not the flat summary's copy.
     // Validation fills it for a burn and refuses a consignment where the two
     // walks disagree, so this bind cannot name one burn and pay another.
     let expected = validated.last_transfer_op_id.ok_or_else(|| {
@@ -187,13 +187,13 @@ pub fn validate_funds_out_source_burn_tx_id(
 /// the deposits behind the burn's mint ancestry.
 ///
 /// `RgbSettlementModule.beforeFundsOut` decodes `settlementData` as
-/// `abi.encode(bytes32[] operationIds, uint256[] amounts)`. It checks each
-/// pair against the `(operationId, netAmount)` it recorded at `FundsIn`, but
-/// does not know which deposits are behind a burn. The enclave derives one
+/// `abi.encode(bytes32[] operationIds)` and requires a `FundsIn` record for
+/// each id, but does not know which deposits are behind a burn. Each id hashes
+/// its deposit's netAmount, so no amounts are cited. The enclave derives one
 /// deposit id per ancestry mint ([`crate::networks::evm::events::derived_lock`])
 /// without reading the chain. That deposit's existence is enforced by
 /// `beforeFundsOut`, so the release route must use `RgbSettlementModule`.
-/// The cited set must equal the derived ancestry, pair for pair.
+/// The cited set must equal the derived ancestry, id for id.
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
 /// `operationId` order, which also refuses duplicates. `burnId` does not hash
@@ -205,10 +205,10 @@ pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,
     locks: &[crate::networks::rgb::validation::VerifiedLock],
 ) -> Result<()> {
-    use alloy_primitives::{B256, U256};
+    use alloy_primitives::B256;
     use alloy_sol_types::SolValue;
 
-    type Settlement = (Vec<B256>, Vec<U256>);
+    type Settlement = (Vec<B256>,);
 
     if locks.is_empty() {
         return Err(EnclaveError::CrossCheck(
@@ -222,22 +222,15 @@ pub fn validate_funds_out_settlement(
         .map_err(|e| {
             EnclaveError::CrossCheck(format!("fundsOut settlementData does not decode: {e}"))
         })?;
-    let (ids, amounts) = &decoded;
-    if ids.len() != amounts.len() {
-        return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut settlementData cites {} ids but {} amounts",
-            ids.len(),
-            amounts.len()
-        )));
-    }
     if decoded.abi_encode_params() != release.settlement_data {
         return Err(EnclaveError::CrossCheck(
             "fundsOut settlementData is not canonically encoded".into(),
         ));
     }
+    let ids = &decoded.0;
 
-    // One byte form per pair set. The bridge sorts the same way
-    // (`sortSettlementPairs`), and so does `bytes32 <` in Solidity.
+    // One byte form per id set. The bridge sorts the same way
+    // (`sortSettlementIDs`), and so does `bytes32 <` in Solidity.
     if ids.windows(2).any(|w| w[0] >= w[1]) {
         return Err(EnclaveError::CrossCheck(
             "fundsOut settlementData operationIds are not strictly ascending (reordered or \
@@ -246,23 +239,16 @@ pub fn validate_funds_out_settlement(
         ));
     }
 
-    let cited: Vec<([u8; 32], U256)> = ids
-        .iter()
-        .zip(amounts.iter())
-        .map(|(id, amount)| (id.0, *amount))
-        .collect();
+    let cited: Vec<[u8; 32]> = ids.iter().map(|id| id.0).collect();
 
-    let mut expected: Vec<([u8; 32], U256)> = locks
-        .iter()
-        .map(|lock| (lock.operation_id, U256::from(lock.net_amount)))
-        .collect();
+    let mut expected: Vec<[u8; 32]> = locks.iter().map(|lock| lock.operation_id).collect();
     expected.sort();
     expected.dedup();
 
     if cited != expected {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut settlementData mismatch: calldata cites {} deposit(s), the burn's verified \
-             mint ancestry has {} - every (operationId, netAmount) pair must match",
+             mint ancestry has {} - every operationId must match",
             cited.len(),
             expected.len()
         )));

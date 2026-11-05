@@ -21,6 +21,12 @@ KMS_PINS = dict(
     KMS_REGION='eu-west-1',
     KMS_SEED_ID='mint-signer-1',
 )
+MEASURED_PINS = dict(
+    BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
+    EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
+    FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
+    RGB_MAX_UNOWNED_SATS='1000', ENDPOINTS_SHA256='12' * 32,
+)
 
 
 class BuildArgumentsTests(unittest.TestCase):
@@ -49,11 +55,13 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.chmod(0o700)
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
-                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
+                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
+                    'ENCLAVE_FEATURES', *MEASURED_PINS):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
             RGB_LIB_BFA_DEPLOY_KEY='fixture-deploy-key-not-a-real-credential',
+            RGB_PRIVATE_DEPS_TOKEN='fixture-mirror-token-not-a-real-credential',
             OUT_DIR=str(self.base / 'out'),
             SOURCE_DATE_EPOCH='1700000000',
             TEST_DOCKER_ARGV=str(self.argv),
@@ -72,6 +80,7 @@ class BuildArgumentsTests(unittest.TestCase):
         argv = json.loads(self.argv.read_text())
         self.assertEqual(argv[:2], ['buildx', 'build'])
         self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
+        self.assertNotIn(self.env['RGB_PRIVATE_DEPS_TOKEN'], ' '.join(argv))
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--build-arg']
 
     def test_rgb_recipes_reject_missing_asset_before_docker(self):
@@ -94,6 +103,86 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(self.captured_build_args(), [
                     'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
                 ])
+                self.assertNotIn('build override:', result.stdout)
+
+    def test_role_overrides_are_forwarded_and_logged_only_when_declared(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                overrides = dict(MEASURED_PINS, ENCLAVE_FEATURES=f'vsock,{role}-signer')
+                result = self.invoke(f'Dockerfile.enclave.{role}',
+                                     RGB_ASSET_ID='rgb:test-bfa-asset', **overrides)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                applied = dict(overrides)
+                if role == 'burn':
+                    applied.pop('RGB_MAX_UNOWNED_SATS')
+                    self.assertNotIn('RGB_MAX_UNOWNED_SATS', result.stdout)
+                self.assertCountEqual(self.captured_build_args(), [
+                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                    *(f'{key}={value}' for key, value in applied.items()),
+                ])
+                self.assertCountEqual(
+                    [line.strip() for line in result.stdout.splitlines()
+                     if 'build override:' in line],
+                    [f'build override: {key}={value}' for key, value in applied.items()],
+                )
+
+    def test_optional_overrides_do_not_leak_into_legacy_or_ccd_recipes(self):
+        for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb', 'Dockerfile.enclave.ccd',
+                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
+            with self.subTest(recipe=recipe):
+                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     ENCLAVE_FEATURES='vsock,mint-signer', **MEASURED_PINS)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                expected = ['SOURCE_DATE_EPOCH=1700000000']
+                if recipe in RGB_RECIPES:
+                    expected.append('RGB_ASSET_ID=rgb:test-bfa-asset')
+                self.assertEqual(self.captured_build_args(), expected)
+                self.assertNotIn('build override:', result.stdout)
+
+    def test_empty_role_overrides_keep_recipe_defaults(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                empty = {key: '' for key in ('ENCLAVE_FEATURES', *MEASURED_PINS)}
+                result = self.invoke(f'Dockerfile.enclave.{role}',
+                                     RGB_ASSET_ID='rgb:test-bfa-asset', **empty)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertEqual(self.captured_build_args(), [
+                    'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
+                ])
+                self.assertNotIn('build override:', result.stdout)
+
+    def test_non_signet_roles_require_rgb_before_docker(self):
+        for role in ('mint', 'burn'):
+            for network in (None, '', 'bitcoin', 'testnet', 'testnet4', 'regtest'):
+                with self.subTest(role=role, network=network):
+                    overrides = {} if network is None else {'BITCOIN_NETWORK': network}
+                    result = self.invoke(f'Dockerfile.enclave.{role}',
+                                         RGB_ASSET_ID='rgb:test-bfa-asset',
+                                         ENCLAVE_FEATURES=f'vsock,{role}-signer', **overrides)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('requires the rgb feature', result.stderr)
+                    self.assertFalse(self.argv.exists())
+
+    def test_related_feature_names_do_not_satisfy_rgb_guard(self):
+        for feature in ('rgb-validation', 'rgb-mint-burn', 'bfa-mint'):
+            with self.subTest(feature=feature):
+                result = self.invoke('Dockerfile.enclave.burn',
+                                     RGB_ASSET_ID='rgb:test-bfa-asset',
+                                     ENCLAVE_FEATURES=f'vsock,{feature},burn-signer')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('requires the rgb feature', result.stderr)
+                self.assertFalse(self.argv.exists())
+
+    def test_non_signet_roles_accept_explicit_rgb(self):
+        for role in ('mint', 'burn'):
+            for features in (f'rgb,vsock,{role}-signer', f'vsock,rgb,{role}-signer',
+                             f'vsock,{role}-signer,rgb', f'vsock rgb {role}-signer'):
+                with self.subTest(role=role, features=features):
+                    result = self.invoke(f'Dockerfile.enclave.{role}',
+                                         RGB_ASSET_ID='rgb:test-bfa-asset',
+                                         BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES=features)
+                    self.assertEqual(result.returncode, 42, result.stderr)
+                    self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
 
     def test_combined_forwards_asset_and_explicit_debug_together(self):
         result = self.invoke('Dockerfile.enclave', RGB_ASSET_ID='rgb:test-bfa-asset',
@@ -136,6 +225,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(json.loads(self.docker_env.read_text())['RGB_ASSET_ID'],
                          'rgb:test-bfa-asset')
         self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
+        self.assertIn('id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN', argv)
 
     def test_make_mint_rejects_missing_asset_before_docker(self):
         result = self.invoke_make('build_enclave_mint')
@@ -172,38 +262,54 @@ class BuildArgumentsTests(unittest.TestCase):
         argv = json.loads(self.argv.read_text())
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
 
-    def test_every_recipe_takes_the_deploy_key_as_a_secret(self):
+    def test_every_recipe_takes_the_deploy_key_and_the_mirror_token_as_secrets(self):
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
                        'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_secrets(), ['id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY'])
+                self.assertEqual(self.captured_secrets(), [
+                    'id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY',
+                    'id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN',
+                ])
 
-    def test_the_token_file_of_private_deps_dir_wins(self):
+    def test_the_secret_files_of_private_deps_dir_win(self):
         deps = self.base / 'deps'
         deps.mkdir()
         (deps / 'lib_key').write_text('fixture-deploy-key-file')
+        (deps / 'rgb_deps_token').write_text('fixture-mirror-token-file')
         result = self.invoke('Dockerfile.enclave.ccd', PRIVATE_DEPS_DIR=str(deps))
         self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_secrets(), [f'id=lib_key,src={deps}/lib_key'])
+        self.assertEqual(self.captured_secrets(), [
+            f'id=lib_key,src={deps}/lib_key',
+            f'id=rgb_deps_token,src={deps}/rgb_deps_token',
+        ])
         self.assertNotIn('fixture-deploy-key-file', self.argv.read_text())
+        self.assertNotIn('fixture-mirror-token-file', self.argv.read_text())
 
-    def test_missing_token_refuses_before_docker(self):
-        env = dict(self.env)
-        env.pop('RGB_LIB_BFA_DEPLOY_KEY')
-        empty = self.base / 'empty'
-        empty.mkdir()
-        for extra in ({}, {'PRIVATE_DEPS_DIR': str(empty)}):
-            with self.subTest(extra=extra):
+    def test_a_missing_key_or_token_refuses_before_docker(self):
+        deps = self.base / 'deps'
+        deps.mkdir()
+        cases = (
+            ('RGB_LIB_BFA_DEPLOY_KEY', None, 'rgb-lib-bfa'),
+            ('RGB_PRIVATE_DEPS_TOKEN', None, 'RGB_PRIVATE_DEPS_TOKEN'),
+            (None, 'lib_key', 'lib_key'),
+            (None, 'rgb_deps_token', 'rgb_deps_token'),
+        )
+        for unset, missing_file, named in cases:
+            with self.subTest(unset=unset, missing_file=missing_file):
+                env = dict(self.env, DOCKERFILE='Dockerfile.enclave.ccd')
+                if unset:
+                    env.pop(unset)
+                else:
+                    for name in ('lib_key', 'rgb_deps_token'):
+                        (deps / name).write_text('' if name == missing_file else 'fixture')
+                    env['PRIVATE_DEPS_DIR'] = str(deps)
                 self.argv.unlink(missing_ok=True)
-                result = subprocess.run(
-                    ['bash', str(ROOT / 'build/build-enclave.sh')],
-                    env=dict(env, DOCKERFILE='Dockerfile.enclave.ccd', **extra),
-                    capture_output=True, text=True,
-                )
+                result = subprocess.run(['bash', str(ROOT / 'build/build-enclave.sh')],
+                                        env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('lib_key' if extra else 'rgb-lib-bfa', result.stderr)
+                self.assertIn(named, result.stderr)
                 self.assertFalse(self.argv.exists())
 
     def test_ccd_does_not_require_asset(self):

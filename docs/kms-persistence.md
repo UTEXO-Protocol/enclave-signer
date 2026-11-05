@@ -6,7 +6,7 @@ the enclave loads the saved blob, decrypts it with KMS recipient attestation,
 and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
 KMS Sign.
 
-The measured mint image selects `CustodyFlow::RgbMint`, whose encryption-context
+The measured mint image compiles in `CUSTODY_FLOW`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
 rejected at compile time. Burn signers retain their existing OS-entropy and
@@ -46,7 +46,8 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
 `/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
-carry them, and the attested policy commits them:
+carry them. Production policy commits them; Development policy does not.
+Operators must approve the launch values:
 
 | Setting | Value |
 | --- | --- |
@@ -61,7 +62,7 @@ different recovered seed and makes missing storage fail before generation; no
 pin makes an existing object fail before decryption. There is no creation switch.
 A development image built with `allow-seed-import` and launched with all KMS
 values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
-A verifier checks them with `attest-verify --expect-kms-key-arn`,
+For Production policy, a verifier checks them with `attest-verify --expect-kms-key-arn`,
 `--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
@@ -87,7 +88,8 @@ With storage settings absent, the parent does not start the custody broker.
 The AWS SDK obtains and refreshes credentials. Use a dedicated EC2 instance
 role with IMDSv2. The custody listener admits `ENCLAVE_VSOCK_CID` by
 default. `KMS_ALLOWED_CIDS` can explicitly allow comma-separated replica
-CIDs sharing the same logical signer. Every allowed CID receives the **full
+CIDs sharing the same logical signer. When set, it replaces the default, so
+list the primary CID too. Every allowed CID receives the **full
 role**, so give it only this signer's KMS/S3 permissions. A CID is a routing
 address, not attested image identity.
 
@@ -115,7 +117,9 @@ the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
 host deployment. Do not run a second listener on `8003` or `8004`.
 
-The deployment scripts pass enclave KMS settings at launch. They do not provision the KMS relay, broker storage settings, or AWS policies.
+`deploy/deploy-host.sh` deploys only the combined image, so it does not launch the mint signer.
+Set the mint signer's KMS values with `cli set-endpoints`.
+No deployment script provisions the KMS relay, broker storage settings, or AWS policies.
 
 ## AWS permissions and persistence
 
@@ -130,18 +134,19 @@ resource policies with these permissions:
 | `s3:ListBucket` | The containing bucket, so an absent object is distinguishable from access denial. |
 
 Both KMS operations must require recipient attestation with the approved
-production PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
+mint image PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
 exactly these public encryption-context fields:
 
 ```json
 {"application":"utexo-enclave-signer","flow":"rgb-mint","seed_id":"YOUR_SEED_ID","bitcoin_network":"bitcoin"}
 ```
 
-The flow is the compiled [`CustodyFlow::RgbMint`](../enclave/src/kms/mod.rs)
+The flow is the compiled [`CUSTODY_FLOW`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
 context automatically; policies must match it exactly.
 
-Use the actual network: `bitcoin`, `testnet`, `signet`, or `regtest`. Reject
+Use the actual network: `bitcoin`, `testnet`, `testnet4`, `signet`, or `regtest`.
+A `signetcustom` image uses `signet`. Reject
 unattested requests, wrong PCRs and changed/missing/extra context, including when
 another identity policy grants broader access. Keep the signer role free of
 unrelated policies, policy-management privileges, object/version deletion and

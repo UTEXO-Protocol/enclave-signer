@@ -1,7 +1,8 @@
 # `clone` CLI results
 
-`utexo-bridge-parent-cli clone` prints one result line on stdout:
-`CLONE_RESULT_V1=<result>`. It prints the detail on stderr. Automation must
+`utexo-bridge-parent-cli clone` prints exactly one result line on stdout:
+`CLONE_RESULT_V1=<result>`. Stdout also carries progress lines and, when the
+keys are read back, the key printout. It prints the detail on stderr. Automation must
 read the result line, not the exit code alone. Source:
 `parent/src/bin/cli.rs` and `parent/src/bin/cli/clone_completion.rs`.
 
