@@ -146,5 +146,6 @@ ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
 
 # Production logging. This env is measured into PCR0 - do not flip it to `debug`
 # for a production EIF.
-ENV RUST_LOG=info
+ARG RUST_LOG=info
+ENV RUST_LOG=${RUST_LOG}
 ENTRYPOINT ["/app/entrypoint.sh"]
