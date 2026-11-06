@@ -400,7 +400,6 @@ class BuildArgumentsTests(unittest.TestCase):
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
                                      BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
-                                     SPV_MIN_CONFIRMATIONS='6', EVM_FINALITY_TAG='safe',
                                      RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
@@ -411,9 +410,6 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug,alloy_transport_http=off')
-                # Every recipe fixes these two. The environment cannot change them.
-                self.assertNotIn('SPV_MIN_CONFIRMATIONS', args)
-                self.assertNotIn('EVM_FINALITY_TAG', args)
                 self.assertEqual(args['FUNDS_IN_CONTRACT'],
                                  '0xe67c9eb5006512525f597c3fa6119891bd4efaa6')
                 if role == 'burn':
@@ -451,6 +447,15 @@ class BuildArgumentsTests(unittest.TestCase):
 
 class ImageInputsTests(unittest.TestCase):
     RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+
+    def test_every_rgb_recipe_fixes_the_finality_tag_and_the_depth(self):
+        # Every image uses `finalized` and 3. With no ARG, no build can change them.
+        for recipe in RGB_RECIPES:
+            text = (ROOT / 'build' / recipe).read_text()
+            with self.subTest(recipe=recipe):
+                self.assertRegex(text, r'(?m)^\s*EVM_FINALITY_TAG=finalized\b')
+                self.assertRegex(text, r'(?m)^\s*SPV_MIN_CONFIRMATIONS=3\b')
+                self.assertNotRegex(text, r'(?m)^ARG (EVM_FINALITY_TAG|SPV_MIN_CONFIRMATIONS)\b')
 
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:
