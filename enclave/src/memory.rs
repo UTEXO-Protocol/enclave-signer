@@ -89,8 +89,8 @@
 //! factor (`peak::assert_within_factor`), the request bound, or the heap each
 //! worker holds. A parser whose output grows faster than its input fails such
 //! a test instead of reaching an image. `#[ignore]` marks the slow tests with
-//! a history of 10 000 transfers, and CI runs the two that measure memory on
-//! the burn set. The tests live next to the code they measure: `framing`,
+//! a history of 10 000 transfers, and CI runs them on the burn set. The tests
+//! live next to the code they measure: `framing`,
 //! `config`, the gas transaction decoder, consignment validation, PSBT and
 //! fascia parsing, and attestation documents. The tests of whole requests
 //! through `dispatch` are in `server::sign::request_memory` and

@@ -64,7 +64,7 @@ image values, and the launch continues.
 | `first_bytes_timeout_secs` | 10 | 1 | 60 | Time for the first bytes of an egress client. |
 | `electrum_timeout_secs` | 15 | 1 | 90 | Time for one Electrum socket operation. |
 | `esplora_timeout_secs` | 30 | 1 | 90 | Time for one Esplora call. |
-| `max_rgb_lib_ms` | 18000 | 1000 | 75000 | Modeled rgb-lib time on one consignment. |
+| `max_rgb_lib_ms` | 21000 | 1000 | 75000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 4294967296 | Steps to check transitions against witness txs. |
 | `max_bundle_id_cost` | 262144 | 1024 | 16777216 | Steps to hash bundle ids. |
 | `max_reject_walk_cost` | 67108864 | 1048576 | 2147483648 | Steps of the reject-list walk. |
@@ -135,7 +135,7 @@ These values also stay constants:
 The parent waits 110 s for a `Sign`. That is 10 s more than the highest
 `total_request_timeout_secs`, because the enclave must give up first. So a change of
 the deadline needs no change on the parent. The parent waits 40 s for each other
-request, because these requests do not validate a consignment.
+request, because these requests do no work on a consignment.
 
 The parent has its own frame limit (`parent/src/framing.rs`). A value of
 `max_message_bytes` above 24 MiB has no effect until the parent limit also changes.

@@ -100,8 +100,11 @@ limits! {
     /// Modeled time of rgb-lib on one consignment, validation and inspection
     /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
     /// to validate alone, and the caps add up. The rgb-lib work runs on one
-    /// worker, and the deadline does not stop it.
-    max_rgb_lib_ms: 18_000, 1_000, 75_000;
+    /// worker, and the deadline does not stop it. The value of the image passes
+    /// a history of 10 000 transfers with an SPV proof on each, which models at
+    /// 19.95 s, and refuses the forged shapes of `validation/tests/caps.rs`,
+    /// which model at 25 s and more.
+    max_rgb_lib_ms: 21_000, 1_000, 75_000;
     /// Steps to check transitions against their witness txs. Forged bundles at
     /// the value of the image take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
     /// costs 8.5M (`validation/tests/caps.rs`, docs/burn-flow.md).

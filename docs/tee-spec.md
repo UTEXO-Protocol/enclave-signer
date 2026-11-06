@@ -835,7 +835,7 @@ work in rgb-lib would pass one of three caps (`validation/cost.rs`, burn-flow
 B2.2 and section 10): the checks of each transition against its bundle's
 whole witness tx, anchor and input map, which rgb-lib runs for every BFA
 before it checks any witness, and, for a listed asset, its reject walk; or
-whose modeled rgb-lib time would pass 18 s (`MAX_RGB_LIB_NS`): for
+whose modeled rgb-lib time would pass 21 s (`max_rgb_lib_ms`): for
 validation its file bytes, opouts, genesis hashes (every genesis global and
 assignment, once per operation) and those three costs, and for the
 inspection that reads the summary after it its file bytes, opouts,
@@ -1158,18 +1158,20 @@ Known limits. Read them before deployment.
   summary once validation passed costs about as much again per opout: about
   0.5 us per byte, 46 to 60 us per opout and up to about 130 us per
   operation. So a file alone models at 1.75 us per byte, and the budget
-  refuses any file past about 10.3 MB, below the 12 MiB default. On the
+  refuses any file past about 12 MB, above the 10 MiB limit. On the
   pinned asset's genesis of 10 mint rights an honest 2810-mint burn takes
   2.7 to 2.8 s to validate and 1.9 to 2.2 s to inspect, 5.0 to 6.3 s end to
   end; with 3 transfers a line it takes 15.9 to 16.2 s end to end and models
-  at 17.9 s, so a longer history is refused. The genesis part depends on the
+  at 17.9 s. A history of 10,000 transfers with an SPV proof on each models at
+  19.95 s. The budget refuses a history past about 7 MB of plain transfers. The
+  genesis part depends on the
   pinned asset: on a genesis of 255 mint rights an operation costs rgb-lib
-  3.6 ms, so the budget admits about 4,000 operations; the 2810-mint burn
+  3.6 ms, so the budget admits about 4,200 operations; the 2810-mint burn
   there models at 16.5 s and takes 15.3 to 16.2 s end to end. A forged
   chain of propagates, 14 bytes an opout, at the size cap took 44 s to
   validate and 51 s to inspect: the budget counts its opouts and refuses it.
-  The caps' parts add up with it, so `MAX_RGB_LIB_NS` holds the modeled sum
-  to 18 s, against a 30 s deadline that does not stop a worker (4 workers).
+  The caps' parts add up with it, so `max_rgb_lib_ms` holds the modeled sum
+  to 21 s, against a 30 s deadline that does not stop a worker (4 workers).
   The budget is rgb-lib's alone: the enclave's own parse, gate and reads of
   the validated transfer take the rest of the deadline, 1.1 to 1.6 s more end
   to end on the 2810-mint burn with 3 transfers a line (2.3 s at a load of 5.6).

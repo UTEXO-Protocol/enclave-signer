@@ -159,7 +159,7 @@ error.
   file's own cost, so the modeled rgb-lib time of validation (the file bytes,
   its opouts, the genesis hashes and the three costs) and of the inspection
   (the file bytes, its opouts, its operations and the witness checks) together
-  must be at most `MAX_RGB_LIB_NS` (18 s). The caps and the timings behind
+  must be at most `max_rgb_lib_ms` (21 s). The caps and the timings behind
   them are in [Work caps](#10-work-caps).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   consensus phase 1 over the whole history under the BFA rules from
@@ -441,16 +441,16 @@ passed (B2.8):
 | `MAX_WITNESS_CHECK_COST` | per bundle: transitions x (tx bytes + Tapret partner leaf bytes) + seals x tx inputs | 134,217,728 (128 Mi) | 8,539,773 |
 | `MAX_BUNDLE_ID_COST` | per bundle: (transitions + 1) x input map entries | 262,144 (256 Ki) | 11,242 |
 | `MAX_REJECT_WALK_COST` | listed asset only: the steps of rgb-lib's walk from each origin | 67,108,864 (64 Mi) | 14,050 |
-| `MAX_RGB_LIB_NS` | modeled rgb-lib time. Validation: 1100 ns per file byte, 55,000 per opout (each one the genesis or a transition creates, and each one a transition spends), 15,000 per genesis leaf hash (each genesis global and assignment, once for the genesis and once per transition), 14 per witness step, 4500 per bundle id step, 75 per walk step. Inspection: 650 per file byte, 65,000 per opout, 90,000 per operation (the genesis and each transition), 8 per witness step | 18,000,000,000 (18 s) | 6.1 s on the pinned genesis of 10 mint rights, listed: 3.7 s of validation and 2.4 s of inspection (5.0 to 6.3 s measured end to end) |
+| `max_rgb_lib_ms` | modeled rgb-lib time. Validation: 1100 ns per file byte, 55,000 per opout (each one the genesis or a transition creates, and each one a transition spends), 15,000 per genesis leaf hash (each genesis global and assignment, once for the genesis and once per transition), 14 per witness step, 4500 per bundle id step, 75 per walk step. Inspection: 650 per file byte, 65,000 per opout, 90,000 per operation (the genesis and each transition), 8 per witness step | 21,000 ms (21 s) | 6.1 s on the pinned genesis of 10 mint rights, listed: 3.7 s of validation and 2.4 s of inspection (5.0 to 6.3 s measured end to end) |
 
 Each cap alone holds its part to a few seconds, but the parts add up with
 the file's own cost: a listed merge of 1400 lines after 23,900 transfers is
 12.1 MB, within the size cap and each cap (its walk at 66.98M), and took
 rgb-lib 19.5 to 19.9 s to validate, 15.0 to 15.2 s of it without the walk. So
 the gate also models rgb-lib's whole time, from release timings rounded up,
-and refuses past 18 s. A file alone models at 1.75 us per byte (1.1 to
-validate, 0.65 to inspect), so the budget holds a file to about 10.3 MB,
-below the 12 MiB default, whatever it holds. On the pinned genesis of 10 mint
+and refuses past 21 s. A file alone models at 1.75 us per byte (1.1 to
+validate, 0.65 to inspect), so the budget holds a file to about 12 MB,
+above the 10 MiB limit, whatever it holds. On the pinned genesis of 10 mint
 rights the 2810-mint burn's opouts, operations, genesis hashes and costs model
 at 2.5 s besides its file. On a genesis of 255 its genesis hashes alone model
 at 11.0 s (below). The budget is rgb-lib's alone: the burn signer's own parse,
@@ -484,7 +484,7 @@ model counts 15,000 ns and puts the 255-right chain's validation at 9.1 s. On
 the pinned genesis of 10 rights (15 leaves, 16 with a reject list) this adds
 about 0.23 ms an operation, part of which the per-byte and per-opout rates
 already held. On a genesis of 255 rights an operation costs rgb-lib 3.6 ms and
-the model 3.9 ms, so the 18 s budget admits about 4,000 operations, whatever
+the model 3.9 ms, so the 21 s budget admits about 4,200 operations, whatever
 their size: a chain of 5000 one-right propagates (2.3 MB) is refused
 (`tests/caps.rs`). Before this term the gate let through about 27,000 such
 propagates under the size cap, which would have taken rgb-lib about 110 s.
@@ -613,9 +613,9 @@ opouts and its operations. Validation takes about 0.8 to 1.1 us per byte
 byte of `read` calls), about 35 to 55 us per opout beyond its bytes, and
 13.7 us per genesis leaf for each operation; the inspection about 0.5 us per
 byte, 46 to 60 us per opout and up to 130 us per operation. That part is
-bounded by `MAX_CONSIGNMENT_BYTES` (12 MiB by default) and by
-`MAX_RGB_LIB_NS`, which holds the modeled sum of file, opouts, operations,
-genesis hashes and capped parts to 18 s: at most about 2.5 s of witness checks
+bounded by `MAX_CONSIGNMENT_BYTES` (10 MiB by default) and by
+`max_rgb_lib_ms`, which holds the modeled sum of file, opouts, operations,
+genesis hashes and capped parts to 21 s: at most about 2.5 s of witness checks
 in validation and 1.1 s in the inspection, 1.2 s of bundle ids and 5 s of walk
 on top of the file. It is what dominates an honest burn with a long history:
 on the pinned genesis the 2810-mint burn with 3 transfers a line takes 15.9 to
@@ -636,13 +636,15 @@ costs 2kD + k^2 + 4k steps: k = 3478 (2 allocations per input) and D = 8000
 cost 67.8M. At one allocation per input (k <= 1739) it needs D of at least
 18.4k, more witnesses than `MAX_MERKLE_PROOFS`. A burn with change has one
 origin, the split's output, which walks its ancestry once. The time budget
-refuses an honest history past about 18 s of modeled work, validation and
+refuses an honest history past about 21 s of modeled work, validation and
 inspection together. On the pinned genesis of 10 rights a history of
 transfers alone is about 230 bytes per opout, and each opout models at about
-0.7 ms, so it reaches 18 s at about 6 MB: the 2810-mint burn with 3 transfers
-a line (6.0 MB) passes at 17.9 s, and a longer history is refused. On a
+0.7 ms, so it reaches 21 s at about 7 MB: the 2810-mint burn with 3 transfers
+a line (6.0 MB) passes at 17.9 s, and a history past about 7 MB is refused. A
+history of 10,000 transfers with an SPV proof on each (8.9 MB) has more bytes
+for each opout, and it passes at 19.95 s. On a
 genesis of 255 rights each operation adds 3.9 ms, so the budget refuses a
-history past about 4,000 operations, whatever its size. The 2810-mint burn
+history past about 4,200 operations, whatever its size. The 2810-mint burn
 passes there at 16.5 s, 14.1 s of it validation. 1404 or 2810 mints with 3
 transfers a line are refused there; they would take rgb-lib 22.7 and 45.9 s
 to validate, the second past the 30 s deadline.
