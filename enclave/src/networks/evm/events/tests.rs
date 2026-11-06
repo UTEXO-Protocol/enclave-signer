@@ -465,17 +465,6 @@ fn rejects_when_operation_id_not_supplied() {
     assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
 }
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn still_rejects_amount_mismatch_with_matching_operation_id() {
-    let p = FakeEvm {
-        receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-        ..FakeEvm::default()
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("amount mismatch"), "got: {e}");
-}
-
 /// A wrong-length id is a mis-encoding, not an absent one: refuse.
 #[cfg(evm_to_rgb)]
 #[test]

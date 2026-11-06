@@ -7,6 +7,7 @@
 
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +53,7 @@ const CA_A_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_a.der.hex");
 const CA_B_HEX: &str = include_str!("fixtures/evm_rpc_tls/ca_b.der.hex");
 /// PEM of CA A, for `pinned_ca_is_the_only_trusted_root` to add to a system
 /// trust store the client must not consult.
+#[cfg(target_os = "linux")]
 const CA_A_CERT_PEM: &str = include_str!("fixtures/evm_rpc_tls/ca_a.pem");
 /// Leaves signed by CA A: (certificate, key).
 const RPC_TEST: (&str, &str) = (
@@ -192,22 +194,52 @@ fn serve_chain(
     port
 }
 
-/// Accepts a connection and never answers.
-fn serve_hang() -> u16 {
+/// Complete TLS and consume a JSON-RPC request, then withhold its response.
+/// The observed request distinguishes RPC timeout coverage from TLS failure.
+fn serve_hang() -> (u16, Arc<AtomicBool>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let received = Arc::new(AtomicBool::new(false));
+    let observed = received.clone();
+    let cert = CertificateDer::from_pem_slice(RPC_TEST.0.as_bytes()).unwrap();
+    let key = PrivateKeyDer::from_pem_slice(RPC_TEST.1.as_bytes()).unwrap();
+    let cfg = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap(),
+    );
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let _stream = stream.unwrap();
-            std::thread::sleep(Duration::from_secs(60));
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let conn = rustls::ServerConnection::new(cfg).unwrap();
+        let mut reader = BufReader::new(rustls::StreamOwned::new(conn, stream));
+        let mut len = 0;
+        for line in reader.by_ref().lines().map_while(Result::ok) {
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = value.trim().parse().unwrap();
+            }
+            if line.is_empty() || line == "\r" {
+                break;
+            }
         }
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(request["method"].is_string());
+        observed.store(true, Ordering::SeqCst);
+        // Longer than the production deadline, but finite if that deadline regresses.
+        std::thread::sleep(Duration::from_secs(30));
     });
-    port
+    (port, received)
 }
 
-/// Answers every request, over TLS with the `rpc.test` leaf, with a 307 to
-/// another host.
-fn serve_redirect() -> u16 {
+/// Redirect to another reachable port on the same certified host. A client
+/// that follows redirects can complete the request, so DNS/TLS errors cannot
+/// masquerade as proof that redirects were disabled.
+fn serve_redirect(target_port: u16) -> (u16, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (cert, key) = RPC_TEST;
@@ -219,6 +251,8 @@ fn serve_redirect() -> u16 {
             .with_single_cert(vec![cert], key)
             .unwrap(),
     );
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let stream = stream.unwrap();
@@ -239,16 +273,19 @@ fn serve_redirect() -> u16 {
                     }
                 }
                 let mut body = vec![0; len];
-                let _ = reader.read_exact(&mut body);
+                if reader.read_exact(&mut body).is_err() || body.is_empty() {
+                    continue;
+                }
             }
+            observed.fetch_add(1, Ordering::SeqCst);
             let _ = write!(
                 tls,
-                "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://attacker.test/\r\n\
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://rpc.test:{target_port}/\r\n\
                  Content-Length: 0\r\nConnection: close\r\n\r\n"
             );
         }
     });
-    port
+    (port, requests)
 }
 
 /// The Host header of every request `answer` read.
@@ -549,50 +586,103 @@ fn tls_failure_refuses_to_sign() {
     }
 }
 
-#[test]
-fn proxy_env_has_no_effect() {
-    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
-        std::env::set_var(name, "http://127.0.0.1:1");
-        std::env::set_var(name.to_ascii_lowercase(), "http://127.0.0.1:1");
+/// Run environment-sensitive cases in their own test process. The parent and
+/// concurrent tests never mutate process-global proxy or trust-store settings.
+fn isolated_test(name: &str, configure: impl FnOnce(&mut std::process::Command)) -> bool {
+    if std::env::var("UTEXO_TLS_TEST_CHILD").as_deref() == Ok(name) {
+        return false;
     }
-    std::env::remove_var("NO_PROXY");
-    std::env::remove_var("no_proxy");
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(
-        &*client,
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &MINT_LOCK_ID,
-        &OP_ID,
-        950,
-        BEFORE_BLOCK,
-    )
-    .unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", name, "--nocapture"])
+        .env("UTEXO_TLS_TEST_CHILD", name);
+    configure(&mut command);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "isolated {name} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
-/// CA A is trusted through the system store, but only CA B is pinned. If the
-/// client merged the pin with system roots, the CA A leaf would validate.
-/// `tls_certs_only` must make the pin the sole trust anchor.
+/// An HTTP client using the same pinned endpoint, with optional CA pin and
+/// reqwest's ordinary redirect policy, for positive controls.
+fn control_rpc(port: u16, ca: Option<&str>, no_proxy: bool) -> Result<String, String> {
+    use alloy::transports::http::reqwest;
+    let mut builder = reqwest::Client::builder()
+        .resolve("rpc.test", ([127, 0, 0, 1], 0).into())
+        .timeout(Duration::from_secs(3));
+    if let Some(ca) = ca {
+        builder = builder
+            .tls_certs_only([
+                reqwest::Certificate::from_der(&hex::decode(ca.trim()).unwrap()).unwrap(),
+            ]);
+    }
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        client
+            .post(format!("https://rpc.test:{port}/"))
+            .header("content-type", "application/json")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}"#)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .text()
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[test]
+fn proxy_env_has_no_effect() {
+    if isolated_test("proxy_env_has_no_effect", |command| {
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            command
+                .env(name, "http://127.0.0.1:1")
+                .env(name.to_ascii_lowercase(), "http://127.0.0.1:1");
+        }
+        command.env_remove("NO_PROXY").env_remove("no_proxy");
+    }) {
+        return;
+    }
+    let port = serve(Some(RPC_TEST), false);
+    assert!(
+        control_rpc(port, Some(CA_A_HEX), false).is_err(),
+        "control: ordinary client must try the configured dead proxy"
+    );
+    assert_eq!(pinned_client(port, CA_A_HEX).get_chain_id().unwrap(), 42161);
+}
+
+/// Linux's native verifier honors SSL_CERT_FILE. Establish that positive
+/// control before requiring the pinned client to reject the same CA A leaf.
+/// Other platforms use their native stores, so this specific override is Linux-only.
+#[cfg(target_os = "linux")]
 #[test]
 fn pinned_ca_is_the_only_trusted_root() {
-    let path = std::env::temp_dir().join("evm_rpc_tls_test_ca_a.pem");
-    std::fs::write(&path, CA_A_CERT_PEM).unwrap();
-    std::env::set_var("SSL_CERT_FILE", &path);
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_B_HEX);
+    if std::env::var("UTEXO_TLS_TEST_CHILD").as_deref() != Ok("pinned_ca_is_the_only_trusted_root")
+    {
+        let path =
+            std::env::temp_dir().join(format!("evm_rpc_tls_ca_a_{}.pem", std::process::id()));
+        std::fs::write(&path, CA_A_CERT_PEM).unwrap();
+        isolated_test("pinned_ca_is_the_only_trusted_root", |command| {
+            command
+                .env("SSL_CERT_FILE", &path)
+                .env_remove("SSL_CERT_DIR");
+        });
+        std::fs::remove_file(path).unwrap();
+        return;
+    }
+    let port = serve(Some(RPC_TEST), false);
+    let baseline = control_rpc(port, None, true).expect("native roots must trust fixture CA A");
+    assert!(baseline.contains("0xa4b1"), "{baseline}");
     assert!(
-        verify_rgb_funds_in(
-            &*client,
-            &BRIDGE,
-            EvmFinalityTag::Safe,
-            &TX,
-            &MINT_LOCK_ID,
-            &OP_ID,
-            950,
-            BEFORE_BLOCK
-        )
-        .is_err(),
-        "a leaf trusted only through the system store must be refused"
+        pinned_client(port, CA_B_HEX).get_chain_id().is_err(),
+        "CA A must be refused when only CA B is pinned, even if native roots trust A"
     );
 }
 
@@ -600,7 +690,8 @@ fn pinned_ca_is_the_only_trusted_root() {
 /// the enclave.
 #[test]
 fn timeout_refuses_to_sign() {
-    let client = pinned_client(serve_hang(), CA_A_HEX);
+    let (port, received) = serve_hang();
+    let client = pinned_client(port, CA_A_HEX);
     let start = std::time::Instant::now();
     let got = verify_rgb_funds_in(
         &*client,
@@ -612,6 +703,10 @@ fn timeout_refuses_to_sign() {
         950,
         BEFORE_BLOCK,
     );
+    assert!(
+        received.load(Ordering::SeqCst),
+        "TLS must succeed and the RPC request must reach the peer"
+    );
     assert!(got.is_err(), "a hung RPC must refuse to sign");
     assert!(
         start.elapsed() < Duration::from_secs(20),
@@ -620,24 +715,40 @@ fn timeout_refuses_to_sign() {
     );
 }
 
-/// Only the pinned endpoint can send a redirect, but its target can be a peer
-/// that the pinned CA did not certify. The client must not follow it.
+/// A redirect target is observable and reachable with the pinned CA. The
+/// control follows it successfully; the production client must never contact it.
 #[test]
 fn pinned_host_redirect_is_not_followed() {
-    let client = pinned_client(serve_redirect(), CA_A_HEX);
+    let target = serve(Some(RPC_TEST), false);
+    let (redirect, redirected_requests) = serve_redirect(target);
+    let baseline = control_rpc(redirect, Some(CA_A_HEX), true)
+        .expect("control must follow redirect to the reachable target");
+    assert!(baseline.contains("0xa4b1"), "{baseline}");
+    let target_host = format!("rpc.test:{target}");
+    let target_requests = || {
+        HOSTS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| **h == target_host)
+            .count()
+    };
+    let before = target_requests();
+    assert!(before > 0, "control must have reached redirect target");
+    let redirects_before = redirected_requests.load(Ordering::SeqCst);
+    let client = pinned_client(redirect, CA_A_HEX);
     assert!(
-        verify_rgb_funds_in(
-            &*client,
-            &BRIDGE,
-            EvmFinalityTag::Safe,
-            &TX,
-            &MINT_LOCK_ID,
-            &OP_ID,
-            950,
-            BEFORE_BLOCK
-        )
-        .is_err(),
-        "a redirect from the pinned host must not be followed"
+        client.get_chain_id().is_err(),
+        "production client must refuse redirect"
+    );
+    assert!(
+        redirected_requests.load(Ordering::SeqCst) > redirects_before,
+        "production client must have completed TLS and received the redirect"
+    );
+    assert_eq!(
+        target_requests(),
+        before,
+        "production client followed the redirect"
     );
 }
 

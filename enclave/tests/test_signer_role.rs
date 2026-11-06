@@ -11,13 +11,23 @@ use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwor
 use utexo_bridge_enclave::proto::*;
 
 /// The role refusal message for `req`, or a panic naming what came back.
-fn refusal(req: Request) -> String {
+fn error(req: Request) -> ErrorResponse {
     let port = common::start_test_server();
     let resp = common::send_request(port, &EnclaveRequest { request: Some(req) });
     match resp.response {
-        Some(Response::Error(e)) => e.message,
+        Some(Response::Error(e)) => e,
         other => panic!("expected a role refusal, got {other:?}"),
     }
+}
+
+fn refusal(req: Request) -> String {
+    error(req).message
+}
+
+fn assert_key_uninitialized(req: Request) {
+    let e = error(req);
+    assert_eq!(e.code, 1);
+    assert_eq!(e.message, "key not initialized");
 }
 
 /// EVM lock -> RGB mint PSBT.
@@ -116,15 +126,23 @@ mod mint_signer {
     /// the wrong role (it fails later, on the uninitialized key).
     #[test]
     fn does_not_refuse_a_mint_as_the_wrong_role() {
-        let msg = refusal(mint_request());
-        assert!(!msg.contains("mint signer"), "{msg}");
+        assert_key_uninitialized(mint_request());
     }
 
     /// The mint signer holds the rights, so it serves the refill.
     #[test]
     fn does_not_refuse_a_rights_refill_as_the_wrong_role() {
-        let msg = refusal(Request::SignRightsRefill(SignRightsRefillRequest::default()));
-        assert!(!msg.contains("mint signer"), "{msg}");
+        let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        })
+        .unwrap();
+        assert_key_uninitialized(Request::SignRightsRefill(SignRightsRefillRequest {
+            psbt_bytes: psbt.serialize(),
+            ..Default::default()
+        }));
     }
 }
 
@@ -167,7 +185,6 @@ mod burn_signer {
     /// wrong role (it fails later, at the key).
     #[test]
     fn does_not_refuse_a_release_as_the_wrong_role() {
-        let msg = refusal(release_request());
-        assert!(!msg.contains("burn signer"), "{msg}");
+        assert_key_uninitialized(release_request());
     }
 }

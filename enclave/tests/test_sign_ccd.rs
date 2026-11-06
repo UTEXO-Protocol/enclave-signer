@@ -40,7 +40,15 @@ fn test_sign_ccd_roundtrip() {
         Some(Response::CcdSignature(r)) => r.signature,
         other => panic!("expected CcdSignatureResponse, got {:?}", other),
     };
-    assert_eq!(sig.len(), 64, "ed25519 signature must be 64 bytes");
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let key = VerifyingKey::from_bytes(&ccd_pub.try_into().expect("32-byte public key")).unwrap();
+    let signature = Signature::from_bytes(&sig.as_slice().try_into().expect("64-byte signature"));
+    key.verify(&[0xAB; 32], &signature)
+        .expect("signature must verify for the requested hash");
+    assert!(
+        key.verify(&[0xAC; 32], &signature).is_err(),
+        "signature must not verify for another hash"
+    );
 
     // Ed25519 (RFC 8032) is deterministic: the same hash yields the same signature.
     let sig2 = match common::send_request(port, &req).response {

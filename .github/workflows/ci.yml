@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_stress:
+        description: Run ignored RGB history and capacity checks in release mode
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,7 +28,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Test build and deployment scripts
-        run: python3 -m unittest discover -s build/tests -v
+        run: |
+          python3 -m unittest discover -s build/tests -v
+          python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
 
       - name: Install Rust 1.96.1
         uses: dtolnay/rust-toolchain@master
@@ -121,6 +129,10 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace
 
+      # A dependency's tests do not run in the enclave/parent -p invocations.
+      - name: Test (attestation verifier, mock documents)
+        run: cargo test --locked -p attestation-verify --features mock
+
       # --- parent workspace (separate lockfile, separate target dir) ---------
       - name: Check formatting (parent)
         run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
@@ -133,6 +145,13 @@ jobs:
 
       - name: Test (parent)
         run: cargo test --manifest-path parent/Cargo.toml
+
+      # The local VSOCK transport needs no Nitro enclave. Fail if the runner
+      # cannot provide it: a missing device must not become a passing test.
+      - name: Test (parent CLI, silent VSOCK peer)
+        run: |
+          sudo modprobe vsock_loopback
+          cargo test --locked --manifest-path parent/Cargo.toml --features vsock --test test_cli_vsock_timeout
 
       - name: Clippy (parent, insecure-dev)
         run: cargo clippy --manifest-path parent/Cargo.toml --features insecure-dev --lib --bins --test test_insecure_dev -- -D warnings
@@ -155,6 +174,9 @@ jobs:
       - name: Test (rgb mint signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 
+      - name: Test (mint custody VSOCK deadline)
+        run: cargo test --locked -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --lib seed_persistence::tests::vsock_connect_rejects_expired_deadline_before_opening_a_socket -- --exact
+
       - name: Build (rgb burn signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
       - name: Clippy (rgb burn signer)
@@ -176,10 +198,11 @@ jobs:
       - name: Test (without SPV, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib config::tests::
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only
-            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib a_release_build_refuses_a_plaintext_indexer
           done
+          # Indexer consensus and release-binding guards belong to the burn role.
+          cargo test -p utexo-bridge-enclave --no-default-features --features burn-signer --lib indexer_only
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_bfa_mint_over_the_wire
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_signing test_sign_btc
       - name: Clippy (without SPV, mint and burn)
@@ -237,6 +260,13 @@ jobs:
       # separately by the `release-guards` job.
       - name: Test (mock-attestation integration — cloning + attestation)
         run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
+
+      # Keep expensive correctness regressions and timing measurements out
+      # of ordinary PR counts, but give every ignored RGB test an explicit job.
+      - name: Test (RGB release stress, on request)
+        if: github.event_name == 'workflow_dispatch' && inputs.run_stress
+        timeout-minutes: 30
+        run: cargo test --locked --release -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is

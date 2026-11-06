@@ -807,11 +807,14 @@ utexo-bridge-parent-cli --addr vsock://16 health
 
 ```bash
 cargo test                                                              # enclave workspace, default features
+cargo test -p attestation-verify --features mock                          # dependency tests need their own invocation
 cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --features evm-rpc
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
+python3 -m unittest discover -s build/tests -v
+python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
 ```
 
 Coverage: key derivation and fingerprints, framing, EIP-712 digests checked against
@@ -819,7 +822,37 @@ contract fixtures, calldata canonicalisation, gas-tx allowlist, consignment
 fixtures per flow, PSBT binding and fee gate, SPV chain / reorg / Merkle,
 attestation verification incl. crafted cert chains, cloning handshake, wire
 roundtrips over TCP, gRPC translation with a mock enclave, vendored-proto
-provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
+provenance. Mint and burn wire suites validate real BFA data and verify the
+returned signatures. The mint suite also checks failed-delivery retries.
+`build/smoke-test.sh` checks a live enclave's lifecycle and public identity;
+it can initialize a fresh enclave and set its endpoints. The separate
+`build/grpc-smoke-test.sh` checks the burn parent's transport and role refusals.
+Neither smoke script substitutes for a successful signing regression.
+Mint initialization needs KMS configured; SPV-enabled burn readiness needs the
+parent's header sync to have caught up.
+
+CI runs the mock verifier tests, Lambda tests, the mint VSOCK deadline guard,
+and the parent CLI timeout against Linux `vsock_loopback`. To run the latter
+locally on Linux:
+
+```bash
+sudo modprobe vsock_loopback
+cargo test --manifest-path parent/Cargo.toml --features vsock --test test_cli_vsock_timeout
+```
+
+Large RGB histories and capacity/timing tests remain explicitly ignored in
+ordinary PR runs. Use **Actions → CI → Run workflow → run_stress** for the
+release-mode suite, or run:
+
+```bash
+cargo test --release -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+```
+
+Live EVM event checks are explicitly ignored because they require an RPC and a
+known deposit. Configure the variables documented in
+`enclave/tests/test_evm_event_live.rs`, then run the command there with
+`-- --ignored`. An explicit live run fails if its configuration is missing;
+an unconfigured ordinary CI run no longer reports these tests as passed.
 
 ## Feature flags
 

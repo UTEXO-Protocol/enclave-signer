@@ -280,22 +280,17 @@ fn create_utxo_allocation_dust_fits_the_budget() {
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
 }
 
-/// With the cap unset, an `rgb-validation` build fails closed. Other builds
-/// and test builds use the dev path, after the other checks pass.
+/// Unit tests permit the unset-cap development fallback after other checks.
+/// The production failure is covered by `test_sign_btc_uncapped_fails_closed_under_rgb_validation`.
 #[test]
-fn unpinned_cap_behaviour_matches_build_profile() {
+fn unpinned_cap_is_allowed_by_the_unit_test_fallback() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
         // 200 sat pays for approx 111 signed vB at the 1 sat/vB floor.
         psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 800)]),
     };
-    let result = validate_btc_request(&req, &BridgeConfig::default(), &keys);
-    #[cfg(all(feature = "rgb-validation", not(test)))]
-    assert!(result.is_err());
-    // Unit tests are always cfg(test), so the dev fallback returns Ok.
-    #[cfg(not(all(feature = "rgb-validation", not(test))))]
-    assert!(result.is_ok());
+    validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap();
 }
 
 // --- pinned fee policy on the plain-BTC path (#248) ---

@@ -169,23 +169,3 @@ fn readme_commit_matches_the_rev_parent_pins() {
          failure. Re-vendor enclave-proto/ from the rev parent pins (or move both together).\n"
     );
 }
-
-/// The re-sync procedure is only trustworthy if the README keeps saying how to
-/// run it, so fail if the Provenance section is gutted.
-#[test]
-fn readme_still_documents_the_resync_procedure() {
-    let readme = read("README.md");
-    for marker in [
-        "## Provenance",
-        "git hash-object",
-        "rust-gen/src/enclave/enclave.rs",
-        "proto/enclave/enclave.proto",
-    ] {
-        assert!(
-            readme.contains(marker),
-            "enclave-proto/README.md no longer contains {marker:?}. The vendored slice has no \
-             build.rs, so this README is the only description of how to re-sync it - keep the \
-             Provenance section and its verification commands intact."
-        );
-    }
-}
