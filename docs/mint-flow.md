@@ -163,7 +163,7 @@ refuses it.
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
 | `MINT_WITNESS_SAT` | 1500 (default and mint image) | The exact sats a witness mint pays to its recipient's output (M8). 546 to 10 000: a value out of bounds or not a number stops the boot. Image env, so PCR0 measures it; not attested. It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that (M8). |
-| Replay window | 1 h, 100 000 entries | In memory, per enclave. The parent answers a retry of the same request from the reply it kept. |
+| Replay window | 1 h, 100 000 entries | In memory, per enclave. The parent answers a retry of the same request from the reply it kept. The operator can change both values (`mint_replay_ttl_secs`, `mint_replay_max_entries`). |
 | Colored account | `m/86'/827166'/0'` (mainnet) | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
 
@@ -192,7 +192,8 @@ Stage 6.
 - **S1.1** The mint signer makes a replay key from `chain_id`, the proxy
   contract, `evm_tx_hash`, `funds_in_operation_id` and the asset id.
 - **S1.2** If the replay cache still holds this key, the signer refuses it.
-  Entries expire after one hour. Capacity pressure can remove them earlier.
+  Entries expire after one hour by default. Capacity pressure can remove them
+  earlier.
   This check records nothing. It runs before any network call. A retry of
   the same request normally does not reach the enclave: the parent answers
   it from the reply it kept (S7.6).
@@ -202,7 +203,8 @@ Stage 6.
 ### Stage 2 - Is this deposit real?
 
 The mint signer gets the receipt itself, through TLS to the pinned EVM RPC
-host. TLS ends inside the enclave. Each call has a 15 s timeout.
+host. TLS ends inside the enclave. Each call has a timeout of 15 s by default
+(`evm_rpc_timeout_secs`).
 
 - **S2.1** `evm_tx_hash` and `funds_in_operation_id` must each be 32 bytes.
 - **S2.2** The receipt must exist and must be a success.

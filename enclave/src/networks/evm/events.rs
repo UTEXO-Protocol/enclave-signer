@@ -782,12 +782,10 @@ pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Re
     Ok(node)
 }
 
-/// Hard per-call limit for one EVM JSON-RPC round-trip. Without it, a hung RPC
-/// blocks the worker thread forever: `block_on` has no deadline, and
-/// alloy/reqwest set no default timeout. A client-side timeout does not cancel
-/// an in-flight `block_on`, so a few stalls can block all workers. 15s covers a
-/// healthy fetch through loopback -> vsock -> the RPC.
-const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The time for one EVM JSON-RPC round-trip (`evm_rpc_timeout_secs`).
+fn rpc_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(crate::limits::get().evm_rpc_timeout_secs)
+}
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback that a vsock forwarder tunnels to the EVM RPC. alloy is
@@ -818,7 +816,9 @@ impl AlloyEvmClient {
             // Only the pinned host can redirect. It could still point at a
             // peer the CA never certified.
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(EVM_RPC_CALL_TIMEOUT)
+            .timeout(std::time::Duration::from_secs(
+                crate::limits::MAX_EVM_RPC_TIMEOUT_SECS,
+            ))
             .build()
             .map_err(err)?;
         let url = format!("https://{}:{}/", tls.host, tls.tls_port)
@@ -847,10 +847,11 @@ impl AlloyEvmClient {
         number: alloy::rpc::types::BlockNumberOrTag,
     ) -> Result<Option<BlockData>> {
         use alloy::providers::Provider;
+        let timeout = rpc_timeout();
         let block = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, async {
+                tokio::time::timeout(timeout, async {
                     self.provider.get_block_by_number(number).await
                 })
                 .await
@@ -859,7 +860,7 @@ impl AlloyEvmClient {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_getBlockByNumber({number:?}) timed out after {}s \
                      (host RPC path stalled) - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
             .map_err(|e| {
@@ -878,6 +879,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
+        let timeout = rpc_timeout();
         // Outer `?`: the deadline passed (fail closed, free the worker). Inner
         // `?`: the RPC failed. Build the `timeout` future INSIDE the async
         // block. As a `block_on` argument it panics with "there is no reactor
@@ -885,17 +887,13 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let receipt = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(
-                    EVM_RPC_CALL_TIMEOUT,
-                    self.provider.get_transaction_receipt(hash),
-                )
-                .await
+                tokio::time::timeout(timeout, self.provider.get_transaction_receipt(hash)).await
             })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
                      - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
             .map_err(|e| {
@@ -919,14 +917,13 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
     fn get_chain_id(&self) -> Result<u64> {
         use alloy::providers::Provider;
+        let timeout = rpc_timeout();
         self.runtime
-            .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, self.provider.get_chain_id()).await
-            })
+            .block_on(async { tokio::time::timeout(timeout, self.provider.get_chain_id()).await })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_chainId failed: {e}")))
@@ -939,10 +936,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let request = TransactionRequest::default()
             .to(Address::from(*to))
             .input(Bytes::copy_from_slice(data).into());
+        let timeout = rpc_timeout();
         let out = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, async {
+                tokio::time::timeout(timeout, async {
                     self.provider
                         .call(request)
                         .block(BlockId::number(block))
@@ -953,7 +951,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_call timed out after {}s - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
             .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_call failed: {e}")))?;

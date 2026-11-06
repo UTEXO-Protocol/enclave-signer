@@ -1288,3 +1288,27 @@ fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
     assert_ne!(id, rgb_mint_deposit_id(&cfg, &[2; 32], 100).unwrap());
     assert!(rgb_mint_deposit_id(&cfg, &[1; 32], 0).is_err());
 }
+
+/// The client lives as long as the enclave, so a change of the timeout must
+/// reach the next call of a client built before the change.
+#[test]
+fn a_stalled_call_ends_at_the_timeout_in_force() {
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ca_hex = include_str!("../../../../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
+    let client = AlloyEvmClient::with_pinned_tls(&crate::config::EvmRpcTls {
+        host: "rpc.test".into(),
+        ca_der: hex::decode(ca_hex.trim()).unwrap(),
+        tls_port: stalled.local_addr().unwrap().port(),
+    })
+    .unwrap();
+
+    crate::limits::change_for_test(|l| l.evm_rpc_timeout_secs = 1);
+    let started = std::time::Instant::now();
+    let err = client.get_chain_id().unwrap_err().to_string();
+    assert!(err.contains("timed out after 1s"), "{err}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}

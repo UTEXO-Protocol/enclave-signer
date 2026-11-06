@@ -2872,7 +2872,7 @@ dependencies = [
 [[package]]
 name = "federated-signer-proto"
 version = "0.1.0"
-source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=147f2337f7acd93633a1c22587ca45b854d87e2a#147f2337f7acd93633a1c22587ca45b854d87e2a"
+source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=23d4bcf6e10f609aeac8e882f592010c5daf8319#23d4bcf6e10f609aeac8e882f592010c5daf8319"
 dependencies = [
  "bytes",
  "prost",

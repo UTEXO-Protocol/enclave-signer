@@ -260,9 +260,10 @@ endpoint, not the answers.
   Another chain is refused: the enclave has no RPC for it.
 - **B3.8** Over the pinned EVM RPC: the latest block and the `finalized`
   block (capped at the latest), `length()` at both, then `entries` in pages of
-  1000 at the latest block. Any RPC error, no code at the latest block, a list
-  shorter at the latest block, a bad or short page, or more than 20,000
-  entries refuses. About 5 calls plus one per 1000 entries; the history
+  1000 at the latest block (`reject_list_page_entries`). Any RPC error, no code
+  at the latest block, a list shorter at the latest block, a bad or short page,
+  or more than 20,000 entries (`max_reject_list_entries`) refuses. Both values
+  are the defaults. About 5 calls plus one per 1000 entries; the history
   length does not matter. A call that, at the pace of the slowest call so
   far, would end within 2 s of the 30 s request deadline is not started:
   the read refuses with "exceeded the request budget".

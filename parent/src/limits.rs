@@ -26,10 +26,13 @@ limit_fields! {
     first_bytes_timeout_secs,
     electrum_timeout_secs,
     esplora_timeout_secs,
+    evm_rpc_timeout_secs,
     max_rgb_lib_ms,
     max_witness_check_cost,
     max_bundle_id_cost,
     max_reject_walk_cost,
+    max_reject_list_entries,
+    reject_list_page_entries,
     max_message_bytes,
     max_wire_elements,
     max_consignment_bytes,
@@ -41,6 +44,8 @@ limit_fields! {
     max_funds_out_call_data_bytes,
     max_headers_per_submit,
     max_headers_per_minute,
+    mint_replay_ttl_secs,
+    mint_replay_max_entries,
 }
 
 /// Sets one `NAME=VALUE` pair on `limits`.
@@ -130,7 +135,8 @@ mod tests {
     }
 
     /// Each field of the proto must have a row, so `limits show` and `limits
-    /// set` reach every limit.
+    /// set` reach every limit. The table groups the limits, so the order can
+    /// differ from the proto.
     #[test]
     fn every_limit_has_a_name() {
         let proto = include_str!("../../enclave-proto/proto/enclave.proto");
@@ -139,16 +145,16 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split('}').next())
             .unwrap();
-        let names: Vec<&str> = body
+        let mut names: Vec<&str> = body
             .lines()
             .filter_map(|line| line.trim().strip_prefix("uint64 "))
             .map(|field| field.split(' ').next().unwrap())
             .collect();
+        names.sort_unstable();
         let rows = rows(&Limits::default(), &Limits::default());
-        assert_eq!(
-            names,
-            rows.iter().map(|(name, _, _)| *name).collect::<Vec<_>>()
-        );
+        let mut rows: Vec<&str> = rows.iter().map(|(name, _, _)| *name).collect();
+        rows.sort_unstable();
+        assert_eq!(names, rows);
     }
 
     #[test]

@@ -821,3 +821,55 @@ fn replay_guard_evicts_stale_entries_by_ttl() {
         .check_and_record_at(nonce(1), t0 + ttl + Duration::from_secs(1))
         .is_ok());
 }
+
+/// The guard of the mint signer reads its limits at each call, so a change
+/// reaches a guard that already holds entries.
+#[test]
+fn the_mint_guard_follows_the_limits_in_force() {
+    use crate::limits::change_for_test;
+
+    let guard = NonceReplayGuard::for_mint_operations();
+    let now = Instant::now();
+    guard
+        .check_and_record_at(nonce(1), now - Duration::from_secs(600))
+        .unwrap();
+    assert!(matches!(
+        guard.check(&nonce(1)),
+        Err(EnclaveError::NonceReplay)
+    ));
+
+    change_for_test(|l| l.mint_replay_ttl_secs = 300);
+    assert!(guard.check(&nonce(1)).is_ok(), "the window is shorter now");
+    guard.reserve(nonce(1)).unwrap().commit();
+
+    change_for_test(|l| l.mint_replay_max_entries = 1_024);
+    for i in 2..2_000 {
+        guard.check_and_record_at(nonce(i), now).unwrap();
+    }
+    assert_eq!(guard.seen_count(), 1_024);
+}
+
+/// A guard stays within the rate that the memory check counts. Each size is
+/// just past a hash table growth, the worst point of the rate.
+#[test]
+fn the_mint_guard_fits_the_heap_that_the_limits_count() {
+    use crate::limits::MINT_REPLAY_ENTRY_BYTES;
+    use crate::memory::peak;
+
+    for len in [114_689u32, 917_505] {
+        let (_, _, used) = peak::measure(
+            || NonceReplayGuard::with_capacity(1 << 21, Duration::from_secs(3600)),
+            |guard| {
+                let now = Instant::now();
+                for i in 0..len {
+                    guard.check_and_record_at(nonce(i), now).unwrap();
+                }
+            },
+        );
+        let budget = u64::from(len) * MINT_REPLAY_ENTRY_BYTES;
+        assert!(
+            used as u64 <= budget,
+            "a guard of {len} entries took {used} bytes, over {budget}"
+        );
+    }
+}

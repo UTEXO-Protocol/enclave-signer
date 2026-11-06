@@ -17,23 +17,6 @@ pub(super) const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default maximum count of recorded nonces.
 pub(super) const DEFAULT_NONCE_MAX: usize = 10_000;
 
-/// Default TTL for the PSBT bridge-operation dedup guard. Inside the window a
-/// second request for the same deposit is refused. A retry of the same
-/// request does not reach the enclave: the parent answers it from the reply
-/// it kept (parent `signed_responses`). One hour covers the listener's retry
-/// backoff and the usual confirmation of the first transaction. The PSBT is
-/// not part of the key, so a mint rebuilt for the same deposit (other inputs,
-/// higher fee) is refused until the hour has passed.
-/// Safety does not rest on it: every signed mint spends the pinned right
-/// output (mint-flow.md §6).
-/// See [`super::EnclaveState::op_replay_guard`].
-pub(super) const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(60 * 60);
-
-/// Maximum count of recorded bridge operations (approx 8 MB at 80 bytes each).
-/// On overflow, the guard evicts the oldest entry and does not block signing.
-/// See [`super::EnclaveState::op_replay_guard`].
-pub(super) const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
-
 /// In-memory nonce set for one enclave. (F03-AF-09)
 /// It refuses duplicate nonces. A restart clears the set.
 /// Entries expire after the TTL. When the set is full, the oldest entry goes.
@@ -42,8 +25,33 @@ pub(super) const DEFAULT_OP_DEDUP_MAX: usize = 100_000;
 /// Persistent or shared replay protection needs a separate policy decision.
 pub struct NonceReplayGuard {
     inner: Mutex<GuardState>,
-    max: usize,
-    ttl: Duration,
+    bounds: Bounds,
+}
+
+/// The count limit and the time limit of a guard.
+enum Bounds {
+    Fixed {
+        max: usize,
+        ttl: Duration,
+    },
+    /// `mint_replay_max_entries` and `mint_replay_ttl_secs`, as they are at
+    /// each call. See [`super::EnclaveState::op_replay_guard`].
+    Mint,
+}
+
+impl Bounds {
+    fn get(&self) -> (usize, Duration) {
+        match *self {
+            Self::Fixed { max, ttl } => (max, ttl),
+            Self::Mint => {
+                let limits = crate::limits::get();
+                (
+                    limits.mint_replay_max_entries as usize,
+                    Duration::from_secs(limits.mint_replay_ttl_secs),
+                )
+            }
+        }
+    }
 }
 
 /// Membership map plus an insertion-ordered queue for TTL and capacity eviction.
@@ -63,20 +71,29 @@ impl Default for NonceReplayGuard {
 
 impl NonceReplayGuard {
     pub fn with_capacity(max: usize, ttl: Duration) -> Self {
+        Self::with_bounds(Bounds::Fixed { max, ttl })
+    }
+
+    /// The guard of the mint signer. The operator sets its limits.
+    pub fn for_mint_operations() -> Self {
+        Self::with_bounds(Bounds::Mint)
+    }
+
+    fn with_bounds(bounds: Bounds) -> Self {
         Self {
             inner: Mutex::new(GuardState {
                 seen: HashMap::new(),
                 next_generation: 0,
                 order: VecDeque::new(),
             }),
-            max,
-            ttl,
+            bounds,
         }
     }
 
     /// Refuse a live replay. Does not record or evict.
     /// The caller must still reserve before signing to close the concurrent race.
     pub fn check(&self, nonce: &[u8; 32]) -> Result<()> {
+        let (_, ttl) = self.bounds.get();
         let g = self
             .inner
             .lock()
@@ -84,7 +101,7 @@ impl NonceReplayGuard {
         if g.seen.contains_key(nonce)
             && g.order
                 .iter()
-                .any(|(seen_at, key)| key == nonce && seen_at.elapsed() < self.ttl)
+                .any(|(seen_at, key)| key == nonce && seen_at.elapsed() < ttl)
         {
             return Err(EnclaveError::NonceReplay);
         }
@@ -98,6 +115,7 @@ impl NonceReplayGuard {
     /// Core of [`Self::check_and_record`] with an explicit `now` for TTL eviction.
     /// Tests use it to check eviction without a sleep.
     pub(super) fn check_and_record_at(&self, nonce: [u8; 32], now: Instant) -> Result<u64> {
+        let (max, ttl) = self.bounds.get();
         let mut g = self
             .inner
             .lock()
@@ -106,7 +124,7 @@ impl NonceReplayGuard {
         // Evict expired entries. `order` is oldest-first, so stop at the
         // first live entry.
         while let Some(&(seen_at, old)) = g.order.front() {
-            if now.saturating_duration_since(seen_at) >= self.ttl {
+            if now.saturating_duration_since(seen_at) >= ttl {
                 g.order.pop_front();
                 g.seen.remove(&old);
             } else {
@@ -124,7 +142,7 @@ impl NonceReplayGuard {
         })?;
 
         // Capacity limit: evict the oldest entries so a burst cannot block cloning.
-        while g.seen.len() >= self.max {
+        while g.seen.len() >= max {
             match g.order.pop_front() {
                 Some((_, old)) => {
                     g.seen.remove(&old);

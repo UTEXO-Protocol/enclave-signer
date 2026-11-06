@@ -1,11 +1,15 @@
 //! The time, memory and size limits, and how the operator changes them.
 //!
 //! A value here only sets when the enclave refuses a request or how long it
-//! waits. No value changes what the enclave signs. So these values are
-//! configuration, not policy. The operator changes them with `SetLimits`
-//! (`utexo-bridge-parent-cli limits`), and a change needs no new image. The
-//! attestation does not cover them. Safety rules stay in the image: the SPV
-//! depth, the fee limits, the replay windows and the pins.
+//! waits. So these values are configuration, not policy. The operator changes
+//! them with `SetLimits` (`utexo-bridge-parent-cli limits`), and a change needs
+//! no new image. The attestation does not cover them. Safety rules stay in the
+//! image: the SPV depth, the fee limits, the clone replay guard and the pins.
+//!
+//! The mint replay guard is here because it is not a safety rule. A shorter
+//! window lets a rebuilt mint for one deposit reach the signer sooner. Each
+//! signature for that mint spends the same UTXO, so Bitcoin confirms at most
+//! one (`docs/mint-flow.md`, section 6). A restart clears the guard anyway.
 //!
 //! The image sets the start values. [`Limits::DEFAULTS`] holds the constants of
 //! the image, and [`Limits::image`] adds the request limits of `BridgeConfig`.
@@ -97,6 +101,12 @@ limits! {
     electrum_timeout_secs: 15, 1, 90;
     /// Time for one Esplora HTTP call, connect and read.
     esplora_timeout_secs: 30, 1, 90;
+    /// Time for one EVM JSON-RPC call. Without a timeout, a hung RPC blocks the
+    /// worker thread for ever: `block_on` has no deadline, and alloy and reqwest
+    /// set no timeout of their own. The ingress deadline does not cancel this
+    /// work, so a few stalls can hold all the workers. The value of the image
+    /// covers a healthy fetch through loopback, vsock and the RPC.
+    evm_rpc_timeout_secs: 15, 1, MAX_EVM_RPC_TIMEOUT_SECS;
     /// Modeled time of rgb-lib on one consignment, validation and inspection
     /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
     /// to validate alone, and the caps add up. The rgb-lib work runs on one
@@ -116,6 +126,14 @@ limits! {
     /// walk at the measured 45 to 73 ns per step. The burn of 2810 mints costs
     /// 14k.
     max_reject_walk_cost: 64 * MIB, MIB, 2_048 * MIB;
+    /// Entries of a reject list. Over this value the enclave refuses each
+    /// request that reads the list. The list is append-only, so it cannot get
+    /// shorter again. Each page takes one RPC call of the request deadline. At
+    /// about a second for each page, the value of the image fits 30 s.
+    max_reject_list_entries: 20_000, 1, 1 << 20;
+    /// Entries in one `entries` call of a reject list. The value of the image
+    /// is the page of rgb-lib. The page does not change what the enclave reads.
+    reject_list_page_entries: 1_000, 1, 10_000;
     /// Size of one frame. The parent has its own limit too.
     max_message_bytes: MAX_MESSAGE_SIZE as u64, MIB, 256 * MIB;
     /// Protobuf field occurrences in one request.
@@ -142,12 +160,29 @@ limits! {
     max_headers_per_submit: 10_000, 1, 1 << 20;
     /// Headers in one minute.
     max_headers_per_minute: 100_000, 1, 1 << 24;
+    /// How long the mint signer refuses a second request for one deposit. A
+    /// retry of the same request does not reach the enclave: the parent answers
+    /// it from the reply it kept (parent `signed_responses`). The value of the
+    /// image covers the retry backoff of the listener and the usual
+    /// confirmation of the first transaction. The PSBT is not part of the key,
+    /// so a mint rebuilt for the same deposit (other inputs, higher fee) is
+    /// refused until this time has passed. The lowest value is above the highest
+    /// request deadline, so an entry outlives the request that made it.
+    mint_replay_ttl_secs: 3_600, 120, 7 * 24 * 3_600;
+    /// Deposits that the mint replay guard holds. When it is full, the guard
+    /// removes the oldest entry and does not block signing.
+    mint_replay_max_entries: 100_000, 1_024, 1 << 20;
 }
 
 /// The highest request deadline. The parent waits 10 s longer for a `Sign`
 /// (`parent::grpc_server::SIGN_TIMEOUT`), because the enclave must give up
 /// first: its failed write rolls the replay key back.
 pub const MAX_REQUEST_TIMEOUT_SECS: u64 = 100;
+
+/// The highest `evm_rpc_timeout_secs`. The EVM RPC client lives as long as the
+/// enclave, so it gets this value as its own timeout, and each call applies the
+/// value in force.
+pub const MAX_EVM_RPC_TIMEOUT_SECS: u64 = 90;
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte
 /// for each byte, with the margin of the test
@@ -157,6 +192,13 @@ const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 542;
 const CONSIGNMENT_FIXED_BYTES: u64 = 3 * MIB;
 /// The heap of a PSBT at the densest rate measured.
 const DENSE_PSBT_RATE: u64 = 103;
+/// The heap of one entry of a reject list, from the read to the set that
+/// rgb-lib walks with, with a margin on the rate measured
+/// (`networks::evm::reject_list::tests`). A request holds this beside the rest.
+pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
+/// The heap of one entry of the mint replay guard, with a margin on the rate
+/// measured (`state::tests`). The baseline covers the entries of the image.
+pub(crate) const MINT_REPLAY_ENTRY_BYTES: u64 = 200;
 
 impl Limits {
     /// The values of the image: the constants, and the request limits that
@@ -202,12 +244,14 @@ impl Limits {
         let consignment = self.max_consignment_bytes.min(frame) * DENSE_CONSIGNMENT_RATE_TENTHS
             / 10
             + CONSIGNMENT_FIXED_BYTES;
-        let request = (3 * frame).max(frame + consignment) + elements;
+        let list = self.max_reject_list_entries * REJECT_LIST_ENTRY_BYTES;
+        let request = (3 * frame).max(frame + consignment) + elements + list;
         if request > held {
             return Err(format!(
-                "max_consignment_bytes is {}; a burn with the densest consignment at that size \
-                 takes {request} bytes, over the {held} bytes of a {frame}-byte frame",
-                self.max_consignment_bytes
+                "max_consignment_bytes is {} and max_reject_list_entries is {}; a burn with the \
+                 densest consignment and a list at those sizes takes {request} bytes, over the \
+                 {held} bytes of a {frame}-byte frame",
+                self.max_consignment_bytes, self.max_reject_list_entries
             ));
         }
         let psbts = 2 * self.max_psbt_bytes.min(frame) * DENSE_PSBT_RATE + 3 * frame + elements;
@@ -228,6 +272,14 @@ impl Limits {
     /// The most heap one request can use under these values.
     pub fn request_bound_bytes(&self) -> u64 {
         crate::memory::REQUEST_MEMORY_FACTOR as u64 * self.max_message_bytes + self.elements_bytes()
+    }
+
+    /// The heap of the mint replay guard above the entries that the baseline
+    /// covers.
+    pub fn replay_guard_growth_bytes(&self) -> u64 {
+        self.mint_replay_max_entries
+            .saturating_sub(Self::DEFAULTS.mint_replay_max_entries)
+            * MINT_REPLAY_ENTRY_BYTES
     }
 
     /// The socket deadline of one request.
@@ -285,6 +337,15 @@ mod store {
             result
         })
     }
+}
+
+/// Changes limits for the calling test. Each test thread has its own values.
+#[cfg(test)]
+pub(crate) fn change_for_test(edit: impl FnOnce(&mut Limits)) {
+    let mut changes = Limits::NONE;
+    edit(&mut changes);
+    apply(&BridgeConfig::default(), &changes, false, |_| Ok(()))
+        .expect("the test changes the limits to values that pass the checks");
 }
 
 /// The values in force. The three request limits of `BridgeConfig` show their
@@ -349,6 +410,7 @@ mod tests {
             crate::memory::request_bound(MAX_MESSAGE_SIZE as usize)
         );
         let needed = crate::memory::BASELINE_BYTES as u64
+            + Limits::DEFAULTS.replay_guard_growth_bytes()
             + crate::conn::WORKER_THREADS as u64 * Limits::DEFAULTS.request_bound_bytes();
         assert_eq!(needed as usize, MIN_ENCLAVE_MEMORY_BYTES);
         assert!(needed <= RUN_ENCLAVE_MEMORY_MIB as u64 * MIB);
@@ -448,7 +510,42 @@ mod tests {
         .unwrap();
     }
 
-    /// `SetLimits` is 200 bytes at most, so the lowest values still let the
+    /// A burn holds the list beside the rest of the request. A longer list
+    /// takes a smaller consignment or a larger frame budget.
+    #[test]
+    fn a_long_reject_list_must_fit_the_heap_of_a_frame() {
+        apply_to_defaults(|l| l.max_reject_list_entries = 30_000).unwrap();
+        let err = apply_to_defaults(|l| l.max_reject_list_entries = 40_000).unwrap_err();
+        assert!(err.contains("max_reject_list_entries is 40000"), "{err}");
+        apply_to_defaults(|l| {
+            l.max_reject_list_entries = 100_000;
+            l.max_consignment_bytes = 10_000_000;
+        })
+        .unwrap();
+    }
+
+    /// An entry outlives the request that made it, at the highest deadline
+    /// and the 10 s that the parent waits after it.
+    #[test]
+    fn the_lowest_mint_replay_window_outlives_each_request() {
+        let lowest = 120;
+        assert!(lowest > MAX_REQUEST_TIMEOUT_SECS + 10);
+        apply_to_defaults(|l| l.mint_replay_ttl_secs = lowest).unwrap();
+        let err = apply_to_defaults(|l| l.mint_replay_ttl_secs = lowest - 1).unwrap_err();
+        assert!(err.contains("mint_replay_ttl_secs"), "{err}");
+    }
+
+    /// The EVM RPC client keeps this value for its whole life, so no value in
+    /// force can pass it.
+    #[test]
+    fn the_evm_rpc_timeout_stops_at_the_timeout_of_the_client() {
+        apply_to_defaults(|l| l.evm_rpc_timeout_secs = MAX_EVM_RPC_TIMEOUT_SECS).unwrap();
+        let err = apply_to_defaults(|l| l.evm_rpc_timeout_secs = MAX_EVM_RPC_TIMEOUT_SECS + 1)
+            .unwrap_err();
+        assert!(err.contains("evm_rpc_timeout_secs"), "{err}");
+    }
+
+    /// `SetLimits` is 250 bytes at most, so the lowest values still let the
     /// operator reach the enclave and raise them again.
     #[test]
     fn the_lowest_values_keep_the_enclave_reachable() {

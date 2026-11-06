@@ -657,8 +657,8 @@ pub struct HealthResponse {
 }
 /// The time, memory and size limits. The operator can change them at run time,
 /// and a change needs no new image. Each limit only sets when the enclave refuses
-/// a request or how long it waits. No limit changes what the enclave signs. The
-/// attestation does not cover these values. docs/runtime-limits.md has the rules.
+/// a request or how long it waits. The attestation does not cover these values.
+/// docs/runtime-limits.md has the rules.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Limits {
     #[prost(uint64, tag="1")]
@@ -701,6 +701,16 @@ pub struct Limits {
     pub max_headers_per_submit: u64,
     #[prost(uint64, tag="20")]
     pub max_headers_per_minute: u64,
+    #[prost(uint64, tag="21")]
+    pub evm_rpc_timeout_secs: u64,
+    #[prost(uint64, tag="22")]
+    pub max_reject_list_entries: u64,
+    #[prost(uint64, tag="23")]
+    pub reject_list_page_entries: u64,
+    #[prost(uint64, tag="24")]
+    pub mint_replay_ttl_secs: u64,
+    #[prost(uint64, tag="25")]
+    pub mint_replay_max_entries: u64,
 }
 /// Changes limits. The enclave checks all the values first, so a refused request
 /// changes nothing. The values stay until the enclave restarts.

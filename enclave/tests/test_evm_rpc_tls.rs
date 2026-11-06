@@ -596,7 +596,7 @@ fn pinned_ca_is_the_only_trusted_root() {
     );
 }
 
-/// A hung RPC must fail closed within `EVM_RPC_CALL_TIMEOUT`. It must not block
+/// A hung RPC must fail closed within `evm_rpc_timeout_secs`. It must not block
 /// the enclave.
 #[test]
 fn timeout_refuses_to_sign() {

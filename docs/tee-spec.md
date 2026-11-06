@@ -161,9 +161,9 @@ forwarders. They bridge over vsock to host-side `vsock-proxy` instances
 **Runtime limits** (`limits.rs`). The operator can change the time, memory and
 size limits of a running enclave. A change needs no new image, so the PCR values
 do not change. The attestation does not cover these values. Each limit only sets
-when the enclave refuses a request or how long it waits, and no limit changes
-what the enclave signs. Safety rules stay in the image. `docs/runtime-limits.md`
-has the list. The numbers in this document are the image values.
+when the enclave refuses a request or how long it waits. Safety rules stay in the
+image. `docs/runtime-limits.md` has the list. The numbers in this document are the
+image values.
 
 **Request memory model** (`memory.rs`). The enclave has a fixed amount of
 memory and no swap. So the heap one request can use has a bound that depends
@@ -641,7 +641,7 @@ and head correctness: the checks above cannot reject a self-consistent false
 history solely because the approved provider invented it (Sec 2). The source, hostname
 and CA SHA-256 are committed into the attested policy (Sec 4).
 
-An in-memory replay cache (1-hour TTL, 100,000-entry cap) checks requests keyed by
+An in-memory replay cache (by default a 1-hour TTL and a 100,000-entry cap) checks requests keyed by
 `(chain_id, bridge_contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)`
 and is committed only after the enclave writes the response; a failed write
 releases it. A successful write does not prove receipt by the caller. A lost
@@ -1145,8 +1145,10 @@ Known limits. Read them before deployment.
   invents entries or fails refuses releases. A
   rejected release stays refused until an allow is finalized, and its units
   are already burned. The list appender can halt every release; the owner
-  rotates it. The list is read in full on each request, at most 20,000
-  entries (about 25 RPC calls). The read also stops before the 30 s request
+  rotates it. The list is read in full on each request, at most
+  `max_reject_list_entries` entries, by default 20,000 (about 25 RPC calls). The
+  list is append-only, so a list over that value refuses every release until the
+  operator raises it. The read also stops before the 30 s request
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
 - **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
@@ -1184,7 +1186,9 @@ Known limits. Read them before deployment.
   to `MAX_CONSIGNMENT_BYTES` per request, and removed once rgb-lib
   validated and inspected it, or refused it.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
-  after one hour. The 100,000-entry cap can remove entries earlier. A successful
+  after one hour by default. The 100,000-entry cap can remove entries earlier.
+  The operator can change both values, because the cache is not the safety
+  control (`docs/runtime-limits.md`). A successful
   response write can commit an entry even when the caller receives no response;
   the parent's kept reply answers a retry of the same request. The enclave also
   keeps the signed reply for the same window and returns it for a

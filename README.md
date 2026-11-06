@@ -746,7 +746,7 @@ Limits and dev knobs:
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
-| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for one hour, so keep the two aligned. |
+| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for `mint_replay_ttl_secs`, by default one hour, so keep the two aligned. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |

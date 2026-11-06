@@ -82,6 +82,7 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
         WireLimits {
             max_rgb_lib_ms: 30_000,
             total_request_timeout_secs: 40,
+            mint_replay_ttl_secs: 7_200,
             ..Default::default()
         },
         false,
@@ -90,6 +91,7 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
     let seen = current(&get(port));
     assert_eq!(seen.max_rgb_lib_ms, 30_000);
     assert_eq!(seen.total_request_timeout_secs, 40);
+    assert_eq!(seen.mint_replay_ttl_secs, 7_200);
 
     // The frame limit reaches the frame reader: a frame over it is refused, so
     // the connection ends without a response.

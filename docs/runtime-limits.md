@@ -5,8 +5,10 @@ running enclave. A change needs no new image, so the PCR values and the keys do
 not change.
 
 Each limit only sets when the enclave refuses a request, or how long it waits.
-No limit changes what the enclave signs. The safety rules stay in the image (see
-[What stays in the image](#what-stays-in-the-image)).
+The safety rules stay in the image (see
+[What stays in the image](#what-stays-in-the-image)). The mint replay guard is a
+limit because it is not a safety rule (see
+[The mint replay guard](#the-mint-replay-guard)).
 
 ## Commands
 
@@ -64,10 +66,13 @@ image values, and the launch continues.
 | `first_bytes_timeout_secs` | 10 | 1 | 60 | Time for the first bytes of an egress client. |
 | `electrum_timeout_secs` | 15 | 1 | 90 | Time for one Electrum socket operation. |
 | `esplora_timeout_secs` | 30 | 1 | 90 | Time for one Esplora call. |
+| `evm_rpc_timeout_secs` | 15 | 1 | 90 | Time for one EVM RPC call. |
 | `max_rgb_lib_ms` | 21000 | 1000 | 75000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 4294967296 | Steps to check transitions against witness txs. |
 | `max_bundle_id_cost` | 262144 | 1024 | 16777216 | Steps to hash bundle ids. |
 | `max_reject_walk_cost` | 67108864 | 1048576 | 2147483648 | Steps of the reject-list walk. |
+| `max_reject_list_entries` | 20000 | 1 | 1048576 | Entries of a reject list. |
+| `reject_list_page_entries` | 1000 | 1 | 10000 | Entries in one RPC call that reads a reject list. |
 | `max_message_bytes` | 25165824 | 1048576 | 268435456 | Size of one frame. |
 | `max_wire_elements` | 524288 | 1024 | 16777216 | Protobuf field occurrences in a request. |
 | `max_consignment_bytes` | 10485760 | 1024 | 134217728 | Size of a consignment. |
@@ -79,6 +84,8 @@ image values, and the launch continues.
 | `max_funds_out_call_data_bytes` | 98304 | 1024 | 16777216 | Size of the calldata of a fundsOut. |
 | `max_headers_per_submit` | 10000 | 1 | 1048576 | Headers in one `SubmitHeaders`. |
 | `max_headers_per_minute` | 100000 | 1 | 16777216 | Headers in one minute. |
+| `mint_replay_ttl_secs` | 3600 | 120 | 604800 | Time that the mint signer refuses a second request for a deposit. |
+| `mint_replay_max_entries` | 100000 | 1024 | 1048576 | Deposits in the mint replay guard. |
 
 The image env can lower `max_consignment_bytes`, `max_merkle_proofs` and
 `max_total_proof_bytes`. Then `limits show` prints those values as the image
@@ -100,10 +107,41 @@ refuses the request and changes nothing.
 - The densest consignment at `max_consignment_bytes` must fit the heap of a frame
   (`enclave/src/memory.rs`). So a larger consignment needs a larger
   `max_message_bytes`.
+- A densest consignment and a reject list at `max_reject_list_entries` must fit
+  the heap of a frame together. At the image values, the list limit stops at about
+  33,000 entries. Each MiB less of `max_consignment_bytes` gives room for about
+  250,000 more entries.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
   limits, and the baseline. A larger frame can need a larger `run-enclave --memory`
-  value, which needs a new launch.
+  value, which needs a new launch. Each entry of `mint_replay_max_entries` above the
+  image value adds 200 bytes.
+
+## The reject list
+
+The enclave refuses each burn of an asset whose list is over
+`max_reject_list_entries`. The list is append-only, so it cannot get shorter. Raise
+the limit before the list reaches it.
+
+Each page is one RPC call, and the calls use the time of the request deadline. At
+about a second for each page, a long list also needs a larger
+`total_request_timeout_secs`. `reject_list_page_entries` does not change what the
+enclave reads.
+
+## The mint replay guard
+
+The mint signer refuses a second request for a deposit for `mint_replay_ttl_secs`.
+The PSBT is not part of the key. So the guard also refuses a mint that the listener
+builds again with other inputs or a higher fee.
+
+This guard is not the safety control of a mint. Each signature for one mint spends
+the same UTXO, so at most one can reach the chain
+([mint-flow.md](mint-flow.md), section 6). A restart clears the guard. So a change
+gives the host nothing that it does not have already. The guard reads the two limits
+at each call, so a change applies to the entries that it holds.
+
+Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If the
+parent drops a reply first, the enclave refuses the retry until the window ends.
 
 ## What the attestation shows
 
@@ -119,7 +157,7 @@ These values stay in the image, because they decide what the enclave signs:
 - the SPV depth, the SPV tip age and the header rules
 - `EVM_FINALITY_TAG`
 - the fee limits, the sats budgets, the gas limits and the mint witness amount
-- the replay windows and their capacity
+- the replay guard of the clone handshake and the rate of rights refills
 - the pins: chain ids, contracts, the asset, the endpoints hash
 
 These values also stay constants:
@@ -127,6 +165,11 @@ These values also stay constants:
 - `WORKER_THREADS` and `MAX_QUEUED_CONNECTIONS`: the enclave sets up the accept
   loop at boot.
 - `MAX_RLP_DEPTH`: it keeps the decoder from using all of the stack.
+- `MAX_STORED_HEADERS`: at the mainnet block rate, the chain reaches it in about
+  19 years.
+- The rates of the cost model (`validation/cost.rs`) and of the memory model
+  (`memory.rs`). They describe the code of the image, so they change with the code.
+  `max_rgb_lib_ms` and the request deadline already cover a slower CPU.
 - Small fixed formats, such as a mnemonic, a KMS reply and an attestation document.
 - The KMS and seed recovery timeouts.
 
