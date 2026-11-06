@@ -462,6 +462,7 @@ if 'limits' in sys.argv and {refuse!r}:
             ELECTRUM_URL='https://user%40example.org:p%3Aw@esplora.example.org:8443'
                          '/api?network=bitcoin&limit=25',
             EVM_RPC_TLS_CA_DER_FILE='',
+            EVM_RPC_PATH_FILE='/etc/utexo/evm-rpc-path',
             KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/'
                         '0f0e0d0c-0b0a-0908-0706-050403020100',
             KMS_REGION='eu-central-1', KMS_SEED_ID='seed-1',
@@ -542,6 +543,66 @@ if 'limits' in sys.argv and {refuse!r}:
         ours, theirs = function.findall(CTL.read_text()), function.findall(HOST.read_text())
         self.assertEqual(len(ours), 1)
         self.assertEqual(theirs, ours * 2)
+
+
+
+class DeployRpcPathTests(unittest.TestCase):
+    """deploy-host.sh gives the private RPC path file to the service user."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix='deploy-rpc-path-')
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.copy = self.base / 'evm-rpc-path'
+        self.calls = self.base / 'install.log'
+        (self.base / 'bin').mkdir()
+        stub = self.base / 'bin' / 'install'
+        # Records the call and copies the file. The real command needs root.
+        stub.write_text('#!/bin/sh\n'
+                        'echo "$@" >> "$INSTALL_LOG"\n'
+                        'for last; do :; done\n'
+                        'eval "source=\\${$(($# - 1))}"\n'
+                        'cp "$source" "$last"\n')
+        stub.chmod(0o755)
+
+    def run_step(self, value):
+        step = re.search(r'# The private RPC path can hold a provider API key, so only.*?\n'
+                         r'  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path\nfi\n',
+                         HOST.read_text(), re.S)
+        self.assertTrue(step, 'install step not found in deploy-host.sh')
+        script = step.group(0).replace('/etc/utexo/evm-rpc-path', str(self.copy))
+        result = subprocess.run(
+            ['bash', '-c', f'set -euo pipefail\n{script}printf %s "$EVM_RPC_PATH_FILE"'],
+            env=dict(EVM_RPC_PATH_FILE=value, INSTALL_LOG=str(self.calls),
+                     PATH=f"{self.base / 'bin'}:{os.environ['PATH']}"),
+            capture_output=True, text=True, check=True)
+        return result.stdout
+
+    def test_a_new_file_reaches_only_the_service_user(self):
+        source = self.base / 'source'
+        source.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(str(source)), str(self.copy))
+        self.assertEqual(self.copy.read_text(), '/v2/key\n')
+        self.assertIn('-m 0600 -o ubuntu -g ubuntu', self.calls.read_text())
+
+    def test_a_deploy_without_the_variable_keeps_the_copy(self):
+        self.copy.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(''), str(self.copy))
+        self.assertFalse(self.calls.exists())
+
+    def test_no_variable_and_no_copy_leaves_the_path_empty(self):
+        self.assertEqual(self.run_step(''), '')
+
+    def test_the_copy_is_not_installed_over_itself(self):
+        self.copy.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(str(self.copy)), str(self.copy))
+        self.assertFalse(self.calls.exists())
+
+    def test_the_enclave_env_carries_the_file(self):
+        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
+                            HOST.read_text(), re.S)
+        self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
+        self.assertIn('EVM_RPC_PATH_FILE=$EVM_RPC_PATH_FILE\n', heredoc.group(1))
 
 
 if __name__ == '__main__':

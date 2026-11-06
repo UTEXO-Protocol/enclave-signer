@@ -751,6 +751,13 @@ No image rebuild, PCR allowlist change or KMS context change is needed. The
 parent supplies this file, so the key is not hidden from a compromised parent.
 The no-SPV endpoint-approval limitation described above still applies.
 
+`deploy/deploy-host.sh` also takes `EVM_RPC_PATH_FILE`. It keeps a copy in
+`/etc/utexo/evm-rpc-path`, with mode 0600 and the service user as owner, and
+writes that path in `/etc/utexo/enclave.env`. A deploy without the variable keeps
+the copy, so a new deploy does not lose the key. To rotate a key on such a host,
+replace the copy and restart the enclave. To go back to the path `/`, delete the
+copy and deploy again.
+
 A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
