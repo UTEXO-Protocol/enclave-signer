@@ -9,13 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::replay_guard::Bounds;
 use crate::proto::EnclaveResponse;
-
-/// Same window as the operation replay guard.
-pub(super) const DEFAULT_RESULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// A mint has one input and few outputs, so a reply is small.
-pub(super) const DEFAULT_RESULT_MAX: usize = 1_024;
 
 struct Entry {
     at: Instant,
@@ -31,13 +26,17 @@ struct Inner {
 
 pub struct SignedResultCache {
     inner: Mutex<Inner>,
-    max: usize,
-    ttl: Duration,
+    bounds: Bounds,
 }
 
+/// The cache of the mint signer. The operator sets its limits. A mint has one
+/// input and few outputs, so a reply is small.
 impl Default for SignedResultCache {
     fn default() -> Self {
-        Self::with_capacity(DEFAULT_RESULT_MAX, DEFAULT_RESULT_TTL)
+        Self {
+            inner: Mutex::new(Inner::default()),
+            bounds: Bounds::MintReply,
+        }
     }
 }
 
@@ -45,8 +44,7 @@ impl SignedResultCache {
     pub fn with_capacity(max: usize, ttl: Duration) -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
-            max,
-            ttl,
+            bounds: Bounds::Fixed { max, ttl },
         }
     }
 
@@ -61,9 +59,10 @@ impl SignedResultCache {
         request: &[u8; 32],
         now: Instant,
     ) -> Option<EnclaveResponse> {
+        let (_, ttl) = self.bounds.get();
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let entry = g.map.get(op_key)?;
-        let live = now.saturating_duration_since(entry.at) < self.ttl;
+        let live = now.saturating_duration_since(entry.at) < ttl;
         (live && &entry.request == request).then(|| entry.response.clone())
     }
 
@@ -79,6 +78,7 @@ impl SignedResultCache {
         response: EnclaveResponse,
         now: Instant,
     ) {
+        let (max, ttl) = self.bounds.get();
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if g.map.remove(&op_key).is_some() {
             g.order.retain(|k| k != &op_key);
@@ -87,8 +87,8 @@ impl SignedResultCache {
             let expired = g
                 .map
                 .get(&oldest)
-                .is_none_or(|e| now.saturating_duration_since(e.at) >= self.ttl);
-            if !expired && g.map.len() < self.max {
+                .is_none_or(|e| now.saturating_duration_since(e.at) >= ttl);
+            if !expired && g.map.len() < max {
                 break;
             }
             g.order.pop_front();
@@ -157,6 +157,24 @@ mod tests {
         assert_eq!(c.count(), 2);
         assert_eq!(c.get(&[1; 32], &[1; 32]), None);
         assert!(c.get(&[3; 32], &[3; 32]).is_some());
+    }
+
+    /// The operator sets the limits, and a change reaches a cache that holds
+    /// replies.
+    #[test]
+    fn the_cache_of_the_mint_signer_follows_the_limits_in_force() {
+        let c = SignedResultCache::default();
+        let t0 = Instant::now() - Duration::from_secs(600);
+        c.put_at([1; 32], [9; 32], reply(1), t0);
+        assert!(c.get(&[1; 32], &[9; 32]).is_some());
+
+        crate::limits::change_for_test(|l| l.mint_reply_ttl_secs = 300);
+        assert_eq!(c.get(&[1; 32], &[9; 32]), None);
+
+        crate::limits::change_for_test(|l| l.mint_reply_max_entries = 1);
+        c.put([2; 32], [2; 32], reply(2));
+        c.put([3; 32], [3; 32], reply(3));
+        assert_eq!(c.count(), 1);
     }
 
     #[test]

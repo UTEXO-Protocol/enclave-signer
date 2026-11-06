@@ -86,6 +86,10 @@ image values, and the launch continues.
 | `max_headers_per_minute` | 100000 | 1 | 2^40 | Headers in one minute. |
 | `mint_replay_ttl_secs` | 3600 | 120 | 31622400 | Time that the mint signer refuses a second request for a deposit. |
 | `mint_replay_max_entries` | 100000 | 1024 | 2^32 | Deposits in the mint replay guard. |
+| `mint_reply_ttl_secs` | 86400 | 120 | 31622400 | Time that the mint signer keeps a signed reply. |
+| `mint_reply_max_entries` | 1024 | 1 | 2^32 | Signed replies that the mint signer keeps. |
+| `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before any fascia is decoded. |
+| `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before any fascia is decoded. |
 
 The image env can lower `max_consignment_bytes`, `max_merkle_proofs` and
 `max_total_proof_bytes`. Then `limits show` prints those values as the image
@@ -183,7 +187,7 @@ These values stay in the image, because they decide what the enclave signs:
 - `EVM_FINALITY_TAG`
 - the fee limits, the sats budgets, the gas limits and the mint witness amount
 - the replay guard of the clone handshake and the rate of rights refills
-- the pins: chain ids, contracts, the asset, the endpoints hash
+- the pins: chain ids, contracts, the asset, the KMS accounts, the endpoints hash
 
 These values also stay constants:
 

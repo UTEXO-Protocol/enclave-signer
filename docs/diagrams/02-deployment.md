@@ -11,7 +11,7 @@ flowchart TB
     end
 
     subgraph EC2 [EC2 instance — Nitro-enabled, UNTRUSTED parent host]
-        Parent[utexo-bridge-parent<br/>tonic gRPC, GRPC_HOST:GRPC_PORT<br/>-<br/>Default 127.0.0.1:5000.<br/>Deployed hosts: private ENI IP, ports 50051-50053,<br/>mTLS + client ACL - GRPC_TLS_*,<br/>one parent per enclave CID 16 / 18 / 20.<br/>40 s timeout per enclave RPC.<br/>Keeps each RGB sign reply 1 h;<br/>a retry of the same request is answered from it.<br/>USE_VSOCK=true in production.<br/>Header sync from HEADER_ELECTRUM_URL.]
+        Parent[utexo-bridge-parent<br/>tonic gRPC, GRPC_HOST:GRPC_PORT<br/>-<br/>Default 127.0.0.1:5000.<br/>Deployed hosts: private ENI IP, ports 50051-50053,<br/>mTLS + client ACL - GRPC_TLS_*,<br/>one parent per enclave CID 16 / 18 / 20.<br/>Waits the request deadline plus 10 s for each enclave RPC.<br/>Keeps each RGB sign reply 1 h;<br/>a retry of the same request is answered from it.<br/>USE_VSOCK=true in production.<br/>Header sync from HEADER_ELECTRUM_URL.]
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
         VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl://.]
         VPk["vsock-proxy 8003<br/>-<br/>mint signers only.<br/>8003 -> KMS 443. Relays TLS bytes only."]

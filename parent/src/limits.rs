@@ -46,6 +46,10 @@ limit_fields! {
     max_headers_per_minute,
     mint_replay_ttl_secs,
     mint_replay_max_entries,
+    mint_reply_ttl_secs,
+    mint_reply_max_entries,
+    mint_max_inputs,
+    mint_max_outputs,
 }
 
 /// Sets one `NAME=VALUE` pair on `limits`.

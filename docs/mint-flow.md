@@ -394,8 +394,8 @@ it is signed.
   that the caller received the response. The parent therefore keeps the
   reply of an EVM -> RGB sign from the moment it reads it, for one hour, and
   answers a retry of the same request itself. A retry of a request still in
-  flight waits for that exchange and gets its reply. The enclave keeps the signed reply for the same window (1 024 entries,
-  in memory) and returns it for a byte-identical retry that reaches it, for
+  flight waits for that exchange and gets its reply. The enclave keeps the signed reply for 24 h and 1 024 entries by
+  default (`mint_reply_ttl_secs`, `mint_reply_max_entries`), in memory, and returns it for a byte-identical retry that reaches it, for
   example after a parent restart. Any other request for the deposit is refused.
 
 ## 6. Replay

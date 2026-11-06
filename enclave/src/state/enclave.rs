@@ -100,7 +100,7 @@ pub struct EnclaveState {
 
     /// Signed mint replies by operation key. A byte-identical retry after a
     /// lost reply gets the same bytes, not a replay refusal. In memory, per
-    /// instance, same window as `op_replay_guard`.
+    /// instance (`mint_reply_ttl_secs`, `mint_reply_max_entries`).
     #[cfg(evm_to_rgb)]
     pub signed_results: super::SignedResultCache,
 

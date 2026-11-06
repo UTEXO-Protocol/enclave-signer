@@ -435,6 +435,10 @@ message Limits {
   uint64 reject_list_page_entries = 23;
   uint64 mint_replay_ttl_secs = 24;
   uint64 mint_replay_max_entries = 25;
+  uint64 mint_reply_ttl_secs = 26;
+  uint64 mint_reply_max_entries = 27;
+  uint64 mint_max_inputs = 28;
+  uint64 mint_max_outputs = 29;
 }
 
 // Changes limits. The enclave checks all the values first, so a refused request

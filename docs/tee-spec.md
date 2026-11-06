@@ -1194,7 +1194,7 @@ Known limits. Read them before deployment.
   control (`docs/runtime-limits.md`). A successful
   response write can commit an entry even when the caller receives no response;
   the parent's kept reply answers a retry of the same request. The enclave also
-  keeps the signed reply for the same window and returns it for a
+  keeps the signed reply for 24 h by default and returns it for a
   byte-identical retry. The parent proof is the real bound: signatures
   for one mint that share a supplied parent spend the same UTXO, so Bitcoin
   confirms at most one. A different parent conflicts with the real one on

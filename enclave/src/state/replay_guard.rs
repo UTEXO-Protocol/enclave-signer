@@ -28,29 +28,36 @@ pub struct NonceReplayGuard {
     bounds: Bounds,
 }
 
-/// The count limit and the time limit of a guard.
-enum Bounds {
+/// The count limit and the time limit of a guard or a cache.
+pub(super) enum Bounds {
     Fixed {
         max: usize,
         ttl: Duration,
     },
     /// `mint_replay_max_entries` and `mint_replay_ttl_secs`, as they are at
     /// each call. See [`super::EnclaveState::op_replay_guard`].
-    Mint,
+    MintReplay,
+    /// `mint_reply_max_entries` and `mint_reply_ttl_secs`, as they are at each
+    /// call.
+    #[cfg(evm_to_rgb)]
+    MintReply,
 }
 
 impl Bounds {
-    fn get(&self) -> (usize, Duration) {
-        match *self {
-            Self::Fixed { max, ttl } => (max, ttl),
-            Self::Mint => {
+    pub(super) fn get(&self) -> (usize, Duration) {
+        let (max, ttl) = match *self {
+            Self::Fixed { max, ttl } => return (max, ttl),
+            Self::MintReplay => {
                 let limits = crate::limits::get();
-                (
-                    limits.mint_replay_max_entries as usize,
-                    Duration::from_secs(limits.mint_replay_ttl_secs),
-                )
+                (limits.mint_replay_max_entries, limits.mint_replay_ttl_secs)
             }
-        }
+            #[cfg(evm_to_rgb)]
+            Self::MintReply => {
+                let limits = crate::limits::get();
+                (limits.mint_reply_max_entries, limits.mint_reply_ttl_secs)
+            }
+        };
+        (max as usize, Duration::from_secs(ttl))
     }
 }
 
@@ -76,7 +83,7 @@ impl NonceReplayGuard {
 
     /// The guard of the mint signer. The operator sets its limits.
     pub fn for_mint_operations() -> Self {
-        Self::with_bounds(Bounds::Mint)
+        Self::with_bounds(Bounds::MintReplay)
     }
 
     fn with_bounds(bounds: Bounds) -> Self {
