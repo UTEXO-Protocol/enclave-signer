@@ -25,7 +25,7 @@ EVM_PROXY_CONTRACT_ADDRESS=0x4ab64dd591778ab9b65fd81062703595dfe64552
 FUNDS_IN_CONTRACT=0xe67c9eb5006512525f597c3fa6119891bd4efaa6
 TOKEN_CONTRACT="$STAGE_TOKEN_CONTRACT"
 RGB_ASSET_ID="$STAGE_RGB_ASSET_ID"
-RUST_LOG=debug
+RUST_LOG=debug,alloy_transport_http=off
 
 if [ "$DOCKERFILE" = Dockerfile.enclave.mint ]; then
     # MINT_WITNESS_SAT is 1500 in the recipe; the connector must match it.

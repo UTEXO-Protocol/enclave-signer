@@ -66,9 +66,11 @@ BUILD_PROFILE=stage-signet DOCKERFILE=Dockerfile.enclave.burn \
 ```
 
 The profile sets `BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none`,
-`EVM_CHAIN_ID=42161`, `RUST_LOG=debug`, the stage contract addresses and the
-role-specific feature list without `rgb`/`spv`. It does not enable Nitro debug
-mode, mock attestation or seed import.
+`EVM_CHAIN_ID=42161`, `RUST_LOG=debug,alloy_transport_http=off`, the stage
+contract addresses and the role-specific feature list without `rgb`/`spv`.
+The log filter keeps debug logs but disables Alloy HTTP transport logs, which
+can include private RPC paths or response bodies. It does not enable Nitro
+debug mode, mock attestation or seed import.
 
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the
 connector. Its `RGB_MAX_UNOWNED_SATS` is 1500. The recipe's other limits remain
