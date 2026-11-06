@@ -1,5 +1,11 @@
 # `fundsOut` signing gate — burn signer (`handle_sign`)
 
+The flow below shows the SPV profile. The public-Signet `IndexerTrusted` profile
+uses the approved indexer's witness status and confirmation depth instead of
+SPV proofs and chain pins. It requires empty RGB Merkle proofs and an empty
+release proof; it makes no BtcRelay commitment. Its
+public endpoint policy is attested; see [runtime RPC policy](../rpc-runtime-policy.md).
+
 Step-by-step text: [burn flow](../burn-flow.md).
 
 ```mermaid
@@ -104,11 +110,11 @@ flowchart TD
   ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
-- The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
+- The SPV burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside
   rgb-lib's validation (P1), and never confirms an anchor or calls plain
   `validate()` without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
   release builds. A release bridge build refuses to boot, and `SetEndpoints`
-  refuses, without a valid `Production` policy.
+  refuses, without a valid policy for the selected Bitcoin source.

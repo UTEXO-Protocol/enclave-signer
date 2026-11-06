@@ -34,10 +34,10 @@ flowchart TB
 
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production,<br/>then listener loop vsock / TCP]
+        EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid<br/>Production or IndexerTrusted,<br/>then listener loop vsock / TCP]
         EConn[conn.rs<br/>DeadlineStream 10 s idle / 30 s socket deadline<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
-        EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
+        EPol[policy.rs<br/>SecurityPolicy<br/>Production / IndexerTrusted / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
         EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 24 h TTL<br/>refill_rate.rs RR15: 12 refills per hour]
         EFr[framing.rs<br/>len-prefixed proto, 24 MiB cap]
         BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS / RGB_MAX_UNOWNED_SATS<br/>MINT_WITNESS_SAT<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS]
@@ -56,7 +56,7 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs swap-path witness status + tx fetch,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>scratch.rs the file rgb-lib reads,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs genesis gate]
+            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs stage + swap witness status and tx fetch,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>scratch.rs the file rgb-lib reads,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs genesis gate]
             NRF["flow/mint_burn.rs (production)<br/>flow/swap.rs (retired)<br/>exactly one per image:<br/>accepted transitions + amount rule"]
             NRI[invoice.rs<br/>FundsIn destinationAddress →<br/>blinded seal == recipient leg]
             NRP["psbt_validation.rs<br/>swap: PSBT to consignment anchor, per-output legs;<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs + parent_proof.rs<br/>mint signer: the transition a PSBT commits, its parent"]
@@ -127,7 +127,7 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"indexer, swap path only (retired),<br/>15 s timeout, via loopback"| VFwd
+    NRV -->|"indexer, no-SPV stage or swap path,<br/>15 s timeout, via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum or Esplora, TLS"| Esp
 

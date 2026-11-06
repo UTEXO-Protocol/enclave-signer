@@ -84,6 +84,20 @@ struct Cli {
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
+    /// Expected Bitcoin source: spv (default) or indexer (public Signet only).
+    /// Indexer trust requires explicit endpoint, network and deployment pins.
+    #[arg(long, default_value = "spv", value_parser = ["spv", "indexer"])]
+    expect_btc_source: String,
+
+    /// Public endpoint SHA-256 from approved set-endpoints inputs. Required
+    /// with --expect-btc-source indexer. RPC paths and KMS fields are excluded.
+    #[arg(
+        long,
+        required_if_eq("expect_btc_source", "indexer"),
+        conflicts_with = "mock"
+    )]
+    expect_endpoints_sha256: Option<String>,
+
     /// Expected Electrum host set at launch (the host of `ELECTRUM_URL`).
     /// Required for production verification. Ignored with --mock.
     #[arg(long)]
@@ -100,8 +114,8 @@ struct Cli {
     #[arg(long)]
     expect_evm_rpc_ca_sha256: Option<String>,
 
-    /// Require this EVM chain ID in the attestation. Omit to accept the
-    /// authenticated value. Ignored with --mock.
+    /// Require this EVM chain ID in the attestation. Required for indexer trust;
+    /// optional for SPV. Ignored with --mock.
     #[arg(long)]
     expect_chain_id: Option<u64>,
 
@@ -110,13 +124,14 @@ struct Cli {
     #[arg(long, default_value = "bitcoin")]
     expect_bitcoin_network: String,
 
-    /// Require this bridge or MultisigProxy address (20-byte 0x-hex). Omit to
-    /// accept the authenticated value. Ignored with --mock.
+    /// Require this bridge or MultisigProxy address (20-byte 0x-hex). Required
+    /// for indexer trust; optional for SPV. Ignored with --mock.
     #[arg(long)]
     expect_bridge_contract: Option<String>,
 
-    /// Require this RGB asset ID in the attestation. An empty string requires
-    /// no RGB asset. Omit to accept the authenticated value. Ignored with --mock.
+    /// Require this RGB asset ID in the attestation. Required and nonempty for
+    /// indexer trust. For SPV, omit to accept the authenticated value, or use an
+    /// empty string to require no RGB asset. Ignored with --mock.
     #[arg(long)]
     expect_rgb_asset_id: Option<String>,
 
@@ -137,7 +152,8 @@ struct Cli {
     expect_token_contract: Option<String>,
 
     /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
-    /// Default: the shipped image value, 3 for mint and 6 otherwise.
+    /// Default: 3 for mint/burn and 6 for combined, matching the image recipes.
+    /// Pass the approved image depth explicitly when a build overrides it.
     #[arg(long)]
     expect_spv_min_confirmations: Option<u32>,
 
@@ -308,10 +324,9 @@ fn parse_expect_evm_finality_tag(value: Option<EvmFinalityTag>) -> Result<EvmFin
 
 /// The `SPV_MIN_CONFIRMATIONS` of the shipped image of `role` (a test reads the Dockerfiles).
 fn default_spv_min_confirmations(role: SignerRole) -> u32 {
-    if role == SignerRole::Mint {
-        3
-    } else {
-        6
+    match role {
+        SignerRole::Mint | SignerRole::Burn => 3,
+        SignerRole::Combined => 6,
     }
 }
 
@@ -337,6 +352,31 @@ fn parse_expect_gas_selectors(s: &str) -> Result<Vec<[u8; 4]>> {
         .collect()
 }
 
+/// Keep the weaker Bitcoin trust model an explicit choice, with public pins.
+fn apply_btc_source(
+    expected: ExpectedPolicy,
+    source: &str,
+    endpoints_sha256: Option<&str>,
+) -> Result<ExpectedPolicy> {
+    match (source, endpoints_sha256) {
+        ("spv", None) => Ok(expected),
+        ("indexer", Some(value)) => {
+            let digest: [u8; 32] = hex::decode(value)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .context("--expect-endpoints-sha256 must be 64 hex characters")?;
+            expected.into_indexer_trusted(digest)
+        }
+        ("indexer", None) => {
+            anyhow::bail!("--expect-btc-source indexer requires --expect-endpoints-sha256")
+        }
+        ("spv", Some(_)) => {
+            anyhow::bail!("--expect-endpoints-sha256 requires --expect-btc-source indexer")
+        }
+        _ => anyhow::bail!("--expect-btc-source must be spv or indexer"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -351,6 +391,9 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if cli.mock && (cli.expect_btc_source != "spv" || cli.expect_endpoints_sha256.is_some()) {
+        anyhow::bail!("--mock cannot verify an IndexerTrusted policy");
+    }
     let (expected_pcrs, mode, expected_policy) = if cli.mock {
         eprintln!(
             "warning: --mock skips COSE/cert-chain checks; do NOT use against production enclaves"
@@ -424,6 +467,11 @@ async fn run(cli: Cli) -> Result<()> {
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
             kms,
         };
+        let expected_policy = apply_btc_source(
+            expected_policy,
+            &cli.expect_btc_source,
+            cli.expect_endpoints_sha256.as_deref(),
+        )?;
         (pcrs, VerifyMode::Real, expected_policy)
     };
 
@@ -471,6 +519,32 @@ mod tests {
     }
 
     #[test]
+    fn indexer_source_requires_explicit_digest_and_refuses_mock() {
+        let cli =
+            Cli::try_parse_from(["attest-verify", "--expect-evm-finality-tag", "safe"]).unwrap();
+        assert_eq!(cli.expect_btc_source, "spv");
+        let mut args = vec![
+            "attest-verify",
+            "--expect-evm-finality-tag",
+            "safe",
+            "--expect-btc-source",
+            "indexer",
+        ];
+        let err = Cli::try_parse_from(&args).err().unwrap();
+        assert!(err.to_string().contains("--expect-endpoints-sha256"));
+        let digest = "55".repeat(32);
+        args.extend(["--expect-endpoints-sha256", &digest]);
+        assert!(Cli::try_parse_from(&args).is_ok());
+        args.push("--mock");
+        assert!(Cli::try_parse_from(&args).is_err());
+        assert!(apply_btc_source(ExpectedPolicy::Development, "spv", Some(&digest)).is_err());
+        assert!(apply_btc_source(ExpectedPolicy::Development, "indexer", None).is_err());
+        for bad in ["", "not-hex", "abcd"] {
+            assert!(apply_btc_source(ExpectedPolicy::Development, "indexer", Some(bad)).is_err());
+        }
+    }
+
+    #[test]
     fn production_refuses_an_expected_latest_tag() {
         let err = parse_expect_evm_finality_tag(Some(EvmFinalityTag::Latest)).unwrap_err();
         assert!(format!("{err:#}").contains("latest"), "{err:#}");
@@ -483,8 +557,12 @@ mod tests {
     fn image_spv_depth(dockerfile: &str) -> u32 {
         dockerfile
             .lines()
-            .find_map(|l| l.trim().strip_prefix("SPV_MIN_CONFIRMATIONS="))
-            .and_then(|v| v.trim_end_matches('\\').trim().parse().ok())
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("SPV_MIN_CONFIRMATIONS=")
+                    .or_else(|| l.trim().strip_prefix("ARG SPV_MIN_CONFIRMATIONS="))
+            })
+            .find_map(|v| v.trim_end_matches('\\').trim().parse().ok())
             .expect("image sets SPV_MIN_CONFIRMATIONS")
     }
 

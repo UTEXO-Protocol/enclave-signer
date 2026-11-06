@@ -73,3 +73,8 @@ sequenceDiagram
 
     Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. It also retains<br/>the verified session secret and can become a donor.<br/>Seed and donor secret remain in SecretBox; temporary plaintext buffers are zeroized.<br/>Ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor || requester.
 ```
+
+For `IndexerTrusted` burn signers, policy equality includes the public endpoint
+digest. Different provider keys under the same approved public endpoint policy
+can clone; a different host, CA or port cannot activate with that donor's seed.
+The API-key path is excluded. See [runtime RPC policy](../rpc-runtime-policy.md).

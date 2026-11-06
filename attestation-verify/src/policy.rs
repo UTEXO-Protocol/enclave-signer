@@ -11,11 +11,12 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V1`] instead.
+//! variant or reorder its fields. New kinds may use an unused discriminant;
+//! older decoders reject them. Changes to existing layouts need a new version.
 
 /// Version tag at the start of every policy commitment. A verifier rejects a
 /// different policy version instead of accepting different security semantics.
-/// Bump it on every layout change or change to a fixed policy requirement.
+/// Bump it on a change to an existing layout or fixed policy requirement.
 /// V1 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
 /// Every accepted FundsIn receipt must belong to the canonical chain at or
 /// below that tagged head. The selected tag is attested so verifiers can
@@ -156,15 +157,17 @@ pub struct KmsPin {
     pub expected_evm_address: Option<[u8; 20]>,
 }
 
-/// Source of Bitcoin anchor evidence for RGB consignment witness txs. Only
-/// SPV is safe, so a production build always reports
-/// [`SpvVerified`](BtcDataSource::SpvVerified).
+/// Source of Bitcoin anchor evidence for RGB consignment witness txs.
+/// The policy kind makes SPV and indexer trust distinct to verifiers.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
     /// Witness txids are checked against the enclave PoW-verified header
     /// chain (`spv`), not the host-controlled indexer.
     SpvVerified = 1,
+    /// Witness status and depth come from the approved TLS indexer. This is
+    /// not an SPV proof and is accepted only by an explicit indexer policy.
+    IndexerTrusted = 2,
 }
 
 /// Attestation root of trust: a real NSM device or the zero-PCR mock. Mock is
@@ -181,7 +184,9 @@ pub enum AttestationMode {
 ///
 /// [`Production`](AttestedPolicy::Production) is the fail-closed bridge
 /// posture: fully pinned, real attestation, SPV anchors and a known EVM data
-/// source. A debug, dev-feature, unpinned or non-bridge build is
+/// source. [`IndexerTrusted`](AttestedPolicy::IndexerTrusted) carries the same
+/// pins but explicitly trusts an approved indexer for Bitcoin evidence.
+/// A debug, dev-feature, unpinned or non-bridge build is
 /// [`Development`](AttestedPolicy::Development). A production verifier must
 /// reject it.
 // Built once at boot, so the variant size difference does not matter.
@@ -235,10 +240,102 @@ pub enum AttestedPolicy {
         /// [`SignerRole::Mint`]), and never all zero there.
         clone_peer_pcr3: Option<[u8; 48]>,
     },
+    /// Explicit indexer trust, not the SPV-backed Production policy. All
+    /// shared fields have the meanings documented on `Production`.
+    /// Role, network and launch approval are checked by the enclave and verifier.
+    IndexerTrusted {
+        allow_vanilla_psbt: bool,
+        signer_role: SignerRole,
+        attestation: AttestationMode,
+        evm_source: EvmDataSource,
+        btc_source: BtcDataSource,
+        chain_id: u64,
+        bitcoin_network: BitcoinNetwork,
+        bridge_contract: [u8; 20],
+        rgb_asset_id: String,
+        funds_in_contract: [u8; 20],
+        evm_finality_tag: EvmFinalityTag,
+        /// Required indexer-reported depth; it does not imply SPV verification.
+        spv_min_confirmations: u32,
+        electrum_host: String,
+        evm_rpc_tls: Option<EvmRpcTlsPin>,
+        gas_tx_allowed_to: [u8; 20],
+        gas_tx_max_gas_limit: u64,
+        gas_tx_max_fee_per_gas: u128,
+        gas_tx_max_value_wei: u128,
+        gas_tx_allowed_selectors: Vec<[u8; 4]>,
+        token_contract: [u8; 20],
+        kms: Option<KmsPin>,
+        clone_peer_pcr3: Option<[u8; 48]>,
+        /// Commitment to the approved public endpoint configuration. The
+        /// caller must exclude RPC paths, API keys and other credentials.
+        endpoints_sha256: [u8; 32],
+    },
     Development,
 }
 
 impl AttestedPolicy {
+    /// Keep all pins while changing an SPV policy to explicit indexer trust.
+    /// The caller must separately enforce the allowed role, network and
+    /// approval of the public endpoint digest. No credential is an input.
+    pub fn into_indexer_trusted(
+        self,
+        endpoints_sha256: [u8; 32],
+    ) -> Result<Self, PolicyDecodeError> {
+        let Self::Production {
+            allow_vanilla_psbt,
+            signer_role,
+            attestation,
+            evm_source,
+            btc_source: BtcDataSource::SpvVerified,
+            chain_id,
+            bitcoin_network,
+            bridge_contract,
+            rgb_asset_id,
+            funds_in_contract,
+            evm_finality_tag,
+            spv_min_confirmations,
+            electrum_host,
+            evm_rpc_tls,
+            gas_tx_allowed_to,
+            gas_tx_max_gas_limit,
+            gas_tx_max_fee_per_gas,
+            gas_tx_max_value_wei,
+            gas_tx_allowed_selectors,
+            token_contract,
+            kms,
+            clone_peer_pcr3,
+        } = self
+        else {
+            return Err(PolicyDecodeError("expected an SPV Production policy"));
+        };
+        Ok(Self::IndexerTrusted {
+            allow_vanilla_psbt,
+            signer_role,
+            attestation,
+            evm_source,
+            btc_source: BtcDataSource::IndexerTrusted,
+            chain_id,
+            bitcoin_network,
+            bridge_contract,
+            rgb_asset_id,
+            funds_in_contract,
+            evm_finality_tag,
+            spv_min_confirmations,
+            electrum_host,
+            evm_rpc_tls,
+            gas_tx_allowed_to,
+            gas_tx_max_gas_limit,
+            gas_tx_max_fee_per_gas,
+            gas_tx_max_value_wei,
+            gas_tx_allowed_selectors,
+            token_contract,
+            kms,
+            clone_peer_pcr3,
+            endpoints_sha256,
+        })
+    }
+
     /// Deterministic, length-prefixed encoding for attestation `user_data`.
     /// Layout (see the wire contract in the module docs):
     ///
@@ -263,6 +360,8 @@ impl AttestedPolicy {
     ///               ++ len(region) u32 BE ++ region ++ len(seed_id) u32 BE
     ///               ++ seed_id ++ (0x00 | 0x01 ++ address 20)]
     ///              [clone_peer_pcr3: 0x00 | 0x01 ++ pcr3 48]
+    /// IndexerTrusted: [0x02][same fields as Production, btc_source = 0x02]
+    ///                 [endpoints_sha256 32]  (public configuration only)
     /// Development: [0x00]
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -292,8 +391,37 @@ impl AttestedPolicy {
                 token_contract,
                 kms,
                 clone_peer_pcr3,
+            }
+            | AttestedPolicy::IndexerTrusted {
+                allow_vanilla_psbt,
+                signer_role,
+                attestation,
+                evm_source,
+                btc_source,
+                chain_id,
+                bitcoin_network,
+                bridge_contract,
+                rgb_asset_id,
+                funds_in_contract,
+                evm_finality_tag,
+                spv_min_confirmations,
+                electrum_host,
+                evm_rpc_tls,
+                gas_tx_allowed_to,
+                gas_tx_max_gas_limit,
+                gas_tx_max_fee_per_gas,
+                gas_tx_max_value_wei,
+                gas_tx_allowed_selectors,
+                token_contract,
+                kms,
+                clone_peer_pcr3,
+                ..
             } => {
-                out.push(0x01);
+                out.push(if matches!(self, Self::IndexerTrusted { .. }) {
+                    0x02
+                } else {
+                    0x01
+                });
                 out.push(*allow_vanilla_psbt as u8);
                 out.push(*signer_role as u8);
                 out.push(*attestation as u8);
@@ -358,6 +486,12 @@ impl AttestedPolicy {
                     }
                     None => out.push(0x00),
                 }
+                if let Self::IndexerTrusted {
+                    endpoints_sha256, ..
+                } = self
+                {
+                    out.extend_from_slice(endpoints_sha256);
+                }
             }
             AttestedPolicy::Development => {
                 out.push(0x00);
@@ -376,7 +510,7 @@ impl AttestedPolicy {
         }
         let policy = match r.u8()? {
             0x00 => AttestedPolicy::Development,
-            0x01 => {
+            kind @ (0x01 | 0x02) => {
                 let allow_vanilla_psbt = r.flag()?;
                 let signer_role = match r.u8()? {
                     0 => SignerRole::Combined,
@@ -397,8 +531,12 @@ impl AttestedPolicy {
                 };
                 let btc_source = match r.u8()? {
                     1 => BtcDataSource::SpvVerified,
+                    2 => BtcDataSource::IndexerTrusted,
                     _ => return Err(PolicyDecodeError("unknown BTC data source")),
                 };
+                if (kind == 0x01) != (btc_source == BtcDataSource::SpvVerified) {
+                    return Err(PolicyDecodeError("policy kind and BTC source disagree"));
+                }
                 let chain_id = u64::from_be_bytes(r.array()?);
                 let bitcoin_network = match r.u8()? {
                     0 => BitcoinNetwork::Mainnet,
@@ -455,12 +593,12 @@ impl AttestedPolicy {
                     })
                     .transpose()?;
                 let clone_peer_pcr3 = r.flag()?.then(|| r.array()).transpose()?;
-                AttestedPolicy::Production {
+                let production = AttestedPolicy::Production {
                     allow_vanilla_psbt,
                     signer_role,
                     attestation,
                     evm_source,
-                    btc_source,
+                    btc_source: BtcDataSource::SpvVerified,
                     chain_id,
                     bitcoin_network,
                     bridge_contract,
@@ -478,6 +616,11 @@ impl AttestedPolicy {
                     token_contract,
                     kms,
                     clone_peer_pcr3,
+                };
+                if kind == 0x02 {
+                    production.into_indexer_trusted(r.array()?)?
+                } else {
+                    production
                 }
             }
             _ => return Err(PolicyDecodeError("unknown policy kind")),
@@ -584,6 +727,188 @@ mod tests {
 
     fn base() -> AttestedPolicy {
         prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
+    }
+
+    // Fixed V1 fixture from the pre-IndexerTrusted field layout. Keep this
+    // independent of to_bytes so adding a policy kind cannot silently change
+    // the existing Production wire contract.
+    const PRODUCTION_V1_GOLDEN: &str = concat!(
+        "01010001010101000000000000000100",
+        "1111111111111111111111111111111111111111",
+        "000000097267623a6173736574",
+        "4444444444444444444444444444444444444444",
+        "01000000060000000d656c65637472756d2e7465737400",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "0000000000005208000000000000000000000000000003e8",
+        "0000000000000000000000000000000000000001deadbeef",
+        "77777777777777777777777777777777777777770000",
+    );
+
+    #[test]
+    fn production_v1_golden_is_unchanged() {
+        let expected = hex::decode(PRODUCTION_V1_GOLDEN).unwrap();
+        assert_eq!(base().to_bytes(), expected);
+        assert_eq!(AttestedPolicy::from_bytes(&expected), Ok(base()));
+    }
+
+    #[test]
+    fn indexer_kind_has_a_distinct_golden_layout() {
+        let policy = base().into_indexer_trusted([0xa5; 32]).unwrap();
+        let mut expected = hex::decode(PRODUCTION_V1_GOLDEN).unwrap();
+        expected[1] = 0x02; // New kind; an old V1 decoder rejects this tag.
+        expected[6] = 0x02; // Explicit indexer source, never SPV.
+        expected.extend_from_slice(&[0xa5; 32]);
+        assert_eq!(policy.to_bytes(), expected);
+        assert_eq!(AttestedPolicy::from_bytes(&expected), Ok(policy.clone()));
+        assert_ne!(
+            policy_commitment(&expected),
+            policy_commitment(&base().to_bytes())
+        );
+        assert_ne!(expected, AttestedPolicy::Development.to_bytes());
+        // This is the complete layout: no RPC path, API-key string, or
+        // credential-derived commitment field is appended. The digest's
+        // producer must hash only public endpoint configuration.
+        assert_eq!(expected.len(), base().to_bytes().len() + 32);
+    }
+
+    #[test]
+    fn indexer_conversion_preserves_tls_kms_and_clone_pins() {
+        let mut original = with_tls("rpc.test", [1; 32]);
+        if let AttestedPolicy::Production {
+            evm_source,
+            bitcoin_network,
+            kms,
+            ..
+        } = &mut original
+        {
+            *evm_source = EvmDataSource::PinnedTlsRpc;
+            *bitcoin_network = BitcoinNetwork::Signet;
+            *kms = Some(a_kms_pin());
+        }
+        for production in [original, with_clone_peer_pcr3(Some([0x33; 48]))] {
+            let mut expected = production.to_bytes();
+            expected[1] = 0x02;
+            expected[6] = 0x02;
+            expected.extend_from_slice(&[0x42; 32]);
+            let indexer = production.into_indexer_trusted([0x42; 32]).unwrap();
+            assert_eq!(indexer.to_bytes(), expected);
+            assert_eq!(AttestedPolicy::from_bytes(&expected), Ok(indexer));
+        }
+    }
+
+    #[test]
+    fn indexer_conversion_refuses_non_spv_production_inputs() {
+        let mut invalid = base();
+        if let AttestedPolicy::Production { btc_source, .. } = &mut invalid {
+            *btc_source = BtcDataSource::IndexerTrusted;
+        }
+        for policy in [
+            AttestedPolicy::Development,
+            base().into_indexer_trusted([1; 32]).unwrap(),
+            invalid,
+        ] {
+            assert_eq!(
+                policy.into_indexer_trusted([2; 32]),
+                Err(PolicyDecodeError("expected an SPV Production policy"))
+            );
+        }
+    }
+
+    #[test]
+    fn policy_kind_and_bitcoin_source_cannot_be_confused() {
+        for policy in [base(), base().into_indexer_trusted([1; 32]).unwrap()] {
+            let good = policy.to_bytes();
+            let mut mismatch = good.clone();
+            mismatch[6] = if good[1] == 0x01 { 2 } else { 1 };
+            assert_eq!(
+                AttestedPolicy::from_bytes(&mismatch),
+                Err(PolicyDecodeError("policy kind and BTC source disagree"))
+            );
+            for source in [0, 3, 255] {
+                let mut unknown = good.clone();
+                unknown[6] = source;
+                assert_eq!(
+                    AttestedPolicy::from_bytes(&unknown),
+                    Err(PolicyDecodeError("unknown BTC data source"))
+                );
+            }
+            for kind in [3, 255] {
+                let mut unknown = good.clone();
+                unknown[1] = kind;
+                assert_eq!(
+                    AttestedPolicy::from_bytes(&unknown),
+                    Err(PolicyDecodeError("unknown policy kind"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexer_policy_refuses_truncated_and_extra_fields() {
+        let bytes = with_kms(Some(a_kms_pin()))
+            .into_indexer_trusted([0xa5; 32])
+            .unwrap()
+            .to_bytes();
+        for n in 0..bytes.len() {
+            assert!(AttestedPolicy::from_bytes(&bytes[..n]).is_err(), "{n}");
+        }
+        // Credentials are launch-only values, never an optional wire tail.
+        for tail in [b"/v2/private-key".as_slice(), &[0]] {
+            let mut extended = bytes.clone();
+            extended.extend_from_slice(tail);
+            assert_eq!(
+                AttestedPolicy::from_bytes(&extended),
+                Err(PolicyDecodeError("trailing bytes"))
+            );
+        }
+    }
+
+    #[test]
+    fn every_indexer_policy_field_is_committed() {
+        let policy = base().into_indexer_trusted([1; 32]).unwrap();
+        let original = policy.to_bytes();
+        macro_rules! changed {
+            ($field:ident, $value:expr) => {{
+                let mut other = policy.clone();
+                if let AttestedPolicy::IndexerTrusted { $field, .. } = &mut other {
+                    *$field = $value;
+                }
+                let encoded = other.to_bytes();
+                assert_ne!(encoded, original, stringify!($field));
+                assert_ne!(policy_commitment(&encoded), policy_commitment(&original));
+                assert_eq!(AttestedPolicy::from_bytes(&encoded), Ok(other));
+            }};
+        }
+        changed!(allow_vanilla_psbt, true);
+        changed!(signer_role, SignerRole::Burn);
+        changed!(attestation, AttestationMode::Mock);
+        changed!(evm_source, EvmDataSource::PinnedTlsRpc);
+        changed!(chain_id, 2);
+        changed!(bitcoin_network, BitcoinNetwork::Signet);
+        changed!(bridge_contract, [0x22; 20]);
+        changed!(rgb_asset_id, "rgb:other".into());
+        changed!(funds_in_contract, [0x55; 20]);
+        changed!(evm_finality_tag, EvmFinalityTag::Finalized);
+        changed!(spv_min_confirmations, 7);
+        changed!(electrum_host, "other.test".into());
+        changed!(
+            evm_rpc_tls,
+            Some(EvmRpcTlsPin {
+                host: "rpc.test".into(),
+                ca_sha256: [1; 32]
+            })
+        );
+        changed!(gas_tx_allowed_to, [0xbb; 20]);
+        changed!(gas_tx_max_gas_limit, 30_000);
+        changed!(gas_tx_max_fee_per_gas, 2_000);
+        changed!(gas_tx_max_value_wei, 5);
+        changed!(gas_tx_allowed_selectors, vec![[1, 2, 3, 4]]);
+        changed!(token_contract, [0x88; 20]);
+        changed!(kms, Some(a_kms_pin()));
+        changed!(clone_peer_pcr3, Some([0x33; 48]));
+        changed!(endpoints_sha256, [2; 32]);
+        // btc_source is not freely variable: its only other known value is
+        // rejected for this kind in policy_kind_and_bitcoin_source_cannot_be_confused.
     }
 
     #[test]
@@ -695,7 +1020,7 @@ mod tests {
                 kms,
                 clone_peer_pcr3,
             },
-            AttestedPolicy::Development => unreachable!(),
+            AttestedPolicy::Development | AttestedPolicy::IndexerTrusted { .. } => unreachable!(),
         }
     }
 
@@ -710,7 +1035,11 @@ mod tests {
 
     #[test]
     fn rejects_every_version_other_than_v1() {
-        for policy in [base(), AttestedPolicy::Development] {
+        for policy in [
+            base(),
+            AttestedPolicy::Development,
+            base().into_indexer_trusted([1; 32]).unwrap(),
+        ] {
             let current = policy.to_bytes();
             for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V1) {
                 let mut other = current.clone();
@@ -982,7 +1311,7 @@ mod tests {
         *flag.last_mut().unwrap() = 2;
         bad.push(flag);
         let mut kind = good.clone();
-        kind[1] = 2;
+        kind[1] = 3;
         bad.push(kind);
         let mut role = good.clone();
         role[3] = 3;

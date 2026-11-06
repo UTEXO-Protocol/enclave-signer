@@ -13,6 +13,9 @@ use utexo_bridge_parent::enclave_proto::{
     InitializeKeyResponse, PublicKeysResponse, SetEndpointsRequest,
 };
 
+// Launch verification and the CLI use the same public endpoint digest.
+use utexo_bridge_parent::launch_check::endpoints_sha256;
+
 #[derive(Parser)]
 #[command(
     name = "utexo-bridge-parent-cli",
@@ -138,7 +141,7 @@ enum Command {
     /// Set the chain endpoints and the KMS values once, after launch. The
     /// enclave rejects a second call.
     SetEndpoints {
-        /// Print the chain-endpoint SHA-256 (excluding KMS fields) without contacting
+        /// Print the public endpoint SHA-256 (excluding RPC paths and KMS fields) without contacting
         /// an enclave. Uses the same flags, environment and CA file as launch.
         #[arg(long)]
         print_sha256: bool,
@@ -171,7 +174,7 @@ enum Command {
         #[arg(long, required_unless_present_any = ["mock", "allow_development_policy"])]
         image_env: Option<PathBuf>,
         /// Role of the deployed production image.
-        #[arg(long, value_parser = ["combined", "burn"], required_unless_present_any = ["mock", "allow_development_policy"])]
+        #[arg(long, value_parser = ["combined", "mint", "burn"], required_unless_present_any = ["mock", "allow_development_policy"])]
         signer_role: Option<String>,
         /// The bundle file to write.
         #[arg(long)]
@@ -238,6 +241,9 @@ struct EndpointArgs {
     /// DER file of the only CA the EVM RPC TLS trusts. Empty means no CA.
     #[arg(long, env = "EVM_RPC_TLS_CA_DER_FILE")]
     evm_rpc_ca_der_file: Option<PathBuf>,
+    /// File containing the RPC path, e.g. `/v2/<key>`. Never print its contents.
+    #[arg(long, env = "EVM_RPC_PATH_FILE")]
+    evm_rpc_path_file: Option<PathBuf>,
     /// Full ARN of the KMS key that wraps the seed.
     #[arg(long, env = "KMS_KEY_ARN")]
     kms_key_arn: Option<String>,
@@ -273,6 +279,11 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
                 .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
         })
         .unwrap_or_default();
+    let evm_rpc_path = args
+        .evm_rpc_path_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| read_rpc_path(&path).unwrap_or_else(|e| fail(e)))
+        .unwrap_or_default();
     SetEndpointsRequest {
         electrum_url: args.electrum_url.unwrap_or_default(),
         evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
@@ -282,35 +293,39 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_region: args.kms_region.unwrap_or_default(),
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
-        // This enclave does not read it: it requests the EVM RPC at `/`.
-        evm_rpc_path: String::new(),
+        evm_rpc_path,
     }
 }
 
-/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
-fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    let mut network = request.clone();
-    // New schema fields must be explicitly classified as hashed or excluded.
-    let SetEndpointsRequest {
-        electrum_url: _,
-        evm_rpc_host: _,
-        evm_rpc_ca_der: _,
-        evm_rpc_tls_port: _,
-        // Hashed: the enclave requests `/` and never reads it, so only the empty
-        // path this CLI sends matches the pin.
-        evm_rpc_path: _,
-        kms_key_arn,
-        kms_region,
-        kms_seed_id,
-        kms_expected_evm_address,
-    } = &mut network;
-    kms_key_arn.clear();
-    kms_region.clear();
-    kms_seed_id.clear();
-    kms_expected_evm_address.clear();
-    Sha256::digest(network.encode_to_vec()).into()
+fn read_rpc_path(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file =
+        std::fs::File::open(path).map_err(|_| "cannot open EVM_RPC_PATH_FILE".to_string())?;
+    let mut value = String::new();
+    file.take(2051)
+        .read_to_string(&mut value)
+        .map_err(|_| "cannot read EVM_RPC_PATH_FILE as UTF-8".to_string())?;
+    if value.len() > 2050 {
+        return Err("EVM_RPC_PATH_FILE exceeds 2048 bytes plus an optional line ending".into());
+    }
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.len() > 2048 {
+        return Err("EVM_RPC_PATH_FILE must contain a nonempty path of at most 2048 bytes".into());
+    }
+    // Match enclave::config::parse_evm_rpc_path before launch or digest output.
+    // Never include the file contents in an error: the path can contain a key.
+    if !value.starts_with('/')
+        || value.starts_with("//")
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/-._~".contains(&c))
+        || value
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("EVM_RPC_PATH_FILE must contain an absolute ASCII path without authority, query, fragment, escapes or dot segments".into());
+    }
+    Ok(value.into())
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -878,7 +893,9 @@ fn export_attestation(
     } else {
         let role = match signer_role {
             Some("burn") => SignerRole::Burn,
-            _ => SignerRole::Combined,
+            Some("mint") => SignerRole::Mint,
+            Some("combined") => SignerRole::Combined,
+            _ => anyhow::bail!("--signer-role must be mint, burn or combined"),
         };
         let image_env = image_env.context("--image-env required")?;
         let endpoints = endpoints_request(endpoints);
@@ -1047,6 +1064,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rpc_path_is_read_from_a_file_at_launch() {
+        let file = std::env::temp_dir().join(format!("rpc-path-test-{}", std::process::id()));
+        std::fs::write(&file, "/v3/fixture-key\n").unwrap();
+        let cli = Cli::try_parse_from([
+            "cli",
+            "set-endpoints",
+            "--evm-rpc-path-file",
+            file.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Command::SetEndpoints { endpoints, .. } = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(endpoints_request(endpoints).evm_rpc_path, "/v3/fixture-key");
+        std::fs::write(&file, "").unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::write(&file, "x".repeat(2051)).unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::write(&file, format!("/key{}hidden", "\n".repeat(2051))).unwrap();
+        assert!(read_rpc_path(&file).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn rpc_path_validation_applies_to_launch_and_digest_inputs_without_disclosing_keys() {
+        let file = std::env::temp_dir().join(format!("rpc-path-validation-{}", std::process::id()));
+        for print_digest in [false, true] {
+            let mut args = vec![
+                "cli",
+                "set-endpoints",
+                "--evm-rpc-path-file",
+                file.to_str().unwrap(),
+            ];
+            if print_digest {
+                args.push("--print-sha256");
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::SetEndpoints {
+                print_sha256,
+                endpoints,
+            } = cli.command
+            else {
+                panic!("wrong command")
+            };
+            assert_eq!(print_sha256, print_digest);
+            let path_file = endpoints.evm_rpc_path_file.unwrap();
+            for invalid in [
+                "https://other.test/fixture-secret",
+                "//other.test/fixture-secret",
+                "fixture-secret",
+                "/x?key=fixture-secret",
+                "/x#fixture-secret",
+                "/x\\fixture-secret",
+                "/x\r\nfixture-secret",
+                "/x/../fixture-secret",
+                "/./fixture-secret",
+                "/fixture-secret/.",
+                "/fixture-secret/..",
+                "/%2e%2e/fixture-secret",
+                "/clé/fixture-secret",
+                "/fixture-secret with space",
+            ] {
+                std::fs::write(&path_file, invalid).unwrap();
+                let err = read_rpc_path(&path_file).unwrap_err();
+                assert!(err.contains("EVM_RPC_PATH_FILE"));
+                assert!(
+                    !err.contains("fixture-secret"),
+                    "credential leaked in error"
+                );
+                assert!(!err.contains(invalid), "path leaked in error");
+            }
+            for valid in ["/", "/v3/key_-.~9", "/.../key", "/key//segment"] {
+                std::fs::write(&path_file, format!("{valid}\r\n")).unwrap();
+                assert_eq!(read_rpc_path(&path_file).unwrap(), valid);
+            }
+            let max = format!("/{}", "a".repeat(2047));
+            std::fs::write(&path_file, format!("{max}\r\n")).unwrap();
+            assert_eq!(read_rpc_path(&path_file).unwrap(), max);
+            std::fs::write(&path_file, format!("{max}a")).unwrap();
+            assert!(read_rpc_path(&path_file).is_err());
+        }
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
     fn endpoints_digest_matches_the_enclave_golden_vector() {
         let cli = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"]).unwrap();
         assert!(matches!(
@@ -1071,16 +1173,16 @@ mod tests {
         };
         assert_eq!(
             hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+            "f73ab3c87f8429adeed93c7823df995134368dedbb88b1ace23ca9eee6261bfc"
         );
-        // The EVM RPC path is a network input: another path misses the pin.
+        // Provider credentials can rotate without changing the public digest.
         let other_path = SetEndpointsRequest {
             evm_rpc_path: "/v2/key".into(),
             ..request.clone()
         };
-        assert_ne!(
+        assert_eq!(
             hex::encode(endpoints_sha256(&other_path)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+            "f73ab3c87f8429adeed93c7823df995134368dedbb88b1ace23ca9eee6261bfc"
         );
         // KMS bootstrap/recovery inputs are deliberately outside the chain pin.
         for field in [
@@ -1093,7 +1195,7 @@ mod tests {
         }
         assert_eq!(
             hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+            "f73ab3c87f8429adeed93c7823df995134368dedbb88b1ace23ca9eee6261bfc"
         );
     }
 
@@ -1152,7 +1254,7 @@ mod tests {
         };
         let cli = Cli::try_parse_from(args("burn")).unwrap();
         assert!(matches!(cli.command, Command::ExportAttestation { .. }));
-        assert!(Cli::try_parse_from(args("mint")).is_err());
+        assert!(Cli::try_parse_from(args("mint")).is_ok());
     }
 
     /// rgb-lib f3975623 strips the PSBT, so the parent's PSBT gave way to two fascias.

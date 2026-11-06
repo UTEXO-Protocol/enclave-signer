@@ -7,17 +7,23 @@ fn release_bridge_ctx() -> BuildContext {
         mock_attestation: false,
         allow_seed_import: false,
         rgb_validation: true,
-        // Both directions, so the gas and plain-BTC rules are live.
-        signer_role: SignerRole::Combined,
+        // The no-SPV profile requires an explicit compiled signer role.
+        signer_role: if INDEXER_TRUSTED {
+            BuildContext::current().signer_role
+        } else {
+            SignerRole::Combined
+        },
     }
 }
 
 /// PCR3 of a parent instance with an IAM role.
 const ROLE_PCR3: [u8; 48] = [0x33; 48];
 
-/// `p` with the clone-peer PCR3 that `SetEndpoints` reads for a cloning role.
+/// Complete the launch-only pins with a public fixture digest and parent PCR3.
 fn with_role(p: SecurityPolicy) -> SecurityPolicy {
-    p.with_clone_peer_pcr3(|| Ok(ROLE_PCR3)).unwrap()
+    p.with_endpoints_sha256([0x55; 32])
+        .with_clone_peer_pcr3(|| Ok(ROLE_PCR3))
+        .unwrap()
 }
 
 fn pinned_config() -> BridgeConfig {
@@ -27,12 +33,22 @@ fn pinned_config() -> BridgeConfig {
         rgb_asset_id: "rgb:asset".into(),
         funds_in_contract: [0x22; 20],
         token_contract: [0x33; 20],
+        bitcoin_network: if INDEXER_TRUSTED {
+            BitcoinNetwork::Signet
+        } else {
+            BitcoinNetwork::Mainnet
+        },
+        btc_relay_mode: if INDEXER_TRUSTED {
+            BtcRelayMode::None
+        } else {
+            BtcRelayMode::Required
+        },
         ..Default::default()
     }
 }
 
 #[test]
-fn release_bridge_with_full_pins_is_production() {
+fn release_bridge_with_full_pins_has_the_compiled_trust_mode() {
     let p = with_role(SecurityPolicy::resolve(
         &release_bridge_ctx(),
         &pinned_config(),
@@ -41,12 +57,19 @@ fn release_bridge_with_full_pins_is_production() {
         "e.test",
     ));
     match &p {
-        SecurityPolicy::Production(pp) => {
+        SecurityPolicy::Production(pp) | SecurityPolicy::IndexerTrusted { policy: pp, .. } => {
             assert_eq!(pp.chain_id, 1);
             assert_eq!(pp.evm_source, EvmDataSource::PinnedTlsRpc);
             assert_eq!(pp.evm_rpc_tls, a_tls_pin());
             assert_eq!(pp.attestation, AttestationMode::Real);
-            assert_eq!(pp.btc_source, BtcDataSource::SpvVerified);
+            assert_eq!(
+                pp.btc_source,
+                if INDEXER_TRUSTED {
+                    BtcDataSource::IndexerTrusted
+                } else {
+                    BtcDataSource::SpvVerified
+                }
+            );
         }
         other => panic!("expected Production, got {other:?}"),
     }
@@ -83,7 +106,7 @@ fn configured_finality_tag_is_attested() {
         );
         assert!(matches!(
             policy.attested(),
-            AttestedPolicy::Production { evm_finality_tag, .. } if evm_finality_tag == tag
+            AttestedPolicy::Production { evm_finality_tag, .. } | AttestedPolicy::IndexerTrusted { evm_finality_tag, .. } if evm_finality_tag == tag
         ));
         policy.commitment_bytes()
     })
@@ -125,7 +148,9 @@ fn signer_role_is_attested() {
     let mint = resolve(SignerRole::Mint);
     let burn = resolve(SignerRole::Burn);
     match &burn {
-        SecurityPolicy::Production(p) => assert_eq!(p.signer_role, SignerRole::Burn),
+        SecurityPolicy::Production(p) | SecurityPolicy::IndexerTrusted { policy: p, .. } => {
+            assert_eq!(p.signer_role, SignerRole::Burn)
+        }
         other => panic!("expected Production, got {other:?}"),
     }
     assert_ne!(mint.commitment_bytes(), burn.commitment_bytes());
@@ -152,7 +177,7 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
         None,
         "e.test",
     ) {
-        SecurityPolicy::Production(p) => p,
+        SecurityPolicy::Production(p) | SecurityPolicy::IndexerTrusted { policy: p, .. } => p,
         other => panic!("expected Production, got {other:?}"),
     };
 
@@ -169,9 +194,11 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     assert_eq!(burn.gas_tx_allowed_to, Some([0x33; 20]));
     assert_eq!(burn.gas_tx_max_gas_limit, 100_000);
 
-    let combined = resolve(SignerRole::Combined);
-    assert!(combined.allow_vanilla_psbt);
-    assert_eq!(combined.gas_tx_allowed_to, Some([0x33; 20]));
+    if !INDEXER_TRUSTED {
+        let combined = resolve(SignerRole::Combined);
+        assert!(combined.allow_vanilla_psbt);
+        assert_eq!(combined.gas_tx_allowed_to, Some([0x33; 20]));
+    }
 }
 
 fn a_tls_pin() -> Option<EvmRpcTlsPin> {
@@ -182,7 +209,7 @@ fn a_tls_pin() -> Option<EvmRpcTlsPin> {
 }
 
 #[test]
-fn production_accepts_an_authenticated_evm_source_and_attests_it() {
+fn release_policy_enforces_and_attests_its_evm_source() {
     let ctx = release_bridge_ctx();
     // `Disabled` fails closed per request.
     for (source, pin) in [
@@ -197,12 +224,15 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
             "e.test",
         ));
         match &p {
-            SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
+            SecurityPolicy::Production(pp) | SecurityPolicy::IndexerTrusted { policy: pp, .. } => {
+                assert_eq!(pp.evm_source, source)
+            }
             other => panic!("expected Production for {source:?}, got {other:?}"),
         }
-        assert!(
+        assert_eq!(
             p.assert_valid_for_build(&ctx).is_ok(),
-            "{source:?} must not be gated at boot"
+            !INDEXER_TRUSTED || source == EvmDataSource::PinnedTlsRpc,
+            "{source:?}"
         );
     }
 }
@@ -210,17 +240,25 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
 /// The gate `SetEndpoints` runs, fed from a request as the handler feeds it.
 #[cfg(feature = "evm-rpc")]
 #[test]
-fn production_launches_only_with_a_pinned_tls_evm_rpc() {
+fn release_policy_launches_only_with_a_pinned_tls_evm_rpc() {
     let ca =
         hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim()).unwrap();
     let launch = |host: &str, ca_der: Vec<u8>| {
-        let e = crate::config::Endpoints::parse(&crate::proto::SetEndpointsRequest {
+        let mut request = crate::proto::SetEndpointsRequest {
             electrum_url: "ssl://electrum.test:50002".into(),
             evm_rpc_host: host.into(),
             evm_rpc_ca_der: ca_der,
             evm_rpc_tls_port: 443,
             ..Default::default()
-        })?;
+        };
+        if cfg!(feature = "kms-persistence") {
+            request.kms_key_arn =
+                "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
+                    .into();
+            request.kms_region = "eu-west-1".into();
+            request.kms_seed_id = "policy-test".into();
+        }
+        let e = crate::config::Endpoints::parse(&request)?;
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, pin) = crate::bootstrap::resolve_evm_data_source(tls);
         let ctx = release_bridge_ctx();
@@ -236,12 +274,11 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     assert!(launch("", ca.clone()).is_err());
     assert!(launch("rpc.test", Vec::new()).is_err());
 
-    let Ok(SecurityPolicy::Production(p)) = launch("rpc.test", ca) else {
-        panic!("a valid host and CA must launch");
-    };
+    let policy = launch("rpc.test", ca).expect("a valid host and CA must launch");
+    let p = policy.pinned().unwrap();
     assert_eq!(p.electrum_host, "electrum.test");
     assert_eq!(p.evm_source, EvmDataSource::PinnedTlsRpc);
-    let pin = p.evm_rpc_tls.unwrap();
+    let pin = p.evm_rpc_tls.as_ref().unwrap();
     assert_eq!(pin.host, "rpc.test");
     // `openssl x509 -in ca_a.pem -outform der | sha256sum`
     assert_eq!(
@@ -329,7 +366,14 @@ fn production_rejects_a_zero_spv_confirmation_rule() {
     cfg.spv_min_confirmations = 0;
     let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
     let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
-    assert!(err.contains("SPV_MIN_CONFIRMATIONS"), "got: {err}");
+    assert!(
+        err.contains(if INDEXER_TRUSTED {
+            "public-signet policy"
+        } else {
+            "SPV_MIN_CONFIRMATIONS"
+        }),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -352,9 +396,17 @@ fn production_rejects_an_unpinned_token_contract() {
     cfg.token_contract = [0u8; 20];
     let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
-    assert!(err.contains("TOKEN_CONTRACT"), "got: {err}");
+    assert!(
+        err.contains(if INDEXER_TRUSTED {
+            "public-signet policy"
+        } else {
+            "TOKEN_CONTRACT"
+        }),
+        "got: {err}"
+    );
 }
 
+#[cfg(not(all(feature = "rgb-validation", not(feature = "spv"))))]
 #[test]
 fn production_rejects_btc_relay_mode_none() {
     // `none` is only for a local stand with no BtcRelay.
@@ -367,18 +419,25 @@ fn production_rejects_btc_relay_mode_none() {
 }
 
 /// The default is `required`, so a production config boots without the env var.
+#[cfg(not(all(feature = "rgb-validation", not(feature = "spv"))))]
 #[test]
 fn production_defaults_to_btc_relay_required() {
     let ctx = release_bridge_ctx();
+    let config = BridgeConfig {
+        btc_relay_mode: BridgeConfig::default().btc_relay_mode,
+        ..pinned_config()
+    };
     let policy = with_role(SecurityPolicy::resolve(
         &ctx,
-        &pinned_config(),
+        &config,
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
         "e.test",
     ));
     match &policy {
-        SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
+        SecurityPolicy::Production(p) | SecurityPolicy::IndexerTrusted { policy: p, .. } => {
+            assert!(p.btc_relay_required)
+        }
         other => panic!("expected Production, got {other:?}"),
     }
     assert!(policy.assert_valid_for_build(&ctx).is_ok());
@@ -448,7 +507,14 @@ fn release_bridge_unconfigured_is_rejected_at_boot() {
     );
     // A misconfigured production build never boots.
     let err = p.assert_valid_for_build(&ctx).unwrap_err();
-    assert!(err.contains("Unconfigured"), "got: {err}");
+    assert!(
+        err.contains(if INDEXER_TRUSTED {
+            "public-signet policy"
+        } else {
+            "Unconfigured"
+        }),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -543,33 +609,27 @@ fn minimal_non_bridge_release_is_exempt() {
 
 #[test]
 fn allow_vanilla_psbt_tracks_the_btc_pins() {
-    let ctx = release_bridge_ctx();
+    let ctx = BuildContext {
+        signer_role: SignerRole::Mint,
+        ..release_bridge_ctx()
+    };
     let mut cfg = pinned_config();
     // Unset BTC pins: vanilla is off.
     let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
-    assert!(matches!(
-        p,
-        SecurityPolicy::Production(ProductionPolicy {
-            allow_vanilla_psbt: false,
-            ..
-        })
-    ));
+    assert!(!p.pinned().unwrap().allow_vanilla_psbt);
     // With the cap set, vanilla is on and attested.
     cfg.btc_max_total_sats = 100_000;
     let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
-    assert!(matches!(
-        p,
-        SecurityPolicy::Production(ProductionPolicy {
-            allow_vanilla_psbt: true,
-            ..
-        })
-    ));
+    assert!(p.pinned().unwrap().allow_vanilla_psbt);
 }
 
 #[test]
 fn gas_tx_rule_is_carried_into_the_commitment() {
     // The gas-tx pins change the commitment.
-    let ctx = release_bridge_ctx();
+    let ctx = BuildContext {
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
     let unpinned = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
@@ -592,7 +652,7 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
         "pinning the gas-tx rule must change the attested commitment"
     );
     match &pinned {
-        SecurityPolicy::Production(p) => {
+        SecurityPolicy::Production(p) | SecurityPolicy::IndexerTrusted { policy: p, .. } => {
             assert_eq!(p.gas_tx_allowed_to, Some([0x77; 20]));
             assert_eq!(p.gas_tx_max_gas_limit, 30_000);
             assert_eq!(p.gas_tx_max_fee_per_gas, 5_000);
@@ -606,7 +666,10 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
 #[test]
 fn gas_tx_value_ceiling_alone_changes_the_commitment() {
     // The LayerZero value cap is part of the attested gas-tx rule.
-    let ctx = release_bridge_ctx();
+    let ctx = BuildContext {
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
     let mut base = pinned_config();
     base.gas_tx_allowed_to = Some([0x77; 20]);
     base.gas_tx_max_gas_limit = 30_000;
@@ -628,7 +691,10 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
 #[test]
 fn unset_gas_tx_value_ceiling_commits_as_zero() {
     // `None` and `Some(0)` enforce the same rule, so they commit the same bytes.
-    let ctx = release_bridge_ctx();
+    let ctx = BuildContext {
+        signer_role: SignerRole::Burn,
+        ..release_bridge_ctx()
+    };
     let mut unset = pinned_config();
     unset.gas_tx_max_value_wei = None;
     let mut zero = pinned_config();
@@ -686,7 +752,7 @@ fn development_commitment_is_stable_and_distinct() {
 }
 
 #[test]
-fn with_kms_is_committed_in_production_only() {
+fn with_kms_is_committed_in_each_release_policy_only() {
     let pin = Some(KmsPin {
         key_arn: "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcdef0123456789abcdef"
             .into(),
@@ -703,7 +769,9 @@ fn with_kms_is_committed_in_production_only() {
     );
     let pinned = prod.clone().with_kms(pin.clone());
     assert_ne!(prod.commitment_bytes(), pinned.commitment_bytes());
-    assert!(matches!(pinned.attested(), AttestedPolicy::Production { kms, .. } if kms == pin));
+    assert!(
+        matches!(pinned.attested(), AttestedPolicy::Production { kms, .. } | AttestedPolicy::IndexerTrusted { kms, .. } if kms == pin)
+    );
     let dev = SecurityPolicy::Development {
         reason: DevReason::DebugBuild,
     };
@@ -714,7 +782,12 @@ fn with_kms_is_committed_in_production_only() {
 /// with an IAM role. An all-zero or unread PCR3 refuses `SetEndpoints`.
 #[test]
 fn a_cloning_role_needs_a_non_zero_pcr3_to_launch() {
-    for signer_role in [SignerRole::Burn, SignerRole::Combined] {
+    for signer_role in if INDEXER_TRUSTED {
+        &[SignerRole::Burn][..]
+    } else {
+        &[SignerRole::Burn, SignerRole::Combined][..]
+    } {
+        let signer_role = *signer_role;
         let ctx = BuildContext {
             signer_role,
             ..release_bridge_ctx()
@@ -738,10 +811,7 @@ fn a_cloning_role_needs_a_non_zero_pcr3_to_launch() {
 
         let role = with_role(resolve());
         assert!(role.assert_valid_for_build(&ctx).is_ok(), "{signer_role:?}");
-        let SecurityPolicy::Production(p) = role else {
-            panic!("expected Production")
-        };
-        assert_eq!(p.clone_peer_pcr3, Some(ROLE_PCR3));
+        assert_eq!(role.pinned().unwrap().clone_peer_pcr3, Some(ROLE_PCR3));
     }
 }
 
@@ -779,13 +849,11 @@ fn the_mint_signer_does_not_read_pcr3() {
         a_tls_pin(),
         "e.test",
     )
+    .with_endpoints_sha256([0x55; 32])
     .with_clone_peer_pcr3(|| panic!("the mint signer must not read PCR3"))
     .unwrap();
     assert!(p.assert_valid_for_build(&ctx).is_ok());
-    let SecurityPolicy::Production(pp) = &p else {
-        panic!("expected Production")
-    };
-    assert_eq!(pp.clone_peer_pcr3, None);
+    assert_eq!(p.pinned().unwrap().clone_peer_pcr3, None);
 }
 
 /// The clone-peer PCR3 is in the commitment: two instances under different
@@ -811,6 +879,9 @@ fn the_clone_peer_pcr3_is_attested() {
     assert!(matches!(
         a.attested(),
         AttestedPolicy::Production {
+            clone_peer_pcr3: Some(ROLE_PCR3),
+            ..
+        } | AttestedPolicy::IndexerTrusted {
             clone_peer_pcr3: Some(ROLE_PCR3),
             ..
         }
@@ -848,6 +919,7 @@ fn boot_policy(chain_id: u64, network: BitcoinNetwork) -> SecurityPolicy {
 }
 
 /// A test-network image must not carry mainnet EVM pins.
+#[cfg(not(all(feature = "rgb-validation", not(feature = "spv"))))]
 #[test]
 fn a_mainnet_evm_chain_requires_bitcoin_mainnet() {
     let ctx = release_bridge_ctx();
@@ -892,10 +964,114 @@ fn the_bitcoin_network_is_attested() {
         AttestedPolicy::Production {
             bitcoin_network: BitcoinNetwork::Signet,
             ..
+        } | AttestedPolicy::IndexerTrusted {
+            bitcoin_network: BitcoinNetwork::Signet,
+            ..
         }
     ));
     assert_ne!(
         signet.commitment_bytes(),
         boot_policy(421_614, BitcoinNetwork::Mainnet).commitment_bytes()
     );
+}
+
+#[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+#[test]
+fn indexer_policy_requires_public_signet_explicit_role_and_no_relay() {
+    let ctx = release_bridge_ctx();
+    for network in [
+        BitcoinNetwork::Mainnet,
+        BitcoinNetwork::Testnet3,
+        BitcoinNetwork::Testnet4,
+        BitcoinNetwork::SignetCustom,
+        BitcoinNetwork::Regtest,
+    ] {
+        let config = BridgeConfig {
+            bitcoin_network: network,
+            ..pinned_config()
+        };
+        let policy = SecurityPolicy::resolve(
+            &ctx,
+            &config,
+            EvmDataSource::PinnedTlsRpc,
+            a_tls_pin(),
+            "e.test",
+        );
+        assert!(policy.assert_valid_at_boot(&ctx).is_err(), "{network:?}");
+    }
+    let config = BridgeConfig {
+        btc_relay_mode: BtcRelayMode::Required,
+        ..pinned_config()
+    };
+    let policy = SecurityPolicy::resolve(
+        &ctx,
+        &config,
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
+        "e.test",
+    );
+    assert!(policy.assert_valid_at_boot(&ctx).is_err());
+
+    let combined = BuildContext {
+        signer_role: SignerRole::Combined,
+        ..ctx
+    };
+    let policy = SecurityPolicy::resolve(
+        &combined,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
+        "e.test",
+    );
+    assert!(policy.assert_valid_at_boot(&combined).is_err());
+}
+
+#[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+#[test]
+fn indexer_launch_requires_a_nonzero_public_endpoint_digest_and_matching_source() {
+    let ctx = release_bridge_ctx();
+    let policy = SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
+        "e.test",
+    )
+    .with_clone_peer_pcr3(|| Ok(ROLE_PCR3))
+    .unwrap();
+    policy.assert_valid_at_boot(&ctx).unwrap();
+    for candidate in [
+        policy.clone(),
+        policy.clone().with_endpoints_sha256([0; 32]),
+    ] {
+        let error = candidate.assert_valid_for_build(&ctx).unwrap_err();
+        assert!(error.contains("runtime endpoint identity"), "{error}");
+    }
+    let approved = policy.with_endpoints_sha256([0x55; 32]);
+    approved.assert_valid_for_build(&ctx).unwrap();
+    assert!(matches!(
+        approved.attested(),
+        AttestedPolicy::IndexerTrusted {
+            endpoints_sha256,
+            btc_source: BtcDataSource::IndexerTrusted,
+            ..
+        } if endpoints_sha256 == [0x55; 32]
+    ));
+
+    let SecurityPolicy::IndexerTrusted {
+        mut policy,
+        endpoints_sha256,
+    } = approved
+    else {
+        unreachable!();
+    };
+    policy.btc_source = BtcDataSource::SpvVerified;
+    let inconsistent = SecurityPolicy::IndexerTrusted {
+        policy,
+        endpoints_sha256,
+    };
+    assert!(inconsistent
+        .assert_valid_for_build(&ctx)
+        .unwrap_err()
+        .contains("wrong Bitcoin source"));
 }

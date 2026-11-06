@@ -25,9 +25,6 @@ fn config() -> BridgeConfig {
         funds_in_contract: [2; 20],
         token_contract: [3; 20],
         rgb_asset_id: "test-asset".into(),
-        endpoints_sha256: Some(utexo_bridge_enclave::config::chain_endpoints_sha256(
-            &endpoints(),
-        )),
         ..BridgeConfig::default()
     }
 }
@@ -227,13 +224,12 @@ fn indexer_only_cloning_entrypoints_match_production_custody() {
 }
 
 #[test]
-fn indexer_only_chain_endpoint_pin_refuses_substitution_without_installing_launch() {
-    let port = start();
+fn indexer_only_accepts_valid_runtime_endpoints_once() {
     let mutations: [fn(&mut SetEndpointsRequest); 6] = [
-        |r| r.electrum_url = "ssl://attacker.test:50002".into(),
-        |r| r.electrum_url = "tcp://electrum.test:50002".into(),
+        |r| r.electrum_url = "ssl://other-indexer.test:50002".into(),
+        |r| r.evm_rpc_path = "/v2/runtime-api-key".into(),
         |r| r.electrum_url = "ssl://electrum.test:50003".into(),
-        |r| r.evm_rpc_host = "attacker.test".into(),
+        |r| r.evm_rpc_host = "other-rpc.test".into(),
         |r| {
             r.evm_rpc_ca_der =
                 hex::decode(include_str!("fixtures/evm_rpc_tls/ca_b.der.hex").trim()).unwrap()
@@ -241,19 +237,19 @@ fn indexer_only_chain_endpoint_pin_refuses_substitution_without_installing_launc
         |r| r.evm_rpc_tls_port = 8443,
     ];
     for mutate in mutations {
+        let port = start();
         let mut request = endpoints();
         mutate(&mut request);
-        let Response::Error(error) = send(port, Request::SetEndpoints(request)) else {
-            panic!("an unapproved chain endpoint must be refused");
+        assert!(matches!(
+            send(port, Request::SetEndpoints(request)),
+            Response::SetEndpoints(_)
+        ));
+        assert!(health(port).endpoints_set);
+        let Response::Error(error) = send(port, Request::SetEndpoints(endpoints())) else {
+            panic!("runtime endpoints must remain fixed after launch");
         };
-        assert!(error.message.contains("ENDPOINTS_SHA256"), "{error:?}");
-        assert!(!health(port).endpoints_set);
+        assert!(error.message.contains("already set"), "{error:?}");
     }
-    assert!(matches!(
-        send(port, Request::SetEndpoints(endpoints())),
-        Response::SetEndpoints(_)
-    ));
-    assert!(health(port).endpoints_set);
 }
 
 #[test]
@@ -418,15 +414,54 @@ fn indexer_only_mint_reaches_persistent_seed_and_never_falls_back_to_entropy() {
 fn indexer_only_release_policy_never_claims_production_spv() {
     let mut build = BuildContext::current();
     build.debug_or_test = false;
+    let request = endpoints();
+    let endpoints = Endpoints::parse(&request).unwrap();
+    let (source, tls) = bootstrap::resolve_evm_data_source(endpoints.evm_rpc_tls.as_ref().unwrap());
+    let policy = SecurityPolicy::resolve(&build, &config(), source, tls, &endpoints.electrum_host)
+        .with_kms(endpoints.kms);
+    policy.assert_valid_at_boot(&build).unwrap();
+    assert!(
+        policy.assert_valid_for_build(&build).is_err(),
+        "launch endpoints and the cloning parent role are not bound yet"
+    );
+    let digest = utexo_bridge_enclave::config::chain_endpoints_sha256(&request);
+    let policy = policy
+        .with_endpoints_sha256(digest)
+        .with_clone_peer_pcr3(|| Ok([0x33; 48]))
+        .unwrap();
+    policy.assert_valid_for_build(&build).unwrap();
+    assert!(matches!(
+        policy.attested(),
+        AttestedPolicy::IndexerTrusted { endpoints_sha256, .. } if endpoints_sha256 == digest
+    ));
+    assert!(matches!(policy, SecurityPolicy::IndexerTrusted { .. }));
+
+    for source in [
+        EvmDataSource::Disabled,
+        EvmDataSource::RawRpc,
+        EvmDataSource::PinnedTlsRpc,
+    ] {
+        let invalid = SecurityPolicy::resolve(&build, &config(), source, None, "electrum.test")
+            .with_endpoints_sha256(digest)
+            .with_clone_peer_pcr3(|| Ok([0x33; 48]))
+            .unwrap();
+        assert!(invalid.assert_valid_for_build(&build).is_err());
+    }
+    let zero_digest = policy.with_endpoints_sha256([0; 32]);
+    assert!(zero_digest.assert_valid_for_build(&build).is_err());
+}
+
+#[test]
+fn indexer_only_debug_policy_does_not_claim_a_release_attestation() {
+    let build = BuildContext::current();
     let policy = SecurityPolicy::resolve(&build, &config(), EvmDataSource::Disabled, None, "");
     assert!(matches!(
         policy,
         SecurityPolicy::Development {
-            reason: DevReason::IndexerTrusted
+            reason: DevReason::DebugBuild
         }
     ));
     assert_eq!(policy.attested(), AttestedPolicy::Development);
-    policy.assert_valid_at_boot(&build).unwrap();
     policy.assert_valid_for_build(&build).unwrap();
 }
 
@@ -459,11 +494,6 @@ fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
     let mut cfg = config();
     cfg.spv_min_confirmations = 0;
     invalid.push(cfg);
-    for pin in [None, Some([0; 32])] {
-        let mut cfg = config();
-        cfg.endpoints_sha256 = pin;
-        invalid.push(cfg);
-    }
     for cfg in invalid {
         assert!(cfg.validate_indexer_only().is_err());
         let build = BuildContext::current();

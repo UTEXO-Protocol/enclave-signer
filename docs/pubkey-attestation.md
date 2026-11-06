@@ -13,6 +13,9 @@ where a private key was first created.
 
 The policy covers selected settings. These include signer role, bridge pins,
 plain-BTC permission, gas limits, data sources, and mint KMS configuration.
+`Production` uses SPV. The public-Signet `IndexerTrusted` policy uses the
+approved TLS indexer for Bitcoin confirmations and requires explicit verifier
+opt-in. Both policies commit the full signing rules. `Development` does not.
 The enclave resolves the policy once, at `SetEndpoints`. The verifier compares
 its expected policy with the authenticated response.
 
@@ -87,11 +90,11 @@ populates them as:
 | `user_data`  | `sha256(canonical_bundle \|\| policy_commitment)` — 32-byte commitment over the key bundle *and* the resolved security policy |
 | `nonce`      | the 32-byte nonce supplied by the verifier                                                 |
 
-A lightweight verifier can stop at `public_key` (e.g. an EVM contract that
-only cares about the signing address). A thorough verifier rebuilds the
-canonical bundle **and the expected security policy** and checks `user_data` to
-confirm the BTC keys, xpubs, and fingerprint were not swapped by the parent host
-process *and* that the enclave's posture matches what was expected.
+Checking `public_key` alone binds that key to the document, but does not
+check the full key bundle or the expected policy. Signer approval must also
+rebuild the canonical bundle and expected policy, then check `user_data`.
+This checks that the parent did not replace any bundle field and that the
+attested policy matches the approved rules.
 
 ### Canonical bundle encoding
 
@@ -135,9 +138,11 @@ pass `--expect-chain-id`, `--expect-bridge-contract` and/or
 `--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
 exactly those pins, so onboarding can reject a valid attestation of the *wrong*
 chain, contract or RGB asset. When omitted, the pins are authenticated but not
-compared. A successful run prints each pin, and every other verified field, as
-one `name: value` line. The names are the paths of the exported bundle. Compare
-the values in that output or in the bundle.
+compared for the SPV `Production` policy. `IndexerTrusted` requires all three
+pins to be supplied, with a nonempty asset ID. A successful run prints every
+verified field as one `name: value` line. The names are the paths of the
+exported bundle. Bundle metadata is not a source of trusted expectations;
+approve the measurements and deployment values independently.
 
 The verifier MUST use the same field set, the same order, and the same
 length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
@@ -157,13 +162,12 @@ both the enclave and every verifier share so the bytes are identical.
 ```
 policy_commitment =
     u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
-    // Production (release, fully-pinned bridge signer):
-    u8(0x01)                                        // production discriminant
+    u8(policy_kind)                                // 0x01 Production | 0x02 IndexerTrusted
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
-    u8(btc_source)                                  // 1 = SPV-verified
+    u8(btc_source)                                  // 1 = SPV (Production) | 2 = indexer (IndexerTrusted)
     chain_id_be8
     u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest | 4 testnet4 | 5 signetcustom
     bridge_contract(20)
@@ -187,19 +191,33 @@ policy_commitment =
       || u8(address_present) [|| expected_evm_address(20)]
     u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
       [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
-    // Development (debug/test/dev-feature/non-bridge/unpinned build):
-    u8(0x00)                                        // development discriminant
+    // Only IndexerTrusted appends this field:
+    endpoints_sha256(32)                            // public endpoint identity; no RPC path or KMS fields
 ```
 
-V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
-and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
-in the mint image).
+The existing V1 `Production` encoding is unchanged: kind `0x01`, Bitcoin
+source `1`, and no endpoint digest at the end. `IndexerTrusted` uses kind
+`0x02`, Bitcoin source `2`, the same fields in the same order, then the 32-byte
+endpoint digest after the clone-peer PCR3 option. The decoder rejects a
+policy kind with the wrong Bitcoin source. `Development` is exactly two bytes:
+`[0x01, 0x00]`.
+
+V1 commits to `evm_finality_tag` (`EVM_FINALITY_TAG`) and Bitcoin witness
+depth (`SPV_MIN_CONFIRMATIONS`). The mint and burn image recipes, including
+the public-Signet stage profile, use `finalized` and depth 3. Raw configuration
+and the combined image default to `safe` and depth 6. Use the values from the
+approved image. Burn checks witness depth; mint commits it without checking it.
 Every EVM `FundsIn` receipt must be at or below the selected head, with its
 block hash matching the canonical block at that height. The enclave
 revalidates the selected head snapshot to detect a reorg. The enclave trusts
-the pinned RPC for the correctness of these responses. Production verification
+the pinned RPC for the correctness of these responses. Real policy verification
 requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
-value; a production enclave refuses `latest` at boot, and so does the verifier.
+value. Both release policies refuse `latest`, and so does the verifier.
+`IndexerTrusted` is restricted to public Signet, a mint or burn role, real
+attestation, TLS endpoints, and `BTC_RELAY_MODE=none`. It retains the full
+contract, asset, finality, gas, custody and clone-peer checks. A mint signer
+requires KMS custody; a burn signer does not accept a KMS pin. It provides no
+SPV claim: the indexer supplies the Bitcoin confirmation evidence.
 
 `clone_peer_pcr3` binds clone peers to the parent instance IAM role (#270). A
 verifier does not configure it: it takes PCR3 from the verified document (the
@@ -210,19 +228,22 @@ IAM role therefore fails verification, and does not start.
 Use enclave images and verifiers from the same release with approved EIF
 measurements. Clone peers must have matching policy commitments.
 
-`bitcoin_network` is `BITCOIN_NETWORK`, the network of the SPV header chain and
-of the accepted consignments. A verifier declares it (`--expect-bitcoin-network`,
-default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
-`42161`) with another Bitcoin network does not boot. The enclave reads the
-attested value with the same parser as the SPV chain, and an unknown name does
-not boot.
+`bitcoin_network` is `BITCOIN_NETWORK`, the network of the accepted
+consignments and, for `Production`, the SPV header chain. A verifier declares
+it with `--expect-bitcoin-network` (default `bitcoin`). A `Production` policy
+pinned to EVM chain `1` or `42161` with another Bitcoin network does not boot.
+`IndexerTrusted` explicitly permits public Signet with the approved EVM chain;
+the stage profile uses Arbitrum One (`42161`). Approve its exact contracts and
+asset as well as its indexer trust model. Real attestation does not turn
+Signet evidence into Bitcoin-mainnet evidence or prove the deployment safe
+for production assets. Unknown Bitcoin network names are refused.
 
-The tuple omits the sats values, the Electrum/Esplora
-URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
-release image accepts only `ssl://` or `https://` for the Electrum/Esplora
-URL, so PCR0 covers it. Only a dev build (and thus a development policy)
-accepts `tcp://` or `http://`. Matching policies do not prove specific
-endpoint ports.
+The `Production` tuple has the indexer host and EVM RPC host/CA hash, but
+omits the indexer URL scheme and ports. A release image accepts only `ssl://`
+or `https://` indexer URLs; a development build can accept plaintext.
+Matching `Production` policies do not prove specific endpoint ports.
+`IndexerTrusted` additionally commits the public endpoint digest below,
+which binds the exact indexer URL, EVM RPC host, TLS port and CA DER bytes.
 
 The sats values are image env, so PCR0 measures them. The policy does not
 commit `BTC_MAX_UNOWNED_SATS`, `RGB_MAX_UNOWNED_SATS` or `MINT_WITNESS_SAT`,
@@ -236,8 +257,8 @@ image; the operator sets them and the KMS values once at launch
 the set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
 that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
-A production enclave commits the full production tuple. A dev/mock enclave
-commits only `[version, 0x00]`, without individual policy settings. The response
+A `Production` or `IndexerTrusted` enclave commits its full tuple. A dev/mock
+enclave commits only `[version, 0x00]`, without individual policy settings. The response
 contains this encoding in `attested_policy`. The verifier authenticates and
 decodes those bytes.
 It then constructs the expected policy from its own settings and the authenticated
@@ -258,6 +279,52 @@ enforces (no non-zero value is signable) — so "unpinned" is itself attested, t
 same way an unset destination commits as all-zero. `None` and `Some(0)` therefore
 produce identical bytes; one enforced rule cannot yield two attestations.
 
+### Public endpoint digest and credential rotation
+
+`IndexerTrusted.endpoints_sha256` is:
+
+```
+sha256(b"utexo/chain-endpoints/v2\0" || protobuf(public_endpoints))
+```
+
+`public_endpoints` is the `SetEndpointsRequest` with the entire `evm_rpc_path`
+and all KMS fields cleared. The remaining fields are the exact `electrum_url`,
+`evm_rpc_host`, `evm_rpc_tls_port` and `evm_rpc_ca_der` bytes. The enclave computes
+this digest from the validated launch request; the host cannot substitute an
+opaque digest. `set-endpoints --print-sha256` computes the same value without
+contacting an enclave.
+
+Approve these public values independently. Keep the exact CA DER bytes used
+for the calculation on the launch hosts. An RPC API key stored in the path is
+not needed to calculate or publish the digest. For example:
+
+```bash
+env -u EVM_RPC_PATH_FILE utexo-bridge-parent-cli set-endpoints --print-sha256 \
+  --electrum-url ssl://electrum.example:50002 \
+  --evm-rpc-host rpc.example \
+  --evm-rpc-tls-port 443 \
+  --evm-rpc-ca-der-file approved-rpc-ca.der
+```
+
+At launch, supply the provider's absolute RPC path through a restricted file
+and `EVM_RPC_PATH_FILE`. It defaults to `/` when omitted. The path accepts only
+absolute ASCII paths; authorities, queries, fragments, percent escapes and
+dot segments are refused. The file is read at launch. The path is not baked
+into the EIF and is excluded from the policy digest and public bundle.
+
+Rotating only the path/API key leaves the endpoint digest, attested policy
+and EIF measurements unchanged. Restart the enclave with the new restricted
+file because `SetEndpoints` runs once per boot. Changing the public host, CA,
+port or indexer URL requires approval of the new runtime policy and digest;
+it does not require a member-specific EIF. A changed mint digest changes the
+KMS encryption context. Existing ciphertext needs a trusted operator to
+rewrap it from the old context to the approved new one with KMS `ReEncrypt`
+on the same key, without exporting plaintext. Updating the key policy alone
+is insufficient. The first move from the old four-entry stage context to the
+new endpoint-bound context also needs this migration. The signer role must
+not receive `ReEncrypt` permission. Rotating the API key in the path leaves
+the context unchanged and needs no rewrap. See [KMS persistence](kms-persistence.md).
+
 ## Where the expected PCRs come from
 
 The attestation document contains signed PCR values. A verifier must obtain
@@ -266,6 +333,14 @@ its expected values from a trusted source outside that response.
 PCR0 measures the image. PCR1 measures the kernel and bootstrap. PCR2 measures
 the application. Rebuild the EIF to determine whether a change affects them.
 A file checksum and a PCR measurement are different values.
+
+Federation members using the same release, role and build profile use the
+same public EIF and PCR0/1/2. They can choose different approved RPC providers
+and credentials at launch. Those runtime choices change `user_data` policy
+values where applicable, not the EIF measurements. Mint and burn images, and
+SPV and indexer profiles, have different build inputs and must use their own
+approved measurements. PCR3 measures the parent IAM role; it can differ
+between members even when PCR0/1/2 match.
 
 This repository publishes measurements with EIF artifacts. Verify those
 artifacts before you use their PCRs. A trusted configuration or registry can
@@ -292,7 +367,9 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
    `Sig_structure1 = ["Signature1", protected, h"", payload]`. Per RFC 8152
    §8.1 the COSE signature is raw `r||s` (96 bytes for P-384), not DER.
 5. Reject all-zero PCR0/1/2. Compare each PCR with its expected value, byte for byte.
-   The unsafe `allow-debug-pcrs` feature disables only the all-zero rejection.
+   The unsafe `allow-debug-pcrs` feature disables the shared verifier's all-zero
+   rejection. `IndexerTrusted` still requires each of PCR0/1/2 to be nonzero
+   in the parent verifier; it never accepts Nitro debug measurements.
 6. Nonce check: `doc.nonce == nonce_sent`.
 7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
 8. Commitment check: confirm
@@ -306,7 +383,7 @@ request timing. Do not reuse nonces.
 
 If all eight checks pass, the bridge's EVM address (`keccak256(evm_uncompressed_pub)[12..]`)
 is bound to the running TEE measurement *and* the enclave's attested posture
-equals the expected production policy.
+equals the explicitly expected `Production` or `IndexerTrusted` policy.
 
 ## Verification recipe (with `attest-verify`)
 
@@ -314,7 +391,7 @@ The `attest-verify` CLI in this repo runs the full recipe. Configure the client
 CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
 `observer` certificate is sufficient for verification.
 To check a published bundle offline (`--from-file`), see
-[Verify a burn signer](verify-a-signer.md).
+[Verify a signer](verify-a-signer.md).
 
 ```bash
 # Production verification (against a real Nitro enclave). By default it expects a
@@ -331,9 +408,9 @@ attest-verify \
     --expect-signer-role burn \
     --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
-    --expect-evm-finality-tag safe \
+    --expect-evm-finality-tag finalized \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    --expect-spv-min-confirmations 6 \
+    --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
@@ -355,8 +432,8 @@ attest-verify \
 # Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
 
 # Deployment pins: compare the attested chain/contract/asset against the
-# operator's intended deployment (otherwise they are authenticated but not
-# compared). Verification fails on any mismatch:
+# approved deployment. These flags are required for indexer trust and optional
+# for SPV; omitted SPV pins are authenticated but not compared:
 # --expect-chain-id <u64> --expect-bridge-contract <hex20> \
 # --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
 # --expect-bitcoin-network <bitcoin|testnet3|testnet4|signet|signetcustom|regtest>   # default bitcoin
@@ -365,7 +442,7 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-finality-tag safe \
+    --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
@@ -378,6 +455,16 @@ attest-verify --endpoint https://parent.example:50051 \
 # enable GRPC_ALLOW_INSECURE_LOOPBACK=true on the loopback-bound Parent.
 attest-verify --endpoint http://127.0.0.1:50051 --mock
 ```
+
+For public-Signet indexer trust, use the same full verification command with
+`--expect-btc-source indexer --expect-endpoints-sha256 <approved-public-digest>`
+and `--expect-bitcoin-network signet`. Supply the independently approved chain,
+bridge and nonempty asset pins, and the correct mint or burn role. These flags
+are required for both live and offline checks. The default `spv` expectation
+rejects `IndexerTrusted`; an indexer expectation rejects `Production` and
+`Development`. `--mock` and `--allow-development-policy` cannot approve this
+stage policy. A complete offline example is in
+[the signer guide](verify-a-signer.md#verify-a-public-signet-indexer-signer).
 
 Exit codes:
 
@@ -407,7 +494,15 @@ all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
 inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
 verified document, as described above.
 
-`ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
+For an indexer release, `verify-launch` reads `BTC_RELAY_MODE=none` and
+`BITCOIN_NETWORK=signet` from the approved measured `IMAGE-ENV.json`. It requires
+a mint or burn role and computes the expected public digest from the approved
+launch endpoints. Other `BTC_RELAY_MODE=none` combinations are refused.
+`export-attestation` supports the same full policy for mint and burn after
+keys are loaded.
+
+`ENCLAVE_DEBUG_MODE=1` skips the deploy launch check because the PCRs are zero.
+That path does not approve a real `IndexerTrusted` release.
 
 ## Threat model
 
@@ -430,7 +525,8 @@ Defended:
 - **Posture downgrade** — `user_data` also commits to the resolved
   security policy (signing modes, pins, attestation mode, data sources). An
   enclave that shipped with a weaker posture than expected — plain-BTC signing
-  enabled, a different EVM source, or a dev build — fails
+  enabled, a different EVM source, indexer trust where SPV was expected, or a
+  dev build — fails
   the commitment match against the verifier's expected policy.
 - **Fork to a different enclave image** — PCR mismatch on verify.
 - **Unapproved image** — verification rejects measurements outside the expected

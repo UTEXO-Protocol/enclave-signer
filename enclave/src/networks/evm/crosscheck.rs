@@ -16,7 +16,8 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map, which the burn path fills from verified SPV proofs only.
+/// ordinal map, populated from SPV proofs or the approved indexer in the
+/// no-SPV public-Signet profile.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -287,13 +288,14 @@ struct ProofBlock {
 /// Step 4 depends on the operator [`BtcRelayMode`] (`BTC_RELAY_MODE`):
 ///
 /// - [`Required`](BtcRelayMode::Required): the default, and the only mode a
-///   production policy boots with. Both words must match. A zero word is
+///   Production/SPV policy boots with. Both words must match. A zero word is
 ///   refused, because the bridge sends zeros only when it has no relay.
-/// - [`None`](BtcRelayMode::None): a local stand with no BtcRelay. Both words
-///   must be zero, and no compare occurs. A non-zero word means the bridge
+/// - [`None`](BtcRelayMode::None): an SPV development stand with no BtcRelay.
+///   Both words must be zero, and no compare occurs. A non-zero word means the bridge
 ///   and the enclave disagree about the relay, so it is refused.
 ///
-/// Steps 1-3 run in both modes. No build flag affects the choice.
+/// Steps 1-3 run in both modes of this SPV check. The no-SPV profile does not
+/// call this function; it requires an entirely empty release proof.
 ///
 /// Order is cheapest first. The calldata decode and `latest` checks run
 /// before the anchor resolution, which reads the chain and verifies a Merkle

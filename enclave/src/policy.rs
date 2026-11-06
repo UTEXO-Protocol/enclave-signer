@@ -4,7 +4,8 @@
 //! [`BridgeConfig`]. It is:
 //!
 //!   * fail-closed: a release `rgb-validation` build without a valid
-//!     [`SecurityPolicy::Production`] does not boot or launch
+//!     [`SecurityPolicy::Production`] or [`SecurityPolicy::IndexerTrusted`]
+//!     does not boot or launch
 //!     ([`SecurityPolicy::assert_valid_at_boot`],
 //!     [`SecurityPolicy::assert_valid_for_build`]);
 //!   * attested: the attestation `user_data` commits
@@ -34,13 +35,19 @@ const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature =
 pub enum SecurityPolicy {
     /// A fully pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
+    /// Public Signet with indexer-trusted Bitcoin confirmations and a full
+    /// runtime policy. The digest is derived from validated launch endpoints.
+    IndexerTrusted {
+        policy: ProductionPolicy,
+        endpoints_sha256: Option<[u8; 32]>,
+    },
     /// Not a production bridge signer: a debug build, a dev feature, a
     /// non-bridge build or an unpinned config. The reason goes into logs and the
     /// fail-closed panic.
     Development { reason: DevReason },
 }
 
-/// The pins, signing modes and data sources of a production bridge signer.
+/// The pins, signing modes and data sources shared by the two committed policies.
 /// The attestation `user_data` commits all of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductionPolicy {
@@ -62,8 +69,8 @@ pub struct ProductionPolicy {
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
     pub spv_min_confirmations: u32,
     /// `fundsOut` proofs must carry BtcRelay commitments (`BTC_RELAY_MODE=required`).
-    /// [`check_invariants`](Self::check_invariants) refuses `false`, so
-    /// [`AttestedPolicy`] has no field for it.
+    /// Production requires this; IndexerTrusted requires it to be off. The
+    /// policy kind and Bitcoin source therefore commit this rule.
     pub btc_relay_required: bool,
     /// If plain-BTC (vanilla, create_utxo) signing is allowed
     /// ([`BridgeConfig::allows_vanilla_btc`]). Default `false`.
@@ -81,7 +88,7 @@ pub struct ProductionPolicy {
     /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
     /// [`EvmDataSource::PinnedTlsRpc`].
     pub evm_rpc_tls: Option<EvmRpcTlsPin>,
-    /// Bitcoin anchor-verification source. Always SPV in a production build.
+    /// Bitcoin anchor source: SPV for Production, indexer for public Signet.
     pub btc_source: BtcDataSource,
     /// Allowed gas-tx (`SignRawDigest`) destination (`GAS_TX_ALLOWED_TO`).
     /// `None` fails the gas path closed and is attested as all-zero.
@@ -109,8 +116,6 @@ pub struct ProductionPolicy {
 /// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
-    /// Bitcoin finality is trusted from the indexer.
-    IndexerTrusted,
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
     /// `mock-attestation` feature: zero-PCR attestation documents.
@@ -160,9 +165,9 @@ impl SecurityPolicy {
     /// Resolve the policy from the build context, the [`BridgeConfig`] and the
     /// launch endpoints.
     ///
-    /// Only a release bridge build with all three pins set gives
-    /// [`SecurityPolicy::Production`]. All other inputs give
-    /// [`SecurityPolicy::Development`].
+    /// A release bridge build resolves to Production/SPV or the explicit
+    /// IndexerTrusted public-Signet policy. Debug and dev-feature builds keep
+    /// Development; they cannot pass a real release-policy expectation.
     pub fn resolve(
         ctx: &BuildContext,
         bridge: &BridgeConfig,
@@ -170,12 +175,8 @@ impl SecurityPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
     ) -> Self {
-        if ctx.rgb_validation && INDEXER_TRUSTED {
-            return Self::dev(if bridge.validate_indexer_only().is_ok() {
-                DevReason::IndexerTrusted
-            } else {
-                DevReason::Unconfigured
-            });
+        if ctx.rgb_validation && INDEXER_TRUSTED && bridge.validate_indexer_only().is_err() {
+            return Self::dev(DevReason::Unconfigured);
         }
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
@@ -199,7 +200,7 @@ impl SecurityPolicy {
         // pins. `SignBtc` is mint side, the gas tx is burn side.
         let signs_plain_btc = ctx.signer_role != SignerRole::Burn;
         let signs_gas_tx = ctx.signer_role != SignerRole::Mint;
-        Self::Production(ProductionPolicy {
+        let policy = ProductionPolicy {
             chain_id: bridge.chain_id,
             bitcoin_network: bridge.bitcoin_network,
             bridge_contract: bridge.bridge_contract,
@@ -215,8 +216,11 @@ impl SecurityPolicy {
             evm_source,
             electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
-            // RGB builds without SPV returned the Development policy above.
-            btc_source: BtcDataSource::SpvVerified,
+            btc_source: if INDEXER_TRUSTED {
+                BtcDataSource::IndexerTrusted
+            } else {
+                BtcDataSource::SpvVerified
+            },
             // The same pins that `validate_gas_tx_request` enforces, so the
             // attested and the enforced rules agree.
             gas_tx_allowed_to: bridge.gas_tx_allowed_to.filter(|_| signs_gas_tx),
@@ -238,10 +242,38 @@ impl SecurityPolicy {
             },
             kms: None,
             clone_peer_pcr3: None,
-        })
+        };
+        if INDEXER_TRUSTED {
+            Self::IndexerTrusted {
+                policy,
+                endpoints_sha256: None,
+            }
+        } else {
+            Self::Production(policy)
+        }
     }
 
-    /// Set the clone-peer PCR3 of a production policy whose role clones.
+    /// Bind the public endpoint identity after parsing the launch request.
+    /// The host cannot supply an opaque digest in place of the actual inputs.
+    pub fn with_endpoints_sha256(mut self, digest: [u8; 32]) -> Self {
+        if let Self::IndexerTrusted {
+            endpoints_sha256, ..
+        } = &mut self
+        {
+            *endpoints_sha256 = Some(digest);
+        }
+        self
+    }
+
+    /// The fully committed pins, for either real-attestation trust mode.
+    pub fn pinned(&self) -> Option<&ProductionPolicy> {
+        match self {
+            Self::Production(p) | Self::IndexerTrusted { policy: p, .. } => Some(p),
+            Self::Development { .. } => None,
+        }
+    }
+
+    /// Set the clone-peer PCR3 of a fully committed policy whose role clones.
     /// `read_pcr3` reads this enclave's own PCR3 (NSM); it runs only for such a
     /// policy. A development policy, or a mint signer (cloning is off), does
     /// not change.
@@ -249,7 +281,7 @@ impl SecurityPolicy {
         mut self,
         read_pcr3: impl FnOnce() -> crate::error::Result<[u8; 48]>,
     ) -> crate::error::Result<Self> {
-        if let Self::Production(p) = &mut self {
+        if let Self::Production(p) | Self::IndexerTrusted { policy: p, .. } = &mut self {
             if p.signer_role.clones() {
                 p.clone_peer_pcr3 = Some(read_pcr3()?);
             }
@@ -257,10 +289,10 @@ impl SecurityPolicy {
         Ok(self)
     }
 
-    /// Set the KMS pin of a production policy. A development policy does not
+    /// Set the KMS pin of either fully committed policy. Development does not
     /// change.
     pub fn with_kms(mut self, kms: Option<KmsPin>) -> Self {
-        if let Self::Production(p) = &mut self {
+        if let Self::Production(p) | Self::IndexerTrusted { policy: p, .. } = &mut self {
             p.kms = kms;
         }
         self
@@ -272,34 +304,45 @@ impl SecurityPolicy {
 
     /// The commitment form folded into attestation `user_data`.
     pub fn attested(&self) -> AttestedPolicy {
-        match self {
-            Self::Production(p) => AttestedPolicy::Production {
-                allow_vanilla_psbt: p.allow_vanilla_psbt,
-                signer_role: p.signer_role,
-                attestation: p.attestation,
-                evm_source: p.evm_source,
-                btc_source: p.btc_source,
-                chain_id: p.chain_id,
-                bitcoin_network: p.bitcoin_network,
-                bridge_contract: p.bridge_contract,
-                rgb_asset_id: p.rgb_asset_id.clone(),
-                funds_in_contract: p.funds_in_contract,
-                evm_finality_tag: p.evm_finality_tag,
-                token_contract: p.token_contract,
-                spv_min_confirmations: p.spv_min_confirmations,
-                electrum_host: p.electrum_host.clone(),
-                evm_rpc_tls: p.evm_rpc_tls.clone(),
-                // Unset commits as all-zero, which the gas path never accepts.
-                gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
-                gas_tx_max_gas_limit: p.gas_tx_max_gas_limit,
-                gas_tx_max_fee_per_gas: p.gas_tx_max_fee_per_gas,
-                // Unset commits as 0, which is the enforced rule.
-                gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
-                gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
-                kms: p.kms.clone(),
-                clone_peer_pcr3: p.clone_peer_pcr3,
+        let Some(p) = self.pinned() else {
+            return AttestedPolicy::Development;
+        };
+        let policy = AttestedPolicy::Production {
+            allow_vanilla_psbt: p.allow_vanilla_psbt,
+            signer_role: p.signer_role,
+            attestation: p.attestation,
+            evm_source: p.evm_source,
+            btc_source: match self {
+                Self::IndexerTrusted { .. } => BtcDataSource::SpvVerified,
+                _ => p.btc_source,
             },
-            Self::Development { .. } => AttestedPolicy::Development,
+            chain_id: p.chain_id,
+            bitcoin_network: p.bitcoin_network,
+            bridge_contract: p.bridge_contract,
+            rgb_asset_id: p.rgb_asset_id.clone(),
+            funds_in_contract: p.funds_in_contract,
+            evm_finality_tag: p.evm_finality_tag,
+            token_contract: p.token_contract,
+            spv_min_confirmations: p.spv_min_confirmations,
+            electrum_host: p.electrum_host.clone(),
+            evm_rpc_tls: p.evm_rpc_tls.clone(),
+            // Unset commits as all-zero, which the gas path never accepts.
+            gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
+            gas_tx_max_gas_limit: p.gas_tx_max_gas_limit,
+            gas_tx_max_fee_per_gas: p.gas_tx_max_fee_per_gas,
+            // Unset commits as 0, which is the enforced rule.
+            gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
+            gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
+            kms: p.kms.clone(),
+            clone_peer_pcr3: p.clone_peer_pcr3,
+        };
+        match self {
+            Self::IndexerTrusted {
+                endpoints_sha256, ..
+            } => policy
+                .into_indexer_trusted(endpoints_sha256.unwrap_or([0; 32]))
+                .expect("the base policy has the Production/SPV layout"),
+            _ => policy,
         }
     }
 
@@ -312,12 +355,26 @@ impl SecurityPolicy {
     /// Require a valid policy for this build before accepting `SetEndpoints`.
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
-        // resolve() produces IndexerTrusted only after checking network/pins.
         if ctx.rgb_validation && INDEXER_TRUSTED {
             return match self {
+                Self::IndexerTrusted {
+                    policy,
+                    endpoints_sha256,
+                } => {
+                    if policy.btc_source != BtcDataSource::IndexerTrusted {
+                        return Err("indexer-trusted policy has the wrong Bitcoin source".into());
+                    }
+                    policy.check_invariants()?;
+                    if endpoints_sha256.is_none_or(|hash| hash == [0; 32]) {
+                        return Err(
+                            "indexer-trusted policy has no runtime endpoint identity".into()
+                        );
+                    }
+                    Ok(())
+                }
                 Self::Development {
-                    reason: DevReason::IndexerTrusted,
-                } => Ok(()),
+                    reason: DevReason::DebugBuild,
+                } if ctx.debug_or_test => Ok(()),
                 _ => Err("RGB validation without SPV requires a valid public-signet policy".into()),
             };
         }
@@ -325,7 +382,13 @@ impl SecurityPolicy {
             return Ok(());
         }
         match self {
-            Self::Production(p) => p.check_invariants(),
+            Self::Production(p) if p.btc_source == BtcDataSource::SpvVerified => {
+                p.check_invariants()
+            }
+            Self::Production(_) => Err("Production requires the SPV Bitcoin source".into()),
+            Self::IndexerTrusted { .. } => {
+                Err("an SPV build cannot use an indexer-trusted policy".into())
+            }
             Self::Development { reason } => Err(format!(
                 "release rgb-validation (bridge-signing) build resolved to a non-production \
                  security policy ({reason:?}); refusing to boot. A production bridge enclave must \
@@ -339,7 +402,9 @@ impl SecurityPolicy {
     /// checks. The endpoints come at launch.
     pub fn assert_valid_at_boot(&self, ctx: &BuildContext) -> Result<(), String> {
         match self {
-            Self::Production(p) if !ctx.debug_or_test && ctx.rgb_validation => {
+            Self::Production(p) | Self::IndexerTrusted { policy: p, .. }
+                if !ctx.debug_or_test && ctx.rgb_validation =>
+            {
                 p.check_build_invariants()
             }
             _ => self.assert_valid_for_build(ctx),
@@ -348,8 +413,8 @@ impl SecurityPolicy {
 }
 
 impl ProductionPolicy {
-    /// Invariants that must hold before a production enclave signs. Bitcoin
-    /// anchors are SPV-verified and the EVM RPC is authenticated.
+    /// Invariants that must hold before either committed policy signs. The
+    /// Bitcoin source selects SPV or the public-Signet indexer rules.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.check_build_invariants()?;
         if self.electrum_host.is_empty() {
@@ -357,6 +422,11 @@ impl ProductionPolicy {
         }
         // Plaintext lets the host forge a receipt. `Disabled` fails closed per
         // request.
+        if self.btc_source == BtcDataSource::IndexerTrusted
+            && self.evm_source != EvmDataSource::PinnedTlsRpc
+        {
+            return Err("indexer-trusted policy requires the pinned TLS EVM source".into());
+        }
         if self.evm_source == EvmDataSource::RawRpc {
             return Err(
                 "production policy reads the EVM RPC over plaintext; plaintext is for dev and \
@@ -400,7 +470,8 @@ impl ProductionPolicy {
         }
         // A test-network image with mainnet EVM pins would sign real releases
         // for test-network burns.
-        if MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id)
+        if self.btc_source == BtcDataSource::SpvVerified
+            && MAINNET_EVM_CHAIN_IDS.contains(&self.chain_id)
             && self.bitcoin_network != BitcoinNetwork::Mainnet
         {
             return Err(format!(
@@ -432,10 +503,10 @@ impl ProductionPolicy {
                     .into(),
             );
         }
-        if !self.btc_relay_required {
+        if self.btc_source == BtcDataSource::SpvVerified && !self.btc_relay_required {
             return Err(format!(
                 "production policy must verify BtcRelay commitments on fundsOut: \
-                 {}=none is only for a local stand that has no BtcRelay",
+                 {}=none is reserved for the public-Signet indexer policy or local development",
                 crate::config::BTC_RELAY_MODE_ENV
             ));
         }
@@ -444,10 +515,12 @@ impl ProductionPolicy {
                 "production policy must use real (NSM) attestation, not the mock path".into(),
             );
         }
-        if self.btc_source != BtcDataSource::SpvVerified {
-            return Err(
-                "production policy must anchor Bitcoin witness txs via the SPV header chain".into(),
-            );
+        if self.btc_source == BtcDataSource::IndexerTrusted
+            && (self.bitcoin_network != BitcoinNetwork::Signet
+                || self.btc_relay_required
+                || !matches!(self.signer_role, SignerRole::Mint | SignerRole::Burn))
+        {
+            return Err("indexer-trusted policy requires public Signet, a mint/burn role and BTC_RELAY_MODE=none".into());
         }
         Ok(())
     }

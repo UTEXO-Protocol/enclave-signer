@@ -134,11 +134,14 @@ pub struct PersistentSeed {
     config: KmsConfig,
     broker: SeedBroker,
     expected_evm_address: Option<[u8; 20]>,
+    endpoint_digest: Option<[u8; 32]>,
 }
 
 impl PersistentSeed {
-    /// Build the source from the KMS pin set at launch.
-    pub fn new(pin: &KmsPin) -> Result<Self> {
+    /// Build the source from the KMS pin and public endpoint digest resolved
+    /// inside the enclave at launch. The digest excludes RPC credentials.
+    pub fn new(pin: &KmsPin, endpoint_digest: Option<[u8; 32]>) -> Result<Self> {
+        crate::kms::validate_endpoint_digest(endpoint_digest)?;
         let config = KmsConfig {
             key_arn: pin.key_arn.clone(),
             region: pin.region.clone(),
@@ -154,6 +157,7 @@ impl PersistentSeed {
             config,
             broker,
             expected_evm_address: pin.expected_evm_address,
+            endpoint_digest,
         })
     }
 }
@@ -162,7 +166,12 @@ impl SeedSource for PersistentSeed {
     fn load_keys(&self, network: Network, deadline: Instant) -> Result<KeyManager> {
         // Get new short-lived instance-role credentials on every attempt.
         let credentials = self.broker.credentials(deadline)?;
-        let kms = KmsClient::new(self.config.clone(), credentials, network)?;
+        let kms = KmsClient::new(
+            self.config.clone(),
+            credentials,
+            network,
+            self.endpoint_digest,
+        )?;
         let seed = recover_seed(&self.broker, &kms, self.expected_evm_address, deadline)?;
         restore_keys(seed, network, self.expected_evm_address)
     }
@@ -379,6 +388,31 @@ fn connect_vsock(port: u32, deadline: Instant) -> io::Result<vsock::VsockStream>
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn persistent_source_keeps_the_endpoint_binding_when_identity_is_pinned() {
+        let mut pin = KmsPin {
+            key_arn: "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+                .into(),
+            region: "eu-west-1".into(),
+            seed_id: "mint-pool-1".into(),
+            expected_evm_address: None,
+        };
+        let digest =
+            cfg!(all(feature = "rgb-validation", not(feature = "spv"))).then_some([0xab; 32]);
+        let bootstrap = PersistentSeed::new(&pin, digest).unwrap();
+        pin.expected_evm_address = Some([7; 20]);
+        let recovery = PersistentSeed::new(&pin, digest).unwrap();
+        assert_eq!(bootstrap.endpoint_digest, recovery.endpoint_digest);
+        assert_eq!(recovery.endpoint_digest, digest);
+        assert_eq!(recovery.expected_evm_address, Some([7; 20]));
+        let incompatible = if digest.is_some() {
+            None
+        } else {
+            Some([0xab; 32])
+        };
+        assert!(PersistentSeed::new(&pin, incompatible).is_err());
+    }
 
     #[derive(Default)]
     struct Store {

@@ -18,6 +18,16 @@ pub(super) fn handle_set_endpoints(
     ctx: &ServerContext,
     req: SetEndpointsRequest,
 ) -> Result<EnclaveResponse> {
+    set_endpoints(ctx, req, crate::attestation::get_own_pcr3)
+}
+
+/// Keep the platform PCR read separate from launch validation, so unit tests
+/// can exercise the release policy with a fixed parent-role measurement.
+fn set_endpoints(
+    ctx: &ServerContext,
+    req: SetEndpointsRequest,
+    read_pcr3: impl FnOnce() -> Result<[u8; 48]>,
+) -> Result<EnclaveResponse> {
     let _guard = ctx
         .launch_lock
         .lock()
@@ -28,14 +38,8 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
-    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
-    if ctx.bridge_config.endpoints_sha256 != Some(crate::config::chain_endpoints_sha256(&req)) {
-        return Err(EnclaveError::InvalidRequest(
-            "SetEndpoints does not match the measured ENDPOINTS_SHA256 pin".into(),
-        ));
-    }
-
     let endpoints = Endpoints::parse(&req).map_err(EnclaveError::InvalidRequest)?;
+    let endpoint_digest = crate::config::chain_endpoints_sha256(&req);
     #[cfg(feature = "evm-rpc")]
     let tls = endpoints
         .evm_rpc_tls
@@ -52,10 +56,11 @@ pub(super) fn handle_set_endpoints(
         evm_rpc_tls,
         &endpoints.electrum_host,
     )
+    .with_endpoints_sha256(endpoint_digest)
     .with_kms(endpoints.kms.clone())
-    // A production policy of a cloning role reads its own PCR3 (the parent
+    // Either committed policy of a cloning role reads its own PCR3 (the parent
     // IAM role) here. The gate below refuses an all-zero PCR3.
-    .with_clone_peer_pcr3(crate::attestation::get_own_pcr3)?;
+    .with_clone_peer_pcr3(read_pcr3)?;
     policy
         .assert_valid_for_build(&ctx.build_ctx)
         .map_err(EnclaveError::InvalidRequest)?;
@@ -65,7 +70,13 @@ pub(super) fn handle_set_endpoints(
     let seed_source = endpoints
         .kms
         .as_ref()
-        .map(crate::seed_persistence::PersistentSeed::new)
+        .map(|pin| {
+            crate::seed_persistence::PersistentSeed::new(
+                pin,
+                cfg!(all(feature = "rgb-validation", not(feature = "spv")))
+                    .then_some(endpoint_digest),
+            )
+        })
         .transpose()?;
 
     // Unit tests cannot do the loopback binds and the /etc/hosts pin
@@ -200,7 +211,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn awaiting(build_ctx: BuildContext) -> ServerContext {
-        let bridge_config = crate::config::BridgeConfig::default();
+        let bridge_config = if cfg!(all(feature = "rgb-validation", not(feature = "spv"))) {
+            indexer_bridge_config()
+        } else {
+            crate::config::BridgeConfig::default()
+        };
         ServerContext::awaiting_launch(
             EnclaveState::new(bitcoin::Network::Regtest),
             bridge_config,
@@ -213,6 +228,19 @@ mod tests {
             )),
             build_ctx,
         )
+    }
+
+    fn indexer_bridge_config() -> crate::config::BridgeConfig {
+        crate::config::BridgeConfig {
+            bitcoin_network: crate::policy::BitcoinNetwork::Signet,
+            btc_relay_mode: crate::config::BtcRelayMode::None,
+            chain_id: 42161,
+            bridge_contract: [1; 20],
+            funds_in_contract: [2; 20],
+            token_contract: [3; 20],
+            rgb_asset_id: "rgb:launch-policy-fixture".into(),
+            ..Default::default()
+        }
     }
 
     const KEY_ARN: &str =
@@ -266,18 +294,10 @@ mod tests {
     #[test]
     fn before_the_set_signing_and_attestation_are_refused() {
         let ctx = awaiting(BuildContext::current());
-        // A persistence build gets the seed from KMS, which a unit test
-        // cannot reach. Import a mnemonic there instead.
-        let init = InitializeKeyRequest {
-            mnemonic: if cfg!(feature = "kms-persistence") {
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into()
-            } else {
-                String::new()
-            },
-            ..InitializeKeyRequest::default()
-        };
-        let got = call(&ctx, Request::InitializeKey(init));
-        assert!(ctx.state.is_initialized(), "{got:?}");
+        // Seed this unit-test state directly: the endpoint gate must also
+        // hold when custody has already installed keys. The mint and burn
+        // integration tests exercise their actual initialization handlers.
+        ctx.state.initialize_from_seed([0x42; 64]).unwrap();
         for request in [
             Request::Sign(SignRequest::default()),
             Request::SignBtc(SignBtcRequest::default()),
@@ -508,7 +528,8 @@ mod tests {
             rgb_validation: true,
             ..BuildContext::current()
         };
-        let ctx = awaiting(release);
+        let mut ctx = awaiting(release);
+        ctx.bridge_config = crate::config::BridgeConfig::default();
         assert!(handle_set_endpoints(&ctx, valid(1)).is_err());
         assert!(ctx.launch.get().is_none());
     }
@@ -541,5 +562,173 @@ mod tests {
         assert_eq!(winners.len(), 1, "{results:?}");
         let want = Endpoints::parse(&valid(winners[0])).unwrap();
         assert_eq!(ctx.launch().unwrap().endpoints, want);
+    }
+
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    fn release_indexer_context() -> ServerContext {
+        awaiting(BuildContext {
+            debug_or_test: false,
+            mock_attestation: false,
+            allow_seed_import: false,
+            ..BuildContext::current()
+        })
+    }
+
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    fn launch_indexer(req: SetEndpointsRequest) -> ServerContext {
+        let ctx = release_indexer_context();
+        set_endpoints(&ctx, req.clone(), || {
+            assert!(
+                cfg!(feature = "burn-signer"),
+                "mint does not clone or read PCR3"
+            );
+            Ok([0x33; 48])
+        })
+        .unwrap();
+        let launch = ctx.launch().unwrap();
+        launch
+            .policy
+            .assert_valid_for_build(&ctx.build_ctx)
+            .unwrap();
+        let crate::policy::AttestedPolicy::IndexerTrusted {
+            btc_source,
+            bitcoin_network,
+            chain_id,
+            bridge_contract,
+            funds_in_contract,
+            token_contract,
+            rgb_asset_id,
+            evm_rpc_tls,
+            clone_peer_pcr3,
+            endpoints_sha256,
+            ..
+        } = launch.policy.attested()
+        else {
+            panic!("a release launch must attest the full IndexerTrusted policy");
+        };
+        assert_eq!(btc_source, crate::policy::BtcDataSource::IndexerTrusted);
+        assert_eq!(bitcoin_network, crate::policy::BitcoinNetwork::Signet);
+        assert_eq!(chain_id, ctx.bridge_config.chain_id);
+        assert_eq!(bridge_contract, ctx.bridge_config.bridge_contract);
+        assert_eq!(funds_in_contract, ctx.bridge_config.funds_in_contract);
+        assert_eq!(token_contract, ctx.bridge_config.token_contract);
+        assert_eq!(rgb_asset_id, ctx.bridge_config.rgb_asset_id);
+        assert!(evm_rpc_tls.is_some());
+        assert_eq!(
+            endpoints_sha256,
+            crate::config::chain_endpoints_sha256(&req)
+        );
+        assert_eq!(
+            clone_peer_pcr3,
+            if cfg!(feature = "burn-signer") {
+                Some([0x33; 48])
+            } else {
+                None
+            }
+        );
+        ctx
+    }
+
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    #[test]
+    fn release_launch_attests_public_endpoints_without_rpc_credentials() {
+        let mut original = valid(1);
+        original.evm_rpc_path = "/v2/first-api-key".into();
+        let first = launch_indexer(original.clone());
+        let first_policy = first.launch().unwrap().policy.commitment_bytes();
+        for path in ["/v2/rotated-api-key", "/", ""] {
+            let mut rotated = original.clone();
+            rotated.evm_rpc_path = path.into();
+            let next = launch_indexer(rotated);
+            assert_eq!(
+                next.launch().unwrap().policy.commitment_bytes(),
+                first_policy
+            );
+        }
+        for credential in [b"first-api-key".as_slice(), b"rotated-api-key"] {
+            assert!(!first_policy
+                .windows(credential.len())
+                .any(|w| w == credential));
+        }
+
+        let changes: [fn(&mut SetEndpointsRequest); 5] = [
+            |r| r.evm_rpc_host = "other-rpc.test".into(),
+            |r| {
+                r.evm_rpc_ca_der = hex::decode(
+                    include_str!("../../tests/fixtures/evm_rpc_tls/ca_b.der.hex").trim(),
+                )
+                .unwrap()
+            },
+            |r| r.evm_rpc_tls_port = 8443,
+            |r| r.electrum_url = "ssl://other-indexer.test:50002".into(),
+            |r| r.electrum_url = "ssl://electrum1.test:50003".into(),
+        ];
+        for change in changes {
+            let mut changed = original.clone();
+            change(&mut changed);
+            let next = launch_indexer(changed.clone());
+            assert_ne!(
+                next.launch().unwrap().policy.commitment_bytes(),
+                first_policy
+            );
+            assert_ne!(
+                crate::config::chain_endpoints_sha256(&changed),
+                crate::config::chain_endpoints_sha256(&original)
+            );
+        }
+
+        let err = set_endpoints(&first, valid(2), || {
+            panic!("a second set must fail before PCR3")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("already set"));
+        assert_eq!(
+            first.launch().unwrap().policy.commitment_bytes(),
+            first_policy
+        );
+    }
+
+    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+    #[test]
+    fn release_launch_refuses_invalid_tls_and_path_without_installing_policy() {
+        let ctx = release_indexer_context();
+        let invalid: [fn(&mut SetEndpointsRequest); 7] = [
+            |r| r.evm_rpc_host.clear(),
+            |r| r.evm_rpc_host = "https://rpc1.test".into(),
+            |r| r.evm_rpc_ca_der.clear(),
+            |r| r.evm_rpc_ca_der = b"invalid DER".to_vec(),
+            |r| r.evm_rpc_tls_port = 0,
+            |r| r.evm_rpc_path = "/v2/../key".into(),
+            |r| r.evm_rpc_path = "/v2/key?secret=value".into(),
+        ];
+        for change in invalid {
+            let mut req = valid(1);
+            change(&mut req);
+            assert!(set_endpoints(&ctx, req, || Ok([0x33; 48])).is_err());
+            assert!(ctx.launch.get().is_none());
+        }
+        set_endpoints(&ctx, valid(1), || Ok([0x33; 48])).unwrap();
+        assert!(matches!(
+            ctx.launch().unwrap().policy,
+            SecurityPolicy::IndexerTrusted { .. }
+        ));
+    }
+
+    #[cfg(all(
+        feature = "rgb-validation",
+        not(feature = "spv"),
+        feature = "burn-signer"
+    ))]
+    #[test]
+    fn release_burn_requires_a_nonzero_parent_role_before_installing_policy() {
+        let ctx = release_indexer_context();
+        assert!(set_endpoints(&ctx, valid(1), || Ok([0; 48])).is_err());
+        assert!(ctx.launch.get().is_none());
+        assert!(set_endpoints(&ctx, valid(1), || Err(EnclaveError::Internal(
+            "PCR3 unavailable".into()
+        )))
+        .is_err());
+        assert!(ctx.launch.get().is_none());
+        set_endpoints(&ctx, valid(1), || Ok([0x33; 48])).unwrap();
     }
 }

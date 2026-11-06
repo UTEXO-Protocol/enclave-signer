@@ -74,3 +74,8 @@ sequenceDiagram
 
     Note right of V: After OK the verifier knows:<br/>"AWS Nitro hardware certifies that an<br/>enclave with PCR0=X / PCR1=Y / PCR2=Z<br/>reported this signing pubkey, and the full<br/>key bundle PLUS the enclave's resolved<br/>security policy commit to user_data."<br/>A downgraded posture (vanilla on, other<br/>EVM source, dev build) FAILS here.
 ```
+
+Public-Signet indexer verification requires explicit `--expect-btc-source indexer`
+and `--expect-endpoints-sha256`, with all bridge and launch pins supplied from
+approved records. It uses real attestation and a distinct full policy kind.
+The SPV default and Development override cannot accept it.

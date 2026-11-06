@@ -59,6 +59,23 @@ const AMAZON_TRUST_ROOTS: &[u8] = include_bytes!("amazon_trust_roots.pem");
 /// measured image. Host requests and env cannot change it.
 pub const CUSTODY_FLOW: &str = "rgb-mint";
 
+/// The public endpoint policy approved by KMS for an indexer-trusted signer.
+/// This value is derived inside the enclave; it never includes RPC credentials.
+const CHAIN_ENDPOINTS_CONTEXT_KEY: &str = "chain_endpoints_sha256";
+
+pub(crate) fn validate_endpoint_digest(digest: Option<[u8; 32]>) -> Result<()> {
+    if cfg!(all(feature = "rgb-validation", not(feature = "spv"))) {
+        if digest.is_none() || digest == Some([0; 32]) {
+            return Err(fail(
+                "indexer-trusted KMS custody requires a public endpoint digest",
+            ));
+        }
+    } else if digest.is_some() {
+        return Err(fail("this build uses the original KMS encryption context"));
+    }
+    Ok(())
+}
+
 /// Public KMS config. The operator sets it once at launch (`SetEndpoints`).
 /// The attested policy commits it.
 #[derive(Debug, Clone)]
@@ -220,6 +237,7 @@ pub struct KmsClient {
     config: KmsConfig,
     credentials: AwsCredentials,
     network: Network,
+    endpoint_digest: Option<[u8; 32]>,
     /// Test HTTPS client with canned exchanges, and the fixed recipient key that
     /// opens the canned envelope.
     #[cfg(test)]
@@ -227,12 +245,21 @@ pub struct KmsClient {
 }
 
 impl KmsClient {
-    pub fn new(config: KmsConfig, credentials: AwsCredentials, network: Network) -> Result<Self> {
+    /// `endpoint_digest` is computed from the validated launch endpoints, never
+    /// read from a host-supplied digest or from an environment variable.
+    pub fn new(
+        config: KmsConfig,
+        credentials: AwsCredentials,
+        network: Network,
+        endpoint_digest: Option<[u8; 32]>,
+    ) -> Result<Self> {
         config.validate()?;
+        validate_endpoint_digest(endpoint_digest)?;
         Ok(Self {
             config,
             credentials,
             network,
+            endpoint_digest,
             #[cfg(test)]
             test_transport: None,
         })
@@ -405,10 +432,11 @@ impl KmsClient {
         Ok(seed)
     }
 
-    /// The four public context entries. The key policy must require each one
-    /// exactly (see docs/kms-persistence.md).
+    /// Public context entries. Indexer-trusted mint custody also binds the
+    /// approved endpoint digest. SPV keeps its original four-entry context.
+    /// The key policy must require every entry exactly (docs/kms-persistence.md).
     fn encryption_context(&self) -> HashMap<String, String> {
-        HashMap::from([
+        let mut context = HashMap::from([
             (
                 "application".to_string(),
                 "utexo-enclave-signer".to_string(),
@@ -416,7 +444,11 @@ impl KmsClient {
             ("flow".to_string(), CUSTODY_FLOW.to_string()),
             ("seed_id".to_string(), self.config.seed_id.clone()),
             ("bitcoin_network".to_string(), self.network.to_string()),
-        ])
+        ]);
+        if let Some(digest) = self.endpoint_digest {
+            context.insert(CHAIN_ENDPOINTS_CONTEXT_KEY.into(), hex::encode(digest));
+        }
+        context
     }
 
     fn check_key_id(&self, key_id: Option<&str>) -> Result<()> {
@@ -430,7 +462,16 @@ impl KmsClient {
     fn recipient(&self) -> Result<Recipient> {
         #[cfg(test)]
         if let Some((_, key)) = &self.test_transport {
-            return Recipient::new(key.clone());
+            // Only the injected test HTTP client accepts this document. Unit
+            // tests still exercise Recipient serialization and envelope opening
+            // without NSM. This branch is absent from deployed binaries.
+            return Ok(Recipient {
+                key: key.clone(),
+                info: RecipientInfo::builder()
+                    .key_encryption_algorithm(KeyEncryptionMechanism::RsaesOaepSha256)
+                    .attestation_document(Blob::new(b"unit-test-recipient"))
+                    .build(),
+            });
         }
         let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, RECIPIENT_RSA_BITS)
             .map_err(|_| custody(CustodyFailure::Internal))?;

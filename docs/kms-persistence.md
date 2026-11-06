@@ -46,7 +46,8 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
 `/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
-carry them. Production policy commits them; Development policy does not.
+carry them. Production and IndexerTrusted policies commit them; Development
+policy does not.
 Operators must approve the launch values:
 
 | Setting | Value |
@@ -57,12 +58,14 @@ Operators must approve the launch values:
 | `KMS_EXPECTED_EVM_ADDRESS` | Empty for first bootstrap; then the verified EVM address, 40 hex digits with optional `0x`. |
 
 Keep the key ARN, `rgb-mint` flow context, seed ID and Bitcoin network unchanged
-when recovering an existing identity. A configured address pin rejects a
+when recovering an existing identity. No-SPV mint also keeps the approved
+public endpoint digest in its KMS context. Changing only the API-key path does
+not change this digest. A configured address pin rejects a
 different recovered seed and makes missing storage fail before generation; no
 pin makes an existing object fail before decryption. There is no creation switch.
 A development image built with `allow-seed-import` and launched with all KMS
 values empty is import-only: `init` needs a mnemonic, and an empty `init` fails.
-For Production policy, a verifier checks them with `attest-verify --expect-kms-key-arn`,
+For both release policies, a verifier checks them with `attest-verify --expect-kms-key-arn`,
 `--expect-kms-region`, `--expect-kms-seed-id` and `--expect-kms-evm-address`. These endpoint settings support the standard AWS commercial partition.
 
 ## Parent integration
@@ -135,11 +138,25 @@ resource policies with these permissions:
 
 Both KMS operations must require recipient attestation with the approved
 mint image PCR0 from `nitro-cli describe-eif --eif-path YOUR_IMAGE.eif` and
-exactly these public encryption-context fields:
+the exact public encryption context. Production/SPV uses four fields:
 
 ```json
 {"application":"utexo-enclave-signer","flow":"rgb-mint","seed_id":"YOUR_SEED_ID","bitcoin_network":"bitcoin"}
 ```
+
+A no-SPV mint (`IndexerTrusted`, public Signet) adds a fifth field:
+
+```json
+{"application":"utexo-enclave-signer","flow":"rgb-mint","seed_id":"YOUR_SEED_ID","bitcoin_network":"signet","chain_endpoints_sha256":"APPROVED_64_LOWERCASE_HEX_DIGEST"}
+```
+
+Calculate the digest from independently approved public endpoint inputs with
+`cli set-endpoints --print-sha256`. KMS must require that exact digest for both
+operations. The enclave derives it after validating `SetEndpoints`; the caller
+cannot supply a digest override. KMS fields and the private API-key path are
+excluded. A changed host, CA, port or indexer URL cannot recover the existing
+ciphertext without a trusted migration. API-key rotation keeps the context.
+See [runtime RPC policy](rpc-runtime-policy.md).
 
 The flow is the compiled [`CUSTODY_FLOW`](../enclave/src/kms/mod.rs)
 value. Replace `YOUR_SEED_ID` with `KMS_SEED_ID`. The enclave supplies this
@@ -183,6 +200,11 @@ This source review does not verify a deployed policy or prior hardware test resu
  "Action":["kms:Encrypt","kms:ReEncrypt*","kms:CreateGrant"],"Resource":"*"}
 ]
 ```
+
+For no-SPV mint, add `chain_endpoints_sha256` to `DenyExtraContextKeys` and
+add a separate `DenyUnlessSeedId`-shaped statement requiring its approved
+lowercase digest. Keep exactly four permitted keys for SPV and exactly five
+for no-SPV. Test that changing or omitting any single field is denied.
 
 Repeat the `DenyUnlessSeedId` shape for `application`, `flow` and
 `bitcoin_network`. The last statement denies `kms:Encrypt`, `kms:ReEncrypt*`
@@ -237,3 +259,50 @@ not coordinate replicas or authorize concurrent application-level signing.
 Before production use, test real AWS recipient-attestation denials,
 conditional-write races and restart/backup
 recovery on Nitro hardware; local builds do not prove those service boundaries.
+
+## Change the context of an existing no-SPV seed
+
+This release adds `chain_endpoints_sha256` to no-SPV mint recovery. Existing
+four-field ciphertext fails decryption under the new context. The enclave has
+no legacy fallback and never creates a replacement seed after recovery fails.
+The same procedure applies to a later approved public endpoint change; rotating
+only an API-key path needs no migration.
+
+AWS KMS `ReEncrypt` can change the encryption context under the same symmetric
+key without returning plaintext. It needs `kms:ReEncryptFrom` and
+`kms:ReEncryptTo`. See the [ReEncrypt API](https://docs.aws.amazon.com/kms/latest/APIReference/API_ReEncrypt.html)
+and [KMS permission conditions](https://docs.aws.amazon.com/kms/latest/developerguide/kms-api-permissions-reference.html).
+
+This is an operator-controlled maintenance procedure, not a parent capability:
+
+1. Stop signing for this identity. Independently record its approved EVM
+   address, key ARN, old context, S3 object version and ciphertext checksum.
+   Back up that exact ciphertext. Keep the address pin throughout the change.
+2. Approve the new EIF PCRs, public endpoints and new context. Keep the four
+   original fields unchanged and add or replace only the approved digest.
+3. The policy fragments above deny `ReEncrypt*` to every principal. A trusted
+   administrator must make a temporary, narrowly scoped exception for a
+   separate migration principal. Keep the signer/parent role denied. Keep
+   `Encrypt`, grant creation and plaintext `Decrypt` denied to the migration
+   principal. Restrict both re-encryption permissions to the exact key, require
+   `kms:ReEncryptOnSameKey=true`, and constrain the source and destination
+   contexts with the applicable KMS conditions. An Allow cannot override an
+   explicit Deny; review and test the complete temporary policy.
+4. Call `ReEncrypt` with explicit `SourceKeyId` and `DestinationKeyId` set to
+   that same full key ARN, the verified old ciphertext and exact old/new
+   contexts. Check returned `SourceKeyId` and `KeyId` against the approved ARN.
+   Save and checksum the returned ciphertext; never request or export the seed.
+5. Install the new ciphertext using trusted storage administration while
+   retaining the old version. The parent broker is create-only and must not
+   receive overwrite permission. Approve the new PCR/context in KMS, restart
+   with the original expected address and verify recovery and the full attested
+   policy before routing any work.
+6. Revoke old image/context access after successful recovery. Restore the
+   blanket re-encryption denial and remove the migration principal's access.
+   Keep the protected backup and audit record. Test fresh-host recovery before
+   ending maintenance.
+
+Do not delete the seed object, remove the address pin, or bootstrap again to
+resolve a context mismatch. Do not leave both endpoint policies authorized as
+an undocumented fallback. This repository provides no automatic migration tool;
+the actual KMS policy, re-encryption and recovery must be tested on AWS/Nitro.

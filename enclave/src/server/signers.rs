@@ -187,7 +187,7 @@ pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Resul
     // In production, the plain-BTC path runs only if the attested policy
     // enables it. `validate_btc_request` has the same rule, but this check
     // reads the policy that attestation `user_data` commits to.
-    if let crate::policy::SecurityPolicy::Production(p) = &ctx.launch()?.policy {
+    if let Some(p) = ctx.launch()?.policy.pinned() {
         if !p.allow_vanilla_psbt {
             return Err(EnclaveError::Signing(
                 "plain-BTC (vanilla) signing is disabled by the enclave's production security \

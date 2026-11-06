@@ -190,11 +190,12 @@ the same EVM address before it goes `Active`.
 
 The enclave resolves one `SecurityPolicy` when the operator sets the
 endpoints at launch. The policy comes from build flags, image pins and the
-endpoints. It is `Production { ... }` or `Development { reason }`.
+endpoints. It is `Production { ... }` (SPV), `IndexerTrusted { ... }` (public Signet
+without SPV), or `Development { reason }`.
 
 - A release bridge build refuses to boot if its pins do not make a valid
-  `Production` policy.
-- It also refuses endpoints that do not make a valid `Production` policy.
+  policy for its compiled Bitcoin source.
+- It also refuses endpoints that do not make that policy valid at launch.
 - The policy goes into the attestation `user_data`, with the signer role.
 - `attest-verify` builds the expected policy and fails on any difference.
 
@@ -626,26 +627,44 @@ Values must use the exact lowercase spelling. See
 [Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).
 The enclave refuses signing until the deposit meets the selected tag and
 whenever required RPC data is unavailable or invalid. Retry a pending deposit
-after the selected head covers it. Production verification requires
+after the selected head covers it. Mint and burn image recipes set `finalized`
+and confirmation depth 3; the raw code defaults remain `safe` and 6. Both release
+policies require
 `--expect-evm-finality-tag` to match the approved image value.
 
-Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
-(`SetEndpoints`), never in the image. A Production policy commits the Electrum
-host, the EVM RPC host, the SHA-256 of the CA and the four KMS values.
-Development policy does not commit these fields. Without SPV, the image pins
-network inputs through `ENDPOINTS_SHA256`; operators approve KMS inputs separately.
-The digest implementations in `enclave/src/config.rs` (`chain_endpoints_sha256`)
-and `parent/src/bin/cli.rs` (`endpoints_sha256`) must stay in sync. Both exclude
-runtime KMS fields; a shared golden vector and exhaustive field matching guard
-against encoding drift and unreviewed schema additions.
+Chain endpoints and KMS values are set once at launch with `cli set-endpoints`
+(`SetEndpoints`). They are not image inputs. Both `Production` and
+`IndexerTrusted` policies commit the indexer host, EVM RPC host, CA SHA-256 and
+KMS pins. `IndexerTrusted` also commits a public endpoint digest covering the
+exact indexer URL, EVM RPC host, CA DER bytes and TLS port. KMS fields and the
+RPC path are excluded from that digest. Development policy commits no launch
+fields. See [runtime RPC policy](docs/rpc-runtime-policy.md) for the encoding,
+verification and seed-recovery rules.
+
+Federation members using the same role, release and build profile share the
+same EIF and image PCR0/1/2. Each member approves its own public endpoint policy.
+Different providers and API keys do not require different images. Parent IAM
+roles can still produce different PCR3 values.
+
+For an authenticated provider such as Alchemy or Infura, store the absolute RPC
+path in a restricted file and pass `EVM_RPC_PATH_FILE` at launch. It is optional
+when calculating `set-endpoints --print-sha256`: the path is validated if
+supplied, then excluded from the digest. Without a path file, requests use `/`.
+Only absolute ASCII paths are accepted; authorities, queries, fragments,
+percent escapes and dot segments are rejected. The key is read at launch and
+never embedded in the EIF or attested policy. Restart to rotate it; the public
+digest, KMS context and image PCRs stay unchanged. Copy the exact approved CA
+DER bytes to each launch host.
+
 A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
 | `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, for the custom dev signet). TLS terminates inside the enclave. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. A test, debug, `mock-attestation` or `allow-seed-import` build also accepts plaintext `tcp://host:port` and `http://host[:port]`; a release image refuses them. |
-| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
+| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+| `--evm-rpc-path-file` / `EVM_RPC_PATH_FILE` | `evm-rpc`, optional | Restricted file containing an absolute RPC path such as `/v2/<key>`, up to 2048 bytes. Omission uses `/`; an empty supplied file is rejected. |
 | `--kms-key-arn` / `KMS_KEY_ARN` | `kms-persistence` | Full symmetric KMS key ARN; aliases are rejected. |
 | `--kms-region` / `KMS_REGION` | `kms-persistence` | Commercial AWS region matching the key ARN. The KMS forwarder listens on `127.0.0.2:443`. |
 | `--kms-seed-id` / `KMS_SEED_ID` | `kms-persistence` | Stable signer identity used in the KMS encryption context and storage namespace. |

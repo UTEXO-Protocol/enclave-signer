@@ -131,18 +131,20 @@ pub fn resolve_evm_data_source(tls: &EvmRpcTls) -> (EvmDataSource, Option<EvmRpc
 /// Log the resolved policy. The attestation `user_data` commits it.
 pub fn log_policy(policy: &SecurityPolicy) {
     match policy {
-        SecurityPolicy::Production(p) => tracing::info!(
-            chain_id = p.chain_id,
-            allow_vanilla_psbt = p.allow_vanilla_psbt,
-            evm_source = ?p.evm_source,
-            evm_rpc_tls = ?p.evm_rpc_tls,
-            funds_in_contract = %hex::encode(p.funds_in_contract),
-            token_contract = %hex::encode(p.token_contract),
-            evm_finality_tag = %p.evm_finality_tag,
-            spv_min_confirmations = p.spv_min_confirmations,
-            btc_source = ?p.btc_source,
-            "resolved PRODUCTION security policy (committed into attestation user_data)"
-        ),
+        SecurityPolicy::Production(p) | SecurityPolicy::IndexerTrusted { policy: p, .. } => {
+            tracing::info!(
+                chain_id = p.chain_id,
+                allow_vanilla_psbt = p.allow_vanilla_psbt,
+                evm_source = ?p.evm_source,
+                evm_rpc_tls = ?p.evm_rpc_tls,
+                funds_in_contract = %hex::encode(p.funds_in_contract),
+                token_contract = %hex::encode(p.token_contract),
+                evm_finality_tag = %p.evm_finality_tag,
+                spv_min_confirmations = p.spv_min_confirmations,
+                btc_source = ?p.btc_source,
+                "resolved pinned security policy (BTC source and launch pins are attested)"
+            )
+        }
         SecurityPolicy::Development { reason } => tracing::warn!(
             ?reason,
             "resolved DEVELOPMENT security policy - this is NOT a production bridge signer"

@@ -25,7 +25,7 @@ MEASURED_PINS = dict(
     BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
-    RGB_MAX_UNOWNED_SATS='1000', ENDPOINTS_SHA256='12' * 32,
+    RGB_MAX_UNOWNED_SATS='1000',
     SPV_MIN_CONFIRMATIONS='4', EVM_FINALITY_TAG='finalized',
 )
 
@@ -330,12 +330,11 @@ class BuildArgumentsTests(unittest.TestCase):
     def stage_inputs(self):
         return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:new-signet-asset',
                     STAGE_TOKEN_CONTRACT='0x' + '33' * 20,
-                    STAGE_ENDPOINTS_SHA256='12' * 32,
                     STAGE_GAS_TX_ALLOWED_SELECTORS='0x12345678,0xabcdef01')
 
     def test_stage_profile_requires_dedicated_pins_before_docker(self):
         for key in ('STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS'):
+                    'STAGE_GAS_TX_ALLOWED_SELECTORS'):
             with self.subTest(key=key):
                 inputs = self.stage_inputs()
                 inputs[key] = ''
@@ -348,8 +347,6 @@ class BuildArgumentsTests(unittest.TestCase):
     def test_stage_profile_rejects_bad_pins_and_debug_features(self):
         for key, value in (('STAGE_TOKEN_CONTRACT', '0x' + '00' * 20),
                            ('STAGE_TOKEN_CONTRACT', 'not-an-address'),
-                           ('STAGE_ENDPOINTS_SHA256', '00' * 32),
-                           ('STAGE_ENDPOINTS_SHA256', 'bad-digest'),
                            ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
                            ('ENCLAVE_DEBUG_FEATURES', 'allow-debug-pcrs')):
             with self.subTest(key=key, value=value):
@@ -374,7 +371,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
                 self.assertEqual(args['RGB_ASSET_ID'], inputs['STAGE_RGB_ASSET_ID'])
                 self.assertEqual(args['TOKEN_CONTRACT'], inputs['STAGE_TOKEN_CONTRACT'])
-                self.assertEqual(args['ENDPOINTS_SHA256'], inputs['STAGE_ENDPOINTS_SHA256'])
+                self.assertNotIn('ENDPOINTS_SHA256', args)
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug')
@@ -391,6 +388,31 @@ class BuildArgumentsTests(unittest.TestCase):
                 else:
                     self.assertEqual(args['RGB_MAX_UNOWNED_SATS'], '1500')
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
+
+    def test_stage_rpc_configuration_does_not_change_image_inputs(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                inputs = self.stage_inputs()
+                result = self.invoke(f'Dockerfile.enclave.{role}', **inputs)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                baseline = self.captured_build_args()
+                for suffix in ('first', 'rotated'):
+                    result = self.invoke(
+                        f'Dockerfile.enclave.{role}', **inputs,
+                        EVM_RPC_HOST=f'{suffix}.rpc.test', EVM_RPC_TLS_PORT='8443',
+                        EVM_RPC_TLS_CA_DER_FILE=f'/private/{suffix}-ca.der',
+                        EVM_RPC_PATH_FILE=f'/private/{suffix}-credential',
+                        ELECTRUM_URL=f'ssl://{suffix}.indexer.test:50002',
+                        ENDPOINTS_SHA256=suffix, STAGE_ENDPOINTS_SHA256=suffix,
+                    )
+                    self.assertEqual(result.returncode, 42, result.stderr)
+                    self.assertEqual(self.captured_build_args(), baseline)
+                    self.assertNotIn(f'{suffix}.rpc.test', result.stdout)
+                    self.assertNotIn(f'{suffix}-credential', result.stdout)
+                recipe = (ROOT / 'build' / f'Dockerfile.enclave.{role}').read_text()
+                self.assertNotIn('ARG ENDPOINTS_SHA256', recipe)
+                self.assertNotIn('ENV ENDPOINTS_SHA256', recipe)
+                self.assertNotIn('ARG EVM_RPC', recipe)
 
     def test_stage_profile_refuses_legacy_recipe_and_unknown_profile(self):
         for recipe, profile in (('Dockerfile.enclave', 'stage-signet'),

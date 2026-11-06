@@ -1,8 +1,9 @@
 //! The indexer client of `RgbValidator`.
 //!
-//! It serves [`RgbValidator::fetch_transaction`] and, on the mint path, the
-//! on-chain status of the consignment witnesses ([`IndexerWitnesses`]) and of
-//! an off-tx seal. The burn path reads witness status from SPV proofs instead.
+//! It serves [`RgbValidator::fetch_transaction`] and trusted witness status
+//! ([`IndexerWitnesses`]) for the no-SPV public-Signet burn profile and the
+//! combined swap path, including off-tx seals. SPV burn uses proofs instead.
+//! The mint signer does not read indexer history.
 //! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora
 //! (`https://`, `http://`), through the host vsock forwarder. Each call
 //! crosses the trust boundary and has a timeout. Electrum calls are
@@ -156,7 +157,7 @@ impl RgbValidator {
 }
 
 impl RgbValidator {
-    /// The mint path's witness source, at `min_confirmations` depth. It
+    /// The indexer-trusted witness source, at `min_confirmations` depth. It
     /// connects on the first witness it is asked about.
     pub fn indexer_witnesses(&self, min_confirmations: u32) -> IndexerWitnesses<'_> {
         IndexerWitnesses {
@@ -214,7 +215,7 @@ impl RgbValidator {
     }
 }
 
-/// The mint path's witness status, from the pinned indexer. TLS ends in the
+/// Witness status for indexer-trusted validation. TLS ends in the
 /// enclave on a release image, so the host can only make a lookup fail.
 pub struct IndexerWitnesses<'a> {
     validator: &'a RgbValidator,

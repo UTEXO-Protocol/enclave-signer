@@ -3,8 +3,10 @@
 //! the parent, where `vsock-proxy` relays it to the real endpoint.
 //!
 //! Trust boundary: the host controls this path. It can drop, delay, reorder or
-//! forge bytes. The enclave verifies all data from it (SPV, rgb-lib validation,
-//! in-enclave TLS) and never trusts it as input.
+//! forge bytes. TLS authenticates the approved remote endpoint inside the
+//! enclave. Signing then applies RGB validation and the compiled Bitcoin
+//! source policy: SPV proofs, or trusted indexer confirmations on public Signet.
+//! EVM RPC answers remain a trusted-provider assumption.
 //!
 //! The listener is loopback only, but it is a generic egress path: any code in
 //! the enclave process can use it. A forwarder for a TLS endpoint therefore

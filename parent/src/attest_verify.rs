@@ -42,10 +42,10 @@ impl VerifyMode {
     }
 }
 
-/// Fail for Mock mode with a Production expectation.
+/// Fail for Mock mode with a Production or IndexerTrusted expectation.
 pub(crate) fn refuse_mock_production(mode: VerifyMode, production: bool) -> Result<()> {
     if mode == VerifyMode::Mock && production {
-        bail!("mock mode refuses a Production expectation: a mock document proves no enclave");
+        bail!("mock mode refuses a Production expectation or an IndexerTrusted expectation: a mock document proves no enclave");
     }
     Ok(())
 }
@@ -59,7 +59,8 @@ pub(crate) fn refuse_mock_production(mode: VerifyMode, production: bool) -> Resu
 /// public-key bundle binds. This type gives only the posture flags and rules
 /// that are not on the wire. The optional chain, contract and asset pins
 /// (F02-AF-04) also compare the wire values with the operator deployment.
-/// Without a pin, the value is authenticated but not compared.
+/// Without a pin, the value is authenticated but not compared. IndexerTrusted
+/// requires all three deployment pins explicitly.
 ///
 /// One value is built per run, so the variant size difference does not matter.
 #[allow(clippy::large_enum_variant)]
@@ -109,9 +110,57 @@ pub enum ExpectedPolicy {
         /// no KMS pin.
         kms: Option<KmsPin>,
     },
+    /// A real public-Signet signer using an approved TLS indexer instead of
+    /// SPV. Reuse all Production field checks, with an explicit source and
+    /// public endpoint digest. Construct with `into_indexer_trusted`.
+    IndexerTrusted {
+        production: Box<ExpectedPolicy>,
+        endpoints_sha256: [u8; 32],
+    },
     /// Expect a dev or mock enclave (for example with `--mock`). Not for
     /// production.
     Development,
+}
+
+impl ExpectedPolicy {
+    /// Opt in to indexer trust with independently approved deployment pins.
+    pub fn into_indexer_trusted(self, endpoints_sha256: [u8; 32]) -> Result<Self> {
+        self.check_indexer_inputs()?;
+        Ok(Self::IndexerTrusted {
+            production: Box::new(self),
+            endpoints_sha256,
+        })
+    }
+
+    fn check_indexer_inputs(&self) -> Result<()> {
+        let Self::Production {
+            signer_role,
+            bitcoin_network,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
+            ..
+        } = self
+        else {
+            bail!("IndexerTrusted requires a complete production-field expectation");
+        };
+        if !matches!(signer_role, SignerRole::Mint | SignerRole::Burn)
+            || *bitcoin_network != BitcoinNetwork::Signet
+        {
+            bail!("IndexerTrusted requires a mint or burn signer on public Signet");
+        }
+        if expected_chain_id.is_none()
+            || expected_bridge_contract.is_none()
+            || expected_rgb_asset_id.as_ref().is_none_or(String::is_empty)
+        {
+            bail!("IndexerTrusted requires --expect-chain-id, --expect-bridge-contract and --expect-rgb-asset-id");
+        }
+        Ok(())
+    }
+
+    fn requires_real_attestation(&self) -> bool {
+        !matches!(self, Self::Development)
+    }
 }
 
 /// A passed verification. `mode` tells how the document was checked. Only
@@ -170,10 +219,7 @@ pub async fn verify_attested_pubkey(
     mode: VerifyMode,
     expected_policy: ExpectedPolicy,
 ) -> Result<AttestedPubkeyResult> {
-    refuse_mock_production(
-        mode,
-        matches!(expected_policy, ExpectedPolicy::Production { .. }),
-    )?;
+    refuse_mock_production(mode, expected_policy.requires_real_attestation())?;
     let mut nonce = [0u8; 32];
     rand::fill(&mut nonce);
 
@@ -215,10 +261,7 @@ fn verify_attested_response_with(
     expected_policy: &ExpectedPolicy,
     verify_doc: impl FnOnce(&[u8]) -> Result<VerifiedAttestation>,
 ) -> Result<AttestedPubkeyResult> {
-    refuse_mock_production(
-        mode,
-        matches!(expected_policy, ExpectedPolicy::Production { .. }),
-    )?;
+    refuse_mock_production(mode, expected_policy.requires_real_attestation())?;
     let result = verify_keyed(response, nonce, mode, verify_doc)?;
     check_expected_policy(&result, expected_policy)?;
     Ok(result)
@@ -296,6 +339,7 @@ fn check_expected_policy(
 ) -> Result<()> {
     let expected =
         expected_attested_policy(expected_policy, &result.response, &result.verified.pcrs)?;
+    launch_check::check_indexer_measurements(&expected, &result.verified.pcrs)?;
     if result.response.attested_policy != expected.to_bytes() {
         bail!(
             "the attested policy {:?} does not match the expected policy {expected:?}: \
@@ -543,7 +587,7 @@ fn export_bundle_with(
     expect_evm: Option<[u8; 20]>,
     verify_doc: impl FnOnce(&[u8]) -> Result<VerifiedAttestation>,
 ) -> Result<AttestationBundle> {
-    refuse_mock_production(mode, matches!(expected, AttestedPolicy::Production { .. }))?;
+    refuse_mock_production(mode, !matches!(expected, AttestedPolicy::Development))?;
     let result = verify_keyed(attested_response(response)?, nonce, mode, verify_doc)?;
     let expected = launch_check::with_document_pcr3(expected, &result.verified.pcrs)?;
     launch_check::compare_policy(&expected, &result.response.attested_policy)?;
@@ -584,10 +628,7 @@ fn verify_bundle_with(
     expected_policy: &ExpectedPolicy,
     verify_doc: impl FnOnce(&[u8], &[u8; 32]) -> Result<VerifiedAttestation>,
 ) -> Result<AttestedPubkeyResult> {
-    refuse_mock_production(
-        mode,
-        matches!(expected_policy, ExpectedPolicy::Production { .. }),
-    )?;
+    refuse_mock_production(mode, expected_policy.requires_real_attestation())?;
     // Read the format first, so an old bundle fails with a clear message.
     #[derive(Deserialize)]
     struct Format {
@@ -663,6 +704,16 @@ fn expected_attested_policy(
 ) -> Result<AttestedPolicy> {
     match expected {
         ExpectedPolicy::Development => Ok(AttestedPolicy::Development),
+        ExpectedPolicy::IndexerTrusted {
+            production,
+            endpoints_sha256,
+        } => {
+            production.check_indexer_inputs()?;
+            let policy = expected_attested_policy(production, resp, doc_pcrs)?
+                .into_indexer_trusted(*endpoints_sha256)?;
+            launch_check::validate_indexer_policy(&policy)?;
+            Ok(policy)
+        }
         ExpectedPolicy::Production {
             allow_vanilla_psbt,
             signer_role,
@@ -826,6 +877,179 @@ mod tests {
         }
     }
 
+    fn indexer_inputs(role: SignerRole) -> ExpectedPolicy {
+        let mut expected = production(role);
+        if let ExpectedPolicy::Production {
+            bitcoin_network,
+            expected_chain_id,
+            expected_bridge_contract,
+            expected_rgb_asset_id,
+            kms,
+            ..
+        } = &mut expected
+        {
+            *bitcoin_network = BitcoinNetwork::Signet;
+            *expected_chain_id = Some(1);
+            *expected_bridge_contract = Some([0xaa; 20]);
+            *expected_rgb_asset_id = Some("rgb:asset".into());
+            *kms = (role == SignerRole::Mint).then(a_kms_pin);
+        }
+        expected
+    }
+
+    fn indexer(role: SignerRole) -> ExpectedPolicy {
+        indexer_inputs(role)
+            .into_indexer_trusted([0x55; 32])
+            .unwrap()
+    }
+
+    #[test]
+    fn indexer_mint_and_burn_verify_and_export_with_explicit_pins() {
+        let nonce = [0x42; 32];
+        for role in [SignerRole::Mint, SignerRole::Burn] {
+            let expected = indexer(role);
+            let (response, root) = signed(&expected, &nonce);
+            verify_policy(response.clone(), &root, &expected).unwrap();
+            let policy = expected_attested_policy(&expected, &response, &mock_pcrs()).unwrap();
+            let bundle = export_bundle_with(
+                enclave_answer(response),
+                nonce,
+                VerifyMode::Real,
+                &policy,
+                Some([0x0e; 20]),
+                |doc| {
+                    Ok(verify_at_document_time_with_root(
+                        doc, &PCRS, &nonce, &root,
+                    )?)
+                },
+            )
+            .unwrap();
+            assert_eq!(bundle.verification_mode, VerifyMode::Real);
+            let json = serde_json::to_string(&bundle).unwrap();
+            assert!(json.contains("IndexerTrusted"), "{json}");
+            assert!(json.contains("endpoints_sha256"), "{json}");
+            verify_bundle_with(&json, VerifyMode::Real, &expected, |doc, nonce| {
+                Ok(verify_at_document_time_with_root(doc, &PCRS, nonce, &root)?)
+            })
+            .unwrap();
+            // A default SPV or Development expectation never accepts indexer trust.
+            for other in [indexer_inputs(role), ExpectedPolicy::Development] {
+                assert!(
+                    verify_bundle_with(&json, VerifyMode::Real, &other, |doc, nonce| {
+                        Ok(verify_at_document_time_with_root(doc, &PCRS, nonce, &root)?)
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexer_rejects_changed_public_pins_and_other_policy_modes() {
+        let expected = indexer(SignerRole::Burn);
+        let (response, root) = signed(&expected, &[0x42; 32]);
+        for change in 0..3 {
+            let mut other = indexer_inputs(SignerRole::Burn);
+            let ExpectedPolicy::Production {
+                evm_rpc_tls: Some(pin),
+                ..
+            } = &mut other
+            else {
+                unreachable!()
+            };
+            let mut digest = [0x55; 32];
+            match change {
+                0 => pin.host = "other.test".into(),
+                1 => pin.ca_sha256 = [0x44; 32],
+                _ => digest[0] ^= 1,
+            }
+            let other = other.into_indexer_trusted(digest).unwrap();
+            let err = verify_policy(response.clone(), &root, &other).unwrap_err();
+            assert!(format!("{err:#}").contains("expected policy"), "{err:#}");
+        }
+        assert!(verify_policy(response, &root, &indexer(SignerRole::Mint)).is_err());
+        for other in [
+            indexer_inputs(SignerRole::Burn),
+            ExpectedPolicy::Development,
+        ] {
+            let (response, root) = signed(&other, &[0x42; 32]);
+            assert!(verify_policy(response, &root, &expected).is_err());
+        }
+    }
+
+    #[test]
+    fn indexer_requires_public_signet_split_role_and_independent_deployment_pins() {
+        for change in 0..5 {
+            let mut inputs = indexer_inputs(SignerRole::Burn);
+            let ExpectedPolicy::Production {
+                signer_role,
+                bitcoin_network,
+                expected_chain_id,
+                expected_bridge_contract,
+                expected_rgb_asset_id,
+                ..
+            } = &mut inputs
+            else {
+                unreachable!()
+            };
+            match change {
+                0 => *signer_role = SignerRole::Combined,
+                1 => *bitcoin_network = BitcoinNetwork::SignetCustom,
+                2 => *expected_chain_id = None,
+                3 => *expected_bridge_contract = None,
+                _ => *expected_rgb_asset_id = None,
+            }
+            assert!(inputs.into_indexer_trusted([0x55; 32]).is_err());
+        }
+        assert!(ExpectedPolicy::Development
+            .into_indexer_trusted([0; 32])
+            .is_err());
+        assert!(indexer(SignerRole::Burn)
+            .into_indexer_trusted([0; 32])
+            .is_err());
+    }
+
+    #[test]
+    fn indexer_refuses_mock_mode_and_zero_image_measurement() {
+        let expected = indexer(SignerRole::Burn);
+        let (mut response, user_data) = committed(&expected);
+        let err = verify_attested_response_with(
+            response.clone(),
+            [0x42; 32],
+            VerifyMode::Mock,
+            &expected,
+            |_| panic!("mock indexer verification must stop before parsing a document"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("IndexerTrusted"));
+        let zero = ExpectedPcrs::new([0; 48], [2; 48], [3; 48]);
+        let (doc, root) = signed_document(
+            &zero,
+            &[0x42; 32],
+            Some(&response.evm_uncompressed_pub),
+            &user_data,
+            1_577_880_000_000,
+            None,
+        );
+        response.attestation_doc = doc;
+        let err = verify_attested_response_with(
+            response,
+            [0x42; 32],
+            VerifyMode::Real,
+            &expected,
+            |doc| {
+                Ok(verify_at_document_time_with_root(
+                    doc,
+                    &zero,
+                    &[0x42; 32],
+                    &root,
+                )?)
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nonzero PCR0"), "{err:#}");
+    }
+
     #[test]
     fn finality_tag_must_match_the_verifier_expectation() {
         for tag in [
@@ -885,7 +1109,9 @@ mod tests {
                 assert_eq!(chain_id, 42161);
                 assert_eq!(rgb_asset_id, "rgb:abc");
             }
-            AttestedPolicy::Development => panic!("expected production policy"),
+            AttestedPolicy::Development | AttestedPolicy::IndexerTrusted { .. } => {
+                panic!("expected production policy")
+            }
         }
     }
 

@@ -781,11 +781,13 @@ impl AlloyEvmClient {
             .timeout(EVM_RPC_CALL_TIMEOUT)
             .build()
             .map_err(err)?;
-        let url = format!("https://{}:{}/", tls.host, tls.tls_port)
+        let mut url: reqwest::Url = format!("https://{}:{}/", tls.host, tls.tls_port)
             .parse()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
             })?;
+        // Change only the path; never allow credentials to change the TLS authority.
+        url.set_path(&tls.path);
         Ok(Self {
             runtime: Self::runtime()?,
             provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
@@ -822,9 +824,10 @@ impl AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| {
+            .map_err(|_| {
+                // Transport errors can contain the RPC URL and its API key.
                 EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_getBlockByNumber({number:?}) failed: {e}"
+                    "evm-rpc: eth_getBlockByNumber({number:?}) failed"
                 ))
             })?;
         Ok(block.map(|block| BlockData {
@@ -858,8 +861,8 @@ impl EvmReceiptProvider for AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
+            .map_err(|_| {
+                EnclaveError::CrossCheck("evm-rpc: eth_getTransactionReceipt failed (RPC error details redacted)".into())
             })?;
         receipt.map(map_alloy_receipt).transpose()
     }
@@ -889,7 +892,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_chainId failed: {e}")))
+            .map_err(|_| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_chainId failed (RPC error details redacted)".into(),
+                )
+            })
     }
 
     fn call(&self, to: &[u8; 20], data: &[u8], block: u64) -> Result<Vec<u8>> {
@@ -916,7 +923,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
                     EVM_RPC_CALL_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_call failed: {e}")))?;
+            .map_err(|_| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_call failed (RPC error details redacted)".into(),
+                )
+            })?;
         Ok(out.to_vec())
     }
 }

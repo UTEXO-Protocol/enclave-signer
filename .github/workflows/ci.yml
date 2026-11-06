@@ -195,9 +195,14 @@ jobs:
         run: |
           for role in mint-signer burn-signer; do
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib indexer_only
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib policy::tests
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib server::endpoints::tests
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib config::tests::endpoint
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib a_release_build_refuses_a_plaintext_indexer
           done
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --lib kms::tests
+          cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --lib seed_persistence::tests
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_bfa_mint_over_the_wire
           cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer --test test_signing test_sign_btc
       - name: Clippy (without SPV, mint and burn)

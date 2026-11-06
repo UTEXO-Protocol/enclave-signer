@@ -13,7 +13,106 @@ use sha2::{Digest, Sha256};
 use crate::attest_verify::{refuse_mock_production, VerifyMode};
 use crate::enclave_proto::{GetAttestedPublicKeyResponse, SetEndpointsRequest};
 
-/// The policy that a production enclave of `role` must attest after
+/// Public endpoint identity, without provider credentials or KMS recovery inputs.
+/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
+pub fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
+    use prost::Message;
+    let mut network = request.clone();
+    // Every new schema field must be explicitly classified.
+    let SetEndpointsRequest {
+        electrum_url: _,
+        evm_rpc_host: _,
+        evm_rpc_ca_der: _,
+        evm_rpc_tls_port: _,
+        evm_rpc_path,
+        kms_key_arn,
+        kms_region,
+        kms_seed_id,
+        kms_expected_evm_address,
+    } = &mut network;
+    evm_rpc_path.clear();
+    kms_key_arn.clear();
+    kms_region.clear();
+    kms_seed_id.clear();
+    kms_expected_evm_address.clear();
+    let mut hash = Sha256::new();
+    hash.update(b"utexo/chain-endpoints/v2\0");
+    hash.update(network.encode_to_vec());
+    hash.finalize().into()
+}
+
+/// The indexer policy is a real, fully pinned Signet mint or burn policy.
+/// The endpoint digest is an independently approved runtime value.
+pub(crate) fn validate_indexer_policy(policy: &AttestedPolicy) -> Result<()> {
+    let AttestedPolicy::IndexerTrusted {
+        signer_role,
+        attestation,
+        evm_source,
+        btc_source,
+        chain_id,
+        bitcoin_network,
+        bridge_contract,
+        rgb_asset_id,
+        funds_in_contract,
+        token_contract,
+        evm_finality_tag,
+        spv_min_confirmations,
+        electrum_host,
+        evm_rpc_tls,
+        kms,
+        ..
+    } = policy
+    else {
+        return Ok(());
+    };
+    if !matches!(signer_role, SignerRole::Mint | SignerRole::Burn)
+        || *bitcoin_network != BitcoinNetwork::Signet
+        || *attestation != AttestationMode::Real
+        || *btc_source != BtcDataSource::IndexerTrusted
+        || *evm_source != EvmDataSource::PinnedTlsRpc
+    {
+        bail!("IndexerTrusted requires real attestation, public Signet, pinned TLS and a mint or burn role");
+    }
+    if *chain_id == 0
+        || *bridge_contract == [0; 20]
+        || rgb_asset_id.is_empty()
+        || *funds_in_contract == [0; 20]
+        || *token_contract == [0; 20]
+        || *spv_min_confirmations == 0
+        || *evm_finality_tag == EvmFinalityTag::Latest
+        || electrum_host.is_empty()
+        || evm_rpc_tls.as_ref().is_none_or(|pin| pin.host.is_empty())
+    {
+        bail!(
+            "IndexerTrusted requires complete chain, contract, asset, finality and endpoint pins"
+        );
+    }
+    if (*signer_role == SignerRole::Mint) != kms.is_some() {
+        bail!("IndexerTrusted requires KMS custody for mint only");
+    }
+    Ok(())
+}
+
+/// Real indexer-trusted images must never use Nitro debug measurements.
+pub(crate) fn check_indexer_measurements(
+    policy: &AttestedPolicy,
+    doc_pcrs: &HashMap<u32, Vec<u8>>,
+) -> Result<()> {
+    validate_indexer_policy(policy)?;
+    if matches!(policy, AttestedPolicy::IndexerTrusted { .. }) {
+        for index in 0..3 {
+            if doc_pcrs
+                .get(&index)
+                .is_none_or(|pcr| pcr.len() != 48 || pcr.iter().all(|b| *b == 0))
+            {
+                bail!("IndexerTrusted requires an approved nonzero PCR{index}; Nitro debug mode is not supported");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The policy that a release enclave of `role` must attest after
 /// `endpoints` is set. `image_env` is the `Config.Env` JSON list of the
 /// measured image. The deploy inputs do not give the clone-peer PCR3, so it is
 /// unset here; [`with_document_pcr3`] sets it from the verified document.
@@ -50,6 +149,26 @@ pub fn expected_policy(
     if evm_finality_tag == EvmFinalityTag::Latest {
         bail!("EVM_FINALITY_TAG=latest is not a production policy; use safe or finalized");
     }
+    let network_name = optional("BITCOIN_NETWORK").unwrap_or("bitcoin");
+    let bitcoin_network = BitcoinNetwork::from_env_str(network_name)
+        .with_context(|| format!("BITCOIN_NETWORK {network_name:?} is not a known network"))?;
+    let indexer_trusted = match optional("BTC_RELAY_MODE").unwrap_or("required") {
+        "required" => false,
+        "none"
+            if bitcoin_network == BitcoinNetwork::Signet
+                && matches!(role, SignerRole::Mint | SignerRole::Burn) =>
+        {
+            true
+        }
+        "none" => bail!("BTC_RELAY_MODE=none requires a mint or burn image on public Signet"),
+        value => bail!("unsupported BTC_RELAY_MODE {value:?}"),
+    };
+    if indexer_trusted
+        && !(endpoints.electrum_url.starts_with("ssl://")
+            || endpoints.electrum_url.starts_with("https://"))
+    {
+        bail!("IndexerTrusted requires a TLS indexer URL");
+    }
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
@@ -78,7 +197,7 @@ pub fn expected_policy(
         })
     };
 
-    Ok(AttestedPolicy::Production {
+    let policy = AttestedPolicy::Production {
         allow_vanilla_psbt: role != SignerRole::Burn
             && number::<u64>("BTC_MAX_TOTAL_SATS", optional("BTC_MAX_TOTAL_SATS"))? != 0,
         signer_role: role,
@@ -86,12 +205,7 @@ pub fn expected_policy(
         evm_source: EvmDataSource::PinnedTlsRpc,
         btc_source: BtcDataSource::SpvVerified,
         chain_id: number("EVM_CHAIN_ID", Some(required("EVM_CHAIN_ID")?))?,
-        // Unset is mainnet, as in the enclave.
-        bitcoin_network: {
-            let name = optional("BITCOIN_NETWORK").unwrap_or("bitcoin");
-            BitcoinNetwork::from_env_str(name)
-                .with_context(|| format!("BITCOIN_NETWORK {name:?} is not a known network"))?
-        },
+        bitcoin_network,
         bridge_contract: address20(
             "EVM_PROXY_CONTRACT_ADDRESS",
             required("EVM_PROXY_CONTRACT_ADDRESS")?,
@@ -125,7 +239,17 @@ pub fn expected_policy(
         token_contract: address20("TOKEN_CONTRACT", required("TOKEN_CONTRACT")?)?,
         kms,
         clone_peer_pcr3: None,
-    })
+    };
+    if indexer_trusted {
+        if endpoints.evm_rpc_tls_port == 0 || endpoints.evm_rpc_tls_port > u16::MAX as u32 {
+            bail!("IndexerTrusted requires a valid EVM RPC TLS port");
+        }
+        let policy = policy.into_indexer_trusted(endpoints_sha256(endpoints))?;
+        validate_indexer_policy(&policy)?;
+        Ok(policy)
+    } else {
+        Ok(policy)
+    }
 }
 
 /// The lowercased host of an indexer URL, as the enclave attests it:
@@ -161,7 +285,13 @@ pub fn with_document_pcr3(
     doc_pcrs: &HashMap<u32, Vec<u8>>,
 ) -> Result<AttestedPolicy> {
     let mut policy = expected.clone();
+    check_indexer_measurements(expected, doc_pcrs)?;
     if let AttestedPolicy::Production {
+        signer_role,
+        clone_peer_pcr3,
+        ..
+    }
+    | AttestedPolicy::IndexerTrusted {
         signer_role,
         clone_peer_pcr3,
         ..
@@ -204,7 +334,7 @@ fn check_launch_with(
     expected: &AttestedPolicy,
     verify_doc: impl FnOnce(&[u8]) -> Result<VerifiedAttestation>,
 ) -> Result<AttestedPolicy> {
-    refuse_mock_production(mode, matches!(expected, AttestedPolicy::Production { .. }))?;
+    refuse_mock_production(mode, !matches!(expected, AttestedPolicy::Development))?;
     if response.public_keys.is_some() {
         bail!("the enclave already has keys; the launch check needs a fresh enclave");
     }
@@ -237,7 +367,7 @@ pub fn compare_policy(expected: &AttestedPolicy, attested: &[u8]) -> Result<Atte
 /// Each field of `policy` as (name, value), in wire order. An option gives a
 /// present/absent entry before its subfields.
 pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
-    let AttestedPolicy::Production {
+    let (AttestedPolicy::Production {
         allow_vanilla_psbt,
         signer_role,
         attestation,
@@ -260,7 +390,32 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         token_contract,
         kms,
         clone_peer_pcr3,
-    } = policy
+    }
+    | AttestedPolicy::IndexerTrusted {
+        allow_vanilla_psbt,
+        signer_role,
+        attestation,
+        evm_source,
+        btc_source,
+        chain_id,
+        bitcoin_network,
+        bridge_contract,
+        rgb_asset_id,
+        funds_in_contract,
+        evm_finality_tag,
+        spv_min_confirmations,
+        electrum_host,
+        evm_rpc_tls,
+        gas_tx_allowed_to,
+        gas_tx_max_gas_limit,
+        gas_tx_max_fee_per_gas,
+        gas_tx_max_value_wei,
+        gas_tx_allowed_selectors,
+        token_contract,
+        kms,
+        clone_peer_pcr3,
+        endpoints_sha256: _,
+    }) = policy
     else {
         return vec![("policy", "Development".into())];
     };
@@ -270,7 +425,15 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
     selectors.sort_unstable();
     selectors.dedup();
     let mut out = vec![
-        ("policy", "Production".into()),
+        (
+            "policy",
+            if matches!(policy, AttestedPolicy::IndexerTrusted { .. }) {
+                "IndexerTrusted"
+            } else {
+                "Production"
+            }
+            .into(),
+        ),
         ("allow_vanilla_psbt", allow_vanilla_psbt.to_string()),
         ("signer_role", format!("{signer_role:?}")),
         ("attestation", format!("{attestation:?}")),
@@ -320,6 +483,12 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
     out.push(("clone_peer_pcr3", presence(clone_peer_pcr3.is_some())));
     if let Some(pcr3) = clone_peer_pcr3 {
         out.push(("clone_peer_pcr3.value", hex(pcr3)));
+    }
+    if let AttestedPolicy::IndexerTrusted {
+        endpoints_sha256, ..
+    } = policy
+    {
+        out.push(("endpoints_sha256", hex(endpoints_sha256)));
     }
     out
 }
@@ -372,6 +541,197 @@ mod tests {
 
     fn expected() -> AttestedPolicy {
         expected_policy(SignerRole::Combined, &image_env(), &endpoints()).unwrap()
+    }
+
+    fn stage_env() -> String {
+        let mut env: Vec<String> = serde_json::from_str(
+            &image_env().replace("SPV_MIN_CONFIRMATIONS=6", "SPV_MIN_CONFIRMATIONS=3"),
+        )
+        .unwrap();
+        env.push("EVM_FINALITY_TAG=finalized".into());
+        env.extend([
+            "BITCOIN_NETWORK=signet".into(),
+            "BTC_RELAY_MODE=none".into(),
+        ]);
+        serde_json::to_string(&env).unwrap()
+    }
+
+    fn stage_endpoints(role: SignerRole) -> SetEndpointsRequest {
+        let mut endpoints = endpoints();
+        if role == SignerRole::Burn {
+            endpoints.kms_key_arn.clear();
+            endpoints.kms_region.clear();
+            endpoints.kms_seed_id.clear();
+            endpoints.kms_expected_evm_address.clear();
+        }
+        endpoints
+    }
+
+    fn stage_expected(role: SignerRole) -> AttestedPolicy {
+        expected_policy(role, &stage_env(), &stage_endpoints(role)).unwrap()
+    }
+
+    fn stage_attested(role: SignerRole) -> AttestedPolicy {
+        let mut policy = stage_expected(role);
+        if let AttestedPolicy::IndexerTrusted {
+            clone_peer_pcr3, ..
+        } = &mut policy
+        {
+            *clone_peer_pcr3 = role.clones().then_some(attestation_verify::MOCK_PCR3);
+        }
+        policy
+    }
+
+    #[test]
+    fn stage_launch_checks_real_documents_for_mint_and_burn() {
+        for role in [SignerRole::Mint, SignerRole::Burn] {
+            let expected = stage_expected(role);
+            let attested = stage_attested(role);
+            let (answer, root) = response(&attested.to_bytes());
+            let checked = check_launch_with(answer, VerifyMode::Real, &expected, |doc| {
+                Ok(verify_policy_with_root(doc, &PCRS, &NONCE, &root)?)
+            })
+            .unwrap();
+            assert_eq!(checked.to_bytes(), attested.to_bytes());
+            assert!(matches!(
+                checked,
+                AttestedPolicy::IndexerTrusted {
+                    btc_source: BtcDataSource::IndexerTrusted,
+                    bitcoin_network: BitcoinNetwork::Signet,
+                    attestation: AttestationMode::Real,
+                    ..
+                }
+            ));
+            let err = check_launch_with(
+                mock_response(&attested.to_bytes()),
+                VerifyMode::Mock,
+                &expected,
+                |_| panic!("mock mode must stop before document verification"),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("IndexerTrusted"));
+        }
+    }
+
+    #[test]
+    fn stage_credential_rotation_keeps_policy_and_endpoint_changes_are_visible() {
+        for role in [SignerRole::Mint, SignerRole::Burn] {
+            let approved = stage_endpoints(role);
+            let expected = stage_expected(role);
+            for path in ["", "/", "/v2/old-key", "/v3/rotated-key"] {
+                let mut endpoints = approved.clone();
+                endpoints.evm_rpc_path = path.into();
+                assert_eq!(
+                    expected_policy(role, &stage_env(), &endpoints).unwrap(),
+                    expected
+                );
+            }
+            for change in 0..4 {
+                let mut endpoints = approved.clone();
+                match change {
+                    0 => endpoints.evm_rpc_host = "another.example".into(),
+                    1 => endpoints.evm_rpc_ca_der.push(0xff),
+                    2 => endpoints.evm_rpc_tls_port = 8443,
+                    _ => endpoints.electrum_url = "ssl://other.example:50002".into(),
+                }
+                let changed = expected_policy(role, &stage_env(), &endpoints).unwrap();
+                assert_ne!(changed, expected);
+                assert_ne!(endpoints_sha256(&endpoints), endpoints_sha256(&approved));
+            }
+        }
+    }
+
+    #[test]
+    fn stage_launch_rejects_wrong_host_ca_digest_role_and_spv_policy() {
+        let expected = stage_expected(SignerRole::Burn);
+        for change in 0..5 {
+            let mut attested = stage_attested(SignerRole::Burn);
+            let AttestedPolicy::IndexerTrusted {
+                evm_rpc_tls: Some(pin),
+                endpoints_sha256,
+                signer_role,
+                attestation,
+                ..
+            } = &mut attested
+            else {
+                unreachable!()
+            };
+            match change {
+                0 => pin.host = "other.example".into(),
+                1 => pin.ca_sha256[0] ^= 1,
+                2 => endpoints_sha256[0] ^= 1,
+                3 => *signer_role = SignerRole::Mint,
+                _ => *attestation = AttestationMode::Mock,
+            }
+            let (answer, root) = response(&attested.to_bytes());
+            assert!(
+                check_launch_with(answer, VerifyMode::Real, &expected, |doc| {
+                    Ok(verify_policy_with_root(doc, &PCRS, &NONCE, &root)?)
+                })
+                .is_err()
+            );
+        }
+        let (answer, root) = response(&attested().to_bytes());
+        assert!(
+            check_launch_with(answer, VerifyMode::Real, &expected, |doc| {
+                Ok(verify_policy_with_root(doc, &PCRS, &NONCE, &root)?)
+            })
+            .is_err()
+        );
+        let (answer, root) = response(&stage_attested(SignerRole::Burn).to_bytes());
+        assert!(
+            check_launch_with(answer, VerifyMode::Real, &self::expected(), |doc| {
+                Ok(verify_policy_with_root(doc, &PCRS, &NONCE, &root)?)
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stage_requires_explicit_relay_mode_public_signet_tls_and_custody() {
+        for network in ["bitcoin", "testnet4", "signetcustom", "regtest"] {
+            let env = stage_env().replace(
+                "BITCOIN_NETWORK=signet",
+                &format!("BITCOIN_NETWORK={network}"),
+            );
+            assert!(
+                expected_policy(SignerRole::Burn, &env, &stage_endpoints(SignerRole::Burn))
+                    .is_err()
+            );
+        }
+        assert!(expected_policy(SignerRole::Combined, &stage_env(), &endpoints()).is_err());
+        assert!(expected_policy(
+            SignerRole::Burn,
+            &stage_env().replace("BTC_RELAY_MODE=none", "BTC_RELAY_MODE=other"),
+            &stage_endpoints(SignerRole::Burn)
+        )
+        .is_err());
+        for change in 0..4 {
+            let mut endpoints = stage_endpoints(SignerRole::Burn);
+            match change {
+                0 => endpoints.electrum_url = "tcp://electrum.example:50001".into(),
+                1 => endpoints.evm_rpc_ca_der.clear(),
+                2 => endpoints.evm_rpc_tls_port = 0,
+                _ => endpoints.kms_key_arn = ARN.into(),
+            }
+            assert!(expected_policy(SignerRole::Burn, &stage_env(), &endpoints).is_err());
+        }
+        assert!(expected_policy(
+            SignerRole::Mint,
+            &stage_env(),
+            &stage_endpoints(SignerRole::Burn)
+        )
+        .is_err());
+        let spv_env = stage_env().replace("BTC_RELAY_MODE=none", "BTC_RELAY_MODE=required");
+        assert!(matches!(
+            expected_policy(
+                SignerRole::Burn,
+                &spv_env,
+                &stage_endpoints(SignerRole::Burn)
+            )
+            .unwrap(),
+            AttestedPolicy::Production { .. }
+        ));
     }
 
     #[test]
@@ -484,7 +844,9 @@ mod tests {
         ($field:ident, $value:expr) => {
             |p: &mut AttestedPolicy| match p {
                 AttestedPolicy::Production { $field, .. } => *$field = $value,
-                AttestedPolicy::Development => unreachable!(),
+                AttestedPolicy::Development | AttestedPolicy::IndexerTrusted { .. } => {
+                    unreachable!()
+                }
             }
         };
     }
@@ -564,10 +926,10 @@ mod tests {
 
     #[test]
     fn an_unknown_btc_source_aborts_at_decode() {
-        // SpvVerified is the only value. Byte 6 is btc_source.
+        // Byte 6 is btc_source; 0xff is not a supported source.
         let mut bytes = attested().to_bytes();
         assert_eq!(bytes[6], BtcDataSource::SpvVerified as u8);
-        bytes[6] = 2;
+        bytes[6] = 0xff;
         let err = check(response(&bytes)).unwrap_err();
         assert!(err.to_string().contains("unknown BTC data source"), "{err}");
     }

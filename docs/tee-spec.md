@@ -31,9 +31,10 @@ accept the intended signing identities.
 
 Its job is to move trust away from the host operator: requests from a compromised parent, listener, or backend must pass
 the checks implemented for the selected route. The enclave validates RGB consignments (burn),
-the RGB data a mint or refill tx commits, from its rgb-lib fascia (mint), Bitcoin SPV inclusion, EVM
+the RGB data a mint or refill tx commits, from its rgb-lib fascia (mint),
+Bitcoin SPV inclusion when compiled, EVM
 deposit events, and cross-domain bindings itself; it does not treat request
-flags as evidence. The EVM RPC and CCD retain the trust
+flags as evidence. The stage Bitcoin indexer, EVM RPC and CCD retain the trust
 exceptions described below.
 
 ## 2. Trust boundary and threat model
@@ -51,14 +52,15 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
-| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint and burn launches still pin the URL until the images drop the indexer. |
+| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | Bitcoin witness status and confirmation depth in the public-Signet `IndexerTrusted` profile; witness status and off-PSBT seals in the combined swap flow | the SPV burn profile requires proofs against its enclave header chain. Mint reads the rgb-lib fascia of the PSBT transaction, not indexer history. TLS authenticates an indexer; it does not verify its chain view. |
 | EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
 
 **Residual trust anchors:** AWS (Nitro isolation + attestation root CA), the
 correctness of this enclave code and its validation libraries, the Bitcoin
-checkpoint, and the pinned EVM RPC endpoint. Mint seed recovery also trusts
+checkpoint for SPV, the approved indexer for the no-SPV stage profile, and
+the pinned EVM RPC endpoint. Mint seed recovery also trusts
 AWS KMS and its access policies. The Bridge contract and its governance are
 trusted: the enclave pins the Bridge address, not its code, so an upgraded
 Bridge could emit fake `FundsIn` events and back unbacked mints. EVM deposits,
@@ -87,7 +89,7 @@ These are consistency checks, not EVM consensus proofs. A faulty, malicious
 or compromised approved provider can return a self-consistent false deposit
 history that passes them.
 
-For the burn flow, RGB consensus, Bitcoin SPV and burn/settlement bindings
+For the SPV burn flow, RGB consensus, Bitcoin SPV and burn/settlement bindings
 still apply. The receiving contracts must also enforce their on-chain
 settlement rules and signature quorum (Secs 9-10). Those checks constrain
 release execution; they do not authenticate the provider's historical receipts
@@ -157,14 +159,19 @@ and 8002); the enclave has no direct network stack.
 **Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. Production images keep these values outside the image
-and commit them through the attested policy. Without SPV, `ENDPOINTS_SHA256`
-binds network inputs to the image; KMS fields remain runtime inputs.
+expected EVM address. An optional absolute RPC path can carry a provider API
+key. Both release policies keep these values outside the image and commit
+public launch pins through attestation. `IndexerTrusted` also commits the
+public endpoint digest, excluding the RPC path and KMS fields. No endpoint
+digest is baked into the image. Mint binds the no-SPV digest through KMS
+encryption context; burn clone activation requires an equal policy. See
+[runtime RPC policy](rpc-runtime-policy.md).
 The burn signer requires the indexer URL; without SPV, it queries the indexer
 for confirmations.
 The enclave refuses a second set; changing launch values needs a restart,
 which clears the in-memory keys. Mint recovers its saved KMS identity; burn
-recovery requires a live approved donor with matching PCRs. Until the set, the
+recovery requires a live approved donor with matching PCRs and policy. Until
+the set, the
 enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
@@ -191,9 +198,9 @@ HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
 redirect to a port with no forwarder, or to another host, has no route out.
 The parent -> enclave channel (vsock port 5000) is a separate inbound listener
 and is not affected. The EVM RPC forwarder listens on the
-EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
-it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
-build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+EVM RPC TLS port, and the client connects to `https://<host>:<port><path>`
+through it (the path defaults to `/`). TLS ends inside the enclave, which trusts
+only the CA of the set in every build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
 Each socket read or write has a 10-second idle timeout. A 30-second socket
@@ -228,37 +235,32 @@ SecurityPolicy = Production {
     btc_source:  SpvVerified,                  -- always, in production
     kms,                                       -- KMS pin, mint signer only
     clone_peer_pcr3,                           -- own PCR3, cloning roles only
+} | IndexerTrusted {
+    -- same fields, but btc_source: IndexerTrusted
+    endpoints_sha256,                          -- public runtime endpoint digest
 } | Development { reason }
 ```
 
-- **Resolution** (`policy.rs`): any dev feature
-  (`mock-attestation`, `allow-seed-import`), a
-  debug/test build, a non-bridge
-  build, or a missing pin resolves to `Development`. Only a release
-  `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
-  `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is
-  `Disabled` without `evm-rpc`. Otherwise it is `PinnedTlsRpc` with the host
-  and the CA SHA-256 of the launch set. The verifier pins both.
-- **Boot gate:** a release `rgb-validation` build that does not resolve to a
-  valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
-  and `TOKEN_CONTRACT` must be non-zero, and `BTC_RELAY_MODE` must be `required`.
-  A mainnet EVM chain (`EVM_CHAIN_ID` 1 or 42161) requires
-  `BITCOIN_NETWORK=bitcoin`.
-  `EVM_FINALITY_TAG` accepts exactly `latest`, `safe`, or `finalized` (default
-  `safe`); an invalid value rejects startup, and a production policy refuses
-  `latest`.
-  `SetEndpoints` runs the gate again with the endpoints and refuses the set on
-  an error: `RawRpc`, and `PinnedTlsRpc` without a valid host and CA.
-  Independently, each
-  dev feature is a `compile_error!` in any shipped release binary (non-test
-  build with debug assertions off); `rgb-validation` without `spv` requires
-  a mint/burn role, real attestation, `BITCOIN_NETWORK=signet` and
-  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
-  `SetEndpoints` enforces the measured network digest, and operators approve
-  KMS inputs separately.
-  A build fails with both RGB flows
-  (`rgb-swap` + `rgb-mint-burn`) or with neither, and `rgb-mint-burn` with
-  both signer roles or with neither.
+- **Resolution** (`policy.rs`): a debug/test build, dev feature, non-bridge
+  build or missing pin resolves to `Development`. A release bridge build uses
+  `Production` with SPV or `IndexerTrusted` without it. Both commit the full
+  bridge, role, finality, gas, TLS and custody fields. A missing pin never
+  silently selects an acceptable release policy.
+- **Boot gate:** a release `rgb-validation` build must have valid chain,
+  bridge, asset, FundsIn and token pins. `EVM_FINALITY_TAG` must be `safe` or
+  `finalized`, and confirmation depth must be positive. Production/SPV requires
+  `BTC_RELAY_MODE=required`; a mainnet EVM chain (1 or 42161) then requires
+  Bitcoin mainnet. `IndexerTrusted` instead requires public Signet,
+  `BTC_RELAY_MODE=none`, a mint or burn role, and real attestation. Dev features
+  remain compile errors in release builds; no-SPV RGB also forbids them.
+  The existing mutually exclusive RGB-flow and signer-role compile guards
+  still apply.
+- **Launch gate:** `SetEndpoints` validates all input fields, derives the
+  public endpoint digest, resolves the full policy and checks its launch pins
+  before installing it. `IndexerTrusted` requires a TLS EVM host and CA,
+  indexer host and nonzero digest. Both policies validate KMS pins for mint
+  and the enclave's own nonzero PCR3 for cloning roles. A rejected set leaves
+  the launch slot empty; an accepted set is immutable until restart.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
   (`attestation-verify/src/policy.rs`), so the enclave and every verifier
@@ -278,7 +280,10 @@ SecurityPolicy = Production {
   fails if the commitment differs -- a downgraded posture (vanilla signing on,
   a different EVM source, a dev build) fails verification instead of being
   silently trusted.
-  `--expect-evm-finality-tag` is required for production verification.
+  `--expect-evm-finality-tag` is required for both release policies. SPV is
+  the default. Indexer trust requires explicit `--expect-btc-source indexer`
+  and `--expect-endpoints-sha256`, public Signet and full independent pins.
+  A Development override cannot approve an IndexerTrusted document.
 
 Provider approval is a deployment responsibility. For `PinnedTlsRpc`, supply
 `--expect-evm-source tls` and the RPC hostname and CA SHA-256 from an
@@ -295,18 +300,16 @@ instead of trusting the operator's configuration. An unset pin commits as its ze
 
 Also inside: `BITCOIN_NETWORK` (`bitcoin_network`).
 
-Not inside the policy commitment: the Electrum/Esplora URL
-scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
-`BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
-(only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested), and the mint
-signer's `MINT_WITNESS_SAT`.
+Production/SPV does not commit the Electrum/Esplora URL scheme or port, or the
+EVM RPC TLS port. Its release parser still requires TLS. `IndexerTrusted`
+commits those exact public values through `endpoints_sha256`, along with the
+RPC host and CA DER bytes. The RPC path is excluded from both policies; it may
+contain a secret. Approval therefore covers all accepted paths at that pinned
+host and CA, not a particular provider account or path.
 
-The scheme needs no commitment: a release image accepts only TLS
-(`ssl://` or `https://`) for the Electrum/Esplora URL, so the rule is in the
-code and PCR0 measures it (F05-RR-AF-24). The ports are not committed, and
-matching policies do not prove compliance with a specific port requirement. EVM RPC still requires TLS with the pinned host
-and CA on every accepted port. Bitcoin SPV checks for RGB-source requests
-still apply.
+Neither policy commits request-size caps or concrete `BTC_MAX_TOTAL_SATS`,
+`BTC_MAX_UNOWNED_SATS`, `RGB_MAX_UNOWNED_SATS` and `MINT_WITNESS_SAT` values.
+Only the plain-BTC on/off boolean is in the policy. Image configuration still measures the sats values.
 
 Image-baked configuration is still covered by image measurement; runtime
 configuration is not automatically added to the policy commitment. The plain-BTC *destination* rule needs no
@@ -790,9 +793,9 @@ the resolvers is a refusal of the request, and so is any rgb-lib warning. It
 resolves every witness on chain:
 the transaction comes from the consignment, its status from a source the
 enclave trusts, and it must be mined at least `SPV_MIN_CONFIRMATIONS` deep.
-On the burn path that source is the request's Merkle proofs, verified against
-the enclave header chain (rule 4 below) before consensus runs. In the swap
-flow it is the pinned indexer, through non-verbose calls only, and the depth
+On the SPV burn path that source is the request's Merkle proofs, verified
+against the enclave header chain (rule 4 below) before consensus runs. The
+no-SPV stage burn and the swap flow use the pinned indexer, through non-verbose calls only, and the depth
 counts every block from the indexer's tip, testnet min-difficulty ones
 included. There a witness that a mined witness spends needs no lookup: Bitcoin
 consensus makes it at least as deep. An unmined, unknown
@@ -912,7 +915,8 @@ OpId of the settling burn. Settlement data must contain the exact verified
 `operationId`s. The list must be non-empty and canonically
 encoded. Operation IDs must be strictly ascending, without duplicates.
 
-P8 requires a 128-byte proof with source and latest height/commitment pairs.
+In the SPV profile, P8 requires a 128-byte proof with source and latest
+height/commitment pairs.
 The source height must hold the last consignment witness transaction.
 The enclave verifies that anchor again while it holds the chain lock.
 The latest height must exist in the retained chain. It must be at most
@@ -925,8 +929,11 @@ are rejected. Records that need data below the checkpoint are also rejected.
 Production policy permits only this mode.
 
 With `BTC_RELAY_MODE=none`, both commitments must be zero. The enclave still
-checks heights, the source anchor, and freshness. This mode supports local
-systems without BtcRelay. It is not a production policy.
+checks heights, the source anchor, and freshness in an SPV development build.
+Production/SPV refuses that mode. The no-SPV public-Signet profile requires
+`BTC_RELAY_MODE=none` but skips this SPV check: both the RGB Merkle proof list
+and the release proof must be empty. It never endorses host-supplied header
+claims.
 
 The enclave signs `burnId` and the other decoded fields into the typed digest.
 A signature is not a check of their meaning. So `sourceBurnTxId`,
@@ -958,7 +965,7 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   in any AWS account; PCR3 binds the peer to the operator's role (#270). Each
   side compares the peer's PCR3 with its own (`GetClone` and `SetClone`) and
   refuses a missing or different PCR3, and refuses to clone at all when its own
-  PCR3 is all zero (no IAM role). A Production policy for a role that clones
+  PCR3 is all zero (no IAM role). Both real release policies for a role that clones
   (burn, combined) commits its PCR3 (`clone_peer_pcr3`) and refuses
   `SetEndpoints` when it is all zero. The handshake enforces nonzero, matching
   PCR3 regardless of policy. Recovery onto an instance with another role
@@ -984,7 +991,7 @@ End-to-end release uniqueness also depends on contract checks outside this repo
 
 - Key access and signing require `Active`; initialization cannot overwrite keys.
 - Validation errors return no signature. A PSBT with zero new signatures is an error.
-- Production bridge policy requires real attestation and bridge pins. This
+- Production and IndexerTrusted policies require real attestation and bridge pins. This
   does not imply every runtime setting is in the policy commitment (Sec 4).
 - Mainnet Bitcoin anchors use the pinned checkpoint and PoW/SPV checks.
   Signet/regtest have different validation rules (Sec 8).

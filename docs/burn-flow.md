@@ -9,6 +9,15 @@ This document tells how the burn signer checks and signs a release. The
 [spec](tee-spec.md) describes the rules and known limits. If the code and this
 document differ, investigate the difference. Either can contain an error.
 
+The detailed sequence below describes the SPV profile. The `stage-signet`
+build instead uses `--features vsock,burn-signer`, public Signet and the real
+`IndexerTrusted` policy. It obtains witness status and confirmation depth from
+the approved TLS indexer, and uses `BTC_RELAY_MODE=none`. Both RGB Merkle proofs
+and the release proof must be empty; no Bitcoin header claim is signed. It
+does not verify Bitcoin inclusion with SPV. Its public endpoint
+policy is attested and must match before clone activation. See
+[runtime RPC policy](rpc-runtime-policy.md) for approval and key rotation.
+
 ## 1. What the burn flow does
 
 1. The user burns RGB units on Bitcoin.
@@ -36,7 +45,7 @@ The burn signer signs nothing on Bitcoin.
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
 The burn signer checks request claims before it signs. It derives the burn
-amount from the consignment. It reads no Bitcoin indexer, and reads the EVM
+amount from the consignment. In the SPV profile it reads no Bitcoin indexer, and reads the EVM
 RPC only for an asset whose genesis names a reject list (Stage 3b): the
 deposits behind the burn are derived, and the witnesses are checked on chain against
 the enclave's own header chain. One call of rgb-lib's
@@ -97,7 +106,7 @@ sequenceDiagram
 | `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list is. The enclave reads only an `IRgbRejectList` contract on `EVM_CHAIN_ID` (B3.7). |
 | `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `SPV_MIN_CONFIRMATIONS` | 6 (default) | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
+| `SPV_MIN_CONFIRMATIONS` | 3 in the burn image; 6 if unset in code | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
 | `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
 | `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
 | `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | Maximum distance from the BtcRelay tip to the enclave tip. |
@@ -230,7 +239,7 @@ skip proof-of-work and `nBits` checks.
 - **B3.4** Each Merkle path must be at most 32 levels. Each proof must verify
   against the header that the enclave stores at that height.
 - **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
-  blocks deep (default 6). On the testnets min-difficulty blocks count.
+  blocks deep (3 in the burn image; 6 if unset in code). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights and hashes it used. Just before it
   uses the key, it checks that they did not change.
 
@@ -317,7 +326,7 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
     from its own chain. A zero word is refused. To build a record, the
     checkpoint must carry its chain work. Each proof height must be at least
     10 blocks above the checkpoint, and its epoch start must not be below it.
-  - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
+  - With `BTC_RELAY_MODE=none` (SPV local development only), both words must be zero.
     A production policy does not boot in this mode.
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
