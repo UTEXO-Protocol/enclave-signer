@@ -27,7 +27,6 @@ Set these GitHub Actions repository variables, or export them locally:
 ```sh
 export STAGE_RGB_ASSET_ID='rgb:<new-public-signet-BFA-asset>'
 export STAGE_TOKEN_CONTRACT='0x<approved-ERC20-address>'
-export STAGE_ENDPOINTS_SHA256='<64-hex-digest>'
 export STAGE_GAS_TX_ALLOWED_SELECTORS='0x<selector>,0x<selector>'
 ```
 
@@ -38,15 +37,11 @@ the deployed Multisig ABI. `STAGE_GAS_TX_ALLOWED_SELECTORS` is required only for
 Mint also needs `KMS_ALLOWED_ACCOUNT_IDS`, as every mint image does. The workflow
 reads it from the repository variable of that name. A local build must export it.
 
-Compute the endpoint digest with this revision's CLI, using the same endpoint
-environment and CA file that will be supplied at launch:
-
-```sh
-utexo-bridge-parent-cli set-endpoints --print-sha256
-```
-
-This command does not contact an enclave. KMS inputs are excluded from the digest.
-Both images can share the digest only when their chain endpoint inputs match.
+Endpoints are launch configuration, not build inputs. Members can use different
+endpoint hosts, ports and CA files with the same EIF for a given role and
+release. Supply the approved values through `cli set-endpoints` after launch,
+keeping each provider's API-key path in a restricted `EVM_RPC_PATH_FILE`.
+Rotating that file requires a new launch, not a new image.
 
 Provide the existing `RGB_LIB_BFA_DEPLOY_KEY` and
 `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets and the new
@@ -99,4 +94,7 @@ The upload workflow does not enforce write-once S3 storage.
 The build profile does not configure deployment or KMS policies. In particular,
 the current standard `verify-launch` expects a Production/SPV policy and must
 be adapted before deploying an IndexerTrusted image through that launcher.
-The current CLI requests EVM RPC at `/`; it does not read `EVM_RPC_PATH_FILE`.
+The no-SPV policy remains Development: its real attestation identifies the
+image and key, but does not attest endpoint or KMS launch settings. Operators
+approve those settings externally. Runtime TLS authenticates the configured
+provider; it does not enforce that external approval or prove its answers.
