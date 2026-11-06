@@ -54,6 +54,10 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.chmod(0o700)
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
+                    'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
+                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
+                    'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
+                    'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
                     'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
                     'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS):
             self.env.pop(key, None)
@@ -358,9 +362,87 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
 
+    def stage_inputs(self):
+        return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:new-signet-asset',
+                    STAGE_TOKEN_CONTRACT='0x' + '33' * 20,
+                    STAGE_ENDPOINTS_SHA256='12' * 32,
+                    STAGE_GAS_TX_ALLOWED_SELECTORS='0x12345678,0xabcdef01')
+
+    def test_stage_profile_requires_dedicated_pins_before_docker(self):
+        for key in ('STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
+                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS'):
+            with self.subTest(key=key):
+                inputs = self.stage_inputs()
+                inputs[key] = ''
+                result = self.invoke('Dockerfile.enclave.burn',
+                                     RGB_ASSET_ID='rgb:old-asset', **inputs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(key, result.stderr)
+                self.assertFalse(self.argv.exists())
+
+    def test_stage_profile_rejects_bad_pins_and_debug_features(self):
+        for key, value in (('STAGE_TOKEN_CONTRACT', '0x' + '00' * 20),
+                           ('STAGE_TOKEN_CONTRACT', 'not-an-address'),
+                           ('STAGE_ENDPOINTS_SHA256', '00' * 32),
+                           ('STAGE_ENDPOINTS_SHA256', 'bad-digest'),
+                           ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
+                           ('ENCLAVE_DEBUG_FEATURES', 'allow-debug-pcrs')):
+            with self.subTest(key=key, value=value):
+                inputs = self.stage_inputs()
+                inputs[key] = value
+                result = self.invoke('Dockerfile.enclave.burn', **inputs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.argv.exists())
+
+    def test_stage_profile_pins_both_roles_without_spv_and_uses_multisig_for_gas(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                inputs = self.stage_inputs()
+                if role == 'mint':
+                    inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
+                result = self.invoke(f'Dockerfile.enclave.{role}',
+                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
+                                     RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                args = dict(arg.split('=', 1) for arg in self.captured_build_args())
+                self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
+                self.assertEqual(args['RGB_ASSET_ID'], inputs['STAGE_RGB_ASSET_ID'])
+                self.assertEqual(args['TOKEN_CONTRACT'], inputs['STAGE_TOKEN_CONTRACT'])
+                self.assertEqual(args['ENDPOINTS_SHA256'], inputs['STAGE_ENDPOINTS_SHA256'])
+                self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
+                self.assertEqual(args['BTC_RELAY_MODE'], 'none')
+                self.assertEqual(args['RUST_LOG'], 'debug,alloy_transport_http=off')
+                self.assertEqual(args['FUNDS_IN_CONTRACT'],
+                                 '0xe67c9eb5006512525f597c3fa6119891bd4efaa6')
+                if role == 'burn':
+                    self.assertEqual(args['GAS_TX_ALLOWED_TO'],
+                                     '0x4ab64dd591778ab9b65fd81062703595dfe64552')
+                    self.assertEqual(args['GAS_TX_ALLOWED_TO'], args['EVM_PROXY_CONTRACT_ADDRESS'])
+                    self.assertEqual(args['GAS_TX_MAX_GAS_LIMIT'], '3000000')
+                    self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], inputs['STAGE_GAS_TX_ALLOWED_SELECTORS'])
+                else:
+                    self.assertNotIn('GAS_TX_ALLOWED_TO', args)
+
+    def test_stage_profile_refuses_legacy_recipe_and_unknown_profile(self):
+        for recipe, profile in (('Dockerfile.enclave', 'stage-signet'),
+                                ('Dockerfile.enclave.burn', 'typo')):
+            with self.subTest(recipe=recipe, profile=profile):
+                result = self.invoke(recipe, BUILD_PROFILE=profile)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.argv.exists())
+
 
 class ImageInputsTests(unittest.TestCase):
     RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+
+    def test_every_rgb_recipe_fixes_the_finality_tag_and_the_depth(self):
+        # Every image uses `finalized` and 3. With no ARG, no build can change them.
+        for recipe in RGB_RECIPES:
+            text = (ROOT / 'build' / recipe).read_text()
+            with self.subTest(recipe=recipe):
+                self.assertRegex(text, r'(?m)^\s*EVM_FINALITY_TAG=finalized\b')
+                self.assertRegex(text, r'(?m)^\s*SPV_MIN_CONFIRMATIONS=3\b')
+                self.assertNotRegex(text, r'(?m)^ARG (EVM_FINALITY_TAG|SPV_MIN_CONFIRMATIONS)\b')
 
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:
@@ -369,7 +451,9 @@ class ImageInputsTests(unittest.TestCase):
             for stage in stages:
                 with self.subTest(recipe=recipe, stage=stage.splitlines()[0]):
                     updates = [line for line in stage.splitlines()
-                               if line.startswith('RUN ') and 'apt-get update' in line]
+                               if line.startswith('RUN ') and (
+                                   'apt-get update' in line or
+                                   'sh /usr/local/bin/apt-snapshot-install.sh' in line)]
                     self.assertTrue(updates, 'Stage must configure snapshot sources')
                     for update in updates:
                         tokens = shlex.split(update)
@@ -383,11 +467,14 @@ class ImageInputsTests(unittest.TestCase):
                                 r'debian(?:-security)?/[0-9]{8}T[0-9]{6}Z/?$',
                             )
                         self.assertIn('> /etc/apt/sources.list', update)
+                        install = ('sh /usr/local/bin/apt-snapshot-install.sh'
+                                   if 'apt-snapshot-install.sh' in update
+                                   else 'apt-get update')
                         self.assertLess(update.index('> /etc/apt/sources.list'),
-                                        update.index('apt-get update'))
+                                        update.index(install))
                         self.assertIn('rm -f /etc/apt/sources.list.d/*', update)
                         self.assertLess(update.index('rm -f /etc/apt/sources.list.d/*'),
-                                        update.index('apt-get update'))
+                                        update.index(install))
 
     def test_no_build_input_names_an_endpoint(self):
         files = [ROOT / 'build' / r for r in self.RECIPES]
