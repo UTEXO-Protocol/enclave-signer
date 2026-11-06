@@ -14,8 +14,9 @@
 //! of [`MAX_QUEUED_CONNECTIONS`].
 //!
 //! The only ingress is the untrusted parent, which can stop the enclave anyway.
-//! These limits are availability defense in depth. They are compile-time
-//! constants (PCR-attested), not env settings.
+//! These limits are availability defense in depth. The two timeouts here are
+//! the values of the image. The operator can change them at run time
+//! ([`crate::limits`]). The worker pool and the queue are set up at boot.
 
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};

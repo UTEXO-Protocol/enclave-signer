@@ -49,6 +49,11 @@
 //! Responses from the pinned EVM RPC and the Bitcoin indexer are outside the
 //! model. TLS pins their senders, and the host cannot change them.
 //!
+//! The values here are the values of the image. The operator can change the
+//! frame, element and size limits at run time ([`crate::limits`]). A change
+//! must pass [`check_limits`] and the checks of `Limits::check`, so the model
+//! holds for the new values too.
+//!
 //! The model is a tested rule, not an estimate. Each parser of a request byte
 //! field has a size limit, a measured factor, or both:
 //!
@@ -105,6 +110,7 @@
 
 use crate::conn::WORKER_THREADS;
 use crate::framing::{MAX_MESSAGE_SIZE, MAX_WIRE_ELEMENTS};
+use crate::limits::Limits;
 use crate::policy::BuildContext;
 
 /// Upper bound on the heap one request uses, as a multiple of its input size,
@@ -225,6 +231,36 @@ fn check(total: Option<usize>, ctx: &BuildContext) -> Result<(), String> {
             "total memory unknown: /proc/meminfo has no readable MemTotal line, and \
              {required_mib} MiB of usable memory are needed"
         ),
+    };
+    if ctx.debug_or_test {
+        tracing::warn!("{problem}; continuing in a debug build");
+        return Ok(());
+    }
+    Err(problem)
+}
+
+/// Refuses limits whose requests do not fit the usable memory: the check of
+/// [`check_at_boot`], for a change at run time ([`crate::limits`]). So a change
+/// cannot make a request that ends the enclave. A debug build only logs a
+/// warning.
+pub fn check_limits(limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
+    check_limits_against(limits, total_memory_bytes(), ctx)
+}
+
+fn check_limits_against(
+    limits: &Limits,
+    total: Option<usize>,
+    ctx: &BuildContext,
+) -> Result<(), String> {
+    let needed = BASELINE_BYTES + WORKER_THREADS * limits.request_bound_bytes() as usize;
+    let needed_mib = needed / (1024 * 1024);
+    let problem = match total {
+        Some(total) if total >= needed => return Ok(()),
+        Some(total) => format!(
+            "these limits need {needed_mib} MiB of usable memory, and the enclave has {} MiB",
+            total / (1024 * 1024)
+        ),
+        None => format!("total memory unknown, and these limits need {needed_mib} MiB"),
     };
     if ctx.debug_or_test {
         tracing::warn!("{problem}; continuing in a debug build");
@@ -405,6 +441,25 @@ mod tests {
         assert!(err.contains("--memory at least 4096 MiB"), "{err}");
         let err = check(None, &build(false)).unwrap_err();
         assert!(err.contains("total memory unknown"), "{err}");
+    }
+
+    /// A release build refuses limits that need more memory than it has, and
+    /// the image limits fit the minimum.
+    #[test]
+    fn a_change_of_limits_must_fit_the_usable_memory() {
+        let image = Limits::DEFAULTS;
+        assert!(
+            check_limits_against(&image, Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok()
+        );
+        let larger = Limits {
+            max_message_bytes: 2 * image.max_message_bytes,
+            ..image
+        };
+        let err = check_limits_against(&larger, Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false))
+            .unwrap_err();
+        assert!(err.contains("these limits need"), "{err}");
+        assert!(check_limits_against(&larger, None, &build(false)).is_err());
+        assert!(check_limits_against(&larger, Some(1), &build(true)).is_ok());
     }
 
     #[test]

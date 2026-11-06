@@ -56,9 +56,10 @@ pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
 /// Refuses `bytes` over [`MAX_PSBT_BYTES`] before any parse. `what` names the
 /// field in the error.
 pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
-    if bytes.len() > MAX_PSBT_BYTES {
+    let max = crate::limits::get().max_psbt_bytes;
+    if bytes.len() as u64 > max {
         return Err(crate::error::EnclaveError::CrossCheck(format!(
-            "{what} is {} bytes; the limit is {MAX_PSBT_BYTES}",
+            "{what} is {} bytes; the limit is {max}",
             bytes.len()
         )));
     }

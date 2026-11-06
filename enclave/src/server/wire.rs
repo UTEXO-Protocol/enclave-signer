@@ -14,7 +14,7 @@ pub fn handle_connection(stream: impl Read + Write, ctx: &ServerContext) {
     handle_connection_until(
         stream,
         ctx,
-        std::time::Instant::now() + crate::conn::TOTAL_REQUEST_TIMEOUT,
+        std::time::Instant::now() + crate::limits::get().total_request_timeout(),
     );
 }
 

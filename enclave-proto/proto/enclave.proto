@@ -29,6 +29,8 @@ message EnclaveRequest {
     HealthRequest health = 16;
     SetEndpointsRequest set_endpoints = 17;
     SignRightsRefillRequest sign_rights_refill = 18;
+    SetLimitsRequest set_limits = 19;
+    GetLimitsRequest get_limits = 20;
   }
 }
 
@@ -53,6 +55,7 @@ message EnclaveResponse {
     ErrorResponse error = 15;
     HealthResponse health = 16;
     SetEndpointsResponse set_endpoints = 17;
+    LimitsResponse limits = 18;
   }
 }
 
@@ -400,6 +403,49 @@ message HealthResponse {
   uint32 spv_max_tip_age_secs = 8;
   // SetEndpoints was accepted.
   bool endpoints_set = 9;
+}
+
+// The time, memory and size limits. The operator can change them at run time,
+// and a change needs no new image. Each limit only sets when the enclave refuses
+// a request or how long it waits. No limit changes what the enclave signs. The
+// attestation does not cover these values. docs/runtime-limits.md has the rules.
+message Limits {
+  uint64 total_request_timeout_secs = 1;
+  uint64 io_idle_timeout_secs = 2;
+  uint64 first_bytes_timeout_secs = 3;
+  uint64 electrum_timeout_secs = 4;
+  uint64 esplora_timeout_secs = 5;
+  uint64 max_rgb_lib_ms = 6;
+  uint64 max_witness_check_cost = 7;
+  uint64 max_bundle_id_cost = 8;
+  uint64 max_reject_walk_cost = 9;
+  uint64 max_message_bytes = 10;
+  uint64 max_wire_elements = 11;
+  uint64 max_consignment_bytes = 12;
+  uint64 max_merkle_proofs = 13;
+  uint64 max_total_proof_bytes = 14;
+  uint64 max_psbt_bytes = 15;
+  uint64 max_gas_tx_bytes = 16;
+  uint64 max_rlp_items = 17;
+  uint64 max_funds_out_call_data_bytes = 18;
+  uint64 max_headers_per_submit = 19;
+  uint64 max_headers_per_minute = 20;
+}
+
+// Changes limits. The enclave checks all the values first, so a refused request
+// changes nothing. The values stay until the enclave restarts.
+message SetLimitsRequest {
+  // The new values. 0 keeps the value of that limit.
+  Limits values = 1;
+  // Go back to the image values first, then apply `values`.
+  bool reset = 2;
+}
+
+message GetLimitsRequest {}
+
+message LimitsResponse {
+  Limits current = 1; // The values in force.
+  Limits image = 2; // The values of the image, which a reset restores.
 }
 
 // The chain endpoints the enclave reads from. The operator sets them once,

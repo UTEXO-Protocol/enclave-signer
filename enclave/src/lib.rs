@@ -102,6 +102,7 @@ pub mod keys;
 #[cfg(feature = "kms-persistence")]
 pub mod kms;
 // The request memory model and its boot check.
+pub mod limits;
 pub mod memory;
 pub mod networks;
 pub mod policy;

@@ -45,18 +45,16 @@ const ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR: [u8; 4] = [0x8f, 0x6b, 0x30, 0x31];
 /// exhausting the stack.
 const MAX_RLP_DEPTH: usize = 8;
 
-/// Maximum RLP items in one gas transaction: every string and list, at any
-/// depth. A gas tx has 9 fields and a small or empty access list. Each decoded
-/// item takes 24 bytes, however short its encoding is. Without this limit, a
-/// 24 MiB request of one-byte empty lists decodes into more than 1 GiB.
-/// Calldata is one item at any length.
-const MAX_RLP_ITEMS: usize = 1024;
+/// The RLP item limit of the image, for the tests.
+#[cfg(test)]
+const MAX_RLP_ITEMS: usize = crate::limits::Limits::DEFAULTS.max_rlp_items as usize;
 
-/// Maximum size of the unsigned transaction. A release call with thousands of
+/// Maximum size of the unsigned transaction in the image. The operator can
+/// change it ([`crate::limits`]). A release call with thousands of
 /// deposit ids is well under 100 KiB. The wire frame has the size of a burn
 /// consignment, not of a gas transaction. This limit keeps the decoder's
 /// input, and so its heap, far below the request memory model (`memory.rs`).
-pub const MAX_GAS_TX_BYTES: usize = 1024 * 1024;
+pub const MAX_GAS_TX_BYTES: usize = crate::limits::Limits::DEFAULTS.max_gas_tx_bytes as usize;
 
 fn reject(msg: impl Into<String>) -> EnclaveError {
     EnclaveError::CrossCheck(msg.into())
@@ -108,9 +106,10 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         ));
     }
 
-    if req.unsigned_tx.len() > MAX_GAS_TX_BYTES {
+    let max = crate::limits::get().max_gas_tx_bytes;
+    if req.unsigned_tx.len() as u64 > max {
         return Err(reject(format!(
-            "gas tx: unsigned_tx is {} bytes; the limit is {MAX_GAS_TX_BYTES}",
+            "gas tx: unsigned_tx is {} bytes; the limit is {max}",
             req.unsigned_tx.len()
         )));
     }
@@ -329,7 +328,7 @@ fn parse_gas_tx(raw: &[u8]) -> Result<GasTx<'_>> {
 
 /// Decodes exactly one top-level RLP item. It must use the whole buffer.
 fn decode_canonical(buf: &[u8]) -> Result<Rlp<'_>> {
-    let mut items_left = MAX_RLP_ITEMS;
+    let mut items_left = crate::limits::get().max_rlp_items as usize;
     let (item, used) = decode_one(buf, 0, &mut items_left)?;
     if used != buf.len() {
         return Err(reject("rlp: trailing bytes after top-level item"));
@@ -343,9 +342,10 @@ fn decode_one<'a>(buf: &'a [u8], depth: usize, items_left: &mut usize) -> Result
     if depth > MAX_RLP_DEPTH {
         return Err(reject("rlp: nesting too deep"));
     }
-    *items_left = items_left
-        .checked_sub(1)
-        .ok_or_else(|| reject(format!("rlp: more than {MAX_RLP_ITEMS} items")))?;
+    *items_left = items_left.checked_sub(1).ok_or_else(|| {
+        let max = crate::limits::get().max_rlp_items;
+        reject(format!("rlp: more than {max} items"))
+    })?;
     let b0 = *buf
         .first()
         .ok_or_else(|| reject("rlp: unexpected end of input"))?;

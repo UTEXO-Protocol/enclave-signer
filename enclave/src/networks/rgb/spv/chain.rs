@@ -71,7 +71,8 @@ pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
 /// Maximum headers in one `submit_headers` call. It bounds per-call work. The
 /// 24 MiB `framing` cap alone allows approx 314k headers per message.
-pub const MAX_HEADERS_PER_SUBMIT: usize = 10_000;
+pub const MAX_HEADERS_PER_SUBMIT: usize =
+    crate::limits::Limits::DEFAULTS.max_headers_per_submit as usize;
 
 /// Outcome of pushing a batch of headers.
 #[derive(Debug, Clone, Copy)]
@@ -221,10 +222,11 @@ impl HeaderChain {
         let tip = self.tip_height();
 
         // Per-call cap. The 24 MiB `framing` cap alone allows approx 314k headers.
-        if raw_headers.len() > MAX_HEADERS_PER_SUBMIT {
+        let max = crate::limits::get().max_headers_per_submit as usize;
+        if raw_headers.len() > max {
             return Err(SpvError::BatchTooLarge {
                 len: raw_headers.len(),
-                max: MAX_HEADERS_PER_SUBMIT,
+                max,
             });
         }
 
