@@ -92,6 +92,15 @@ enc_id() {
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
 
+# Send the limits of the operator. They do not survive a restart, so each launch
+# sends them again. If the enclave refuses them, it keeps the image values, and
+# the launch goes on.
+send_limits() {
+  LIMITS_FILE="${ENCLAVE_LIMITS_FILE:-/etc/utexo/enclave-limits.conf}"
+  [ -r "$LIMITS_FILE" ] || return 0
+  "$CLI" --addr "vsock://$CID:5000" limits set --file "$LIMITS_FILE" >/dev/null \
+    || echo "CID $CID refused $LIMITS_FILE and keeps the image values" >&2
+}
 # Set endpoints and KMS values once from the unit env.
 set_endpoints() {
   : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
@@ -103,7 +112,11 @@ set_endpoints() {
   for _ in $(seq 30); do
     # `health` exits 1 until the enclave is ready. Any answer will do.
     case "$("$CLI" --addr "vsock://$CID:5000" health 2>/dev/null)" in
-      *"Endpoints set:"*) "$CLI" --addr "vsock://$CID:5000" set-endpoints; return ;;
+      *"Endpoints set:"*)
+        send_limits
+        "$CLI" --addr "vsock://$CID:5000" set-endpoints
+        return
+        ;;
     esac
     sleep 2
   done

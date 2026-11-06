@@ -202,6 +202,55 @@ os.execvp(args[0], args)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('--memory 4096 --enclave-cid 16', self.calls.read_text())
 
+    def limits_stub(self, refuse):
+        # The parent CLI records its commands. It can refuse `limits set`.
+        calls = self.base / 'cli.calls'
+        self.stub('utexo-bridge-parent-cli', f'''
+import sys
+with open({str(calls)!r}, 'a') as f:
+    f.write(' '.join(sys.argv[1:]) + '\\n')
+if 'health' in sys.argv:
+    print('Endpoints set: yes')
+if 'limits' in sys.argv and {refuse!r}:
+    sys.exit(1)
+''')
+        return calls
+
+    def test_start_sends_the_limits_file_before_the_endpoints(self):
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        calls = self.limits_stub(refuse=False)
+        limits = self.base / 'enclave-limits.conf'
+        limits.write_text('max_rgb_lib_ms=21000\n')
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                sent = calls.read_text()
+                self.assertIn(f'limits set --file {limits}', sent)
+                self.assertLess(sent.index('limits set'), sent.index('set-endpoints'))
+
+    def test_start_goes_on_without_a_limits_file_or_when_the_enclave_refuses_it(self):
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        limits = self.base / 'enclave-limits.conf'
+        calls = self.limits_stub(refuse=True)
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('limits set', calls.read_text())
+
+                limits.write_text('max_rgb_lib_ms=1\n')
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('keeps the image values', result.stderr)
+                self.assertIn('set-endpoints', calls.read_text())
+                limits.unlink()
+
     def test_start_refuses_when_the_free_pages_cannot_hold_its_enclave(self):
         for gib, free_gib, mib2, free_mib2, free_mib in ((12, 3, 0, 0, 3072), (3, 3, 511, 511, 4094)):
             self.write_pages(gib=gib, free_gib=free_gib, mib2=mib2, free_mib2=free_mib2)

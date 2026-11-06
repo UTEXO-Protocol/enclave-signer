@@ -3,9 +3,10 @@ use std::time::Duration;
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetAttestedPublicKeyRequest, GetAttestedPublicKeyResponse, GetLastSavedBlockRequest,
-    GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest, HealthResponse,
-    InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse,
-    MerkleProofEntry, PublicKeysResponse, SetCloneRequest, SetEndpointsRequest, SignedPsbtResponse,
+    GetLastSavedBlockResponse, GetLimitsRequest, GetPublicKeyRequest, HealthRequest,
+    HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
+    InitiateCloningResponse, Limits, LimitsResponse, MerkleProofEntry, PublicKeysResponse,
+    SetCloneRequest, SetEndpointsRequest, SetLimitsRequest, SignedPsbtResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -456,6 +457,37 @@ impl EnclaveClient {
         let resp = self.send_request(&req)?;
         match resp.response {
             Some(enclave_response::Response::GetAttestedPublicKey(r)) => Ok(r),
+            Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+                code: e.code,
+                message: e.message,
+            }),
+            other => Err(ParentError::Connection(format!(
+                "unexpected response variant: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Read the time, memory and size limits of the enclave.
+    pub fn get_limits(&self) -> Result<LimitsResponse> {
+        self.limits_request(enclave_request::Request::GetLimits(GetLimitsRequest {}))
+    }
+
+    /// Change limits. A value of 0 keeps that limit. With `reset`, the limits
+    /// go back to the image values first.
+    pub fn set_limits(&self, values: Limits, reset: bool) -> Result<LimitsResponse> {
+        self.limits_request(enclave_request::Request::SetLimits(SetLimitsRequest {
+            values: Some(values),
+            reset,
+        }))
+    }
+
+    fn limits_request(&self, request: enclave_request::Request) -> Result<LimitsResponse> {
+        let req = EnclaveRequest {
+            request: Some(request),
+        };
+        match self.send_request(&req)?.response {
+            Some(enclave_response::Response::Limits(limits)) => Ok(limits),
             Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
                 code: e.code,
                 message: e.message,

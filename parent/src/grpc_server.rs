@@ -12,12 +12,19 @@ use crate::framing;
 
 use crate::signed_responses::{Claim, Lead, SignedResponses};
 
-/// Longer than the enclave's own 30 s socket deadline (`conn::TOTAL_REQUEST_TIMEOUT`),
-/// which starts at accept while this timer starts before the worker is queued.
+/// Longer than the socket deadline of the image (`conn::TOTAL_REQUEST_TIMEOUT`).
 /// The enclave must give up first: its failed write then rolls its replay key
 /// back, while a parent that gives up first leaves a committed key and a
 /// response nobody read.
 const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// The wait for a `Sign`, the one request with a replay key and with a
+/// consignment to validate. It is longer than the highest socket deadline of the
+/// enclave (`limits::MAX_REQUEST_TIMEOUT_SECS`). The operator can change that
+/// deadline at run time, so this wait holds for each value and the parent needs no
+/// change. The deadline starts at accept, while this timer starts before the worker
+/// is queued. See [`ENCLAVE_TIMEOUT`] for why the enclave must give up first.
+const SIGN_TIMEOUT: Duration = Duration::from_secs(110);
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -119,10 +126,7 @@ fn exchange(
 }
 
 fn timed_out() -> Status {
-    Status::deadline_exceeded(format!(
-        "enclave request timed out ({}s)",
-        ENCLAVE_TIMEOUT.as_secs()
-    ))
+    Status::deadline_exceeded("enclave request timed out")
 }
 
 fn is_timeout(e: &io::Error) -> bool {
@@ -228,7 +232,7 @@ impl ParentAdapterService {
         req: EnclaveRequest,
         lead: Option<Lead>,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, lead).await
+        send_within(self.target.clone(), req, SIGN_TIMEOUT, lead).await
     }
 
     /// Unwrap an enclave error response into a gRPC Status.
@@ -1217,5 +1221,6 @@ mod tests {
     #[test]
     fn the_parent_waits_longer_than_the_enclave_socket_deadline() {
         assert!(ENCLAVE_TIMEOUT > utexo_bridge_enclave::conn::TOTAL_REQUEST_TIMEOUT);
+        assert!(SIGN_TIMEOUT.as_secs() > utexo_bridge_enclave::limits::MAX_REQUEST_TIMEOUT_SECS);
     }
 }

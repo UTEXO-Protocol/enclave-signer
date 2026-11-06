@@ -220,7 +220,8 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   enclave clients can also submit headers. The sync reads headers from
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
 - The parent opens one new TCP or vsock connection per enclave RPC, with a
-  40 s timeout.
+  40 s timeout, or 110 s for a `Sign`. The enclave gives up first
+  ([`docs/runtime-limits.md`](docs/runtime-limits.md)).
 - `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
   clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
   the enclave.
@@ -236,6 +237,7 @@ request per connection. Frame limit 24 MiB. Schema:
 | Request | Phase | Signer | Description |
 |---------|-------|--------|-------------|
 | `SetEndpoints` | any | all | Sets the chain endpoints (and the KMS values on mint). Once per boot. |
+| `SetLimits`, `GetLimits` | any | all | Change or read the time, memory and size limits ([`docs/runtime-limits.md`](docs/runtime-limits.md)). |
 | `InitializeKey` | Initial | all | Mint: recover or create the KMS seed. Burn: make a seed from OS entropy, with an optional donor `cloning_secret`. |
 | `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, CCD key, boot pins. |
 | `GetAttestedPublicKey` | any, after `SetEndpoints` | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. Before keys exist it attests the policy only. |
@@ -594,6 +596,13 @@ EIF checksum and PCR0 against the S3 manifest before and after start.
 A restart removes the in-memory keys. Initialize or clone each enclave again.
 Mint signers recover their saved KMS seed through `InitializeKey`. They require
 the verified address pin and do not support peer cloning.
+
+### Runtime limits
+
+The operator can change the time, memory and size limits of a running enclave
+with `utexo-bridge-parent-cli limits`. A change needs no new image, so the PCR
+values and the keys do not change. The attestation does not cover these values.
+[`docs/runtime-limits.md`](docs/runtime-limits.md) has the commands and the rules.
 
 ### Lost `SetEndpoints` reply
 

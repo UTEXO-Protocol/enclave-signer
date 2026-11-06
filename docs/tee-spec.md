@@ -158,6 +158,13 @@ Bitcoin indexer and the EVM RPC are reached through in-enclave loopback
 forwarders. They bridge over vsock to host-side `vsock-proxy` instances
 (vsock ports 8001 and 8002). The enclave has no direct network stack.
 
+**Runtime limits** (`limits.rs`). The operator can change the time, memory and
+size limits of a running enclave. A change needs no new image, so the PCR values
+do not change. The attestation does not cover these values. Each limit only sets
+when the enclave refuses a request or how long it waits, and no limit changes
+what the enclave signs. Safety rules stay in the image. `docs/runtime-limits.md`
+has the list. The numbers in this document are the image values.
+
 **Request memory model** (`memory.rs`). The enclave has a fixed amount of
 memory and no swap. So the heap one request can use has a bound that depends
 only on its size. The bound is `REQUEST_MEMORY_FACTOR` (24) times the frame,
