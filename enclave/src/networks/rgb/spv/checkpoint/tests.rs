@@ -11,16 +11,7 @@ fn signet_challenge_matches_oleksandrs_hex() {
 }
 
 #[test]
-fn signet_challenge_decodes_as_3_of_3_multisig() {
-    // The last bytes are OP_3 OP_CHECKMULTISIG.
-    let len = UTEXO_SIGNET_CHALLENGE.len();
-    assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 2], 0x53); // OP_3 (n)
-    assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 1], 0xae); // OP_CHECKMULTISIG
-}
-
-#[test]
-fn signet_magic_is_four_bytes() {
-    assert_eq!(UTEXO_SIGNET_MAGIC.len(), 4);
+fn signet_magic_matches_the_network() {
     assert_eq!(UTEXO_SIGNET_MAGIC, [0x6f, 0x21, 0x61, 0x5a]);
 }
 
@@ -142,12 +133,42 @@ fn override_is_allowed_in_test_builds() {
 /// With no env var set, boot resolution is the compiled-in constant.
 #[test]
 fn resolve_without_env_returns_the_compiled_checkpoint() {
-    if std::env::var(CHECKPOINT_ENV).is_ok() {
-        return; // set in the shell; the parser tests cover the rest
+    const CHILD: &str = "UTEXO_CHECKPOINT_NO_ENV_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Clear the override in a subprocess, without racing other tests or
+        // silently skipping the assertion when the developer sets it.
+        let full_name = concat!(
+            module_path!(),
+            "::resolve_without_env_returns_the_compiled_checkpoint"
+        );
+        let (_, test_name) = full_name.split_once("::").unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env_remove(CHECKPOINT_ENV)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "checkpoint subprocess failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "the subprocess must execute the checkpoint assertion: {result:?}"
+        );
+    } else {
+        assert!(std::env::var_os(CHECKPOINT_ENV).is_none());
+        let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
+        assert_eq!(cp.height, SIGNET_CHECKPOINT.height);
+        assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
+        assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
+        assert_eq!(cp.time, SIGNET_CHECKPOINT.time);
+        assert_eq!(cp.chain_work, SIGNET_CHECKPOINT.chain_work);
+        assert_eq!(cp.is_real, SIGNET_CHECKPOINT.is_real);
+        assert_eq!(source, CheckpointSource::Compiled);
     }
-    let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
-    assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
-    assert_eq!(source, CheckpointSource::Compiled);
 }
 
 #[test]

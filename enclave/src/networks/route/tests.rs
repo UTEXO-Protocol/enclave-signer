@@ -166,7 +166,9 @@ fn route_proofs_reject_underfunded_evm_destination() {
 }
 
 #[test]
-fn route_proofs_do_not_compare_rgb_to_evm_operation_id_yet() {
+fn rgb_to_evm_amount_check_defers_operation_id_binding_to_handler() {
+    // The handler binds the decoded release to the validated RGB burn after
+    // this amount check; test_bfa_burn_over_the_wire covers that refusal.
     assert!(validate_route_proofs(
         &rgb_source(),
         &evm_destination(90, 20),
@@ -177,7 +179,7 @@ fn route_proofs_do_not_compare_rgb_to_evm_operation_id_yet() {
 }
 
 #[test]
-fn route_proofs_accept_rgb_to_evm_missing_operation_id_for_now() {
+fn rgb_to_evm_amount_check_does_not_require_an_operation_id() {
     assert!(validate_route_proofs(
         &rgb_source(),
         &evm_destination(90, 20),

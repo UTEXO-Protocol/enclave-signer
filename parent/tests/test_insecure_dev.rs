@@ -75,11 +75,9 @@ async fn serves_plaintext_on_wildcard_bind() {
     let _ = child.kill();
     child.wait().unwrap();
     let status = status.expect("parent did not start");
+    assert_eq!(status.code(), tonic::Code::Unavailable, "{status}");
     assert!(
-        !matches!(
-            status.code(),
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
-        ),
+        status.message().starts_with("enclave connection failed:"),
         "{status}"
     );
 }

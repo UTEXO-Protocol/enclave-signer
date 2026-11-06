@@ -18,7 +18,7 @@
 #[path = "../src/test_support/bfa_consignment.rs"]
 mod bfa_consignment;
 
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Write};
 use std::sync::{Arc, Mutex};
 
 use alloy_sol_types::{sol, SolCall, SolEvent};
@@ -238,7 +238,7 @@ fn pay(
 
 /// Issues a BFA asset, with `reject_list` if any. The issuer seeds its right
 /// to the bridge's key-path output (`bridge_spk`, vout 1 of the seed). A
-/// `mint` gives `MINTED` units to `payee`. Its witness tx spends the right and
+/// `mint` gives `issued` units to `payee`. Its witness tx spends the right and
 /// `aux` (if any). The mint consumes the right, or in the old form
 /// (`keeps_right`) passes it on to the bridge change.
 fn issue_and_mint(
@@ -247,6 +247,7 @@ fn issue_and_mint(
     reject_list: Option<RejectListLocation>,
     keeps_right: bool,
     payee: Payee,
+    issued: u64,
 ) -> Deposit {
     let issuer_utxo = OutPoint::new(Txid::from_byte_array([0x15; 32]), 0);
     let mut history = History::issue(Issue {
@@ -272,10 +273,10 @@ fn issue_and_mint(
     let (to, outputs, invoice) = pay(payee, history.contract_id, &user_funding, bridge_spk);
     let mint = if keeps_right {
         history
-            .mint_keeping_right(right, MINTED, BEFORE_BLOCK, to, extra, outputs)
+            .mint_keeping_right(right, issued, BEFORE_BLOCK, to, extra, outputs)
             .0
     } else {
-        history.mint(right, MINTED, BEFORE_BLOCK, to, extra, outputs)
+        history.mint(right, issued, BEFORE_BLOCK, to, extra, outputs)
     };
 
     Deposit {
@@ -494,10 +495,22 @@ fn build_on(
     keeps_right: bool,
     payee: Payee,
 ) -> Built {
+    build_issuing(aux, reject_list, keeps_right, payee, MINTED)
+}
+
+/// The same valid mint shape, with `issued` units committed in its fascia.
+/// The request and both EVM receipt events still name `MINTED` units.
+fn build_issuing(
+    aux: Option<&Aux>,
+    reject_list: Option<RejectListLocation>,
+    keeps_right: bool,
+    payee: Payee,
+    issued: u64,
+) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
     let bridge_spk = bridge_address(our);
-    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right, payee);
+    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right, payee, issued);
 
     let origin = (vec![], (*keys.master_fingerprint(), our_path));
     let mut psbt = deposit.mint.psbt.clone();
@@ -792,6 +805,121 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
         ],
     )
     .expect("consumer resolves the bound witness");
+}
+
+/// M5 compares the amount committed by the mint, not the listener's unchecked
+/// `psbt_output_amount`. The request and the receipt agree in every case.
+#[test]
+fn refuses_a_mint_whose_committed_amount_differs_from_the_deposit() {
+    for issued in [MINTED - 1, MINTED + 1] {
+        let minted = build_issuing(None, None, false, Payee::Blinded, issued);
+        let mut request = sign_request(&minted);
+        let Some(DestinationNetwork::RgbDestination(destination)) =
+            request.destination_network.as_mut()
+        else {
+            panic!("the fixture has an RGB destination");
+        };
+        // A host claiming the correct amount must not conceal different
+        // issuedSupply / asset units inside an otherwise valid mint.
+        destination.psbt_output_amount = MINTED;
+        let chain = deposit_chain(&minted, LOCK_BLOCK, LOCK_BLOCK, vec![]);
+        let ctx = context(bridge_config(&minted.deposit.contract_id), chain);
+        let response = sign_over_the_wire(&ctx, request);
+        let Some(Response::Error(error)) = response.response else {
+            panic!("a mint of {issued} units must not be signed");
+        };
+        assert_eq!(error.code, 3);
+        assert_eq!(
+            error.message,
+            format!(
+                "cross-check failed: mint-RGB amount mismatch: the mint issues {issued} != \
+                 net credited (source_amount {MINTED} - source_commission 0 = {MINTED})"
+            )
+        );
+    }
+
+    // The same shape with the correct committed amount reaches signing.
+    let valid = build(None);
+    let (signed, count) = signed_psbt(&drive(&valid)).expect("matching mint signs");
+    assert_eq!(count, 1);
+    assert_eq!(
+        finalize(&signed, None).compute_txid(),
+        valid.deposit.mint.tx.compute_txid()
+    );
+}
+
+/// Records the response the handler tries to send, but fails the body write.
+/// Recording attempted bytes lets the test prove it reached actual signing.
+struct DisconnectedCaller {
+    request: Cursor<Vec<u8>>,
+    attempted_response: Vec<u8>,
+    body_write_failed: bool,
+}
+
+impl Read for DisconnectedCaller {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.request.read(bytes)
+    }
+}
+
+impl Write for DisconnectedCaller {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let is_body = !self.attempted_response.is_empty();
+        self.attempted_response.extend_from_slice(bytes);
+        if is_body {
+            self.body_write_failed = true;
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "caller disconnected",
+            ))
+        } else {
+            Ok(bytes.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        panic!("the failed body write must stop the response before flush")
+    }
+}
+
+#[test]
+fn retries_a_mint_after_a_failed_response_write() {
+    let minted = build(None);
+    let chain = deposit_chain(&minted, LOCK_BLOCK, LOCK_BLOCK, vec![]);
+    let ctx = context(bridge_config(&minted.deposit.contract_id), chain);
+    let mut request = Vec::new();
+    framing::write_message(
+        &mut request,
+        &EnclaveRequest {
+            request: Some(Request::Sign(sign_request(&minted))),
+        },
+    )
+    .unwrap();
+    let mut disconnected = DisconnectedCaller {
+        request: Cursor::new(request),
+        attempted_response: vec![],
+        body_write_failed: false,
+    };
+    server::handle_connection(&mut disconnected, &ctx);
+    assert!(
+        disconnected.body_write_failed,
+        "the response write must fail"
+    );
+    let attempted: EnclaveResponse =
+        framing::read_message(&mut Cursor::new(disconnected.attempted_response)).unwrap();
+    let (signed, count) = signed_psbt(&attempted).expect("the first attempt reached signing");
+    assert_eq!(count, 1);
+    let expected_txid = minted.deposit.mint.tx.compute_txid();
+    assert_eq!(finalize(&signed, None).compute_txid(), expected_txid);
+
+    let retried = sign_over_the_wire(&ctx, sign_request(&minted));
+    let (signed, count) = signed_psbt(&retried).expect("an undelivered mint may be retried");
+    assert_eq!(count, 1);
+    assert_eq!(finalize(&signed, None).compute_txid(), expected_txid);
+
+    let replayed = sign_over_the_wire(&ctx, sign_request(&minted));
+    let (kept, _) = signed_psbt(&replayed).expect("an identical retry gets the kept reply");
+    assert_eq!(kept, signed);
 }
 
 /// A caller that sent its request and then vanished: reads work, writes fail.

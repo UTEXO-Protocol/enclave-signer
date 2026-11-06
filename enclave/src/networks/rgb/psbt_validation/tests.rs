@@ -126,12 +126,22 @@ fn op_key_varies_with_every_field() {
 
 #[test]
 fn op_key_length_prefix_blocks_concatenation_collision() {
-    // Without length prefixes, a byte moved across a field boundary would
-    // collide. evm_tx_hash and operationId are 32 bytes in practice, but the
-    // key must not depend on that.
-    let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", b"X", "C");
-    let k2 = psbt_operation_key(1, &[0x11; 20], b"A", b"X", "BC");
-    assert_ne!(k1, k2);
+    // Both variable-length field boundaries must be framed. Without the
+    // prefixes, every case hashes the same bytes, "ABXC".
+    let cases: [(&[u8], &[u8], &str); 3] =
+        [(b"AB", b"X", "C"), (b"A", b"BX", "C"), (b"AB", b"", "XC")];
+    let keys: Vec<_> = cases
+        .iter()
+        .map(|(tx, operation, asset)| {
+            assert_eq!([*tx, *operation, asset.as_bytes()].concat(), b"ABXC");
+            psbt_operation_key(1, &[0x11; 20], tx, operation, asset)
+        })
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        for other in &keys[i + 1..] {
+            assert_ne!(key, other, "field boundaries must change the operation key");
+        }
+    }
 }
 
 // Operation dedup end-to-end: `psbt_operation_key` and the soft replay guard,

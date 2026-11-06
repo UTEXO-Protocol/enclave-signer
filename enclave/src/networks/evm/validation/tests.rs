@@ -171,23 +171,20 @@ fn rejects_calldata_over_size_cap() {
 }
 
 #[test]
-fn accepts_calldata_at_size_cap() {
-    // Exactly at the cap is allowed. The selector stays, so dispatch still
-    // recognizes the fundsOut shape.
+fn calldata_at_size_cap_reaches_selector_validation() {
+    // An unknown selector identifies the next validation stage. The size
+    // guard must allow the exact boundary before dispatch rejects it.
     let mut destination = destination();
     destination
         .call_data
         .resize(MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
-    destination.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-    // The zero-padded tail can fail the ABI decode. Assert only that it is
-    // NOT the size error.
+    destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     with_ctx(&config(), |ctx| {
-        if let Err(e) = validate_dest(&destination, ctx) {
-            assert!(
-                !e.to_string().contains("call_data too large"),
-                "calldata exactly at the cap must not trip the size check, got: {e}"
-            );
-        }
+        let err = validate_dest(&destination, ctx).unwrap_err().to_string();
+        assert!(
+            err.contains("unexpected calldata selector") && err.contains("deadbeef"),
+            "calldata at the size cap must reach selector validation, got: {err}"
+        );
     });
 }
 
@@ -444,7 +441,7 @@ fn rejects_expired_deadline() {
 }
 
 #[test]
-fn accepts_deadline_at_cap() {
+fn accepts_deadline_just_inside_cap() {
     let mut destination = destination();
     // A few seconds of slack for the clock tick between here and the check.
     destination.deadline = now() + MAX_TEE_DEADLINE_SECS - 5;

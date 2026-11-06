@@ -1024,12 +1024,22 @@ mod tests {
     }
 
     #[test]
-    fn asset_is_length_prefixed_not_ambiguous() {
-        // The u32 length prefix stops confusion between asset IDs that share
-        // a prefix.
-        let a = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
-        let b = prod(false, EvmDataSource::RawRpc, 1, 0x11, "abc");
-        assert_ne!(a.to_bytes(), b.to_bytes());
+    fn asset_length_prefix_matches_the_wire_contract() {
+        // Fixed offset from the documented V1 layout: tags (7), chain (8),
+        // network (1), bridge address (20). Do not discover it with to_bytes.
+        const OFFSET: usize = 36;
+        let policy = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
+        let bytes = policy.to_bytes();
+        assert_eq!(&bytes[OFFSET..OFFSET + 6], b"\x00\x00\x00\x02ab");
+        assert_eq!(AttestedPolicy::from_bytes(&bytes), Ok(policy));
+        for wrong_length in [0u32, 1, 3, u32::MAX] {
+            let mut corrupted = bytes.clone();
+            corrupted[OFFSET..OFFSET + 4].copy_from_slice(&wrong_length.to_be_bytes());
+            assert!(
+                AttestedPolicy::from_bytes(&corrupted).is_err(),
+                "{wrong_length}"
+            );
+        }
     }
 
     // ---- gas-tx rule commitment ----
@@ -1075,9 +1085,9 @@ mod tests {
     }
 
     #[test]
-    fn selector_count_is_length_prefixed() {
-        // The selector count is length-prefixed, so a set cannot be confused
-        // with a longer set that shares a prefix.
+    fn selector_count_prefix_matches_the_wire_contract() {
+        // V1 offset for base(): 9-byte asset, 13-byte indexer host, no TLS pin.
+        const OFFSET: usize = 152;
         let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
         let two = base_with_gas(
             [0xAA; 20],
@@ -1086,6 +1096,22 @@ mod tests {
             0,
             vec![[1, 1, 1, 1], [2, 2, 2, 2]],
         );
-        assert_ne!(one.to_bytes(), two.to_bytes());
+        let one_bytes = one.to_bytes();
+        let two_bytes = two.to_bytes();
+        assert_eq!(&one_bytes[OFFSET..OFFSET + 8], &[0, 0, 0, 1, 1, 1, 1, 1]);
+        assert_eq!(
+            &two_bytes[OFFSET..OFFSET + 12],
+            &[0, 0, 0, 2, 1, 1, 1, 1, 2, 2, 2, 2]
+        );
+        assert_eq!(AttestedPolicy::from_bytes(&one_bytes), Ok(one));
+        assert_eq!(AttestedPolicy::from_bytes(&two_bytes), Ok(two));
+        for wrong_count in [0u32, 2, u32::MAX] {
+            let mut corrupted = one_bytes.clone();
+            corrupted[OFFSET..OFFSET + 4].copy_from_slice(&wrong_count.to_be_bytes());
+            assert!(
+                AttestedPolicy::from_bytes(&corrupted).is_err(),
+                "{wrong_count}"
+            );
+        }
     }
 }
