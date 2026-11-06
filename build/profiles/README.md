@@ -8,10 +8,14 @@ continue to use the recipe defaults.
 Mint and Burn disable APT's delayed-item retries and make up to four attempts
 to fetch indexes and packages, with 30, 60 and 120 second pauses. This avoids
 the retry loop described in [Debian bug #1152704](https://bugs.debian.org/1152704).
-Completed downloads are retained between attempts. The snapshot date and
-signature checks remain fixed; installation
-starts only after all packages have downloaded. Persistent failures stop the
-build. This does not recover an out-of-memory failure on the build runner.
+Completed downloads are retained between attempts. If package downloads still
+fail, the helper tries the same files on the official `deb.debian.org` CDN.
+The versions and required SHA256 hashes come only from the authenticated
+snapshot indexes; no live CDN indexes are loaded. Missing files or hash
+mismatches stop the build. Index failures have no CDN fallback.
+The snapshot date and signature checks remain fixed; installation starts only
+after all packages have downloaded and uses `--no-download`. This does not
+recover an out-of-memory failure on the build runner.
 
 ## Set the release inputs
 
