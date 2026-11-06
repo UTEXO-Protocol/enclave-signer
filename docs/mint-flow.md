@@ -182,8 +182,6 @@ Stage 6.
   This check records nothing. It runs before any network call. A retry of
   the same request normally does not reach the enclave: the parent answers
   it from the reply it kept (S7.6).
-  A byte-identical retry that does reach the enclave gets the kept reply
-  instead (S7.6).
 
 ### Stage 2 - Is this deposit real?
 
@@ -377,9 +375,12 @@ it is signed.
   that the caller received the response. The parent therefore keeps the
   reply of an EVM -> RGB sign from the moment it reads it, for one hour, and
   answers a retry of the same request itself. A retry of a request still in
-  flight waits for that exchange and gets its reply. The enclave keeps the signed reply for the same window (1 024 entries,
-  in memory) and returns it for a byte-identical retry that reaches it, for
-  example after a parent restart. Any other request for the deposit is refused.
+  flight waits for that exchange and gets its reply. The enclave refuses a
+  retry when the request differs, and refuses an identical retry until its
+  hour has passed when the parent has no reply for it: the parent did not
+  read the reply, the reply was above `SIGNED_RESPONSE_MAX_BYTES`, the parent
+  dropped it at `SIGNED_RESPONSE_MAX_ENTRIES` or `SIGNED_RESPONSE_MAX_BYTES`,
+  or the parent restarted.
 
 ## 6. Replay
 

@@ -95,12 +95,6 @@ pub struct EnclaveState {
     /// authorize a request. Durable uniqueness needs a separate control.
     pub op_replay_guard: NonceReplayGuard,
 
-    /// Signed mint replies by operation key. A byte-identical retry after a
-    /// lost reply gets the same bytes, not a replay refusal. In memory, per
-    /// instance, same window as `op_replay_guard`.
-    #[cfg(evm_to_rgb)]
-    pub signed_results: super::SignedResultCache,
-
     /// RR15: rights refills admitted past the cheap gate in the last hour.
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
     pub refill_rate: super::RefillRateLimit,
@@ -166,8 +160,6 @@ impl EnclaveState {
                 DEFAULT_OP_DEDUP_MAX,
                 DEFAULT_OP_DEDUP_TTL,
             ),
-            #[cfg(evm_to_rgb)]
-            signed_results: super::SignedResultCache::default(),
             #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
             refill_rate: super::RefillRateLimit::default(),
             seed_export_count: AtomicU64::new(0),

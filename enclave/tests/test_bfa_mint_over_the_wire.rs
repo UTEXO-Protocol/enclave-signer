@@ -818,8 +818,9 @@ impl std::io::Write for DeadCaller {
     }
 }
 
-/// A signature the caller never received must not use up the deposit. The
-/// retry gets a signed reply, the same bytes every time.
+/// A signature the caller never received must not use up the deposit's replay
+/// key. The retry signs. Once a response is delivered, the same deposit is
+/// refused as a duplicate.
 #[test]
 fn a_lost_response_keeps_the_deposit_retryable() {
     let built = build(None);
@@ -836,35 +837,13 @@ fn a_lost_response_keeps_the_deposit_retryable() {
     wire.set_position(0);
     server::handle_connection(DeadCaller(wire), &ctx);
 
-    let first = signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
+    signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
         .expect("the retry signs after a lost response");
-    let again = signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
-        .expect("an identical retry gets the same reply");
-    assert_eq!(again, first);
-}
 
-/// Once a response is delivered, an identical retry gets the same reply and a
-/// changed request for the deposit is refused as a duplicate.
-#[test]
-fn a_delivered_deposit_refuses_a_changed_request() {
-    let built = build(None);
-    let ctx = context(
-        bridge_config(&built.deposit.contract_id),
-        deposit_chain(&built, LOCK_BLOCK, LOCK_BLOCK, vec![]),
-    );
-
-    let first = signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
-        .expect("the first request signs");
-    let again = signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
-        .expect("an identical retry gets the kept reply");
-    assert_eq!(again, first);
-
-    let mut changed = sign_request(&built);
-    changed.amount += 1;
-    let refused = refusal(&sign_over_the_wire(&ctx, changed));
+    let again = refusal(&sign_over_the_wire(&ctx, sign_request(&built)));
     assert!(
-        refused.to_lowercase().contains("duplicate"),
-        "expected a duplicate refusal, got: {refused}"
+        again.to_lowercase().contains("duplicate") || again.to_lowercase().contains("already"),
+        "expected a duplicate refusal, got: {again}"
     );
 }
 

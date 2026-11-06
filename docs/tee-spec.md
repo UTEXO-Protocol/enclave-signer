@@ -1164,12 +1164,10 @@ Known limits. Read them before deployment.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
   after one hour. The 100,000-entry cap can remove entries earlier. A successful
   response write can commit an entry even when the caller receives no response;
-  the parent's kept reply answers a retry of the same request. The enclave also
-  keeps the signed reply for the same window and returns it for a
-  byte-identical retry. The parent proof is the real bound: signatures
-  for one mint that share a supplied parent spend the same UTXO, so Bitcoin
-  confirms at most one. A different parent conflicts with the real one on
-  Bitcoin.
+  the parent's kept reply answers a retry of the same request.
+  The parent proof is the real bound: signatures for one mint that share a
+  supplied parent spend the same UTXO, so Bitcoin confirms at most one. A
+  different parent conflicts with the real one on Bitcoin.
 - **Witness mint recipient (accepted V1 risk, CTO 2026-10-30).** A witness
   mint's seal names a vout of the mint tx. The OpId the deposit binds commits
   that vout, not the script on it. A host that controls the bridge can commit
