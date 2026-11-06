@@ -534,7 +534,7 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   `FUNDS_IN_CONTRACT` (falls back to `EVM_PROXY_CONTRACT_ADDRESS`) whose
   `operationId` (topic 1) is the request's. Zero or two such events refuse.
   Other deposits in the tx are ignored. There is no fallback to the plain
-  `FundsIn` event: it carries an RGB OpId, a different id space;
+  `FundsIn` event: it carries an RGB lockId, a different id space;
 - the event MUST bind the on-chain `operationId` (the full 32-byte word,
   indexed topic 1) to the request's 32-byte `funds_in_operation_id` -- not
   `RgbDestination.operation_idx`, which the enclave does not read -- plus the
@@ -546,14 +546,14 @@ and selected finality head, subject to the trust assumption in Sec 2. These chec
   only a blinded-seal beneficiary, and requires the single confidential
   recipient leg to equal that seal. Zero or two confidential legs refuse.
   The v2 Bridge sends an empty `destinationAddress` for RGB.
-  Then the recipient is bound through the mint OpId: the `FundsIn` `rgbOpId`
-  must be the mint transition being signed (Sec 8), and that transition
-  commits to its seals. A witness mint has no confidential leg, so a legacy
-  invoice refuses it. Its witness seal commits a vout of the mint tx, not the
-  script on it (accepted V1 risk, Known limits).
+  Then the recipient is bound through the mint's lockId: the `FundsIn`
+  `lockId` must be `LockId(opid, txid)` of the mint transition being signed
+  and the PSBT's tx (Sec 8). The transition commits to its seals, and the tx
+  to the script on a witness seal's output. A witness mint has no
+  confidential leg, so a legacy invoice refuses it.
 
 **Mint signer (plan B).** The mint signer validates no consignment.
-rgb-lib (pin: rgb-lib-bfa 0a9d352f, RGB-Tools bfa 1ae1c160; since f3975623)
+rgb-lib (pin: rgb-lib-bfa 5010eefa, RGB-Tools bfa 66bae096; since f3975623)
 strips the RGB, MPC, OPRET and TAPRET proprietary keys from
 the PSBT it returns and keeps the tx, its bundles and the MPC entropy in the
 tx's strict-encoded fascia. The enclave decodes that fascia as rgb-lib reads
@@ -574,7 +574,13 @@ that consumes one `mintRight`, assigns asset units only, carries exactly
 `issuedSupply` (> 0) and `beforeBlock` as 8-byte little-endian values, pays
 `issuedSupply` to one seal, blinded or a witness seal on an output of its own
 tx, and issues exactly `amount - commission` (M1 - M5, M7). The deposit must
-name this mint's OpId and carry the deposit id it derives (M6). A blinded
+name this mint's lockId, `LockId(opid, txid)` of the PSBT's tx, and carry the
+deposit id it derives (M6). After the lock the mint tx must never change (no
+RBF, rebuild or batching): another txid names another lock. The only fee
+bump left is a CPFP child that spends an output of the mint tx. `SignBtc`
+never signs a colored input, and rgb-lib sends a mint's change to the colored
+keychain. So only a `SignRightsRefill` whose fee input spends that change can
+fund the child. For a witness mint, the user's output can too. A blinded
 mint pays no sat out of the enclave's outputs. A witness mint pays exactly
 `MINT_WITNESS_SAT` (image env, default 1500, 546 to 10 000) to its seal's
 output, which must not be the enclave's, and no sat elsewhere (M8).
@@ -830,8 +836,9 @@ operations and witness checks. The rest of rgb-lib's work is linear in the
 file (Known limits). The
 asset bind also runs before rgb-lib, so a foreign genesis never reaches it
 and only the pinned asset's list is ever read. rgb-lib runs two phases. Phase 1 (`validate_deterministic`) checks everything that depends on
-the consignment only. It leaves open each witness and each BFA mint anchor
-(the mint's OpId, `issuedSupply` and `beforeBlock`). Phase 2 asks the
+the consignment only. It leaves open each witness and each BFA mint claim
+(`Claim::Lock`: the mint's OpId, its witness txid, `issuedSupply` and
+`beforeBlock`). Phase 2 asks the
 enclave's three resolvers, and no `safe_height` is passed: every refusal of
 the resolvers is a refusal of the request, and so is any rgb-lib warning. It
 resolves every witness on chain:
@@ -849,20 +856,26 @@ only unmined witness allowed is the transaction being signed, as the last
 witness, in the swap flow; the PSBT bind then requires it to be the PSBT's
 own transaction. A proof the consignment carries is never used: the
 resolver offers no block headers, so rgb-ops asks the resolver instead. Phase 2 also
-confirms each anchor only
-against a lock bound to its exact `(OpId, amount)`, through rgb-lib's checked
+confirms each claim only
+against a lock bound to its exact `(lockId, amount)`, lockId being
+`LockId(opid, witness txid)`, through rgb-lib's checked
 resolver, which compares the bound chain id with the genesis `bridgeLocation`;
-rgb-lib makes no RPC for an anchor.
+rgb-lib makes no RPC for a claim.
+`LockId(opid, txid)` is `SHA256(t || t || opid || txid)` with
+`t = SHA256("urn:lnp-bp:rgb:lock#2026-11-04")`, each id as its 32 bytes and
+the txid in internal byte order. Test vector: opid bytes 0x00 to 0x1f and txid
+bytes 0x20 to 0x3f give
+`1ce683c92fdfb3ef54e39c7b461e731dad02cd240b366441f34a2c2e849a9876`.
 The binder first requires `bridgeLocation` to name the pinned
-`FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`, and binds every anchor to the deposit id
-it derives. The mint signer binds its mint the same way from the fascia (M6):
+`FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`, and binds every claim to the deposit id
+its lockId derives. The mint signer binds its mint the same way from the fascia (M6):
 the node must report `EVM_CHAIN_ID`, and the receipt of `evm_tx_hash` must
-hold its `FundsIn` (the `rgbOpId` word equals the 32 raw OpId bytes, as a
+hold its `FundsIn` (the `lockId` word equals the 32 raw `LockId` bytes, as a
 big-endian `uint256`) and the derived `BridgeFundsIn`, with
 `destinationChainId == RGB_CHAIN_ID` (827166), in a block before `beforeBlock`
 and covered by the `EVM_FINALITY_TAG` head, with the canonical block hash at
 its height. The enclave never calls
-`Consignment::validate` or the unchecked `PendingValidation::resolve_anchor`;
+`Consignment::validate` or the unchecked `PendingValidation::resolve_claim`;
 `clippy.toml` refuses both. Last, for an asset whose genesis names a reject
 list, rgb-lib checks the inputs and outputs of every terminal operation
 against the list the enclave's reader returns (Known limits). rgb-lib's
@@ -1109,7 +1122,7 @@ Known limits. Read them before deployment.
   can take a refill's fee from the vanilla key.
 - **Reject list.** A genesis may name an `IRgbRejectList` contract on
   `EVM_CHAIN_ID`. The burn signer reads it over the pinned EVM RPC, with the
-  rules of rgb-lib-bfa 0a9d352f (RGB-Tools bfa 1ae1c160, unchanged since
+  rules of rgb-lib-bfa 5010eefa (RGB-Tools bfa 66bae096, unchanged since
   98a8af6): a pending reject counts at once, an allow only once
   `finalized`. rgb-lib then refuses a release when an input or output of a
   terminal operation descends from a rejected opout: the burn's inputs, and
@@ -1170,14 +1183,14 @@ Known limits. Read them before deployment.
   for one mint that share a supplied parent spend the same UTXO, so Bitcoin
   confirms at most one. A different parent conflicts with the real one on
   Bitcoin.
-- **Witness mint recipient (accepted V1 risk, CTO 2026-10-30).** A witness
-  mint's seal names a vout of the mint tx. The OpId the deposit binds commits
-  that vout, not the script on it. A host that controls the bridge can commit
-  the same mint in a tx that pays that vout to its own script, after the
-  user's lock, and every check passes. M8 keeps the units off the enclave's
-  outputs and bounds the sats that leave to `MINT_WITNESS_SAT`; nothing binds
-  them to the user. A witness mint has no amount cap yet. A blinded mint has
-  no such gap.
+- **Witness mint recipient (bound by the lockId; was the V1 risk of CTO
+  2026-10-30).** A witness mint's seal names a vout of the mint tx, and the
+  OpId commits that vout, not the script on it. The lockId the deposit names
+  also commits the mint txid, so the same mint in a tx paying another script
+  names another lock and M6 refuses it. The user still locks the lockId the
+  bridge hands out, so the bridge must name the tx that pays the user. M8
+  keeps the units off the enclave's outputs and bounds the sats that leave to
+  `MINT_WITNESS_SAT`. A witness mint has no amount cap yet.
 - **EVM and CCD trust.** The images trust the pinned EVM RPC endpoint for
   receipts, canonical blocks and the selected finality head. TLS authenticates the
   endpoint, not its EVM history. A self-consistent false history from an
@@ -1192,10 +1205,10 @@ Known limits. Read them before deployment.
   pins. The caller must compare them with the intended deployment.
 - **Build reproducibility.** rgb-lib comes from the private
   `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, and the RGB protocol
-  crates it pins from the root `[patch.crates-io]`: private `rgb-tools-devs`
-  repos at full revs, fetched from our `UTEXO-Protocol/<repo>-s-bfa` mirrors.
-  An EIF build needs the deploy key of the first (`lib_key`) and a read token
-  for the mirrors (`rgb_deps_token`). Both are BuildKit secrets: never in a
+  crates it pins from the root `[patch.crates-io]`: public `rgb-protocol`
+  repos at the full revs of rgb-lib's own `[patch]`. An EIF build needs the
+  deploy key of the first (`lib_key`); the build scripts also still require
+  `rgb_deps_token`, which maps no URL since rgb-lib bfa.6. Both are BuildKit secrets: never in a
   layer, the image or PCR0. Until the RGB-Tools release is public, only a
   holder of that access can reproduce PCR0. All five EIF recipes pin both base images
   by digest and install packages from the signed Debian snapshot

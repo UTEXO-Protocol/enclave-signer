@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use amplify::{ByteArray, Wrapper};
+use bitcoin::hashes::Hash as _;
 use bitcoin::OutPoint;
 use rgb_lib::no_wallet::{RgbOutputInfo, RgbTransitionInfo};
 use rgb_lib::{Assignment, TypeOfTransition};
@@ -72,14 +73,14 @@ fn validator() -> RgbValidator {
 
 fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
     VerifiedLock {
-        mint_opid: anchor.opid,
+        lock_id: anchor.lock_id,
         minted: anchor.amount,
         operation_id: [0xd0; 32],
         net_amount: anchor.amount,
     }
 }
 
-/// Binds every anchor to a lock with its own `(OpId, amount)`.
+/// Binds every anchor to a lock with its own `(lockId, amount)`.
 fn bind_all(bridge: &BfaBridge, anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
         evm_chain_id: bridge.chain_id,
@@ -697,12 +698,12 @@ mod reject_list_rules {
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib 0a9d352f `SCHEMA_ID_BFA`.
+/// it must fail loudly here. rgb-lib 5010eefa `SCHEMA_ID_BFA`.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(
         schemata::BFA_SCHEMA_ID.to_string(),
-        "rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture"
+        "rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album"
     );
     use rgbstd::contract::IssuerWrapper;
     let rules = schemata::BridgedFungibleAsset::schema_rules();
@@ -822,12 +823,12 @@ fn validates_rgb_libs_split_burn_shape() {
     );
     assert_eq!(group[0].asset_output_amount, MINTED);
 
-    // The mint's anchor was confirmed against its lock, and only it.
+    // The mint's claim was confirmed against its lock, and only it.
     let mint = history.mints[0];
     assert_eq!(
         validated.mint_locks,
         vec![VerifiedLock {
-            mint_opid: gen::opid_bytes(mint.opid),
+            lock_id: mint.lock_id(),
             minted: MINTED,
             operation_id: [0xd0; 32],
             net_amount: MINTED,
@@ -851,8 +852,8 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
     );
     let validated = validate(&history.consignment()).expect("the burn is valid");
     assert_eq!(validated.witness_txids.len(), 3);
-    let locked: Vec<[u8; 32]> = validated.mint_locks.iter().map(|l| l.mint_opid).collect();
-    assert_eq!(locked, vec![gen::opid_bytes(history.mints[0].opid)]);
+    let locked: Vec<[u8; 32]> = validated.mint_locks.iter().map(|l| l.lock_id).collect();
+    assert_eq!(locked, vec![history.mints[0].lock_id()]);
 }
 
 /// The enclave and consignment-utils (which the bridge uses) read the same
@@ -1147,6 +1148,7 @@ fn reads_a_mint_and_its_anchor() {
         *seen.borrow(),
         vec![MintAnchor {
             opid: gen::opid_bytes(mint.opid),
+            lock_id: lock_id(mint.opid, mint.tx.compute_txid()),
             amount: MINTED,
             before_block: 90,
             in_last_bundle: true,
@@ -1304,7 +1306,7 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
         let mut bound = bind_all(bridge, anchors)?;
         if let Some(anchor) = anchors.first() {
             bound.locks.push(VerifiedLock {
-                mint_opid: [0x77; 32],
+                lock_id: [0x77; 32],
                 ..lock_for(anchor)
             });
         }
@@ -1322,6 +1324,76 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
         let err = error_of(validate_bound(&bytes, Some(bind)));
         assert!(err.contains("exactly its own lock"), "{err}");
     }
+}
+
+/// Binds every anchor to a lock keyed by `key` instead of its lockId.
+fn bind_keyed_by(
+    key: impl Fn(&MintAnchor) -> [u8; 32],
+) -> impl Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors> {
+    move |bridge, anchors| {
+        let mut bound = bind_all(bridge, anchors)?;
+        for (lock, anchor) in bound.locks.iter_mut().zip(anchors) {
+            lock.lock_id = key(anchor);
+        }
+        Ok(bound)
+    }
+}
+
+/// The claim names `LockId(opid, witness txid)`: a lock under the bare OpId,
+/// or under the same OpId in another tx, backs nothing.
+#[test]
+fn refuses_a_lock_not_keyed_by_the_mint_lock_id() {
+    let bytes = burn_bytes();
+    let other_tx = bitcoin::Txid::from_byte_array([0x42; 32]);
+    let bare_opid = bind_keyed_by(|a| a.opid);
+    let in_other_tx = bind_keyed_by(|a| lock_id(rgbstd::OpId::from(a.opid), other_tx));
+    let binders: [AnchorBinder<'_>; 2] = [&bare_opid, &in_other_tx];
+    for bind in binders {
+        let err = error_of(validate_bound(&bytes, Some(bind)));
+        assert!(err.contains("exactly its own lock"), "{err}");
+    }
+}
+
+/// The two upstream vectors (rgb-ops 00f8d62 `claim.rs`). The txid bytes are in
+/// internal order, and the digest is the ABI word with no byte reversal.
+#[test]
+fn lock_id_matches_the_upstream_vectors() {
+    let opid = rgbstd::OpId::from(std::array::from_fn::<u8, 32, _>(|i| i as u8));
+    let txid = bitcoin::Txid::from_byte_array(std::array::from_fn(|i| 32 + i as u8));
+    assert_eq!(
+        txid.to_string(),
+        "3f3e3d3c3b3a393837363534333231302f2e2d2c2b2a29282726252423222120"
+    );
+    let zero = (
+        rgbstd::OpId::from([0u8; 32]),
+        bitcoin::Txid::from_byte_array([0; 32]),
+    );
+    let cases = [
+        (
+            (opid, txid),
+            "1ce683c92fdfb3ef54e39c7b461e731dad02cd240b366441f34a2c2e849a9876",
+        ),
+        (
+            zero,
+            "9b30b6d0fcafbb02dea72ca6f0a1829fe643dfc3ea394df702d96688ff3906a9",
+        ),
+    ];
+    for ((opid, txid), expected) in cases {
+        assert_eq!(hex::encode(lock_id(opid, txid)), expected);
+        assert_eq!(gen::lock_id_bytes(opid, txid), lock_id(opid, txid));
+    }
+}
+
+/// The lockId commits to both halves: another OpId or another txid moves it,
+/// and it is never the bare OpId.
+#[test]
+fn lock_id_differs_per_opid_and_per_txid() {
+    let opid = rgbstd::OpId::from([1u8; 32]);
+    let txid = bitcoin::Txid::from_byte_array([2; 32]);
+    let base = lock_id(opid, txid);
+    assert_ne!(base, lock_id(rgbstd::OpId::from([3u8; 32]), txid));
+    assert_ne!(base, lock_id(opid, bitcoin::Txid::from_byte_array([3; 32])));
+    assert_ne!(base, [1u8; 32]);
 }
 
 /// The bound chain id must be the genesis one, or rgb-lib's checked resolver
@@ -1379,13 +1451,9 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
     let calls = calls.into_inner();
     assert_eq!(calls.len(), 3, "{calls:?}");
     assert!(calls[0].is_empty());
-    let mut asked: Vec<[u8; 32]> = calls[1..].iter().map(|c| c[0].opid).collect();
+    let mut asked: Vec<[u8; 32]> = calls[1..].iter().map(|c| c[0].lock_id).collect();
     asked.sort();
-    let mut minted: Vec<[u8; 32]> = history
-        .mints
-        .iter()
-        .map(|m| gen::opid_bytes(m.opid))
-        .collect();
+    let mut minted: Vec<[u8; 32]> = history.mints.iter().map(gen::Mint::lock_id).collect();
     minted.sort();
     assert_eq!(asked, minted);
     assert!(calls[1..].iter().all(|c| c.len() == 1));
@@ -1398,6 +1466,7 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
 fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
     let anchor = |n: u8| MintAnchor {
         opid: [n; 32],
+        lock_id: [n + 0x10; 32],
         amount: MINTED,
         before_block: 90,
         in_last_bundle: false,
@@ -1468,6 +1537,7 @@ fn output(assignment: Assignment, txid: [u8; 32], vout: u32) -> RgbOutputInfo {
         recipient_id: None,
         is_ours: None,
         is_terminal: Some(true),
+        blinding: None,
     }
 }
 
@@ -1878,8 +1948,8 @@ fn each_rgb_lib_refusal_names_what_failed() {
         address: LIST,
     };
     let cases = [
-        (E::MintEventNotFound { opid: "op".into() }, "no bound lock"),
-        (E::NoAnchorResolver, "binds none"),
+        (E::MintLockNotFound { opid: "op".into() }, "no bound lock"),
+        (E::NoClaimResolver, "binds none"),
         (E::NoRejectListResolver, "cannot read it"),
         (
             E::ConsignmentRejected { opouts: vec![] },

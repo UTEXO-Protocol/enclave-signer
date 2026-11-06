@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
-**Checked against repository code:** 2026-11-02 (rgb-lib 1ae1c160 move; plan B: the mint signer reads the rgb-lib fascia; witness mints).
+**Checked against repository code:** 2026-11-04 (rgb-lib bfa.6 66bae096 move: locks keyed by lockId; plan B: the mint signer reads the rgb-lib fascia; witness mints).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -11,14 +11,28 @@ document differ, investigate the difference. Either can contain an error.
 ## 1. What the mint flow does
 
 1. The backend makes an RGB mint (a BFA `mint` transition) with
-   `mint_begin`, and a Bitcoin PSBT that anchors it. It returns the mint
-   OpId and `settlementData = abi.encode(uint256 opId, uint64 beforeBlock)`.
+   `mint_begin`, and a Bitcoin PSBT that anchors it. It returns the mint's
+   lockId and `settlementData = abi.encode(uint256 lockId, uint64 beforeBlock)`.
    The mint commits to `beforeBlock`: its EVM lock must be in an earlier
-   (L2) block.
+   (L2) block. The lockId is `LockId(opid, txid)`: the tagged SHA-256
+   (`urn:lnp-bp:rgb:lock#2026-11-04`) of the mint OpId and the mint txid in
+   internal byte order, used as is as the `uint256` word. It is
+   `SHA256(t || t || opid || txid)` with `t = SHA256(tag)`, each id as its 32
+   bytes. Test vector: opid bytes 0x00 to 0x1f and txid bytes 0x20 to 0x3f
+   give `1ce683c92fdfb3ef54e39c7b461e731dad02cd240b366441f34a2c2e849a9876`.
+   It commits the mint
+   to its exact tx, so the mint tx must never change after the lock: no RBF,
+   rebuild or batching, and a retry signs the same PSBT. Another tx of the
+   mint names another lock, which M6 refuses. After the lock, the only way
+   to raise the fee is a CPFP child that spends an output of the mint tx.
+   rgb-lib sends a mint's change to the colored keychain, and `SignBtc` never
+   signs a colored input. So only a `SignRightsRefill` whose fee input spends
+   that change can fund the child. For a witness mint, the user's output can
+   too.
 2. The user locks ERC-20 tokens in the Bridge contract on EVM. The
    `fundsIn` call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
-   `FundsIn` names the mint OpId.
+   `FundsIn` names the mint's lockId.
 4. The backend sends the PSBT, the fascia rgb-lib wrote for the mint tx,
    and the fascia of the tx that made the right the mint spends (the parent
    fascia).
@@ -53,7 +67,7 @@ log this wait at debug level. Other validation failures keep code 3; a receipt
 above the `latest` head also remains a validation failure.
 
 The mint signer validates no RGB consignment. Since f3975623, rgb-lib (pinned:
-rgb-lib-bfa 0a9d352f, RGB-Tools bfa 1ae1c160) commits the PSBT and then
+rgb-lib-bfa 5010eefa, RGB-Tools bfa 66bae096) commits the PSBT and then
 strips its RGB, MPC, OPRET and TAPRET proprietary keys. It keeps
 the RGB data in the tx's fascia (`transfers/<txid>/fascia`): the unsigned tx,
 every bundle the tx commits and the MPC merkle block with its entropy,
@@ -271,7 +285,7 @@ market fee before the user locks tokens.
 
 ### Stage 4 - Is it a mint of exactly the deposit?
 
-These redo what the VM checks (`sas`, `pma`) and what the former consignment
+These redo what the VM checks (`sas`, `plc`) and what the former consignment
 binds checked, on the committed transition.
 
 - **M1** The transition type must be `TS_MINT`.
@@ -334,13 +348,14 @@ it is signed.
 ### Stage 6 - Is the deposit this mint's, and the user the right one?
 
 - **M6** The EVM node must report `EVM_CHAIN_ID` (`eth_chainId`). The receipt
-  of `evm_tx_hash` must have exactly one `FundsIn` event with this mint's
-  OpId and `issuedSupply` as amount, and exactly one `BridgeFundsIn` event
+  of `evm_tx_hash` must have exactly one `FundsIn` event whose `lockId`
+  is `LockId(opid, txid)` of this mint and the PSBT's tx (F2 fixed that txid),
+  with `issuedSupply` as amount, and exactly one `BridgeFundsIn` event
   with the derived `operationId`, both from `FUNDS_IN_CONTRACT`. Other
   deposits in the tx are ignored. The derived `operationId` must be the
   request's `funds_in_operation_id` that S2.3 bound.
   The `operationId` and the net amount must be the deposit id the mint
-  derives from its OpId and `issuedSupply` (`rgb_mint_deposit_id`, see
+  derives from its lockId and `issuedSupply` (`rgb_mint_deposit_id`, see
   burn-flow B2.4). `TOKEN_CONTRACT` and `EVM_CHAIN_ID` are checked before any
   RPC. `destinationChainId` must be 827166 (`RGB_CHAIN_ID`). The receipt
   block must be before `beforeBlock`, with no lower bound (rgb-lib
@@ -356,9 +371,9 @@ it is signed.
   A witness mint has no blinded seal, so a legacy deposit refuses it
   ("pays 0 confidential recipient legs"). A `wvout` invoice is refused too.
 - **S6.3** If the `destinationAddress` is empty (the v2 Bridge), the deposit
-  binds the user through the mint OpId (M6). The mint transition commits to
-  its seal: a blinded seal in full, a witness seal by its vout only, not the
-  script on that output (section 11, accepted V1 risk).
+  binds the user through the mint's lockId (M6). The mint transition commits
+  to its seal, and the tx to the script on a witness seal's output
+  (section 11).
 - **S6.4** The mint signer reserves the replay key.
 
 ### Stage 7 - Sign
@@ -394,7 +409,7 @@ confirms at most one. The enclave does not compare parents across requests.
 A different parent tx must spend the real parent's inputs again, so it
 conflicts with it on Bitcoin. The same transition committed again in a tx that spends
 another Colored UTXO is refused (PP7). A new transition for the same deposit
-is refused too: the deposit names one OpId (M6).
+is refused too: the deposit names one lockId (M6).
 
 ## 7. Plain BTC (`SignBtc`)
 
@@ -475,8 +490,8 @@ begin returns. For a right a refill made, the parent fascia is that refill's.
 For a right the issuer seeded, the issuer's `rights.fascia` (saved by
 `bfa_issuer` at `send-rights-begin`) is placed once, at seeding, as
 `<connector data dir>/rights_seeds/<txid>.fascia`. It must be strict-encoded,
-as rgb-lib writes it since f3975623 (pinned: rgb-lib-bfa 0a9d352f, RGB-Tools
-bfa 1ae1c160). An older rgb-lib wrote JSON, which PP1 refuses. Only opening
+as rgb-lib writes it since f3975623 (pinned: rgb-lib-bfa 5010eefa, RGB-Tools
+bfa 66bae096). An older rgb-lib wrote JSON, which PP1 refuses. Only opening
 that wallet on f3975623 or later re-saves it.
 
 What is not checked, and why that is safe:
@@ -509,7 +524,7 @@ input, at most 12 refills per hour.
 | `Sign` with an RGB source or an EVM destination (burn) | Refused: wrong signer role. |
 | `SignRawDigest` (gas transaction) | Refused: wrong signer role. |
 | `InitiateCloning`, `GetClone`, `SetClone` | Refused: the seed comes from KMS. |
-| `Sign` without `fascia` | Refused (F4). rgb-lib strips the PSBT (since f3975623; pinned 0a9d352f, RGB-Tools bfa 1ae1c160), so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
+| `Sign` without `fascia` | Refused (F4). rgb-lib strips the PSBT (since f3975623; pinned 5010eefa, RGB-Tools bfa 66bae096), so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
 | `Sign` without `parent_fascia` | Refused (PP1). |
 | `SignRightsRefill` without `fascia` or `parent_fascia` | Refused (F4, PP1). |
 | `SignRightsRefill` that breaks a rule of section 8 | Refused. Past the gate it still counts against the hourly limit. |
@@ -528,12 +543,12 @@ signer checks the amount three times, from the fascia and the deposit:
 
 1. The mint rule: the one `OS_ASSET` leg equals `issuedSupply` (M5), as the
    VM's `sas` does for every receiver.
-2. The deposit: its `FundsIn` names this mint's OpId, and the deposit id the
+2. The deposit: its `FundsIn` names this mint's lockId, and the deposit id the
    mint derives carries `issuedSupply` (M6). The units equal
    `amount - commission` (M5).
 3. The recipient: the one leg (M7) is the depositor's blinded seal when a
-   legacy deposit names one (S6.2). Otherwise the OpId binds it (S6.3): a
-   blinded seal in full, a witness seal by its vout only (below).
+   legacy deposit names one (S6.2). Otherwise the lockId binds it (S6.3): a
+   blinded seal in full, a witness seal by its vout and its tx (below).
 
 A propagate parent (PP4) keeps every mint out of a mint's history, by
 induction: rights reach the mint wallet only by issuer sends or refills,
@@ -561,24 +576,28 @@ when it accepts the mint, and refuses a bad one.
   hour of the invoice is left when it prepares the mint, while the lock may
   come any time before `beforeBlock`, `INIT_OP_TTL` later. The bridge must
   bound this: an invoice has to outlive its mint's `beforeBlock`.
+- Receive limits of the receiver's wallet. `process_received_consignment`
+  refuses a locked mint when the receiving UTXO passes
+  `max_allocations_per_utxo`, when other unpaid invoices on it fill that cap
+  or the bundle limit, or when its asset amount passes `u64::MAX`. The
+  enclave cannot check these: they depend on the receiver's wallet.
 
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
-mint spends. With a witness mint it can also take the minted units (below).
+mint spends.
 
-**Accepted V1 risk (CTO 2026-10-30): the OpId does not commit a witness
-mint's output script.** A witness seal names a vout of the mint tx. The mint
-transition, and so the OpId the deposit binds, commits that vout, not the
-script on it. A host that controls the bridge can commit the same mint in a
-tx that pays that vout to its own script, after the user's lock. Every check
-passes on both txs (route test
-`witness_mint_opid_does_not_bind_the_recipient_script`), and the units go to
-the host. M8 only keeps the units off the enclave's own outputs and bounds
-the sats that leave to `MINT_WITNESS_SAT`. A blinded mint has no such gap:
-its seal commits the user's UTXO. V1 does not fix it. There is no amount cap
-on a witness mint yet (to be added later).
+**Witness mint output script: bound by the lockId** (was the accepted V1
+risk, CTO 2026-10-30). A witness seal names a vout of the mint tx, and the
+OpId commits that vout, not the script on it. The lockId the deposit names
+also commits the mint txid, so the same mint in a tx that pays that vout to
+another script names another lock, and M6 refuses it (route test
+`witness_mint_lock_id_binds_the_recipient_script`). The user still locks the
+lockId the bridge hands out, so the bridge must name the tx that pays the
+user. M8 keeps the units off the enclave's own outputs and bounds the sats
+that leave to `MINT_WITNESS_SAT`. There is no amount cap on a witness mint
+yet (to be added later).
 
-The fascia is read in the strict encoding of rgb-ops ed1d60d (the pinned
+The fascia is read in the strict encoding of rgb-ops 00f8d62 (the pinned
 `rgb-ops` rev). A change of that encoding fails F4 and PP1 closed: every mint
 and refill is refused until the enclave moves with rgb-lib.

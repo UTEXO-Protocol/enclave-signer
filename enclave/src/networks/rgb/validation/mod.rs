@@ -12,7 +12,7 @@
 //! - `transition.rs`: read one transition's globals and seals, for both paths.
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
-//! - `bfa.rs`: the BFA mint anchors and their binding to EVM locks.
+//! - `bfa.rs`: the BFA mint claims and their binding to EVM locks by lockId.
 //! - `schema.rs`: the genesis gate and its reject list.
 //! - `reject_list.rs`: the issuer's reject list decisions.
 //!
@@ -36,7 +36,7 @@ mod witness;
 mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
-pub use bfa::{AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
+pub use bfa::{lock_id, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
 pub use indexer::{IndexerWitnesses, RgbValidator};
 pub use reject_list::{

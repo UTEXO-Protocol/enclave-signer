@@ -95,6 +95,42 @@ impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
     }
 }
 
+/// A receipt at block 100 of one deposit on `bridge`, chain 42161: a `FundsIn`
+/// of `amount` under `lock_id`, and its `BridgeFundsIn` record `operation_id`.
+#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+pub(crate) fn mint_deposit(
+    bridge: [u8; 20],
+    lock_id: [u8; 32],
+    amount: u64,
+    operation_id: [u8; 32],
+) -> FakeEvm {
+    use crate::networks::evm::events::{LogEntry, ReceiptData, BRIDGE_FUNDS_IN_SIG, FUNDS_IN_SIG};
+    use sha3::{Digest, Keccak256};
+
+    let topic0 = |sig: &str| -> [u8; 32] { Keccak256::digest(sig.as_bytes()).into() };
+    let logs = vec![
+        LogEntry {
+            address: bridge,
+            topics: vec![topic0(FUNDS_IN_SIG), abi_word(0xdead), lock_id],
+            data: abi_word(amount).to_vec(),
+        },
+        LogEntry {
+            address: bridge,
+            topics: vec![topic0(BRIDGE_FUNDS_IN_SIG), operation_id],
+            data: bridge_funds_in_data(amount, amount, 0, ""),
+        },
+    ];
+    FakeEvm {
+        receipt: Some(ReceiptData {
+            status_success: true,
+            block_number: 100,
+            block_hash: [0x42; 32],
+            logs,
+        }),
+        chain_id: 42161,
+    }
+}
+
 /// A request deadline no test reaches.
 #[cfg(feature = "evm-rpc")]
 pub(crate) fn far_deadline() -> std::time::Instant {

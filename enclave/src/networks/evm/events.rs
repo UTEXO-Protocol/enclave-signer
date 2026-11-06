@@ -16,9 +16,10 @@
 //! contract from config and decodes the fields (`operationId`,
 //! gross/net/commission) itself.
 //!
-//! `BridgeFundsIn.operationId` and the RGB OpId are different identifiers.
-//! For BFA mints, the caller also verifies the receipt's `FundsIn` RGB OpId
-//! against the mint transition. Amounts must fit the proto's `u64` fields.
+//! `BridgeFundsIn.operationId` and the RGB lockId are different identifiers.
+//! For BFA mints, the caller also verifies the receipt's `FundsIn` lockId
+//! (`LockId(opid, witness txid)`) against the mint transition and its tx.
+//! Amounts must fit the proto's `u64` fields.
 //! Larger values fail (see [`extract_uint256_as_u64`]).
 
 use attestation_verify::EvmFinalityTag;
@@ -85,7 +86,7 @@ pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// `settlementData`) must be present. The `settlementData` tail is not read.
 const BFI_MIN_DATA_LEN: usize = 9 * 32;
 
-/// Bridge `FundsIn` signature. The sender and the RGB OpId are indexed; the
+/// Bridge `FundsIn` signature. The sender and the RGB lockId are indexed; the
 /// uint64 amount is the one data word.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
 
@@ -220,7 +221,7 @@ pub fn verify_funds_in_event(
 
     // 3/4. Find the one log from the pinned bridge contract with the request's
     //      operationId. Other deposits in the tx are ignored. No fallback to
-    //      plain `FundsIn`: it carries an RGB OpId, a different id-space.
+    //      plain `FundsIn`: it carries an RGB lockId, a different id-space.
     let log = select_unique_log(
         &receipt,
         bridge_contract,
@@ -569,16 +570,16 @@ fn check_finality_snapshot(
     Ok(())
 }
 
-/// `FundsIn` topic that holds the indexed `rgbOpId`.
+/// `FundsIn` topic that holds the indexed lockId (the contract keeps the `rgbOpId` name).
 #[cfg(feature = "bfa-validation")]
-const FUNDS_IN_OPID_TOPIC: usize = 2;
+const FUNDS_IN_LOCK_ID_TOPIC: usize = 2;
 
-/// Decodes a `FundsIn` log, binds it to `expected_rgb_opid`, and returns the amount.
+/// Decodes a `FundsIn` log, binds it to `expected_lock_id`, and returns the amount.
 ///
 /// Only one layout is accepted: topic0, the indexed sender and the indexed
-/// `rgbOpId` (the OpId bytes as a big-endian uint256), then the amount word.
+/// `lockId` (the `LockId` digest bytes as a big-endian uint256), then the amount word.
 #[cfg(feature = "bfa-validation")]
-fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> {
+fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
         return Err(EnclaveError::CrossCheck(
             "log is not a FundsIn event".into(),
@@ -589,19 +590,20 @@ fn decode_funds_in(log: &LogEntry, expected_rgb_opid: &[u8; 32]) -> Result<u64> 
             "unexpected FundsIn event layout".into(),
         ));
     }
-    let rgb_op_id = log.topics[FUNDS_IN_OPID_TOPIC];
+    let lock_id = log.topics[FUNDS_IN_LOCK_ID_TOPIC];
     let amount = extract_uint256_as_u64(&log.data, 0)?;
-    if &rgb_op_id != expected_rgb_opid {
+    if &lock_id != expected_lock_id {
         return Err(EnclaveError::CrossCheck(format!(
-            "FundsIn rgbOpId mismatch: on-chain 0x{} != consignment 0x{}",
-            hex::encode(rgb_op_id),
-            hex::encode(expected_rgb_opid)
+            "FundsIn lockId mismatch: on-chain 0x{} != the mint's 0x{}",
+            hex::encode(lock_id),
+            hex::encode(expected_lock_id)
         )));
     }
     Ok(amount)
 }
 
 /// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
+/// The contract kept the `rgbOpId` label; the word it names is the lockId.
 #[cfg(feature = "bfa-validation")]
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
@@ -611,7 +613,7 @@ const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,
 #[cfg(feature = "bfa-validation")]
 pub fn rgb_mint_deposit_id(
     cfg: &crate::config::BridgeConfig,
-    mint_opid: &[u8; 32],
+    lock_id: &[u8; 32],
     minted: u64,
 ) -> Result<[u8; 32]> {
     if cfg.token_contract == [0u8; 20] || cfg.chain_id == 0 {
@@ -623,8 +625,8 @@ pub fn rgb_mint_deposit_id(
     }
     if minted == 0 {
         return Err(EnclaveError::CrossCheck(format!(
-            "BFA mint 0x{} mints nothing, so no deposit can back it",
-            hex::encode(mint_opid)
+            "BFA mint of lockId 0x{} mints nothing, so no deposit can back it",
+            hex::encode(lock_id)
         )));
     }
 
@@ -644,7 +646,7 @@ pub fn rgb_mint_deposit_id(
     hasher.update(word(cfg.chain_id));
     hasher.update(address(&cfg.token_contract));
     hasher.update(word(crate::networks::evm::RGB_CHAIN_ID));
-    hasher.update(mint_opid);
+    hasher.update(lock_id);
     hasher.update(word(minted));
     Ok(hasher.finalize().into())
 }
@@ -653,13 +655,13 @@ pub fn rgb_mint_deposit_id(
 #[cfg(feature = "bfa-validation")]
 pub fn derived_lock(
     cfg: &crate::config::BridgeConfig,
-    mint_opid: [u8; 32],
+    lock_id: [u8; 32],
     minted: u64,
 ) -> Result<VerifiedLock> {
     Ok(VerifiedLock {
-        mint_opid,
+        lock_id,
         minted,
-        operation_id: rgb_mint_deposit_id(cfg, &mint_opid, minted)?,
+        operation_id: rgb_mint_deposit_id(cfg, &lock_id, minted)?,
         net_amount: minted,
     })
 }
@@ -668,18 +670,18 @@ pub fn derived_lock(
 ///
 /// Same fail-closed checks as [`verify_funds_in_event`] (receipt, success,
 /// pinned emitter, canonical inclusion below the configured tag). The
-/// `FundsIn` is selected by the RGB OpId, not by the bridge `operationId` (a
+/// `FundsIn` is selected by the RGB lockId, not by the bridge `operationId` (a
 /// different id-space). `funds_in_contract` and `finality_tag` come from PINNED
-/// config. `rgb_opid`, `minted` and `before_block` come from the committed mint
+/// config. `lock_id`, `minted` and `before_block` come from the committed mint
 /// (`MintFacts`) and only select the log that must exist.
 ///
-/// The lock must also follow the RGB rule for a mint anchor: a block before
+/// The lock must also follow the RGB rule for a mint claim: a block before
 /// `before_block`, with no lower bound (rgb-lib `mint_lock_status`). An RGB
 /// receiver refuses any other lock, so a signed mint would strand the deposit.
 ///
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
 /// contract with `operation_id` (from [`rgb_mint_deposit_id`]), and exactly one
-/// `FundsIn` with `rgb_opid` and `minted` as amount. Other deposits in the tx
+/// `FundsIn` with `lock_id` and `minted` as amount. Other deposits in the tx
 /// are ignored. A later `fundsOut` must cite its `operationId` in
 /// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
 #[cfg(feature = "bfa-validation")]
@@ -689,28 +691,28 @@ pub fn verify_rgb_funds_in(
     funds_in_contract: &[u8; 20],
     finality_tag: EvmFinalityTag,
     evm_tx_hash: &[u8; 32],
-    rgb_opid: &[u8; 32],
+    lock_id: &[u8; 32],
     operation_id: &[u8; 32],
     minted: u64,
     before_block: u64,
 ) -> Result<VerifiedLock> {
     let head = fetch_finality_block(provider, finality_tag)?;
     let receipt = fetch_successful_receipt(provider, evm_tx_hash)?;
-    // The Bridge keys a deposit by OpId and net amount, so one tx can hold
-    // several FundsIn with the mint's OpId. The minted amount tells them apart.
+    // The Bridge keys a deposit by lockId and net amount, so one tx can hold
+    // several FundsIn with the mint's lockId. The minted amount tells them apart.
     let mut amount_word = [0u8; 32];
     amount_word[24..].copy_from_slice(&minted.to_be_bytes());
     let log = select_unique_log(
         &receipt,
         funds_in_contract,
         &FUNDS_IN_TOPIC0,
-        FUNDS_IN_OPID_TOPIC,
-        rgb_opid,
+        FUNDS_IN_LOCK_ID_TOPIC,
+        lock_id,
         Some(&amount_word),
         "FundsIn",
         evm_tx_hash,
     )?;
-    let minted = decode_funds_in(log, rgb_opid)?;
+    let minted = decode_funds_in(log, lock_id)?;
 
     let bridge_log = select_unique_log(
         &receipt,
@@ -751,7 +753,7 @@ pub fn verify_rgb_funds_in(
 
     tracing::info!(
         tx = %hex::encode(evm_tx_hash),
-        rgb_opid = %hex::encode(rgb_opid),
+        lock_id = %hex::encode(lock_id),
         operation_id = %hex::encode(operation_id),
         minted,
         net_amount,
@@ -759,7 +761,7 @@ pub fn verify_rgb_funds_in(
         "FundsIn lock for a BFA mint independently verified in-enclave"
     );
     Ok(VerifiedLock {
-        mint_opid: *rgb_opid,
+        lock_id: *lock_id,
         minted,
         operation_id,
         net_amount,

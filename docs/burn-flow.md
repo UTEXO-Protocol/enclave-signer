@@ -1,8 +1,8 @@
 # Burn flow (RGB -> EVM)
 
 **Signer image:** `burn-signer` (`--no-default-features --features vsock,rgb,burn-signer`).
-**Checked against repository code:** 2026-11-02, rgb-lib-bfa 0a9d352f
-(RGB-Tools bfa 1ae1c160).
+**Checked against repository code:** 2026-11-04, rgb-lib-bfa 5010eefa
+(RGB-Tools bfa 66bae096).
 Deployment was not checked.
 
 This document tells how the burn signer checks and signs a release. The
@@ -168,15 +168,16 @@ error.
   resolver (Stage 3b). No `safe_height` is passed: the witness resolver already
   enforces the depth. rgb-lib must report the transfer the enclave parsed (same
   consignment id) and no warning; neither of its warnings can arise with this
-  resolver, so one refuses. Each mint leaves an anchor: its OpId and its
-  `issuedSupply`.
+  resolver, so one refuses. Each mint leaves a claim (`Claim::Lock`, an
+  "anchor" in the code): its OpId, its witness txid and its `issuedSupply`.
 - **B2.4** The anchor resolver asks the binder once with no anchor: the
   genesis `bridgeLocation` must name the pinned `FUNDS_IN_CONTRACT` on
   `EVM_CHAIN_ID`, and rgb-lib compares that chain id with the genesis one. Then
   it asks once per anchor. For each anchor, the burn signer derives the
   `operationId` of the one deposit that can back it:
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
-  EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, mint OpId, minted units))`. It
+  EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, lockId, minted units))`, where
+  lockId = `LockId(mint OpId, mint witness txid)` as rgb-lib computes it. It
   reads nothing from the chain. `TOKEN_CONTRACT` and `EVM_CHAIN_ID` must be
   pinned.
 - **B2.5** rgb-lib confirms each anchor only against its derived lock, one
@@ -539,7 +540,9 @@ script of any length), scans the tx inputs for each seal, and hashes the
 bundle id, a commitment to the whole input map (`validate_transition`, and
 the bundle id once more per bundle). An honest bundle carries one or two
 transitions, so these stay linear; a forged one of thousands of transitions does not. The
-walk cost is counted the way rgb-lib walks (`rejected_opouts`): from each
+walk cost is counted as a bound on rgb-lib's walk (`rejected_opouts`). In
+rgb-lib 5010eefa the origins share one `rejected` map (`history_rejected`), so
+a shared history is walked once. The model counts it once per origin: each
 origin on its own, with no list entry to cut it short, stopping just past the
 cap. So a burn of many separate lines costs a few steps per line, however
 long each line's history; only origins that share a long history cost much.

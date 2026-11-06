@@ -1,7 +1,7 @@
-//! BFA deposit binding. A consignment's mint anchors are bound to the deposit
-//! ids they derive. The mint signer binds the mint its PSBT commits to the
-//! request's own deposit on the pinned EVM chain, covered by the
-//! `EVM_FINALITY_TAG` head (M6).
+//! BFA deposit binding. A consignment's mint claims are bound to the deposit
+//! ids their lockIds derive. The mint signer binds the mint its PSBT commits,
+//! in that exact tx, to the request's own deposit on the pinned EVM chain,
+//! covered by the `EVM_FINALITY_TAG` head (M6).
 //!
 //! `server/mod.rs` gates this module on `bfa-validation`.
 
@@ -32,12 +32,12 @@ fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
     Ok(())
 }
 
-/// The derived lock of each anchor, in consignment order; no RPC read.
+/// The derived lock of each claim's lockId, in consignment order; no RPC read.
 #[cfg(rgb_to_evm)]
 fn derive_all(cfg: &BridgeConfig, anchors: &[MintAnchor]) -> Result<Vec<VerifiedLock>> {
     anchors
         .iter()
-        .map(|a| derived_lock(cfg, a.opid, a.amount))
+        .map(|a| derived_lock(cfg, a.lock_id, a.amount))
         .collect()
 }
 
@@ -56,8 +56,8 @@ pub(super) fn derived_locks(
     })
 }
 
-/// M6: the receipt of `tx_hash` holds the one deposit the mint derives, on the
-/// pinned chain, before its `beforeBlock`. The pins are checked before any RPC.
+/// M6: the receipt of `tx_hash` holds the one deposit the mint's lockId derives,
+/// on the pinned chain, before its `beforeBlock`. The pins are checked before any RPC.
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 pub(super) fn bind_mint_deposit(
     ctx: &ServerContext,
@@ -68,14 +68,14 @@ pub(super) fn bind_mint_deposit(
     use crate::networks::evm::events::{check_node_chain_id, verify_rgb_funds_in};
 
     let cfg = &ctx.bridge_config;
-    let derived = derived_lock(cfg, mint.opid, mint.issued)?;
+    let derived = derived_lock(cfg, mint.lock_id, mint.issued)?;
     // S2.3 bound the request's id. The mint must use the same deposit.
     if request_operation_id != derived.operation_id {
         return Err(EnclaveError::CrossCheck(format!(
-            "the request's funds_in_operation_id 0x{} is not the deposit id 0x{} that mint 0x{} derives, refusing to sign",
+            "the request's funds_in_operation_id 0x{} is not the deposit id 0x{} that mint lockId 0x{} derives, refusing to sign",
             hex::encode(request_operation_id),
             hex::encode(derived.operation_id),
-            hex::encode(mint.opid),
+            hex::encode(mint.lock_id),
         )));
     }
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
@@ -91,7 +91,7 @@ pub(super) fn bind_mint_deposit(
         &cfg.funds_in_contract,
         cfg.evm_finality_tag,
         tx_hash,
-        &mint.opid,
+        &mint.lock_id,
         &derived.operation_id,
         mint.issued,
         mint.before_block,
@@ -104,9 +104,9 @@ pub(super) fn bind_mint_deposit(
 fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<()> {
     if paid != derived {
         return Err(EnclaveError::CrossCheck(format!(
-            "the request's deposit is not the one mint 0x{} derives: operationId 0x{} for {} \
-             (net {}), the mint needs 0x{} for {} - refusing to sign",
-            hex::encode(derived.mint_opid),
+            "the request's deposit is not the one mint lockId 0x{} derives: operationId 0x{} \
+             for {} (net {}), the mint needs 0x{} for {} - refusing to sign",
+            hex::encode(derived.lock_id),
             hex::encode(paid.operation_id),
             paid.minted,
             paid.net_amount,

@@ -35,7 +35,7 @@ sequenceDiagram
     Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
-    Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(mint OpId, minted units; no EVM RPC read)
+    Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units; no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
     Rgb->>Rgb: witness resolver: tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
     opt genesis names a reject list

@@ -1,21 +1,22 @@
-//! BFA mint anchors and their binding to EVM locks.
+//! BFA mint claims (the enclave's "mint anchors") and their binding to EVM locks.
 //!
-//! Each BFA `mint` leaves an external anchor: its own OpId, the amount it
-//! issues and the EVM block its lock must precede. Consensus cannot confirm an
-//! anchor. The enclave confirms one only against a lock that a binder bound
-//! to that exact `(OpId, amount)`: a receipt-verified lock for the mint being
+//! Each BFA `mint` leaves a `Claim::Lock`: its OpId, its witness txid, the
+//! amount it issues and the EVM block its lock must precede. The bridge keys
+//! the lock by `LockId(opid, witness txid)`. Consensus cannot confirm a claim.
+//! The enclave confirms one only against a lock that a binder bound to that
+//! exact `(lockId, amount)`: a receipt-verified lock for the mint being
 //! signed, a derived deposit id for every other one.
 //!
 //! The binder lives in `server/bfa.rs`, because it reads the pins and the EVM
-//! RPC. This module holds the shapes it works on and rgb-lib's anchor resolver.
+//! RPC. This module holds the shapes it works on and rgb-lib's claim resolver.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use amplify::ByteArray;
-use rgbstd::containers::{AnchorResolverError, ResolveAnchor, Transfer};
+use rgbstd::containers::{ClaimResolverError, LockId, ResolveClaim, Transfer};
 use rgbstd::stl::{BridgeLocation, EvmContract};
-use rgbstd::validation::ExternalAnchor;
+use rgbstd::validation::Claim;
 use rgbstd::{Genesis, OpId};
 use schemata::BridgedFungibleAsset;
 
@@ -28,18 +29,20 @@ use crate::error::{EnclaveError, Result};
 /// only id that a `fundsOut.settlementData` can cite for this deposit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedLock {
-    /// The mint that this lock backs.
-    pub mint_opid: [u8; 32],
+    /// `LockId(opid, witness txid)` of the mint that this lock backs.
+    pub lock_id: [u8; 32],
     pub minted: u64,
     pub operation_id: [u8; 32],
     pub net_amount: u64,
 }
 
-/// One mint anchor that phase 1 of consensus left open.
+/// One mint claim that phase 1 of consensus left open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MintAnchor {
     /// The mint's own OpId.
     pub opid: [u8; 32],
+    /// `LockId(opid, witness txid)`: the id the bridge keys the mint's lock by.
+    pub lock_id: [u8; 32],
     /// The mint's `issuedSupply`, which consensus made equal to its
     /// `assetOwner` outputs.
     pub amount: u64,
@@ -81,16 +84,24 @@ pub struct BoundAnchors {
 /// pins check and the chain id.
 pub type AnchorBinder<'a> = &'a dyn Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors>;
 
-/// One anchor consensus left open. `last_bundle` holds the OpIds of the
+/// `LockId(opid, witness_id)`, the word the bridge keys a mint's lock by.
+/// Its bytes are the `uint256` ABI word as is, with no byte reversal.
+pub fn lock_id(opid: OpId, witness_id: bitcoin::Txid) -> [u8; 32] {
+    LockId::with(opid, witness_id).to_byte_array()
+}
+
+/// One claim consensus left open. `last_bundle` holds the OpIds of the
 /// bundle a mint PSBT signs.
-fn mint_anchor(anchor: &ExternalAnchor, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
-    let ExternalAnchor::Mint {
+fn mint_anchor(claim: &Claim, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
+    let Claim::Lock {
         opid,
+        witness_id,
         amount,
         before_block,
-    } = anchor;
+    } = claim;
     MintAnchor {
         opid: opid.to_byte_array(),
+        lock_id: lock_id(*opid, *witness_id),
         amount: *amount,
         before_block: *before_block,
         in_last_bundle: last_bundle.contains(opid),
@@ -100,8 +111,8 @@ fn mint_anchor(anchor: &ExternalAnchor, last_bundle: &BTreeSet<OpId>) -> MintAnc
 /// The locks must be the anchors, one for one: an extra lock would be cited in
 /// settlement, a missing one would leave a mint unbacked.
 pub(super) fn check_bijection(anchors: &[MintAnchor], locks: &[VerifiedLock]) -> Result<()> {
-    let wanted: BTreeSet<([u8; 32], u64)> = anchors.iter().map(|a| (a.opid, a.amount)).collect();
-    let bound: BTreeSet<([u8; 32], u64)> = locks.iter().map(|l| (l.mint_opid, l.minted)).collect();
+    let wanted: BTreeSet<([u8; 32], u64)> = anchors.iter().map(|a| (a.lock_id, a.amount)).collect();
+    let bound: BTreeSet<([u8; 32], u64)> = locks.iter().map(|l| (l.lock_id, l.minted)).collect();
     if wanted.len() != anchors.len() || bound.len() != locks.len() || wanted != bound {
         return Err(EnclaveError::CrossCheck(format!(
             "the consignment carries {} mint anchor(s) but {} lock(s) were bound to them - every \
@@ -113,7 +124,7 @@ pub(super) fn check_bijection(anchors: &[MintAnchor], locks: &[VerifiedLock]) ->
     Ok(())
 }
 
-/// rgb-lib's anchor resolver: it confirms each mint anchor only against the
+/// rgb-lib's claim resolver: it confirms each mint claim only against the
 /// lock the binder binds to it, with no RPC, and keeps the pairs.
 pub(super) struct BindingResolver<'a> {
     genesis: &'a Genesis,
@@ -152,8 +163,8 @@ impl<'a> BindingResolver<'a> {
         Ok(locks)
     }
 
-    fn fail(&self, e: EnclaveError) -> AnchorResolverError {
-        let issue = AnchorResolverError::ResolverIssue(e.to_string());
+    fn fail(&self, e: EnclaveError) -> ClaimResolverError {
+        let issue = ClaimResolverError::ResolverIssue(e.to_string());
         *self.failure.borrow_mut() = Some(e);
         issue
     }
@@ -162,35 +173,36 @@ impl<'a> BindingResolver<'a> {
     fn bind(
         &self,
         anchors: &[MintAnchor],
-    ) -> std::result::Result<BoundAnchors, AnchorResolverError> {
+    ) -> std::result::Result<BoundAnchors, ClaimResolverError> {
         BfaBridge::from_genesis(self.genesis)
             .and_then(|bridge| (self.bind)(&bridge, anchors))
             .map_err(|e| self.fail(e))
     }
 }
 
-impl ResolveAnchor for BindingResolver<'_> {
+impl ResolveClaim for BindingResolver<'_> {
     /// An empty bind checks the bridge pins and names the chain they are on.
-    fn evm_chain_id(&self) -> std::result::Result<u64, AnchorResolverError> {
+    fn evm_chain_id(&self) -> std::result::Result<u64, ClaimResolverError> {
         self.bind(&[]).map(|bound| bound.evm_chain_id)
     }
 
     fn is_confirmed(
         &self,
         _location: &BridgeLocation,
-        anchor: &ExternalAnchor,
-    ) -> std::result::Result<bool, AnchorResolverError> {
-        let anchor = mint_anchor(anchor, &self.last_bundle);
+        claim: &Claim,
+    ) -> std::result::Result<bool, ClaimResolverError> {
+        let anchor = mint_anchor(claim, &self.last_bundle);
         match self.bind(&[anchor])?.locks.as_slice() {
-            [lock] if lock.mint_opid == anchor.opid && lock.minted == anchor.amount => {
+            [lock] if lock.lock_id == anchor.lock_id && lock.minted == anchor.amount => {
                 self.bound.borrow_mut().push((anchor, lock.clone()));
                 Ok(true)
             }
             locks => Err(self.fail(EnclaveError::CrossCheck(format!(
-                "{} lock(s) were bound to mint 0x{} of {} units - every mint needs exactly its \
-                 own lock",
+                "{} lock(s) were bound to mint 0x{} (lockId 0x{}) of {} units - every mint needs \
+                 exactly its own lock",
                 locks.len(),
                 hex::encode(anchor.opid),
+                hex::encode(anchor.lock_id),
                 anchor.amount
             )))),
         }

@@ -94,12 +94,12 @@ fn bridge_log(op: [u8; 32], gross: u64, net: u64, commission: u64) -> LogEntry {
     }
 }
 
-/// The RGB-only companion `FundsIn(address,uint256 rgbOpId,uint64)`. Its id
+/// The RGB-only companion `FundsIn(address,uint256 lockId,uint64)`. Its id
 /// is an RGB id, so the predicate must never use this shape as a fallback.
-fn rgb_companion_log(rgb_op_id: u64, net: u64) -> LogEntry {
+fn rgb_companion_log(lock_id: u64, net: u64) -> LogEntry {
     LogEntry {
         address: BRIDGE,
-        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(rgb_op_id)],
+        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(lock_id)],
         data: word(net).to_vec(),
     }
 }
@@ -945,7 +945,7 @@ fn issue_51_no_receipt_means_no_authorization() {
     assert!(verify(&p).is_err());
 }
 
-// ---- BFA: the `FundsIn` log whose id is the RGB OpId ----
+// ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
 
 #[cfg(feature = "bfa-validation")]
 #[test]
@@ -957,30 +957,51 @@ fn rejects_old_funds_in_signature() {
 
 #[cfg(feature = "bfa-validation")]
 #[test]
-fn decodes_funds_in_with_the_operation_id_as_topic2() {
+fn decodes_funds_in_with_the_lock_id_as_topic2() {
     let log = rgb_companion_log(0xab, 100);
     assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
 }
 
-/// The topic is the OpId bytes as they are, a big-endian uint256.
+/// The topic is the lockId bytes as they are, a big-endian uint256.
 #[cfg(feature = "bfa-validation")]
 #[test]
-fn funds_in_reads_the_operation_id_big_endian() {
-    let mut opid = [0u8; 32];
-    opid[0] = 0xab;
-    opid[31] = 0x02;
+fn funds_in_reads_the_lock_id_big_endian() {
+    let mut lock_id = [0u8; 32];
+    lock_id[0] = 0xab;
+    lock_id[31] = 0x02;
     let mut log = rgb_companion_log(0, 100);
-    log.topics[2] = opid;
-    assert_eq!(decode_funds_in(&log, &opid).unwrap(), 100);
+    log.topics[2] = lock_id;
+    assert_eq!(decode_funds_in(&log, &lock_id).unwrap(), 100);
 
-    let mut reversed = opid;
+    let mut reversed = lock_id;
     reversed.reverse();
     assert!(decode_funds_in(&log, &reversed).is_err());
 }
 
+/// A lock keyed by the bare OpId, or by the OpId in another tx, is not the
+/// lock of the mint in this tx.
 #[cfg(feature = "bfa-validation")]
 #[test]
-fn rejects_funds_in_for_a_different_operation_id() {
+fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
+    use crate::networks::rgb::validation::lock_id;
+    use bitcoin::hashes::Hash;
+
+    let opid = rgbstd::OpId::from([0xab; 32]);
+    let ours = lock_id(opid, bitcoin::Txid::from_byte_array([0x11; 32]));
+    let other_tx = lock_id(opid, bitcoin::Txid::from_byte_array([0x22; 32]));
+    let mut log = rgb_companion_log(0, 100);
+    log.topics[2] = ours;
+    assert_eq!(decode_funds_in(&log, &ours).unwrap(), 100);
+    for topic in [[0xab; 32], other_tx] {
+        log.topics[2] = topic;
+        let err = decode_funds_in(&log, &ours).unwrap_err().to_string();
+        assert!(err.contains("lockId mismatch"), "{err}");
+    }
+}
+
+#[cfg(feature = "bfa-validation")]
+#[test]
+fn rejects_funds_in_for_a_different_lock_id() {
     let log = rgb_companion_log(0xab, 100);
     assert!(decode_funds_in(&log, &word(0xcd)).is_err());
 }
@@ -999,7 +1020,7 @@ fn rejects_funds_in_amount_above_u64() {
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_with_unexpected_layout() {
-    // The old layout: the OpId in data, not indexed.
+    // The old layout: the id in data, not indexed.
     let mut data = word(0xab).to_vec();
     data.extend_from_slice(&word(100));
     let old = LogEntry {
@@ -1051,7 +1072,7 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
         )
         .unwrap(),
         VerifiedLock {
-            mint_opid: word(0xab),
+            lock_id: word(0xab),
             minted: 100,
             operation_id: op_id(7),
             net_amount: 950,
@@ -1205,7 +1226,8 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     assert!(e.contains("no FundsIn log"), "got: {e}");
 }
 
-/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166).
+/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166). The id is a
+/// pure function of the 32-byte word, so it holds for a lockId word too.
 #[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
@@ -1221,13 +1243,13 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
     )
     .unwrap();
     cfg.chain_id = 42161;
-    let mut opid = [0u8; 32];
-    opid[0] = 0xab;
-    opid[1] = 0x01;
-    opid[31] = 0x02;
+    let mut lock_id = [0u8; 32];
+    lock_id[0] = 0xab;
+    lock_id[1] = 0x01;
+    lock_id[31] = 0x02;
 
     assert_eq!(
-        hex::encode(rgb_mint_deposit_id(&cfg, &opid, 100_000).unwrap()),
+        hex::encode(rgb_mint_deposit_id(&cfg, &lock_id, 100_000).unwrap()),
         "37a9c9b5fe6b36b6ac70e27858cd0408becfe3ee3b10161e27d3faf7fc200d25"
     );
 }
@@ -1243,11 +1265,11 @@ fn rgb_mint_deposit_id_matches_the_contract_vector() {
         chain_id: 42161,
         ..Default::default()
     };
-    let mut opid = [0u8; 32];
-    opid[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
+    let mut lock_id = [0u8; 32];
+    lock_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
 
     assert_eq!(
-        hex::encode(rgb_mint_deposit_id(&cfg, &opid, 1_000_000).unwrap()),
+        hex::encode(rgb_mint_deposit_id(&cfg, &lock_id, 1_000_000).unwrap()),
         "f275b61cb80792e5a40bf8de0b0d66b3ed9c29b774ea9df36d3ae567eb17c3c4"
     );
 }

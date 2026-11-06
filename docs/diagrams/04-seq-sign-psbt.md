@@ -63,7 +63,7 @@ sequenceDiagram
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; the FundsIn with rgbOpId == mint OpId and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; the FundsIn with lockId == LockId(mint OpId, PSBT txid) and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
 
     Note over Srv,Inv: 5 — route and recipient
     Srv->>Srv: amount ≥ minted units + commission
@@ -71,7 +71,7 @@ sequenceDiagram
         Srv->>Inv: RGB invoice, blinded seal only
         Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
     else empty (v2 Bridge)
-        Note right of Srv: recipient bound by the mint OpId (step 3)
+        Note right of Srv: recipient bound by the mint lockId (step 4, M6)
     end
 
     Note over Srv,State: 6 — reserve replay key
