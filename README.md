@@ -104,7 +104,8 @@ Before it signs, the mint signer:
    derives, before its `beforeBlock` and covered by the `EVM_FINALITY_TAG` head,
    read from a node on the pinned chain. The lockId is `LockId(opid, txid)` of
    the mint and the PSBT's tx, so the mint tx must never change after the lock
-   (no RBF, rebuild or batching): a retry signs the same PSBT.
+   (no RBF, rebuild or batching): a retry signs the same PSBT. The only fee
+   bump left is a CPFP child that spends an output of the mint tx.
 6. Binds the recipient. The v2 Bridge deposit names the mint's lockId, which
    commits to the user's seal and, for a witness seal, to the script of the
    user's output. A legacy deposit has an RGB invoice. Then the mint's one

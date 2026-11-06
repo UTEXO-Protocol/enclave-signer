@@ -576,7 +576,11 @@ that consumes one `mintRight`, assigns asset units only, carries exactly
 tx, and issues exactly `amount - commission` (M1 - M5, M7). The deposit must
 name this mint's lockId, `LockId(opid, txid)` of the PSBT's tx, and carry the
 deposit id it derives (M6). After the lock the mint tx must never change (no
-RBF, rebuild or batching): another txid names another lock. A blinded
+RBF, rebuild or batching): another txid names another lock. The only fee
+bump left is a CPFP child that spends an output of the mint tx. `SignBtc`
+never signs a colored input, and rgb-lib sends a mint's change to the colored
+keychain. So only a `SignRightsRefill` whose fee input spends that change can
+fund the child. For a witness mint, the user's output can too. A blinded
 mint pays no sat out of the enclave's outputs. A witness mint pays exactly
 `MINT_WITNESS_SAT` (image env, default 1500, 546 to 10 000) to its seal's
 output, which must not be the enclave's, and no sat elsewhere (M8).
@@ -857,6 +861,11 @@ against a lock bound to its exact `(lockId, amount)`, lockId being
 `LockId(opid, witness txid)`, through rgb-lib's checked
 resolver, which compares the bound chain id with the genesis `bridgeLocation`;
 rgb-lib makes no RPC for a claim.
+`LockId(opid, txid)` is `SHA256(t || t || opid || txid)` with
+`t = SHA256("urn:lnp-bp:rgb:lock#2026-11-04")`, each id as its 32 bytes and
+the txid in internal byte order. Test vector: opid bytes 0x00 to 0x1f and txid
+bytes 0x20 to 0x3f give
+`1ce683c92fdfb3ef54e39c7b461e731dad02cd240b366441f34a2c2e849a9876`.
 The binder first requires `bridgeLocation` to name the pinned
 `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`, and binds every claim to the deposit id
 its lockId derives. The mint signer binds its mint the same way from the fascia (M6):
