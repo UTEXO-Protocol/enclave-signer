@@ -35,12 +35,13 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
-    let endpoints = Endpoints::parse(
-        &req,
-        &ctx.bridge_config.kms_allowed_accounts,
-        ctx.build_ctx.debug_or_test,
-    )
-    .map_err(EnclaveError::InvalidRequest)?;
+    #[cfg(feature = "kms-persistence")]
+    let kms_accounts = ctx.bridge_config.kms_allowed_accounts.as_slice();
+    // This build takes no KMS key, so it has no account list.
+    #[cfg(not(feature = "kms-persistence"))]
+    let kms_accounts: &[String] = &[];
+    let endpoints = Endpoints::parse(&req, kms_accounts, ctx.build_ctx.debug_or_test)
+        .map_err(EnclaveError::InvalidRequest)?;
     #[cfg(feature = "evm-rpc")]
     let tls = endpoints
         .evm_rpc_tls
