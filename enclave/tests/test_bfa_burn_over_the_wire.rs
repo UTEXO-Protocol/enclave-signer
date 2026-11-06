@@ -250,11 +250,11 @@ impl EvmReceiptProvider for EmptyRejectList {
     }
 }
 
-fn mint_deposit_id(mint_opid: [u8; 32]) -> B256 {
+fn mint_deposit_id(lock_id: [u8; 32]) -> B256 {
     keccak256((
         keccak256("UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"),
         Address::from(BRIDGE), U256::from(CHAIN_ID), Address::from(TOKEN),
-        U256::from(RGB_CHAIN_ID), B256::from(mint_opid), U256::from(MINTED),
+        U256::from(RGB_CHAIN_ID), B256::from(lock_id), U256::from(MINTED),
     ).abi_encode())
 }
 
@@ -329,9 +329,7 @@ impl Fixture {
             destinationChainId: U256::from(route.chain()),
             sourceAddress: String::new(),
             proof,
-            settlementData: (vec![mint_deposit_id(bfa_consignment::opid_bytes(
-                history.mints[0].opid,
-            ))],)
+            settlementData: (vec![mint_deposit_id(history.mints[0].lock_id())],)
                 .abi_encode_params()
                 .into(),
             sourceBurnTxId: bfa_consignment::opid_bytes(burn.opid).into(),
