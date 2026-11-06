@@ -98,12 +98,6 @@ pub struct EnclaveState {
     /// count limits (`mint_replay_ttl_secs`, `mint_replay_max_entries`).
     pub op_replay_guard: NonceReplayGuard,
 
-    /// Signed mint replies by operation key. A byte-identical retry after a
-    /// lost reply gets the same bytes, not a replay refusal. In memory, per
-    /// instance (`mint_reply_ttl_secs`, `mint_reply_max_entries`).
-    #[cfg(evm_to_rgb)]
-    pub signed_results: super::SignedResultCache,
-
     /// RR15: rights refills admitted past the cheap gate in the last hour.
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
     pub refill_rate: super::RefillRateLimit,
@@ -166,8 +160,6 @@ impl EnclaveState {
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
             op_replay_guard: NonceReplayGuard::for_mint_operations(),
-            #[cfg(evm_to_rgb)]
-            signed_results: super::SignedResultCache::default(),
             #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
             refill_rate: super::RefillRateLimit::default(),
             seed_export_count: AtomicU64::new(0),

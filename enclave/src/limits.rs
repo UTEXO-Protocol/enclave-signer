@@ -182,11 +182,10 @@ limits! {
     /// removes the oldest entry and does not block signing. Only a real deposit
     /// adds an entry, so a high value does not let a request grow the guard.
     mint_replay_max_entries: 100_000, 1_024, 1 << 32;
-    /// How long the mint signer keeps a signed reply. A byte-identical retry
-    /// gets the same bytes in this time, and a changed request is refused.
+    /// Not used: the enclave keeps no signed replies. The field goes when
+    /// federated-signer-proto drops it.
     mint_reply_ttl_secs: 86_400, 120, 366 * 24 * 3_600;
-    /// Signed replies that the mint signer keeps. When it is full, the oldest
-    /// goes. Only a signed mint adds a reply.
+    /// Not used, like `mint_reply_ttl_secs`.
     mint_reply_max_entries: 1_024, 1, 1 << 32;
     /// Inputs of a mint tx, before any fascia is decoded. This is looser than
     /// `MINT_INPUTS`, which the rules enforce exactly after the fascia.

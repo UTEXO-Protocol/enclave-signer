@@ -1229,12 +1229,10 @@ Known limits. Read them before deployment.
   The operator can change both values, because the cache is not the safety
   control (`docs/runtime-limits.md`). A successful
   response write can commit an entry even when the caller receives no response;
-  the parent's kept reply answers a retry of the same request. The enclave also
-  keeps the signed reply for 24 h by default and returns it for a
-  byte-identical retry. The parent proof is the real bound: signatures
-  for one mint that share a supplied parent spend the same UTXO, so Bitcoin
-  confirms at most one. A different parent conflicts with the real one on
-  Bitcoin.
+  the parent's kept reply answers a retry of the same request.
+  The parent proof is the real bound: signatures for one mint that share a
+  supplied parent spend the same UTXO, so Bitcoin confirms at most one. A
+  different parent conflicts with the real one on Bitcoin.
 - **Witness mint recipient (bound by the lockId; was the V1 risk of CTO
   2026-10-30).** A witness mint's seal names a vout of the mint tx, and the
   OpId commits that vout, not the script on it. The lockId the deposit names

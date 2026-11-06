@@ -86,8 +86,8 @@ image values, and the launch continues.
 | `max_headers_per_minute` | 100000 | 1 | 2^40 | Headers in one minute. |
 | `mint_replay_ttl_secs` | 3600 | 120 | 31622400 | Time that the mint signer refuses a second request for a deposit. |
 | `mint_replay_max_entries` | 100000 | 1024 | 2^32 | Deposits in the mint replay guard. |
-| `mint_reply_ttl_secs` | 86400 | 120 | 31622400 | Time that the mint signer keeps a signed reply. |
-| `mint_reply_max_entries` | 1024 | 1 | 2^32 | Signed replies that the mint signer keeps. |
+| `mint_reply_ttl_secs` | 86400 | 120 | 31622400 | Not used. The enclave keeps no signed replies. |
+| `mint_reply_max_entries` | 1024 | 1 | 2^32 | Not used. The enclave keeps no signed replies. |
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 
