@@ -709,6 +709,8 @@ Members using the same role, release and build profile can use the same EIF
 with different launch endpoints. Rebuilding that image and comparing PCR0/1/2
 does not require the members' endpoint configuration. The public build inputs
 and private dependency access described under Building are still required.
+A mint image also carries `KMS_ALLOWED_ACCOUNT_IDS`, so members can share one
+mint image only if this list has the AWS account of the key of each member.
 
 A Production policy separately commits the Electrum host, the EVM RPC host,
 the SHA-256 of the CA and the four KMS values in attestation `user_data`.

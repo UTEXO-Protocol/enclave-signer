@@ -582,7 +582,10 @@ mod tests {
             let ctx = awaiting(build);
             handle_set_endpoints(&ctx, request.clone()).unwrap();
             let launch = ctx.launch().unwrap();
-            assert_eq!(launch.endpoints, Endpoints::parse(request).unwrap());
+            assert_eq!(
+                launch.endpoints,
+                Endpoints::parse(request, &[], true).unwrap()
+            );
             assert!(launch.rgb_validator.is_some());
             assert!(launch.evm_rpc_client.is_some());
         }

@@ -1426,7 +1426,7 @@ mod tests {
     #[cfg(not(feature = "evm-rpc"))]
     #[test]
     fn unsupported_rpc_paths_are_refused_without_echoing_them() {
-        Endpoints::parse(&valid()).unwrap();
+        Endpoints::parse(&valid(), &[], true).unwrap();
         for path in [
             "/",
             "/v2/private-api-key",

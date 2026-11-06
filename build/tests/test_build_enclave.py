@@ -544,6 +544,10 @@ class ImageInputsTests(unittest.TestCase):
                     continue
                 for assignment in shlex.split(line[4:]):
                     name = assignment.split('=', 1)[0]
+                    # A release pin, not a member setting: a host that chose
+                    # this list could name a key in its own account.
+                    if name == 'KMS_ALLOWED_ACCOUNT_IDS':
+                        continue
                     with self.subTest(recipe=recipe, name=name):
                         self.assertNotEqual(name, 'ENDPOINTS_SHA256')
                         self.assertFalse(name.startswith(('ELECTRUM_', 'ESPLORA_',

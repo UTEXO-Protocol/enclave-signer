@@ -278,7 +278,7 @@ fn indexer_only_accepts_independent_runtime_endpoints_without_changing_the_build
             send(port, Request::SetEndpoints(request.clone())),
             Response::SetEndpoints(_)
         ));
-        let installed = Endpoints::parse(request).unwrap();
+        let installed = Endpoints::parse(request, &[], true).unwrap();
         let launch = ctx.launch().unwrap();
         assert_eq!(launch.endpoints, installed);
         assert!(launch.rgb_validator.is_some());
@@ -361,7 +361,7 @@ fn indexer_only_rejects_malformed_endpoints_without_consuming_the_launch_slot() 
     assert!(health(port).endpoints_set);
     assert_eq!(
         ctx.launch().unwrap().endpoints,
-        Endpoints::parse(&endpoints()).unwrap()
+        Endpoints::parse(&endpoints(), &[], true).unwrap()
     );
 }
 

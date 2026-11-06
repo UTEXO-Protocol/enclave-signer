@@ -218,7 +218,9 @@ EVM RPC TLS port, an optional private RPC path and, in a mint build, the KMS
 key ARN, region, seed id and expected EVM address. Every build keeps these
 values and any endpoint-derived digest outside the image. SPV and no-SPV members with the same role, release
 and build profile can use the same EIF with different endpoints. Image PCR
-reproduction and comparison do not require endpoint information.
+reproduction and comparison do not require endpoint information. A mint image
+also carries `KMS_ALLOWED_ACCOUNT_IDS`, so members can share one mint image only
+if this list has the AWS account of the key of each member.
 A Production policy separately commits the endpoint and KMS fields listed in
 Sec 4 in attestation `user_data`; the Development policy does not.
 Endpoint approval is external deployment configuration, not an approval
