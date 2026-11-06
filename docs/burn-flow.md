@@ -316,7 +316,7 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
   `Bridge._deriveBurnIdFromFields`. It uses the pinned `FUNDS_IN_CONTRACT`,
   `EVM_CHAIN_ID` and `TOKEN_CONTRACT`, and the calldata fields. The calldata
   `burnId` must be equal.
-- **B5.5** BtcRelay proof: the calldata `proof` is
+- **B5.5** With `spv` enabled, the calldata BtcRelay `proof` is
   `(sourceHeight, sourceCommit, latestHeight, latestCommit)`, 128 bytes.
   - `sourceHeight` must be the block that holds the last witness transaction.
   - `latestHeight` must not be below `sourceHeight`.
@@ -329,6 +329,9 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
     10 blocks above the checkpoint, and its epoch start must not be below it.
   - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
     A production policy does not boot in this mode.
+
+  With `spv` disabled, these BtcRelay checks do not run. The signer instead
+  requires empty RGB `merkle_proofs` and an empty calldata `proof`.
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
   OpId of the burn transition.

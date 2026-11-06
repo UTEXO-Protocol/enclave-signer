@@ -199,7 +199,7 @@ jobs:
         run: |
           for role in mint-signer burn-signer; do
             cargo test -p utexo-bridge-enclave --no-default-features --features $role --lib config::tests::
-            cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only --test test_evm_rpc_tls
+            cargo test -p utexo-bridge-enclave --no-default-features --features $role --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path
           done
           # Indexer consensus and release-binding guards belong to the burn role.
           cargo test -p utexo-bridge-enclave --no-default-features --features burn-signer --lib indexer_only
@@ -208,7 +208,7 @@ jobs:
       - name: Clippy (without SPV, mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only --test test_evm_rpc_tls -- -D warnings
+            cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path -- -D warnings
           done
 
       # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB

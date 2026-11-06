@@ -28,7 +28,7 @@ MEASURED_PINS = dict(
 MEMBER_INPUT_NAMES = (
     'ENDPOINTS_SHA256', 'ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_PORT',
     'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_TLS_CA_DER_HEX', 'EVM_RPC_URL',
-    'EVM_RPC_PATH', 'EVM_RPC_API_KEY',
+    'EVM_RPC_PATH', 'EVM_RPC_PATH_FILE', 'EVM_RPC_API_KEY',
     'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
 )
 
@@ -202,6 +202,7 @@ class BuildArgumentsTests(unittest.TestCase):
                             EVM_RPC_TLS_CA_DER_HEX='aa' if member == 'a' else 'bb',
                             EVM_RPC_URL=f'https://rpc-{member}.test/v2/secret-{member}',
                             EVM_RPC_PATH=f'/v2/secret-{member}',
+                            EVM_RPC_PATH_FILE=f'/member-{member}/rpc-path',
                             EVM_RPC_API_KEY=f'secret-{member}',
                             **dict(KMS_PINS, KMS_SEED_ID=f'member-{member}',
                                    KMS_EXPECTED_EVM_ADDRESS='0x' + ('11' if member == 'a' else '22') * 20),

@@ -71,6 +71,7 @@ fn live() -> Live {
         tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443)
             .try_into()
             .expect("TLS port must fit u16"),
+        path: "/".into(),
     };
     Live {
         client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),

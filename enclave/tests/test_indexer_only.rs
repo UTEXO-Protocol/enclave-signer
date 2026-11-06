@@ -247,19 +247,32 @@ fn indexer_only_cloning_entrypoints_match_production_custody() {
 
 #[test]
 fn indexer_only_accepts_independent_runtime_endpoints_without_changing_the_build_config() {
-    let first = endpoints();
+    let first = SetEndpointsRequest {
+        evm_rpc_path: "/v2/member-one-key".into(),
+        ..endpoints()
+    };
     let second = SetEndpointsRequest {
         electrum_url: "ssl://member-two-indexer.test:50003".into(),
         evm_rpc_host: "member-two-rpc.test".into(),
         evm_rpc_ca_der: hex::decode(include_str!("fixtures/evm_rpc_tls/ca_b.der.hex").trim())
             .unwrap(),
         evm_rpc_tls_port: 8443,
+        evm_rpc_path: "/v3/member-two-key".into(),
+        ..first.clone()
+    };
+    let rotated = SetEndpointsRequest {
+        evm_rpc_path: "/v2/rotated-member-one-key".into(),
         ..first.clone()
     };
     let bridge = config();
-    // Both contexts use the same compiled role and identical bridge pins.
+    // Each context uses the same compiled role and identical bridge pins.
     // Only the runtime request varies, including the TLS trust root.
-    for (request, replacement) in [(&first, &second), (&second, &first)] {
+    for (request, replacement) in [
+        (&first, &second),
+        (&second, &first),
+        (&first, &rotated),
+        (&rotated, &first),
+    ] {
         let (port, ctx) = start_with_config(bridge.clone());
         assert!(matches!(
             send(port, Request::SetEndpoints(request.clone())),
@@ -292,8 +305,8 @@ fn indexer_only_rejects_malformed_endpoints_without_consuming_the_launch_slot() 
     type MalformedEndpoint = (fn(&mut SetEndpointsRequest), &'static str);
     let malformed: [MalformedEndpoint; 11] = [
         (
-            |r| r.evm_rpc_path = "/v2/private-api-key".into(),
-            "evm_rpc_path is set, but this build does not use it",
+            |r| r.evm_rpc_path = "/v2/../private-api-key".into(),
+            "evm_rpc_path must be an absolute ASCII path",
         ),
         (
             |r| r.electrum_url = "ftp://indexer.test:50002".into(),

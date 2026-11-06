@@ -277,6 +277,13 @@ still required as described in the README. The former `ENDPOINTS_SHA256`
 image setting is removed; approve the corrected release's measurements once.
 Later endpoint changes reuse that image and its PCR allowlist.
 
+Provider credentials can be supplied through `EVM_RPC_PATH_FILE` at launch.
+The private path is not in the image, attested policy or KMS encryption context.
+Replacing the file and restarting rotates the key without changing those
+values. Verifiers need only the independently approved public fields their
+selected policy commits; they do not need the API key. See the
+[launch path rules](../README.md#enclave).
+
 Checking image identity and approving runtime policy are separate checks.
 The full production verifier still compares independently approved endpoint
 hosts and CA hashes with the signed policy in `user_data`; these values do
