@@ -60,12 +60,12 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
         u64::from(MAX_MESSAGE_SIZE)
     );
 
-    // A refused change keeps the values. 30 s of rgb-lib does not fit the 30 s
+    // A refused change keeps the values. 68 s of rgb-lib does not fit the 90 s
     // deadline of the image.
     let refused = set(
         port,
         WireLimits {
-            max_rgb_lib_ms: 30_000,
+            max_rgb_lib_ms: 68_000,
             ..Default::default()
         },
         false,
@@ -80,8 +80,8 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
     let changed = set(
         port,
         WireLimits {
-            max_rgb_lib_ms: 30_000,
-            total_request_timeout_secs: 40,
+            max_rgb_lib_ms: 68_000,
+            total_request_timeout_secs: 100,
             mint_replay_ttl_secs: 7_200,
             ..Default::default()
         },
@@ -89,8 +89,8 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
     );
     assert!(matches!(changed, ERes::Limits(_)), "{changed:?}");
     let seen = current(&get(port));
-    assert_eq!(seen.max_rgb_lib_ms, 30_000);
-    assert_eq!(seen.total_request_timeout_secs, 40);
+    assert_eq!(seen.max_rgb_lib_ms, 68_000);
+    assert_eq!(seen.total_request_timeout_secs, 100);
     assert_eq!(seen.mint_replay_ttl_secs, 7_200);
 
     // The frame limit reaches the frame reader: a frame over it is refused, so

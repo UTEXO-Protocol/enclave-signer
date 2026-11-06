@@ -95,6 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
 
+    tokio::spawn(service.clone().follow_enclave_deadline());
+
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop
     // the gRPC server. `/health` reports both as `header_sync`.

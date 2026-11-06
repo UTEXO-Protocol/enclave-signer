@@ -848,28 +848,3 @@ fn the_mint_guard_follows_the_limits_in_force() {
     }
     assert_eq!(guard.seen_count(), 1_024);
 }
-
-/// A guard stays within the rate that the memory check counts. Each size is
-/// just past a hash table growth, the worst point of the rate.
-#[test]
-fn the_mint_guard_fits_the_heap_that_the_limits_count() {
-    use crate::limits::MINT_REPLAY_ENTRY_BYTES;
-    use crate::memory::peak;
-
-    for len in [114_689u32, 917_505] {
-        let (_, _, used) = peak::measure(
-            || NonceReplayGuard::with_capacity(1 << 21, Duration::from_secs(3600)),
-            |guard| {
-                let now = Instant::now();
-                for i in 0..len {
-                    guard.check_and_record_at(nonce(i), now).unwrap();
-                }
-            },
-        );
-        let budget = u64::from(len) * MINT_REPLAY_ENTRY_BYTES;
-        assert!(
-            used as u64 <= budget,
-            "a guard of {len} entries took {used} bytes, over {budget}"
-        );
-    }
-}

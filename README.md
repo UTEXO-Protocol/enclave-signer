@@ -219,9 +219,9 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   header sync writes headers through the direct enclave protocol. Other direct
   enclave clients can also submit headers. The sync reads headers from
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
-- The parent opens one new TCP or vsock connection per enclave RPC, with a
-  40 s timeout, or 110 s for a `Sign`. The enclave gives up first
-  ([`docs/runtime-limits.md`](docs/runtime-limits.md)).
+- The parent opens one new TCP or vsock connection per enclave RPC. It reads the
+  request deadline of the enclave and waits 10 s longer, so the enclave gives up
+  first ([`docs/runtime-limits.md`](docs/runtime-limits.md)).
 - `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
   clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
   the enclave.
@@ -741,6 +741,7 @@ Limits and dev knobs:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRPC_HOST` | `127.0.0.1` | Bind address. The deploy script defaults to the private EC2 address. |
+| `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC call. Keep it above the request deadline of the enclave plus 10 s. |
 | `GRPC_PORT` | `5000` | gRPC port. Deployments use 50051-50053. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |

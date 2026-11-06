@@ -20,9 +20,12 @@
 //! [`crate::conn::MAX_QUEUED_CONNECTIONS`] set up the accept loop at boot. Small
 //! fixed formats need no setting: a mnemonic, an envelope, a KMS reply.
 //!
-//! A change can only make a value that [`Limits::check`] accepts. Each limit
-//! has a range, so no value can stop the operator from reaching the enclave
-//! again. The checks across limits keep the request memory model
+//! A change can only make a value that [`Limits::check`] accepts. The lowest
+//! value of each limit keeps the enclave reachable, so the operator can always
+//! send a new change. The highest values are very wide on purpose, because
+//! validation takes longer as histories grow, and a new image costs a change of
+//! the PCR values. They only stop a typing error and an overflow. The checks
+//! across limits protect the enclave: they keep the request memory model
 //! (`memory.rs`), and they keep the time budget of rgb-lib below the request
 //! deadline.
 
@@ -51,6 +54,9 @@ macro_rules! limits {
             pub const DEFAULTS: Self = Self { $($name: $default,)* };
             /// No value: nothing changes.
             const NONE: Self = Self { $($name: 0,)* };
+            /// The highest value of each limit.
+            #[cfg(test)]
+            const HIGHEST: Self = Self { $($name: $high,)* };
 
             /// `self`, with each non-zero value of `changes` in its place.
             #[must_use]
@@ -62,11 +68,14 @@ macro_rules! limits {
             }
 
             fn check_ranges(&self) -> Result<(), String> {
-                $(if !($low..=$high).contains(&self.$name) {
-                    return Err(format!(
-                        "{} is {}; it must be from {} to {}",
-                        stringify!($name), self.$name, $low, $high
-                    ));
+                $({
+                    let (low, high): (u64, u64) = ($low, $high);
+                    if !(low..=high).contains(&self.$name) {
+                        return Err(format!(
+                            "{} is {}; it must be from {low} to {high}",
+                            stringify!($name), self.$name
+                        ));
+                    }
                 })*
                 Ok(())
             }
@@ -88,25 +97,25 @@ macro_rules! limits {
 
 limits! {
     /// Socket deadline of one request, from accept
-    /// ([`crate::conn::TOTAL_REQUEST_TIMEOUT`]). The highest value stays below
-    /// the time that the parent waits.
-    total_request_timeout_secs: TOTAL_REQUEST_TIMEOUT.as_secs(), 10, MAX_REQUEST_TIMEOUT_SECS;
+    /// ([`crate::conn::TOTAL_REQUEST_TIMEOUT`]). The parent reads the value in
+    /// force and waits 10 s longer, so the enclave still gives up first.
+    total_request_timeout_secs: TOTAL_REQUEST_TIMEOUT.as_secs(), 10, 86_400;
     /// The longest time one socket read or write can block.
-    io_idle_timeout_secs: IO_IDLE_TIMEOUT.as_secs(), 2, 60;
+    io_idle_timeout_secs: IO_IDLE_TIMEOUT.as_secs(), 2, 3_600;
     /// Time for the first bytes of an egress client connection.
-    first_bytes_timeout_secs: crate::egress::FIRST_BYTES_TIMEOUT.as_secs(), 1, 60;
+    first_bytes_timeout_secs: crate::egress::FIRST_BYTES_TIMEOUT.as_secs(), 1, 3_600;
     /// Time for each socket operation of the Electrum client. Without a
     /// timeout, a stalled read blocks the worker thread for ever. The ingress
     /// deadline does not cancel indexer work.
-    electrum_timeout_secs: 15, 1, 90;
+    electrum_timeout_secs: 15, 1, 3_600;
     /// Time for one Esplora HTTP call, connect and read.
-    esplora_timeout_secs: 30, 1, 90;
+    esplora_timeout_secs: 30, 1, 3_600;
     /// Time for one EVM JSON-RPC call. Without a timeout, a hung RPC blocks the
     /// worker thread for ever: `block_on` has no deadline, and alloy and reqwest
     /// set no timeout of their own. The ingress deadline does not cancel this
     /// work, so a few stalls can hold all the workers. The value of the image
     /// covers a healthy fetch through loopback, vsock and the RPC.
-    evm_rpc_timeout_secs: 15, 1, MAX_EVM_RPC_TIMEOUT_SECS;
+    evm_rpc_timeout_secs: 15, 1, 3_600;
     /// Modeled time of rgb-lib on one consignment, validation and inspection
     /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
     /// to validate alone, and the caps add up. The rgb-lib work runs on one
@@ -114,40 +123,40 @@ limits! {
     /// a history of 10 000 transfers with an SPV proof on each, which models at
     /// 19.95 s, and refuses the forged shapes of `validation/tests/caps.rs`,
     /// which model at 25 s and more.
-    max_rgb_lib_ms: 21_000, 1_000, 75_000;
+    max_rgb_lib_ms: 21_000, 1_000, 86_400_000;
     /// Steps to check transitions against their witness txs. Forged bundles at
     /// the value of the image take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
     /// costs 8.5M (`validation/tests/caps.rs`, docs/burn-flow.md).
-    max_witness_check_cost: 128 * MIB, MIB, 4_096 * MIB;
+    max_witness_check_cost: 128 * MIB, MIB, 1 << 50;
     /// Steps to hash bundle ids. 512 transitions in one bundle (one over) take
     /// rgb-lib 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs 11k.
-    max_bundle_id_cost: 256 * KIB, KIB, 16 * MIB;
+    max_bundle_id_cost: 256 * KIB, KIB, 1 << 50;
     /// Steps of the reject-list walk. The value of the image is about 5 s of
     /// walk at the measured 45 to 73 ns per step. The burn of 2810 mints costs
     /// 14k.
-    max_reject_walk_cost: 64 * MIB, MIB, 2_048 * MIB;
+    max_reject_walk_cost: 64 * MIB, MIB, 1 << 50;
     /// Entries of a reject list. Over this value the enclave refuses each
     /// request that reads the list. The list is append-only, so it cannot get
     /// shorter again. Each page takes one RPC call of the request deadline. At
-    /// about a second for each page, the value of the image fits 30 s.
-    max_reject_list_entries: 20_000, 1, 1 << 20;
+    /// about a second for each page, the value of the image fits that deadline.
+    max_reject_list_entries: 20_000, 1, 1 << 32;
     /// Entries in one `entries` call of a reject list. The value of the image
     /// is the page of rgb-lib. The page does not change what the enclave reads.
-    reject_list_page_entries: 1_000, 1, 10_000;
+    reject_list_page_entries: 1_000, 1, 1 << 20;
     /// Size of one frame. The parent has its own limit too.
-    max_message_bytes: MAX_MESSAGE_SIZE as u64, MIB, 256 * MIB;
+    max_message_bytes: MAX_MESSAGE_SIZE as u64, MIB, u32::MAX as u64;
     /// Protobuf field occurrences in one request.
-    max_wire_elements: MAX_WIRE_ELEMENTS as u64, 1_024, 1 << 24;
+    max_wire_elements: MAX_WIRE_ELEMENTS as u64, 1_024, 1 << 32;
     /// Size of one consignment.
-    max_consignment_bytes: crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES as u64, KIB, 128 * MIB;
+    max_consignment_bytes: crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES as u64, KIB, 1 << 32;
     /// Merkle proofs of one request.
-    max_merkle_proofs: crate::config::DEFAULT_MAX_MERKLE_PROOFS as u64, 1, 1 << 20;
+    max_merkle_proofs: crate::config::DEFAULT_MAX_MERKLE_PROOFS as u64, 1, 1 << 32;
     /// Size of all the Merkle proofs of one request.
-    max_total_proof_bytes: crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES as u64, KIB, 128 * MIB;
+    max_total_proof_bytes: crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES as u64, KIB, 1 << 32;
     /// Size of one PSBT or fascia.
-    max_psbt_bytes: crate::config::MAX_PSBT_BYTES as u64, KIB, 16 * MIB;
+    max_psbt_bytes: crate::config::MAX_PSBT_BYTES as u64, KIB, 1 << 32;
     /// Size of an unsigned gas transaction.
-    max_gas_tx_bytes: 1024 * KIB, KIB, 16 * MIB;
+    max_gas_tx_bytes: 1024 * KIB, KIB, 1 << 32;
     /// RLP items of a gas transaction: every string and list, at any depth. A
     /// gas tx has 9 fields and a small or empty access list. Each decoded item
     /// takes 24 bytes, however short its encoding is. Without this limit, a
@@ -155,50 +164,39 @@ limits! {
     /// Calldata is one item at any length.
     max_rlp_items: 1024, 16, 1 << 20;
     /// Size of the calldata of a fundsOut.
-    max_funds_out_call_data_bytes: 96 * KIB, KIB, 16 * MIB;
+    max_funds_out_call_data_bytes: 96 * KIB, KIB, 1 << 32;
     /// Headers in one `SubmitHeaders`.
-    max_headers_per_submit: 10_000, 1, 1 << 20;
+    max_headers_per_submit: 10_000, 1, 1 << 32;
     /// Headers in one minute.
-    max_headers_per_minute: 100_000, 1, 1 << 24;
+    max_headers_per_minute: 100_000, 1, 1 << 40;
     /// How long the mint signer refuses a second request for one deposit. A
     /// retry of the same request does not reach the enclave: the parent answers
     /// it from the reply it kept (parent `signed_responses`). The value of the
     /// image covers the retry backoff of the listener and the usual
     /// confirmation of the first transaction. The PSBT is not part of the key,
     /// so a mint rebuilt for the same deposit (other inputs, higher fee) is
-    /// refused until this time has passed. The lowest value is above the highest
-    /// request deadline, so an entry outlives the request that made it.
-    mint_replay_ttl_secs: 3_600, 120, 7 * 24 * 3_600;
+    /// refused until this time has passed. It must be above the request
+    /// deadline, so an entry outlives the request that made it.
+    mint_replay_ttl_secs: 3_600, 120, 366 * 24 * 3_600;
     /// Deposits that the mint replay guard holds. When it is full, the guard
-    /// removes the oldest entry and does not block signing.
-    mint_replay_max_entries: 100_000, 1_024, 1 << 20;
+    /// removes the oldest entry and does not block signing. Only a real deposit
+    /// adds an entry, so a high value does not let a request grow the guard.
+    mint_replay_max_entries: 100_000, 1_024, 1 << 32;
 }
-
-/// The highest request deadline. The parent waits 10 s longer for a `Sign`
-/// (`parent::grpc_server::SIGN_TIMEOUT`), because the enclave must give up
-/// first: its failed write rolls the replay key back.
-pub const MAX_REQUEST_TIMEOUT_SECS: u64 = 100;
-
-/// The highest `evm_rpc_timeout_secs`. The EVM RPC client lives as long as the
-/// enclave, so it gets this value as its own timeout, and each call applies the
-/// value in force.
-pub const MAX_EVM_RPC_TIMEOUT_SECS: u64 = 90;
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte
 /// for each byte, with the margin of the test
 /// (`validation::tests::the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds`).
-const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 542;
-/// The heap of a consignment that does not grow with it.
-const CONSIGNMENT_FIXED_BYTES: u64 = 3 * MIB;
-/// The heap of a PSBT at the densest rate measured.
+/// A request sets this rate, so the general bound of a frame does not cover it.
+const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 545;
+/// The heap of a PSBT at the densest rate measured. A request sets this rate too.
 const DENSE_PSBT_RATE: u64 = 103;
 /// The heap of one entry of a reject list, from the read to the set that
 /// rgb-lib walks with, with a margin on the rate measured
 /// (`networks::evm::reject_list::tests`). A request holds this beside the rest.
+/// The read reserves the length that the RPC reports, so only this limit stops a
+/// bad length.
 pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
-/// The heap of one entry of the mint replay guard, with a margin on the rate
-/// measured (`state::tests`). The baseline covers the entries of the image.
-pub(crate) const MINT_REPLAY_ENTRY_BYTES: u64 = 200;
 
 impl Limits {
     /// The values of the image: the constants, and the request limits that
@@ -232,6 +230,15 @@ impl Limits {
                 self.io_idle_timeout_secs, self.total_request_timeout_secs
             ));
         }
+        // An entry must outlive the request that made it, or a concurrent
+        // duplicate passes the guard.
+        if self.mint_replay_ttl_secs <= self.total_request_timeout_secs {
+            return Err(format!(
+                "mint_replay_ttl_secs is {}; it must be above \
+                 total_request_timeout_secs, {}",
+                self.mint_replay_ttl_secs, self.total_request_timeout_secs
+            ));
+        }
         // The boot check gives each worker the heap of the image values. So a
         // lower frame limit keeps that heap.
         let held = self
@@ -241,9 +248,8 @@ impl Limits {
         let elements = self.elements_bytes();
         // Validation runs beside the decoded request (`memory.rs`). A frame
         // cannot carry more than itself.
-        let consignment = self.max_consignment_bytes.min(frame) * DENSE_CONSIGNMENT_RATE_TENTHS
-            / 10
-            + CONSIGNMENT_FIXED_BYTES;
+        let consignment =
+            self.max_consignment_bytes.min(frame) * DENSE_CONSIGNMENT_RATE_TENTHS / 10;
         let list = self.max_reject_list_entries * REJECT_LIST_ENTRY_BYTES;
         let request = (3 * frame).max(frame + consignment) + elements + list;
         if request > held {
@@ -272,14 +278,6 @@ impl Limits {
     /// The most heap one request can use under these values.
     pub fn request_bound_bytes(&self) -> u64 {
         crate::memory::REQUEST_MEMORY_FACTOR as u64 * self.max_message_bytes + self.elements_bytes()
-    }
-
-    /// The heap of the mint replay guard above the entries that the baseline
-    /// covers.
-    pub fn replay_guard_growth_bytes(&self) -> u64 {
-        self.mint_replay_max_entries
-            .saturating_sub(Self::DEFAULTS.mint_replay_max_entries)
-            * MINT_REPLAY_ENTRY_BYTES
     }
 
     /// The socket deadline of one request.
@@ -410,7 +408,6 @@ mod tests {
             crate::memory::request_bound(MAX_MESSAGE_SIZE as usize)
         );
         let needed = crate::memory::BASELINE_BYTES as u64
-            + Limits::DEFAULTS.replay_guard_growth_bytes()
             + crate::conn::WORKER_THREADS as u64 * Limits::DEFAULTS.request_bound_bytes();
         assert_eq!(needed as usize, MIN_ENCLAVE_MEMORY_BYTES);
         assert!(needed <= RUN_ENCLAVE_MEMORY_MIB as u64 * MIB);
@@ -480,14 +477,14 @@ mod tests {
     /// request then loses its reply.
     #[test]
     fn the_rgb_lib_budget_must_stay_below_the_deadline() {
-        let err = apply_to_defaults(|l| l.max_rgb_lib_ms = 30_000).unwrap_err();
+        let err = apply_to_defaults(|l| l.max_rgb_lib_ms = 68_000).unwrap_err();
         assert!(err.contains("three quarters"), "{err}");
         let limits = apply_to_defaults(|l| {
-            l.max_rgb_lib_ms = 30_000;
-            l.total_request_timeout_secs = 40;
+            l.max_rgb_lib_ms = 68_000;
+            l.total_request_timeout_secs = 100;
         })
         .unwrap();
-        assert_eq!(limits.max_rgb_lib_ms, 30_000);
+        assert_eq!(limits.max_rgb_lib_ms, 68_000);
     }
 
     /// A larger consignment or PSBT needs a larger frame budget. The memory
@@ -524,25 +521,30 @@ mod tests {
         .unwrap();
     }
 
-    /// An entry outlives the request that made it, at the highest deadline
-    /// and the 10 s that the parent waits after it.
+    /// An entry outlives the request that made it.
     #[test]
-    fn the_lowest_mint_replay_window_outlives_each_request() {
-        let lowest = 120;
-        assert!(lowest > MAX_REQUEST_TIMEOUT_SECS + 10);
-        apply_to_defaults(|l| l.mint_replay_ttl_secs = lowest).unwrap();
-        let err = apply_to_defaults(|l| l.mint_replay_ttl_secs = lowest - 1).unwrap_err();
-        assert!(err.contains("mint_replay_ttl_secs"), "{err}");
+    fn the_mint_replay_window_must_outlive_a_request() {
+        apply_to_defaults(|l| l.mint_replay_ttl_secs = 120).unwrap();
+        apply_to_defaults(|l| l.total_request_timeout_secs = 119).unwrap();
+        let err = apply_to_defaults(|l| l.total_request_timeout_secs = 120).unwrap_err();
+        assert!(err.contains("mint_replay_ttl_secs is 120"), "{err}");
     }
 
-    /// The EVM RPC client keeps this value for its whole life, so no value in
-    /// force can pass it.
+    /// The highest values must reach the checks, and a check must refuse them
+    /// without an overflow.
     #[test]
-    fn the_evm_rpc_timeout_stops_at_the_timeout_of_the_client() {
-        apply_to_defaults(|l| l.evm_rpc_timeout_secs = MAX_EVM_RPC_TIMEOUT_SECS).unwrap();
-        let err = apply_to_defaults(|l| l.evm_rpc_timeout_secs = MAX_EVM_RPC_TIMEOUT_SECS + 1)
-            .unwrap_err();
-        assert!(err.contains("evm_rpc_timeout_secs"), "{err}");
+    fn the_checks_refuse_the_highest_values_without_an_overflow() {
+        let highest = Limits::HIGHEST;
+        assert!(highest.check_ranges().is_ok());
+        assert!(highest.request_bound_bytes() > 0);
+        assert!(highest.max_rgb_lib_ns() > 0);
+        assert!(highest.check().is_err(), "the budget is over the deadline");
+        // Past the time check, the memory checks run on the highest sizes.
+        let sizes = Limits {
+            max_rgb_lib_ms: 1_000,
+            ..highest
+        };
+        let _ = sizes.check();
     }
 
     /// `SetLimits` is 250 bytes at most, so the lowest values still let the

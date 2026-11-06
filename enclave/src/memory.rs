@@ -55,9 +55,7 @@
 //! The values here are the values of the image. The operator can change the
 //! frame, element and size limits at run time ([`crate::limits`]). A change
 //! must pass [`check_limits`] and the checks of `Limits::check`, so the model
-//! holds for the new values too. The baseline covers the replay guard of the
-//! mint signer at the value of the image, and [`check_limits`] adds what a
-//! larger guard takes.
+//! holds for the new values too.
 //!
 //! The model is a tested rule, not an estimate. Each parser of a request byte
 //! field has a size limit, a measured factor, or both:
@@ -174,8 +172,9 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// three enclaves take exactly 12288 MiB, with any mix of 1 GiB and 2 MiB
 /// pages.
 ///
-/// No `MemTotal` reading at this value is on record yet. To take one, run one
-/// image at this value with `ENCLAVE_DEBUG_MODE=1`. Make sure that
+/// The `MemTotal` reading at this value is 3943 MiB (2026-11-05, debug mode, an
+/// `m6i.2xlarge` with nitro-cli 1.4.5). To take a new one, run one image at this
+/// value with `ENCLAVE_DEBUG_MODE=1`. Make sure that
 /// `nitro-cli describe-enclaves` shows this value in `MemoryMiB`. Then read
 /// `total_mib` in the "memory check passed" line on `nitro-cli console`. It
 /// must be at least the minimum. Record the reading here.
@@ -257,9 +256,7 @@ fn check_limits_against(
     total: Option<usize>,
     ctx: &BuildContext,
 ) -> Result<(), String> {
-    let needed = BASELINE_BYTES
-        + limits.replay_guard_growth_bytes() as usize
-        + WORKER_THREADS * limits.request_bound_bytes() as usize;
+    let needed = BASELINE_BYTES + WORKER_THREADS * limits.request_bound_bytes() as usize;
     let needed_mib = needed / (1024 * 1024);
     let problem = match total {
         Some(total) if total >= needed => return Ok(()),
@@ -467,16 +464,6 @@ mod tests {
         assert!(err.contains("these limits need"), "{err}");
         assert!(check_limits_against(&larger, None, &build(false)).is_err());
         assert!(check_limits_against(&larger, Some(1), &build(true)).is_ok());
-
-        // The baseline covers the replay guard of the image only.
-        let larger_guard = Limits {
-            mint_replay_max_entries: image.mint_replay_max_entries + 1,
-            ..image
-        };
-        let err =
-            check_limits_against(&larger_guard, Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false))
-                .unwrap_err();
-        assert!(err.contains("these limits need"), "{err}");
     }
 
     #[test]

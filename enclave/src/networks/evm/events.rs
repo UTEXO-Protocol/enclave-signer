@@ -816,9 +816,6 @@ impl AlloyEvmClient {
             // Only the pinned host can redirect. It could still point at a
             // peer the CA never certified.
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(
-                crate::limits::MAX_EVM_RPC_TIMEOUT_SECS,
-            ))
             .build()
             .map_err(err)?;
         let url = format!("https://{}:{}/", tls.host, tls.tls_port)

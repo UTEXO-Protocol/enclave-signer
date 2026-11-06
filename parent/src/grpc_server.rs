@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -12,19 +13,20 @@ use crate::framing;
 
 use crate::signed_responses::{Claim, Lead, SignedResponses};
 
-/// Longer than the socket deadline of the image (`conn::TOTAL_REQUEST_TIMEOUT`).
-/// The enclave must give up first: its failed write then rolls its replay key
-/// back, while a parent that gives up first leaves a committed key and a
-/// response nobody read.
-const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(40);
+/// How much longer the parent waits for a reply than the socket deadline of the
+/// enclave. The enclave must give up first: its failed write then rolls its
+/// replay key back, while a parent that gives up first leaves a committed key
+/// and a response nobody read. The deadline starts at accept, while the wait of
+/// the parent starts before the worker is queued.
+const ENCLAVE_WAIT_MARGIN_SECS: u64 = 10;
 
-/// The wait for a `Sign`, the one request with a replay key and with a
-/// consignment to validate. It is longer than the highest socket deadline of the
-/// enclave (`limits::MAX_REQUEST_TIMEOUT_SECS`). The operator can change that
-/// deadline at run time, so this wait holds for each value and the parent needs no
-/// change. The deadline starts at accept, while this timer starts before the worker
-/// is queued. See [`ENCLAVE_TIMEOUT`] for why the enclave must give up first.
-const SIGN_TIMEOUT: Duration = Duration::from_secs(110);
+/// The socket deadline of the image. The parent uses it until it has read the
+/// deadline in force.
+const IMAGE_DEADLINE_SECS: u64 = 90;
+
+/// How often the parent reads the deadline in force. The operator changes it
+/// with the CLI, which goes straight to the enclave.
+const DEADLINE_READ_INTERVAL: Duration = Duration::from_secs(5);
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -193,6 +195,8 @@ pub struct ParentAdapterService {
     target: EnclaveTarget,
     /// Replies of EVM->RGB bridge signs, kept for a retry of the same request.
     signed: std::sync::Arc<SignedResponses>,
+    /// The socket deadline of the enclave, in seconds.
+    deadline_secs: std::sync::Arc<AtomicU64>,
 }
 
 impl ParentAdapterService {
@@ -212,7 +216,50 @@ impl ParentAdapterService {
         target: EnclaveTarget,
         signed: std::sync::Arc<SignedResponses>,
     ) -> Self {
-        Self { target, signed }
+        Self {
+            target,
+            signed,
+            deadline_secs: std::sync::Arc::new(AtomicU64::new(IMAGE_DEADLINE_SECS)),
+        }
+    }
+
+    /// Sets the socket deadline that the parent assumes.
+    pub fn with_enclave_deadline_secs(self, secs: u64) -> Self {
+        self.deadline_secs.store(secs, Ordering::Relaxed);
+        self
+    }
+
+    /// The wait for a reply of the enclave.
+    fn enclave_wait(&self) -> Duration {
+        let deadline = self.deadline_secs.load(Ordering::Relaxed);
+        Duration::from_secs(deadline.saturating_add(ENCLAVE_WAIT_MARGIN_SECS))
+    }
+
+    /// Reads the socket deadline in force. A failed read keeps the last value.
+    async fn read_enclave_deadline(&self) {
+        let request = EnclaveRequest {
+            request: Some(enclave_request::Request::GetLimits(
+                enclave_proto::GetLimitsRequest {},
+            )),
+        };
+        let response = self.send_to_enclave(request).await.ok();
+        if let Some(enclave_response::Response::Limits(limits)) = response.and_then(|r| r.response)
+        {
+            let current = limits.current.map(|c| c.total_request_timeout_secs);
+            if let Some(secs) = current.filter(|&secs| secs != 0) {
+                self.deadline_secs.store(secs, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Keeps the wait of the parent above the socket deadline in force, for
+    /// the life of the parent.
+    pub async fn follow_enclave_deadline(self) {
+        let mut interval = tokio::time::interval(DEADLINE_READ_INTERVAL);
+        loop {
+            interval.tick().await;
+            self.read_enclave_deadline().await;
+        }
     }
 
     /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
@@ -223,7 +270,7 @@ impl ParentAdapterService {
         &self,
         req: EnclaveRequest,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, None).await
+        send_within(self.target.clone(), req, self.enclave_wait(), None).await
     }
 
     /// Like [`Self::send_to_enclave`], and a signed-PSBT reply completes `lead`.
@@ -232,7 +279,7 @@ impl ParentAdapterService {
         req: EnclaveRequest,
         lead: Option<Lead>,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, SIGN_TIMEOUT, lead).await
+        send_within(self.target.clone(), req, self.enclave_wait(), lead).await
     }
 
     /// Unwrap an enclave error response into a gRPC Status.
@@ -1217,10 +1264,49 @@ mod tests {
         assert_eq!(err.code(), Code::Unavailable, "{err:?}");
     }
 
-    /// The enclave must give up before the parent (see `ENCLAVE_TIMEOUT`).
+    /// The enclave must give up before the parent. The parent starts from the
+    /// deadline of the image.
     #[test]
-    fn the_parent_waits_longer_than_the_enclave_socket_deadline() {
-        assert!(ENCLAVE_TIMEOUT > utexo_bridge_enclave::conn::TOTAL_REQUEST_TIMEOUT);
-        assert!(SIGN_TIMEOUT.as_secs() > utexo_bridge_enclave::limits::MAX_REQUEST_TIMEOUT_SECS);
+    fn the_parent_starts_from_the_deadline_of_the_image() {
+        let image = utexo_bridge_enclave::limits::Limits::DEFAULTS.total_request_timeout_secs;
+        assert_eq!(IMAGE_DEADLINE_SECS, image);
+        let service = ParentAdapterService::new(EnclaveTarget::Tcp("127.0.0.1:1".into()));
+        assert!(service.enclave_wait() > Duration::from_secs(image));
+    }
+
+    /// One enclave answer with `limits`, then each connection fails.
+    fn answer_limits(listener: TcpListener, deadline: u64) {
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let _: EnclaveRequest = framing::read_message(&mut peer).unwrap();
+            let current = enclave_proto::Limits {
+                total_request_timeout_secs: deadline,
+                ..Default::default()
+            };
+            let response = EnclaveResponse {
+                response: Some(enclave_response::Response::Limits(
+                    enclave_proto::LimitsResponse {
+                        current: Some(current),
+                        image: None,
+                    },
+                )),
+            };
+            framing::write_message(&mut peer, &response).unwrap();
+        });
+    }
+
+    /// The operator changes the deadline with the CLI, so the wait must follow
+    /// the enclave, at any value. A failed read must not lower the wait.
+    #[tokio::test]
+    async fn the_wait_follows_the_deadline_in_force() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let service = ParentAdapterService::new(tcp(listener.local_addr().unwrap()));
+        answer_limits(listener, 3_600);
+
+        service.read_enclave_deadline().await;
+        assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
+
+        service.read_enclave_deadline().await;
+        assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
     }
 }

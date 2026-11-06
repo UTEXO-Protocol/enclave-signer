@@ -61,38 +61,40 @@ image values, and the launch continues.
 
 | Limit | Image | Lowest | Highest | Sets |
 |---|---|---|---|---|
-| `total_request_timeout_secs` | 30 | 10 | 100 | Socket deadline of a request, from accept. |
-| `io_idle_timeout_secs` | 10 | 2 | 60 | Longest block of one socket read or write. |
-| `first_bytes_timeout_secs` | 10 | 1 | 60 | Time for the first bytes of an egress client. |
-| `electrum_timeout_secs` | 15 | 1 | 90 | Time for one Electrum socket operation. |
-| `esplora_timeout_secs` | 30 | 1 | 90 | Time for one Esplora call. |
-| `evm_rpc_timeout_secs` | 15 | 1 | 90 | Time for one EVM RPC call. |
-| `max_rgb_lib_ms` | 21000 | 1000 | 75000 | Modeled rgb-lib time on one consignment. |
-| `max_witness_check_cost` | 134217728 | 1048576 | 4294967296 | Steps to check transitions against witness txs. |
-| `max_bundle_id_cost` | 262144 | 1024 | 16777216 | Steps to hash bundle ids. |
-| `max_reject_walk_cost` | 67108864 | 1048576 | 2147483648 | Steps of the reject-list walk. |
-| `max_reject_list_entries` | 20000 | 1 | 1048576 | Entries of a reject list. |
-| `reject_list_page_entries` | 1000 | 1 | 10000 | Entries in one RPC call that reads a reject list. |
-| `max_message_bytes` | 25165824 | 1048576 | 268435456 | Size of one frame. |
-| `max_wire_elements` | 524288 | 1024 | 16777216 | Protobuf field occurrences in a request. |
-| `max_consignment_bytes` | 10485760 | 1024 | 134217728 | Size of a consignment. |
-| `max_merkle_proofs` | 16384 | 1 | 1048576 | Merkle proofs of a request. |
-| `max_total_proof_bytes` | 8388608 | 1024 | 134217728 | Size of all the proofs of a request. |
-| `max_psbt_bytes` | 1048576 | 1024 | 16777216 | Size of a PSBT or a fascia. |
-| `max_gas_tx_bytes` | 1048576 | 1024 | 16777216 | Size of an unsigned gas transaction. |
-| `max_rlp_items` | 1024 | 16 | 1048576 | RLP items of a gas transaction. |
-| `max_funds_out_call_data_bytes` | 98304 | 1024 | 16777216 | Size of the calldata of a fundsOut. |
-| `max_headers_per_submit` | 10000 | 1 | 1048576 | Headers in one `SubmitHeaders`. |
-| `max_headers_per_minute` | 100000 | 1 | 16777216 | Headers in one minute. |
-| `mint_replay_ttl_secs` | 3600 | 120 | 604800 | Time that the mint signer refuses a second request for a deposit. |
-| `mint_replay_max_entries` | 100000 | 1024 | 1048576 | Deposits in the mint replay guard. |
+| `total_request_timeout_secs` | 90 | 10 | 86400 | Socket deadline of a request, from accept. |
+| `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
+| `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
+| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. |
+| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. |
+| `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
+| `max_rgb_lib_ms` | 21000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
+| `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
+| `max_bundle_id_cost` | 262144 | 1024 | 2^50 | Steps to hash bundle ids. |
+| `max_reject_walk_cost` | 67108864 | 1048576 | 2^50 | Steps of the reject-list walk. |
+| `max_reject_list_entries` | 20000 | 1 | 2^32 | Entries of a reject list. |
+| `reject_list_page_entries` | 1000 | 1 | 2^20 | Entries in one RPC call that reads a reject list. |
+| `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
+| `max_wire_elements` | 524288 | 1024 | 2^32 | Protobuf field occurrences in a request. |
+| `max_consignment_bytes` | 10485760 | 1024 | 2^32 | Size of a consignment. |
+| `max_merkle_proofs` | 16384 | 1 | 2^32 | Merkle proofs of a request. |
+| `max_total_proof_bytes` | 8388608 | 1024 | 2^32 | Size of all the proofs of a request. |
+| `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT or a fascia. |
+| `max_gas_tx_bytes` | 1048576 | 1024 | 2^32 | Size of an unsigned gas transaction. |
+| `max_rlp_items` | 1024 | 16 | 2^20 | RLP items of a gas transaction. |
+| `max_funds_out_call_data_bytes` | 98304 | 1024 | 2^32 | Size of the calldata of a fundsOut. |
+| `max_headers_per_submit` | 10000 | 1 | 2^32 | Headers in one `SubmitHeaders`. |
+| `max_headers_per_minute` | 100000 | 1 | 2^40 | Headers in one minute. |
+| `mint_replay_ttl_secs` | 3600 | 120 | 31622400 | Time that the mint signer refuses a second request for a deposit. |
+| `mint_replay_max_entries` | 100000 | 1024 | 2^32 | Deposits in the mint replay guard. |
 
 The image env can lower `max_consignment_bytes`, `max_merkle_proofs` and
 `max_total_proof_bytes`. Then `limits show` prints those values as the image
 values.
 
 The lowest values keep the enclave reachable, so the operator can always send a
-new `limits set`.
+new `limits set`. The highest values are very wide on purpose, because validation
+takes longer as histories grow. They only stop a typing error and an overflow. The
+rules below protect the enclave.
 
 ## Rules for a change
 
@@ -104,6 +106,8 @@ refuses the request and changes nothing.
   A request that passes the deadline does all its work, and then it cannot send
   its reply. So 30 s of rgb-lib needs a deadline of at least 40 s.
 - `io_idle_timeout_secs` must be at most `total_request_timeout_secs`.
+- `mint_replay_ttl_secs` must be above `total_request_timeout_secs`, so an entry
+  outlives the request that made it.
 - The densest consignment at `max_consignment_bytes` must fit the heap of a frame
   (`enclave/src/memory.rs`). So a larger consignment needs a larger
   `max_message_bytes`.
@@ -114,8 +118,7 @@ refuses the request and changes nothing.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
   limits, and the baseline. A larger frame can need a larger `run-enclave --memory`
-  value, which needs a new launch. Each entry of `mint_replay_max_entries` above the
-  image value adds 200 bytes.
+  value, which needs a new launch.
 
 ## The reject list
 
@@ -142,6 +145,25 @@ at each call, so a change applies to the entries that it holds.
 
 Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If the
 parent drops a reply first, the enclave refuses the retry until the window ends.
+
+## Measured times
+
+These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
+8375C at 2.9 GHz, nitro-cli 1.4.5) on 2026-11-05, with 4096 MiB. `MemTotal` was
+3943 MiB. The request is a history of 10,000 transfers with a proof on each. The
+model gives it 19.95 s.
+
+| Requests at once | 2 vCPUs (1 core) | 4 vCPUs (2 cores) |
+|---|---|---|
+| 1 | 14.3 s | 14.3 s |
+| 2 | 26.8 s | 14.9 s |
+| 4 | 52.8 s | 27.1 s |
+
+The default launch has 2 vCPUs, and these are two threads of one core. So four
+requests take 3.7 times as long as one. On every shape measured, the time of one
+request was at or below the model. At 21 s of `max_rgb_lib_ms`, four of the slowest
+requests at once take about 78 s on 2 vCPUs. On 4 vCPUs they take about 40 s. So the
+deadline of the image is 90 s.
 
 ## What the attestation shows
 
@@ -175,10 +197,15 @@ These values also stay constants:
 
 ## The parent
 
-The parent waits 110 s for a `Sign`. That is 10 s more than the highest
-`total_request_timeout_secs`, because the enclave must give up first. So a change of
-the deadline needs no change on the parent. The parent waits 40 s for each other
-request, because these requests do no work on a consignment.
+The parent reads `total_request_timeout_secs` from the enclave every 5 s, and it
+waits 10 s longer for each reply. The enclave must give up first. Its failed write
+rolls the replay key back. A parent that gives up first leaves a committed key and a
+response that nobody read. So a change of the deadline needs no change on the
+parent. For up to 5 s after a change, the parent can use the old value.
+
+Two timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS`
+on the parent (default 120 s), and the timeout of the backend (2 minutes). A deadline
+above 110 s also needs a change of these two values.
 
 The parent has its own frame limit (`parent/src/framing.rs`). A value of
 `max_message_bytes` above 24 MiB has no effect until the parent limit also changes.

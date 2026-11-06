@@ -151,7 +151,7 @@ enables `kms-persistence`. Production images are built with
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
 decode, `check_request_shape` counts the field occurrences on the wire and
-refuses a request with more than 2^19 (`MAX_WIRE_ELEMENTS`). The walk enters
+refuses a request with more than 2^19 (`max_wire_elements`). The walk enters
 only the messages that `framing::Schema` names. A test reads `enclave.proto`
 and fails when a request message gets a repeated field outside them. The
 Bitcoin indexer and the EVM RPC are reached through in-enclave loopback
@@ -254,9 +254,10 @@ it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
-Each socket read or write has a 10-second idle timeout. A 30-second socket
+Each socket read or write has a 10-second idle timeout. A 90-second socket
 deadline starts when the connection is accepted, including time in the queue.
-Each connection carries one request. These limits are compile-time constants.
+Each connection carries one request. The workers and the queue are compile-time
+constants. The operator can change the two timeouts (`docs/runtime-limits.md`).
 
 The socket deadline does not cancel validation or network work inside a
 handler. KMS initialization checks the shared deadline before it activates
@@ -711,7 +712,7 @@ unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
 creation -- and computes the digest itself. The preimage is at most 1 MiB
-(`MAX_GAS_TX_BYTES`). It decodes to at most 1024 RLP items (`MAX_RLP_ITEMS`)
+(`max_gas_tx_bytes`). It decodes to at most 1024 RLP items (`max_rlp_items`)
 with a nesting depth of at most 8. So the input bounds the decoder's heap.
 
 Two further bounds, each fail-closed when unset:
@@ -1148,7 +1149,7 @@ Known limits. Read them before deployment.
   rotates it. The list is read in full on each request, at most
   `max_reject_list_entries` entries, by default 20,000 (about 25 RPC calls). The
   list is append-only, so a list over that value refuses every release until the
-  operator raises it. The read also stops before the 30 s request
+  operator raises it. The read also stops before the request
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
 - **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
@@ -1173,7 +1174,8 @@ Known limits. Read them before deployment.
   chain of propagates, 14 bytes an opout, at the size cap took 44 s to
   validate and 51 s to inspect: the budget counts its opouts and refuses it.
   The caps' parts add up with it, so `max_rgb_lib_ms` holds the modeled sum
-  to 21 s, against a 30 s deadline that does not stop a worker (4 workers).
+  to 21 s, against a 90 s deadline that does not stop a worker (4 workers).
+  `docs/runtime-limits.md` has the times measured on a real enclave.
   The budget is rgb-lib's alone: the enclave's own parse, gate and reads of
   the validated transfer take the rest of the deadline, 1.1 to 1.6 s more end
   to end on the 2810-mint burn with 3 transfers a line (2.3 s at a load of 5.6).

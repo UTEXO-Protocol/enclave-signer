@@ -156,7 +156,7 @@ refuses it.
 | `SPV_MIN_CONFIRMATIONS` | 3 | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
-| Fascia size | 1 MiB (`MAX_PSBT_BYTES`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
+| Fascia size | 1 MiB (`max_psbt_bytes`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
 | `MINT_INPUTS` | 1 | A mint spends its right alone. |
 | `MINT_MAX_INPUTS` / `MINT_MAX_OUTPUTS` | 16 / 16 | Most inputs and outputs of a mint tx. Checked before any fascia is decoded; F7 then needs exactly `MINT_INPUTS`. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |

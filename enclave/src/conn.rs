@@ -26,7 +26,7 @@ pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Socket deadline measured from accept, including time in the worker queue.
 /// This does not cancel work inside a handler.
-pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Connection worker threads. The only peer is the parent, so a small pool is
 /// sufficient. One slow request does not block the others.
