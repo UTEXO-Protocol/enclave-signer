@@ -15,7 +15,7 @@ ALIASES = {
 }
 DEPLOY_KEY = 'fixture-private-key-not-a-real-credential'
 MIRROR_TOKEN = 'fixture-mirror-token-not-a-real-credential'
-# rgb-lib's [patch.crates-io] repos, each mapped to UTEXO-Protocol/<repo>-s-bfa.
+# The repos map-rgb-mirrors.sh maps to UTEXO-Protocol/<repo>-s-bfa. No lock entry uses them.
 PROTOCOL_REPOS = ('rgb-consensus', 'rgb-ops', 'rgb-api', 'rgb-schemas')
 
 

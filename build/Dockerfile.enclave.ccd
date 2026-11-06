@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Concordium-only enclave image (vsock + ccd) - handles the Concordium bridge
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN -f build/Dockerfile.enclave.ccd .
 # Use the same Debian release for the builder and runtime.

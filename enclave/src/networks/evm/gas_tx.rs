@@ -6,7 +6,7 @@
 //!   1. decodes it as EIP-1559 (type `0x02`) or legacy EIP-155 with a strict
 //!      canonical RLP decoder;
 //!   2. computes the signing hash itself (`keccak256(preimage)`);
-//!   3. enforces the operator's attested allowlist: chain id == `EVM_CHAIN_ID`,
+//!   3. enforces the operator's allowlist: chain id == `EVM_CHAIN_ID`,
 //!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <=
 //!      `GAS_TX_MAX_GAS_LIMIT`, per-gas fees <= `GAS_TX_MAX_FEE_PER_GAS`, and a
 //!      leading 4-byte selector in `GAS_TX_ALLOWED_SELECTORS`.
@@ -16,8 +16,8 @@
 //! `to` == pinned `EVM_PROXY_CONTRACT_ADDRESS`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
 //! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! Any unset pin fails the path closed. The attestation `user_data`
-//! commitment includes the whole rule, via [`crate::policy::SecurityPolicy`].
+//! Any unset pin fails the path closed. A `Production` policy commits the whole
+//! rule in the attestation `user_data`. A no-SPV image only measures it in PCR0.
 //!
 //! Not bounded here: total fee spend across many txs (validation is
 //! stateless). The LayerZero fee is not bound to its release.

@@ -669,16 +669,16 @@ fn test_sign_evm_rejects_unconfigured_bridge_config() {
 // amount. EVM destination validation decodes `fundsOut.amount` and checks it
 // against `calldata_amount`. `validate_route_proofs` compares the two.
 
-/// A build without `spv` must refuse every `fundsOut`, even with no
-/// merkle_proofs. Without SPV, only the host-controlled indexer anchors
-/// witness txs, so the enclave could sign against a fabricated anchor.
+/// A build without `rgb-validation` must refuse an RGB source, even with no
+/// merkle_proofs. It has no consensus code to check a consignment with.
 ///
-/// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The
+/// A no-SPV burn signer is a different build. It has `rgb-validation` and signs
+/// on the indexer's witness status, so it does not run this test. The
 /// refusal fires in RGB source validation, whose message names the missing
 /// `rgb-validation` feature.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
-fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
+fn a_build_without_rgb_validation_refuses_rgb_sources() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -834,8 +834,8 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     }
 }
 
-/// The first RGB bind refusal of a bare PSBT: the swap flow needs a
-/// consignment, the mint signer reads the PSBT's own data and inputs.
+/// The first RGB bind refusal of a bare PSBT: the mint signer reads the PSBT's
+/// own data and inputs. `evm_to_rgb` implies `bfa-mint`, so the `else` never runs.
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 const RGB_BIND_REFUSAL: &str = if cfg!(feature = "bfa-mint") {
     "witness_utxo"

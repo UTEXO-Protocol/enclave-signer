@@ -4,11 +4,11 @@
 //! amount it issues and the EVM block its lock must precede. The bridge keys
 //! the lock by `LockId(opid, witness txid)`. Consensus cannot confirm a claim.
 //! The enclave confirms one only against a lock that a binder bound to that
-//! exact `(lockId, amount)`: a receipt-verified lock for the mint being
-//! signed, a derived deposit id for every other one.
+//! exact `(lockId, amount)`: on the burn path, a derived deposit id for every
+//! mint of the history. The mint signer runs no claim resolver.
 //!
-//! The binder lives in `server/bfa.rs`, because it reads the pins and the EVM
-//! RPC. This module holds the shapes it works on and rgb-lib's claim resolver.
+//! The binder lives in `server/bfa.rs`, because it reads the pins. This module
+//! holds the shapes it works on and rgb-lib's claim resolver.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -48,7 +48,7 @@ pub struct MintAnchor {
     pub amount: u64,
     /// The mint's `beforeBlock`: its lock must be in an EVM (L2) block < before_block.
     pub before_block: u64,
-    /// The mint is in the last bundle: the one a mint PSBT signs.
+    /// The mint is in the last bundle. Only tests read this field.
     pub in_last_bundle: bool,
 }
 
@@ -91,7 +91,7 @@ pub fn lock_id(opid: OpId, witness_id: bitcoin::Txid) -> [u8; 32] {
 }
 
 /// One claim consensus left open. `last_bundle` holds the OpIds of the
-/// bundle a mint PSBT signs.
+/// consignment's last bundle.
 fn mint_anchor(claim: &Claim, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
     let Claim::Lock {
         opid,

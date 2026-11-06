@@ -151,7 +151,7 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is the consignment recipient leg that the
+            // The destination amount is `mint.issued` from the fascia that the
             // enclave proves, not the unchecked host `psbt_output_amount`. Only
             // builds without that bind use the wire field. They run no
             // destination cross-checks.
@@ -216,7 +216,7 @@ pub fn validate_route_proofs(
 /// `source_amount` is the `FundsIn` amount from
 /// `evm::events::verify_funds_in_event`. For RGB -> EVM, it is the consignment
 /// amount. An RGB
-/// `destination_amount` is the consignment recipient leg in RGB units, issued
+/// `destination_amount` is the fascia's `mint.issued` in RGB units, issued
 /// 1:1 against the EVM token. The PSBT checks in sats are in
 /// [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {

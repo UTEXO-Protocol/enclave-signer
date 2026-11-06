@@ -15,3 +15,7 @@ __pycache__/
 .DS_Store
 !/.cargo/
 !.cargo/audit.toml
+
+# Output of the ci.yml patch check, when it runs on a local checkout.
+/metadata.json
+/metadata.log

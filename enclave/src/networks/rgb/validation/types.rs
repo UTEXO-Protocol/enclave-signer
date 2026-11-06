@@ -26,27 +26,27 @@ pub struct ValidatedConsignment {
     /// Bitcoin txid of the witness tx that anchors the last transition, for
     /// all transition types (burn included).
     ///
-    /// In the send-RGB direction, the PSBT is that witness tx. The PSBT
-    /// cross-check binds `psbt.unsigned_tx.compute_txid()` to it after the
-    /// flow transition-type check. The RGB->EVM `fundsOut` source-block bind
-    /// uses it for all types, so it works for transfer and burn.
+    /// No PSBT check reads it: the mint signer runs no consensus and reads its
+    /// tx from the PSBT and the fascia (`rgb::route`). The RGB->EVM `fundsOut`
+    /// source-block bind reads it. It is set for all types, so the bind works
+    /// for transfer and burn.
     ///
     /// A `bitcoin::Txid`, not display-order bytes, to prevent byte-order
     /// errors. `None` only for a consignment with no bundles.
     pub last_witness_txid: Option<bitcoin::Txid>,
     /// Input prevouts of that witness tx. A V1 bundle always carries the full
-    /// tx. The PSBT cross-check uses them as a redundant per-input canary.
+    /// tx. Only tests read this field.
     pub last_transfer_witness_prevouts: Vec<bitcoin::OutPoint>,
-    /// The outpoints whose seals the last bundle's transitions close. A
-    /// PSBT may spend no other colored output: that would destroy the RGB
-    /// state on it.
+    /// The outpoints whose seals the last bundle's transitions close. Only
+    /// tests read this field, but reading these seals refuses a transition
+    /// input with no revealed seal.
     pub last_closed_seals: Vec<bitcoin::OutPoint>,
     /// Every transition of the last bundle is in the consignment. A hidden
     /// one still counts in the bundle id, so a signature would commit to
-    /// state moves the enclave never saw.
+    /// state moves the enclave never saw. Only tests read this field.
     pub last_bundle_fully_disclosed: bool,
-    /// The `mintRight` (`OS_MINT`) outputs of the settling transition. A mint
-    /// must have none: it consumes its right.
+    /// The `mintRight` (`OS_MINT`) outputs of the settling transition. Only
+    /// tests read this field. The mint signer checks the fascia instead (M3).
     pub last_mint_rights: Vec<OutputSeal>,
     /// Authoritative OpId (32-byte commitment hash) of the **last**
     /// transition, read from the rgbstd-**validated** `Transfer`
@@ -54,25 +54,25 @@ pub struct ValidatedConsignment {
     /// NOT from the flat summary.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
-    /// release names is the burn that consensus validated. `Some` when the
-    /// settling transition is the type this flow signs on a deposit, or a burn.
-    /// `None` for a consignment with no bundles or another transition type.
+    /// release names is the burn that consensus validated. `Some` for a
+    /// settling transition of any type: the flow check refuses one that is not a burn.
+    /// `None` only for a consignment with no bundles.
     /// Validation refuses a consignment where this OpId and the flat summary's
     /// `last_transition.op_id` differ.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that are **not mined**, in **display (big-endian) byte
     /// order**, as [`Self::witness_txids`].
     ///
-    /// Empty on the burn path. On the mint path, at most the mint tx being
-    /// signed: consensus refuses every other unmined witness.
+    /// Empty after a passing validation: consensus refuses every unmined
+    /// witness. `fundsOut` checks that again before it signs.
     pub non_mined_witness_txids: Vec<[u8; 32]>,
     /// Every transition in the consignment, grouped by the witness tx that
     /// commits it.
     ///
-    /// One Bitcoin tx commits a bundle, which can hold many transitions. A
-    /// bind of only [`Self::last_transition`] lets an attacker put a large
-    /// transfer earlier in the bundle. Thus the send-RGB PSBT cross-check
-    /// binds the full group with [`Self::transitions_committed_by`].
+    /// One Bitcoin tx commits a bundle, which can hold many transitions. The
+    /// burn path reads [`Self::last_transition`], and the mint signer reads
+    /// the fascia. Only tests read this field, through
+    /// [`Self::transitions_committed_by`].
     pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
@@ -82,8 +82,8 @@ pub struct ValidatedConsignment {
 impl ValidatedConsignment {
     /// Each transition that the witness tx `txid` commits.
     ///
-    /// Empty if the consignment commits nothing to that tx. Callers must treat
-    /// empty as a rejection, not as "nothing to check".
+    /// Empty if the consignment commits nothing to that tx. Only tests call
+    /// this.
     pub fn transitions_committed_by(&self, txid: bitcoin::Txid) -> Vec<&TransitionSummary> {
         self.transitions_by_witness
             .iter()

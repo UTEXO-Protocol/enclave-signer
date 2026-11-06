@@ -23,3 +23,5 @@ are not authorization guarantees.
 
 Edit the Mermaid block alongside the corresponding Rust handler and spec.
 Use a Mermaid-capable preview; plain Markdown renderers show the source block.
+Do not put a raw semicolon in a sequence-diagram message or note: it ends the
+message and the block no longer parses. Use a comma, or write `#59;`.

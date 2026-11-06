@@ -161,7 +161,7 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # only ciphertext through the vsock forwarder.
 # Implies `rgb-validation`: the bridge path and amount/asset context are there.
 evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
-# Binds BFA mint anchors to EVM locks, in either RGB flow. BFA is the only
+# Binds BFA mint anchors to EVM locks, on both signer roles. BFA is the only
 # schema the enclave admits. Each BFA `mint` leaves an EVM lock claim that
 # RGB consensus cannot finalize alone. Without this feature, every mint and
 # every consignment with mint ancestry is refused.

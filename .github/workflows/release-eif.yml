@@ -9,9 +9,10 @@
 # workflow only selects the git_sha + hosts and ships the script over SSM.
 #
 # !!! IMPORTANT — this RESTARTS the enclaves, which WIPES in-memory identity. A redeployed
-# enclave comes up EMPTY ("key not initialized"); re-run init/clone afterwards. Until KMS
-# identity recovery (#5) exists, do NOT point this at a cluster holding live keys without
-# planning the re-bootstrap. That's why it is manual (workflow_dispatch) + environment-gated,
+# burn enclave comes up EMPTY ("key not initialized"); re-run init/clone afterwards. A mint
+# enclave recovers its seed from KMS only with the KMS values and the expected address pin at
+# launch, and this workflow exports none of them. Do NOT point this at a cluster holding live
+# keys without planning the re-bootstrap. That's why it is manual (workflow_dispatch) + environment-gated,
 # never auto-triggered on every build.
 #
 # Required repo config:
