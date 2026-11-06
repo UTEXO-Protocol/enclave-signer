@@ -131,9 +131,9 @@ limits! {
     /// Steps to hash bundle ids. 512 transitions in one bundle (one over) take
     /// rgb-lib 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs 11k.
     max_bundle_id_cost: 256 * KIB, KIB, 1 << 50;
-    /// Steps of the reject-list walk. The value of the image is about 5 s of
-    /// walk at the measured 45 to 73 ns per step. The burn of 2810 mints costs
-    /// 14k.
+    /// Steps of the reject-list walk, counted per origin. The value of the image
+    /// is about 5 s of the per-origin walk at 45 to 73 ns per step, measured on
+    /// rgb-lib 1ae1c160. The burn of 2810 mints costs 14k.
     max_reject_walk_cost: 64 * MIB, MIB, 1 << 50;
     /// Entries of a reject list. Over this value the enclave refuses each
     /// request that reads the list. The list is append-only, so it cannot get

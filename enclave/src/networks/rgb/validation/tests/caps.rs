@@ -240,7 +240,7 @@ fn fan_out(
 }
 
 /// A mint of `k` units, `l` transfers of all of them, then a fan-out to `k`
-/// outputs: k + 1 origins, each walking the whole chain.
+/// outputs: k + 1 origins, each counted over the whole chain.
 fn fanned_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
     let right = history.genesis_right(0, right_utxo());
     let mut units = history.mint_owned(right, u64::from(k), 90);
@@ -252,7 +252,7 @@ fn fanned_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
 }
 
 /// [`fanned_chain`] with each unit moved on by its own transfer, then all
-/// merged: k origins of distinct operations, so k walks of the chain.
+/// merged: k origins of distinct operations, so the count walks the chain k times.
 fn merged_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
     let right = history.genesis_right(0, right_utxo());
     let mut units = history.mint_owned(right, u64::from(k), 90);
@@ -378,10 +378,10 @@ fn the_bundle_id_cost_is_each_transition_over_its_whole_input_map() {
     assert_eq!(bundle_id_cost(&load(&rights_burn(issue(), 3))), 2 + 2 * 3);
 }
 
-/// rgb-lib walks from each origin on its own, so only a shared history makes
-/// it superlinear; a burn of separate lines costs a few steps per line.
+/// The count walks from each origin on its own, so only a shared history makes
+/// it superlinear; a burn of separate lines counts 2L + 5 steps a line.
 #[test]
-fn the_walk_cost_is_rgb_libs_walk_from_each_origin() {
+fn the_walk_cost_counts_a_walk_from_each_origin() {
     assert_eq!(walk_cost(&wide_transfer(listed(), 3)), wide_walk_cost(3));
     // The fan-out's input walks 7 steps, each of its 2 outputs 9.
     assert_eq!(walk_cost(&fanned_chain(listed(), 2, 2)), 7 + 2 * 9);

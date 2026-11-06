@@ -665,8 +665,9 @@ pub fn derived_lock(
 /// pinned emitter, canonical inclusion below the configured tag). The
 /// `FundsIn` is selected by the RGB lockId, not by the bridge `operationId` (a
 /// different id-space). `funds_in_contract` and `finality_tag` come from PINNED
-/// config. `lock_id`, `minted` and `before_block` come from the committed mint
-/// (`MintFacts`) and only select the log that must exist.
+/// config. `lock_id` and `minted` select the `FundsIn`, `operation_id` the
+/// `BridgeFundsIn`, and `before_block` bounds their block. All come from the
+/// committed mint and its tx (`MintFacts`).
 ///
 /// The lock must also follow the RGB rule for a mint claim: a block before
 /// `before_block`, with no lower bound (rgb-lib `mint_lock_status`). An RGB
