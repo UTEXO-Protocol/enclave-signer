@@ -187,7 +187,7 @@ These values stay in the image, because they decide what the enclave signs:
 - `EVM_FINALITY_TAG`
 - the fee limits, the sats budgets, the gas limits and the mint witness amount
 - the replay guard of the clone handshake and the rate of rights refills
-- the pins: chain ids, contracts, the asset, the KMS accounts, the endpoints hash
+- the pins: chain ids, contracts, the asset, the KMS accounts
 
 These values also stay constants:
 
