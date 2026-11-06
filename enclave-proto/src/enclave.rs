@@ -711,10 +711,6 @@ pub struct Limits {
     pub mint_replay_ttl_secs: u64,
     #[prost(uint64, tag="25")]
     pub mint_replay_max_entries: u64,
-    #[prost(uint64, tag="26")]
-    pub mint_reply_ttl_secs: u64,
-    #[prost(uint64, tag="27")]
-    pub mint_reply_max_entries: u64,
     #[prost(uint64, tag="28")]
     pub mint_max_inputs: u64,
     #[prost(uint64, tag="29")]

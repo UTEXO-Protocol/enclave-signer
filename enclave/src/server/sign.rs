@@ -45,15 +45,6 @@ pub(super) fn handle_sign(
 
     // Refuse known replays before network I/O. An invalid request must not
     // use guard capacity, so this only checks. The reservation is made later.
-    // A byte-identical retry of a signed mint gets the same reply back.
-    #[cfg(evm_to_rgb)]
-    let op_key = operation_key(ctx, source_ref, destination_ref);
-    #[cfg(evm_to_rgb)]
-    let request_digest = request_digest(&req);
-    #[cfg(evm_to_rgb)]
-    if let Some(cached) = op_key.and_then(|k| ctx.state.signed_results.get(&k, &request_digest)) {
-        return Ok((cached, None));
-    }
     #[cfg(evm_to_rgb)]
     precheck_operation(ctx, source_ref, destination_ref)?;
 
@@ -244,13 +235,6 @@ pub(super) fn handle_sign(
         #[allow(unreachable_patterns)]
         _ => Err(wrong_signer_role("this route")),
     };
-
-    #[cfg(evm_to_rgb)]
-    if let (Some(op_key), Ok(response)) = (op_key, &result) {
-        ctx.state
-            .signed_results
-            .put(op_key, request_digest, response.clone());
-    }
 
     // On error, the reservation drops here and rolls the key back.
     result.map(|response| (response, op_reservation))
@@ -557,14 +541,6 @@ fn bind_funds_in_recipient(
     Ok(())
 }
 
-/// SHA-256 of the request bytes: a cached reply is for this request only.
-#[cfg(evm_to_rgb)]
-fn request_digest(req: &SignRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    Sha256::digest(req.encode_to_vec()).into()
-}
-
 /// Replay-guard key of an EVM->RGB bridge sign. `None` for all other routes.
 #[cfg(evm_to_rgb)]
 fn operation_key(
@@ -771,64 +747,6 @@ mod early_bridge_checks {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(ctx.state.op_replay_guard.seen_count(), 1);
-    }
-
-    fn committed_key(ctx: &ServerContext) -> [u8; 32] {
-        let key = crate::networks::rgb::psbt_validation::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
-            &[1; 32],
-            &[2; 32],
-            "rgb:test",
-        );
-        ctx.state.op_replay_guard.reserve(key).unwrap().commit();
-        key
-    }
-
-    fn cached_reply() -> EnclaveResponse {
-        EnclaveResponse {
-            response: Some(crate::proto::enclave_response::Response::Error(
-                crate::proto::ErrorResponse {
-                    code: 0,
-                    message: "cached".into(),
-                },
-            )),
-        }
-    }
-
-    #[test]
-    fn a_lost_reply_retry_gets_the_cached_reply_without_rpc() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let ctx = context(&calls);
-        let key = committed_key(&ctx);
-        ctx.state
-            .signed_results
-            .put(key, request_digest(&request()), cached_reply());
-        let (response, reservation) =
-            handle_sign(&ctx, request(), crate::test_support::far_deadline()).unwrap();
-        assert_eq!(response, cached_reply());
-        assert!(reservation.is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn a_changed_request_does_not_get_the_cached_reply() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let ctx = context(&calls);
-        let key = committed_key(&ctx);
-        ctx.state
-            .signed_results
-            .put(key, request_digest(&request()), cached_reply());
-        let mut changed = request();
-        changed.amount += 1;
-        let err = handle_sign(&ctx, changed, crate::test_support::far_deadline())
-            .map(|(response, _)| response)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("duplicate bridge operation"),
-            "{err}"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
 
