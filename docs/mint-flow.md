@@ -23,12 +23,7 @@ document differ, investigate the difference. Either can contain an error.
    It commits the mint
    to its exact tx, so the mint tx must never change after the lock: no RBF,
    rebuild or batching, and a retry signs the same PSBT. Another tx of the
-   mint names another lock, which M6 refuses. After the lock, the only way
-   to raise the fee is a CPFP child that spends an output of the mint tx.
-   rgb-lib sends a mint's change to the colored keychain, and `SignBtc` never
-   signs a colored input. So only a `SignRightsRefill` whose fee input spends
-   that change can fund the child. For a witness mint, the user's output can
-   too.
+   mint names another lock, which M6 refuses.
 2. The user locks ERC-20 tokens in the Bridge contract on EVM. The
    `fundsIn` call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
@@ -40,6 +35,28 @@ document differ, investigate the difference. Either can contain an error.
 6. The mint signer signs the PSBT with its colored taproot key.
 7. The backend finalizes and broadcasts the Bitcoin transaction.
 8. The recipient validates the RGB transfer and waits for the required confirmations.
+
+**Raising the fee after the lock.** The mint tx keeps the fee `mint_begin` set,
+so the only fee bump left is a CPFP child that spends an output of the mint tx.
+None is implemented: the bridge only rebroadcasts a stuck mint tx as it is, so
+an operator must plan for it to confirm at its original fee. A child could
+spend:
+
+- The mint's change, if there is any: BDK drops change below dust and M8 does
+  not require it. rgb-lib puts it on the Colored account. That is its choice:
+  M8 would also take Vanilla change, which `SignBtc` could spend. `SignBtc`
+  signs Vanilla inputs only and `Sign` spends the right alone, so on a mint
+  rgb-lib built the one enclave request that can spend the change is a
+  `SignRightsRefill` with it as the fee input. The refill rule does not ask for
+  a confirmed fee input, so the enclave permits this, but nothing builds it: the
+  connector's refill waits for a confirmed funding UTXO, and rgb-lib cannot be
+  told which input to use. That refill consumes a right and makes at least 2,
+  funded only by the right's UTXO and the change, so the bump is small.
+- A witness mint's user output. It is the seal that holds the minted units,
+  worth `MINT_WITNESS_SAT`. A child that spends it without a valid RGB
+  transition closing that seal destroys the units, and rgb-lib's `send_begin`
+  and `send_btc` do not select it while the receive is pending. A blinded mint
+  has no user output.
 
 ## 2. Who does what
 
@@ -571,21 +588,43 @@ when it accepts the mint, and refuses a bad one.
 - No reject list. The connector's rgb-lib checks it before `mint_begin`.
 - No invoice expiry. A v2 deposit carries no invoice, so the enclave never
   sees the expiry, and S6.2 does not check it. It can sign a mint after the
-  invoice expired; the receiver's wallet then fails that receive, and proxies
-  take a transfer only until the expiry. The connector checks only that an
-  hour of the invoice is left when it prepares the mint, while the lock may
-  come any time before `beforeBlock`, `INIT_OP_TTL` later. The bridge must
-  bound this: an invoice has to outlive its mint's `beforeBlock`.
-- Receive limits of the receiver's wallet. `process_received_consignment`
-  refuses a locked mint when the receiving UTXO passes
-  `max_allocations_per_utxo`, when other unpaid invoices on it fill that cap
-  or the bundle limit, or when its asset amount passes `u64::MAX`. The
-  enclave cannot check these: they depend on the receiver's wallet.
+  invoice expired. A wallet fails a receive it has not checked by the expiry,
+  and proxies take a transfer only until then; a mint the wallet has checked no
+  longer expires with its invoice. The connector requires
+  `MINT_INVOICE_MIN_TTL` (default 12 h, above `INIT_OP_TTL`) of the invoice to
+  be left when it prepares the mint. `beforeBlock` is a block number, and
+  `INIT_OP_TTL` only the least wall-clock time it can take, so slow blocks can
+  still outrun an invoice.
 
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it
 cannot move any other state of ours: the parent proof pins the one UTXO the
 mint spends.
+
+**Receive limits that can lose a locked mint.** This is more than liveness for
+the user. rgb-lib's `process_received_consignment` also refuses a mint on the
+receiver's own wallet state. The enclave cannot check this: it sees the mint's
+amount and its one seal, but no UTXO, allocations or wallet setting. rgb-lib
+refuses when, on the receiving UTXO:
+
+- allocations of any asset held or due, plus other unpaid blind invoices, plus
+  this receive, pass the wallet's `max_allocations_per_utxo`;
+- allocations of this asset held or due, plus those invoices, plus this
+  receive, pass the bundle limit (`MAX_UTXO_ASSET_ALLOCATIONS`, 65535, the
+  `input_map` bound of a transition bundle). On its own this fires only on a
+  wallet whose setting is above 65535;
+- the asset amount held or due, plus this receive, passes `u64::MAX`.
+
+rgb-lib runs these when it first processes the mint and again once the lock is
+final, and does not skip them for a checked mint, unlike `max_mint_lock_blocks`
+and the reject list. A refusal fails the receive for good and does not reach
+the connector, which still signs, broadcasts and completes the mint. After a
+lock that loses the mint for this user: the units sit on a seal the wallet does
+not track, the deposit stays in the Bridge with no refund, and it cannot back
+another mint, as the lockId commits this one. Before a lock a refusal costs
+nothing, so a caller should lock only once `ReceivedMint.lock_id` equals the
+returned lockId. A witness mint pays a new output of the mint tx, which starts
+with no allocations, so these limits apply mainly to blinded mints.
 
 **Witness mint output script: bound by the lockId** (was the accepted V1
 risk, CTO 2026-10-30). A witness seal names a vout of the mint tx, and the

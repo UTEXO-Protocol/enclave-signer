@@ -105,7 +105,9 @@ Before it signs, the mint signer:
    read from a node on the pinned chain. The lockId is `LockId(opid, txid)` of
    the mint and the PSBT's tx, so the mint tx must never change after the lock
    (no RBF, rebuild or batching): a retry signs the same PSBT. The only fee
-   bump left is a CPFP child that spends an output of the mint tx.
+   bump left is a CPFP child that spends an output of the mint tx, and none is
+   implemented: a stuck mint tx is rebroadcast as it is
+   ([mint flow](docs/mint-flow.md) section 1).
 6. Binds the recipient. The v2 Bridge deposit names the mint's lockId, which
    commits to the user's seal and, for a witness seal, to the script of the
    user's output. A legacy deposit has an RGB invoice. Then the mint's one

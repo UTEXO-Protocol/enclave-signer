@@ -483,8 +483,8 @@ fn verify_funds_in_deposit(
     // Recipient bind. The checks above prove the amount, not the recipient.
     // The v2 Bridge `fundsIn` refuses a non-empty RGB destinationAddress, so
     // the deposit has no invoice. Then the lockId binds the recipient:
-    // `decode_funds_in` requires the deposit lockId to name the signed mint
-    // transition in the signed tx. The transition commits to its recipient
+    // M6 (`verify_rgb_funds_in`) requires the deposit lockId to name the
+    // signed mint transition in the signed tx. The transition commits to its recipient
     // seals and the tx to a witness mint's output script.
     // A legacy deposit with an invoice also gets the seal bind.
     if verified.destination_address.trim().is_empty() {
