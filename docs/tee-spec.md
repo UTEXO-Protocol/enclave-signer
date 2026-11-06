@@ -576,12 +576,16 @@ that consumes one `mintRight`, assigns asset units only, carries exactly
 tx, and issues exactly `amount - commission` (M1 - M5, M7). The deposit must
 name this mint's lockId, `LockId(opid, txid)` of the PSBT's tx, and carry the
 deposit id it derives (M6). After the lock the mint tx must never change (no
-RBF, rebuild or batching): another txid names another lock. The only fee
-bump left is a CPFP child that spends an output of the mint tx. `SignBtc`
-never signs a colored input, and rgb-lib sends a mint's change to the colored
-keychain. So only a `SignRightsRefill` whose fee input spends that change can
-fund the child. For a witness mint, the user's output can too. A blinded
-mint pays no sat out of the enclave's outputs. A witness mint pays exactly
+RBF, rebuild or batching): another txid names another lock. Its fee stays the
+one `mint_begin` set, and the only fee bump left is a CPFP child that spends an
+output of the mint tx. None is implemented, so an operator must plan for it to
+confirm at its original fee. rgb-lib puts the mint's change on the Colored
+account (M8 would also take Vanilla), and `SignBtc` never signs a Colored input,
+so on a mint rgb-lib built the one enclave path that could fund a child is a
+`SignRightsRefill` whose fee input spends that change. A witness mint's user
+output is the seal holding the units: a child of it must close that seal or it
+destroys them (mint-flow section 1). A
+blinded mint pays no sat out of the enclave's outputs. A witness mint pays exactly
 `MINT_WITNESS_SAT` (image env, default 1500, 546 to 10 000) to its seal's
 output, which must not be the enclave's, and no sat elsewhere (M8).
 
@@ -827,7 +831,8 @@ not an EVM contract, is refused before rgb-lib runs. So is a transfer whose
 work in rgb-lib would pass one of three caps (`validation/cost.rs`, burn-flow
 B2.2 and section 10): the checks of each transition against its bundle's
 whole witness tx, anchor and input map, which rgb-lib runs for every BFA
-before it checks any witness, and, for a listed asset, its reject walk; or
+before it checks any witness, and, for a listed asset, a count of its reject
+walk with each origin walking alone (rgb-lib shares the walk); or
 whose modeled rgb-lib time would pass 18 s (`MAX_RGB_LIB_NS`): for
 validation its file bytes, opouts, genesis hashes (every genesis global and
 assignment, once per operation) and those three costs, and for the
@@ -1142,9 +1147,12 @@ Known limits. Read them before deployment.
   entries (about 25 RPC calls). The read also stops before the 30 s request
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
-- **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
-  work that grow faster than the file (burn-flow section 10). The rest is
-  bounded by `MAX_CONSIGNMENT_BYTES` and the time budget. Validation costs
+- **Linear work in rgb-lib.** The witness and bundle id caps bound only the
+  parts of rgb-lib's work that grow faster than the file; the walk cap bounds a
+  per-origin count of a walk that is linear on this pin (burn-flow section
+  10). The rest is
+  bounded by `MAX_CONSIGNMENT_BYTES` and the time budget. Measured on rgb-lib
+  1ae1c160 and not again on this pin, validation costs
   about 1.1 us per byte plus 35 to 55 us per opout on an M1 Pro, plus 13.7 us
   per genesis global or assignment for each operation (rgb-consensus hashes
   the whole genesis once per operation). The inspection that reads the

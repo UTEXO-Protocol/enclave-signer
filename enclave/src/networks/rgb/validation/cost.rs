@@ -2,11 +2,13 @@
 //! before any witness is checked, it checks each BFA transition against the
 //! whole witness tx, anchor and input map of its bundle, hashes every opout
 //! into its operation id more than once, and the whole genesis once per
-//! operation. For a listed asset it walks the operations DAG once per origin.
+//! operation. For a listed asset it walks the operations DAG, once for a history
+//! its origins share.
 //! Once validation passed, its inspection reads the summary from the same file:
 //! it hashes each operation id three times more and each witness tx once per
-//! transition. Each superlinear part has its cap, and all of them with the
-//! file, its opouts, operations and genesis hashes have one time budget.
+//! transition. Each superlinear part has its cap, the walk has a cap on a
+//! per-origin count of it, and all of them with the file, its opouts,
+//! operations and genesis hashes have one time budget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -25,8 +27,8 @@ pub(super) const MAX_WITNESS_CHECK_COST: u64 = 128 * 1_024 * 1_024;
 /// The burn of 2810 mints costs 11k (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_BUNDLE_ID_COST: u64 = 256 * 1_024;
 
-/// About 5 s of rgb-lib walk at the measured 45 to 73 ns per step. The burn of
-/// 2810 mints costs 14k (`tests/caps.rs`, docs/burn-flow.md).
+/// About 5 s of the per-origin walk at 45 to 73 ns per step, measured on rgb-lib
+/// 1ae1c160. The burn of 2810 mints costs 14k (`tests/caps.rs`, docs/burn-flow.md).
 pub(super) const MAX_REJECT_WALK_COST: u64 = 64 * 1_024 * 1_024;
 
 /// A 12 MiB history of transfers takes rgb-lib 15 s to validate alone, and the
@@ -234,8 +236,9 @@ pub(super) fn bundle_id_cost(transfer: &Transfer) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// rgb-lib's walk (`rejected_opouts`) with no list entry to cut it short:
-/// one walk per origin, with its own visited set. Counts up to just past `cap`.
+/// One walk per origin with no list entry to cut it short. A model: rgb-lib
+/// (`rejected_opouts`) shares a walk across origins, so a shared history counts
+/// once per origin here. Counts up to just past `cap`.
 pub(super) fn reject_walk_cost(transfer: &Transfer, cap: u64) -> u64 {
     let mut graph = OpGraph::of(transfer);
     // Origins of one operation walk the same way, so each operation walks once.
@@ -291,8 +294,8 @@ impl OpGraph {
         node
     }
 
-    /// The steps of one depth-first walk from `from`, as rgb-lib takes them:
-    /// each node popped and each opout it spends. Stops past `budget`.
+    /// The steps of one depth-first walk from `from`: each node popped and each
+    /// opout it spends. Stops past `budget`.
     fn walk_steps(&self, from: usize, walk: u32, seen: &mut [u32], budget: u64) -> u64 {
         let mut stack = vec![from];
         let mut steps = 0u64;
