@@ -8,7 +8,11 @@
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
 #   EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
+#   EVM_RPC_PATH_FILE=<restricted file with a private RPC path, for example /v2/<key>>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
+# The private RPC path can hold a provider API key. The script keeps a copy in
+# /etc/utexo/evm-rpc-path that only the service user can read. A deploy without
+# EVM_RPC_PATH_FILE keeps that copy. To go back to the path /, delete the copy.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
 # set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not
 # copied from ELECTRUM_URL, whose enclave-side rules differ. An invalid header
@@ -66,6 +70,11 @@ ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 ELECTRUM_URL="${ELECTRUM_URL:-}"
 HEADER_ELECTRUM_URL="${HEADER_ELECTRUM_URL:-}"
 EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
+EVM_RPC_PATH_FILE="${EVM_RPC_PATH_FILE:-}"
+if [ -n "$EVM_RPC_PATH_FILE" ] && [ ! -s "$EVM_RPC_PATH_FILE" ]; then
+  echo "EVM_RPC_PATH_FILE must name a file that is not empty" >&2
+  exit 1
+fi
 KMS_KEY_ARN="${KMS_KEY_ARN:-}"
 KMS_REGION="${KMS_REGION:-}"
 KMS_SEED_ID="${KMS_SEED_ID:-}"
@@ -533,6 +542,14 @@ if [ -n "$EVM_RPC_TLS_CA_DER_FILE" ]; then
   install -m 0644 "$EVM_RPC_TLS_CA_DER_FILE" /etc/utexo/evm-rpc-ca.der
   EVM_RPC_TLS_CA_DER_FILE=/etc/utexo/evm-rpc-ca.der
 fi
+# The private RPC path can hold a provider API key, so only the service user
+# can read this copy. A deploy without EVM_RPC_PATH_FILE keeps the copy.
+if [ -n "$EVM_RPC_PATH_FILE" ] && [ "$EVM_RPC_PATH_FILE" != /etc/utexo/evm-rpc-path ]; then
+  install -m 0600 -o ubuntu -g ubuntu "$EVM_RPC_PATH_FILE" /etc/utexo/evm-rpc-path
+fi
+if [ -e /etc/utexo/evm-rpc-path ]; then
+  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path
+fi
 cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
@@ -546,6 +563,7 @@ IMAGE_ENV=$DIR/IMAGE-ENV.json
 SIGNER_ROLE=$SIGNER_ROLE
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
+EVM_RPC_PATH_FILE=$EVM_RPC_PATH_FILE
 KMS_KEY_ARN=$KMS_KEY_ARN
 KMS_REGION=$KMS_REGION
 KMS_SEED_ID=$KMS_SEED_ID

@@ -138,10 +138,6 @@ enum Command {
     /// Set the chain endpoints and the KMS values once, after launch. The
     /// enclave rejects a second call.
     SetEndpoints {
-        /// Print the chain-endpoint SHA-256 (excluding KMS fields) without contacting
-        /// an enclave. Uses the same flags, environment and CA file as launch.
-        #[arg(long)]
-        print_sha256: bool,
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
@@ -266,6 +262,10 @@ struct EndpointArgs {
     /// DER file of the only CA the EVM RPC TLS trusts. Empty means no CA.
     #[arg(long, env = "EVM_RPC_TLS_CA_DER_FILE")]
     evm_rpc_ca_der_file: Option<PathBuf>,
+    /// Restricted file containing the absolute RPC path, e.g. `/v2/<key>`.
+    /// Omit to use `/`. The contents are never printed.
+    #[arg(long, env = "EVM_RPC_PATH_FILE")]
+    evm_rpc_path_file: Option<PathBuf>,
     /// Full ARN of the KMS key that wraps the seed.
     #[arg(long, env = "KMS_KEY_ARN")]
     kms_key_arn: Option<String>,
@@ -301,6 +301,11 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
                 .unwrap_or_else(|e| fail(format!("cannot read {}: {e}", path.display())))
         })
         .unwrap_or_default();
+    let evm_rpc_path = args
+        .evm_rpc_path_file
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| read_rpc_path(&path).unwrap_or_else(|e| fail(e)))
+        .unwrap_or_default();
     SetEndpointsRequest {
         electrum_url: args.electrum_url.unwrap_or_default(),
         evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
@@ -310,35 +315,39 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_region: args.kms_region.unwrap_or_default(),
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
-        // This enclave does not read it: it requests the EVM RPC at `/`.
-        evm_rpc_path: String::new(),
+        evm_rpc_path,
     }
 }
 
-/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
-fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    let mut network = request.clone();
-    // New schema fields must be explicitly classified as hashed or excluded.
-    let SetEndpointsRequest {
-        electrum_url: _,
-        evm_rpc_host: _,
-        evm_rpc_ca_der: _,
-        evm_rpc_tls_port: _,
-        // Hashed: the enclave requests `/` and never reads it, so only the empty
-        // path this CLI sends matches the pin.
-        evm_rpc_path: _,
-        kms_key_arn,
-        kms_region,
-        kms_seed_id,
-        kms_expected_evm_address,
-    } = &mut network;
-    kms_key_arn.clear();
-    kms_region.clear();
-    kms_seed_id.clear();
-    kms_expected_evm_address.clear();
-    Sha256::digest(network.encode_to_vec()).into()
+fn read_rpc_path(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file =
+        std::fs::File::open(path).map_err(|_| "cannot open EVM_RPC_PATH_FILE".to_string())?;
+    let mut value = String::new();
+    file.take(2051)
+        .read_to_string(&mut value)
+        .map_err(|_| "cannot read EVM_RPC_PATH_FILE as UTF-8".to_string())?;
+    if value.len() > 2050 {
+        return Err("EVM_RPC_PATH_FILE exceeds 2048 bytes plus an optional line ending".into());
+    }
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.len() > 2048 {
+        return Err("EVM_RPC_PATH_FILE must contain a nonempty path of at most 2048 bytes".into());
+    }
+    // Match enclave::config::parse_evm_rpc_path before forwarding the launch request.
+    // Never include the file contents in an error: the path can contain a key.
+    if !value.starts_with('/')
+        || value.starts_with("//")
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/-._~".contains(&c))
+        || value
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("EVM_RPC_PATH_FILE must contain an absolute ASCII path without authority, query, fragment, escapes or dot segments".into());
+    }
+    Ok(value.into())
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -733,15 +742,8 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SetEndpoints {
-            print_sha256,
-            endpoints,
-        } => {
+        Command::SetEndpoints { endpoints } => {
             let request = endpoints_request(endpoints);
-            if print_sha256 {
-                println!("{}", hex::encode(endpoints_sha256(&request)));
-                return;
-            }
             match client.set_endpoints(request) {
                 Ok(()) => println!("Endpoints set"),
                 Err(e) => fail(e.to_string()),
@@ -1100,54 +1102,160 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoints_digest_matches_the_enclave_golden_vector() {
-        let cli = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::SetEndpoints {
-                print_sha256: true,
-                ..
-            }
-        ));
-        // The enclave uses its vendored protobuf schema; the parent uses the
-        // upstream crate. This shared vector detects schema/encoding drift.
-        let mut request = SetEndpointsRequest {
-            electrum_url: "ssl://electrum.test:50002".into(),
-            evm_rpc_host: "rpc.test".into(),
-            evm_rpc_ca_der: vec![1, 2, 3],
-            evm_rpc_tls_port: 443,
-            kms_key_arn: "key".into(),
-            kms_region: "region".into(),
-            kms_seed_id: "seed".into(),
-            kms_expected_evm_address: "address".into(),
-            evm_rpc_path: String::new(),
-        };
-        assert_eq!(
-            hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
-        );
-        // The EVM RPC path is a network input: another path misses the pin.
-        let other_path = SetEndpointsRequest {
-            evm_rpc_path: "/v2/key".into(),
-            ..request.clone()
-        };
-        assert_ne!(
-            hex::encode(endpoints_sha256(&other_path)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
-        );
-        // KMS bootstrap/recovery inputs are deliberately outside the chain pin.
-        for field in [
-            &mut request.kms_key_arn,
-            &mut request.kms_region,
-            &mut request.kms_seed_id,
-            &mut request.kms_expected_evm_address,
-        ] {
-            field.clear();
+    fn runtime_endpoint_arguments_reach_the_launch_request() {
+        // Different members use the same CLI binary with their own endpoint
+        // and CA inputs. No image digest is supplied or computed by this path.
+        let cases = [
+            (
+                "Rpc.One.test",
+                "8443",
+                include_str!("../../../enclave/tests/fixtures/evm_rpc_tls/ca_a.der.hex"),
+                "/v3/member-one-key",
+            ),
+            (
+                "Rpc.Two.test",
+                "9443",
+                include_str!("../../../enclave/tests/fixtures/evm_rpc_tls/ca_b.der.hex"),
+                "/v2/member-two-key",
+            ),
+            (
+                "Rpc.One.test",
+                "8443",
+                include_str!("../../../enclave/tests/fixtures/evm_rpc_tls/ca_a.der.hex"),
+                "/v3/rotated-member-one-key",
+            ),
+        ];
+        for (host, port, ca_hex, rpc_path) in cases {
+            let ca = hex::decode(ca_hex.trim()).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "utexo-runtime-ca-{}-{:016x}.der",
+                process::id(),
+                rand::random::<u64>(),
+            ));
+            std::fs::write(&path, &ca).unwrap();
+            let path_file = path.with_extension("rpc-path");
+            std::fs::write(&path_file, format!("{rpc_path}\n")).unwrap();
+            let cli = Cli::try_parse_from([
+                "cli",
+                "set-endpoints",
+                "--electrum-url",
+                "ssl://Indexer.test:50002/",
+                "--evm-rpc-host",
+                host,
+                "--evm-rpc-tls-port",
+                port,
+                "--evm-rpc-ca-der-file",
+                path.to_str().unwrap(),
+                "--evm-rpc-path-file",
+                path_file.to_str().unwrap(),
+                "--kms-key-arn",
+                "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+                "--kms-region",
+                "eu-west-1",
+                "--kms-seed-id",
+                "member-seed",
+                "--kms-expected-evm-address",
+                "0x1122334455667788990011223344556677889900",
+            ])
+            .unwrap();
+            let Command::SetEndpoints { endpoints } = cli.command else {
+                panic!("expected set-endpoints");
+            };
+            let request = endpoints_request(endpoints);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(path_file).unwrap();
+            assert_eq!(
+                request,
+                SetEndpointsRequest {
+                    electrum_url: "ssl://Indexer.test:50002/".into(),
+                    evm_rpc_host: host.into(),
+                    evm_rpc_ca_der: ca,
+                    evm_rpc_tls_port: port.parse().unwrap(),
+                    kms_key_arn: "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012".into(),
+                    kms_region: "eu-west-1".into(),
+                    kms_seed_id: "member-seed".into(),
+                    kms_expected_evm_address: "0x1122334455667788990011223344556677889900".into(),
+                    evm_rpc_path: rpc_path.into(),
+                }
+            );
         }
+    }
+
+    #[test]
+    fn omitted_rpc_path_is_sent_empty_for_the_enclave_root_default() {
+        let cli = Cli::try_parse_from(["cli", "set-endpoints"]).unwrap();
+        let Command::SetEndpoints { endpoints } = cli.command else {
+            panic!("expected set-endpoints");
+        };
+        assert!(endpoints_request(endpoints).evm_rpc_path.is_empty());
+    }
+
+    #[test]
+    fn rpc_path_rejects_unsafe_syntax_without_disclosing_keys() {
+        let file = std::env::temp_dir().join(format!(
+            "rpc-path-validation-{}-{:016x}",
+            process::id(),
+            rand::random::<u64>()
+        ));
+        for invalid in [
+            "https://other.test/fixture-secret",
+            "//other.test/fixture-secret",
+            "fixture-secret",
+            "/x?key=fixture-secret",
+            "/x#fixture-secret",
+            "/x\\fixture-secret",
+            "/x\r\nfixture-secret",
+            "/x/../fixture-secret",
+            "/./fixture-secret",
+            "/fixture-secret/.",
+            "/fixture-secret/..",
+            "/%2e%2e/fixture-secret",
+            "/clé/fixture-secret",
+            "/fixture-secret with space",
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            let err = read_rpc_path(&file).unwrap_err();
+            assert!(err.contains("EVM_RPC_PATH_FILE"));
+            assert!(
+                !err.contains("fixture-secret"),
+                "credential leaked in error"
+            );
+            assert!(!err.contains(invalid), "path leaked in error");
+        }
+        for valid in ["/", "/v3/key_-.~9", "/.../key", "/key//segment"] {
+            std::fs::write(&file, format!("{valid}\r\n")).unwrap();
+            assert_eq!(read_rpc_path(&file).unwrap(), valid);
+        }
+        let max = format!("/{}", "a".repeat(2047));
+        std::fs::write(&file, format!("{max}\r\n")).unwrap();
+        assert_eq!(read_rpc_path(&file).unwrap(), max);
+        for invalid in [
+            String::new(),
+            format!("{max}a"),
+            format!("/key{}hidden", "\n".repeat(2051)),
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert!(read_rpc_path(&file).is_err());
+        }
+        std::fs::write(&file, [b'/', 0xff]).unwrap();
         assert_eq!(
-            hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
+            read_rpc_path(&file).unwrap_err(),
+            "cannot read EVM_RPC_PATH_FILE as UTF-8"
         );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            read_rpc_path(&file).unwrap_err(),
+            "cannot open EVM_RPC_PATH_FILE"
+        );
+    }
+
+    #[test]
+    fn set_endpoints_rejects_the_removed_build_digest_option() {
+        let err = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"])
+            .err()
+            .expect("the build-digest option must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("--print-sha256"));
     }
 
     #[test]

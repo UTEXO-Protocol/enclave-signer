@@ -50,7 +50,7 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
 | `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
-| `SetEndpointsRequest.evm_rpc_path` | This enclave does not read it. It always requests the EVM RPC at path `/`. |
+| `SetEndpointsRequest.evm_rpc_path` | Optional absolute ASCII RPC path; an empty field uses `/`. The enclave rejects authorities, queries, fragments, percent escapes and dot segments. It may contain a provider key and is excluded from image measurements, attestation and KMS context. Nonempty paths are rejected when `evm-rpc` is disabled. |
 | `SetEndpointsRequest.electrum_url` | The comment says `ssl://` or `tcp://`. A release image accepts only `ssl://` (Electrum) or `https://` (Esplora). Only test, debug and dev-feature builds accept `tcp://` or `http://`. |
 | `SignRawDigestRequest.digest`, `SignRawDigestRequest.unsigned_tx` | Every build requires `unsigned_tx`. No path signs a bare `digest`. A non-empty `digest` must equal `keccak256(unsigned_tx)`. |
 | `SignRawMessageRequest` | The enclave refuses this request in every build. It signs no raw message. |

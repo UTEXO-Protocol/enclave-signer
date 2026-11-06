@@ -102,6 +102,19 @@ leaks after its certificate expires, it can sign a backdated document.
 
 ## Choose the expected launch values
 
+Endpoint settings are runtime inputs in both SPV and no-SPV images. Rebuilding
+the EIF and checking its image PCRs does not require those settings. The
+production verification below additionally checks the signed runtime policy,
+so it requires independently approved public hosts and CA hashes.
+The no-SPV / IndexerTrusted Development policy does not commit endpoint fields
+and is not accepted by this production verification recipe.
+
+A provider API key in `EVM_RPC_PATH_FILE` is private launch configuration. Do not
+publish it in an attestation bundle or verifier command. The path is excluded
+from the attested policy, so rotating that key on restart does not change the
+image PCRs or the public host/CA expectations. Approval covers accepted paths
+at that endpoint, not a particular provider account.
+
 The bundle's `policy` lists every attested launch value. Do not copy them. Read
 them, and decide whether you accept each one:
 

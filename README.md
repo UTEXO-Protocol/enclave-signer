@@ -471,7 +471,7 @@ Building).
 
 ```bash
 # Enclave on 127.0.0.1:5000
-RUST_LOG=debug cargo run -p utexo-bridge-enclave
+RUST_LOG=debug,alloy_transport_http=off cargo run -p utexo-bridge-enclave
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
 RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --manifest-path parent/Cargo.toml
@@ -647,7 +647,7 @@ Bridge pins (all three required for a `Production` policy):
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. Enforced on every bridge PSBT, and on `fundsOut` when the bridge is configured. |
 | `FUNDS_IN_CONTRACT` | falls back to the proxy | Attested emitter of `FundsIn` / `BridgeFundsIn`. It must resolve to a non-zero address in production. |
 | `TOKEN_CONTRACT` | zero | The ERC-20 the Bridge releases (`Bridge.TOKEN`). A `burnId` preimage input: the enclave recomputes `burnId` from it and refuses a mismatch. Attested; must be non-zero in production. |
-| `BTC_RELAY_MODE` | `required` | `required`: every `fundsOut` proof must carry the two BtcRelay commitment words, and each must equal the relay record the enclave rebuilds from its own chain; a zero word is refused. `none`: the stand has no BtcRelay (route verifier `NullVerifier`), the bridge sends both words as zero and the enclave requires exactly that, still binding heights, anchor and freshness. A production policy refuses to boot on `none`. Any other value is treated as `required` with a boot warning. |
+| `BTC_RELAY_MODE` | `required` | With `spv` enabled, `required` checks both `fundsOut` commitment words against the enclave's BtcRelay records and refuses zero words. `none` requires both words to be zero and still checks heights, anchor and freshness. With `spv` disabled, the signer instead requires empty RGB `merkle_proofs` and an empty release `proof`. A production policy refuses to boot on `none`. Any other value is treated as `required` with a boot warning. |
 
 Value bounds (fail closed while unset in a production build):
 
@@ -703,22 +703,70 @@ after the selected head covers it. Production verification requires
 `--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
-(`SetEndpoints`), never in the image. A Production policy commits the Electrum
-host, the EVM RPC host, the SHA-256 of the CA and the four KMS values.
-Development policy does not commit these fields. Without SPV, the image pins
-network inputs through `ENDPOINTS_SHA256`; operators approve KMS inputs separately.
-The digest implementations in `enclave/src/config.rs` (`chain_endpoints_sha256`)
-and `parent/src/bin/cli.rs` (`endpoints_sha256`) must stay in sync. Both exclude
-runtime KMS fields; a shared golden vector and exhaustive field matching guard
-against encoding drift and unreviewed schema additions.
+(`SetEndpoints`), are outside the image in both SPV and no-SPV builds. Hosts,
+ports and the RPC CA, including any digest of them, are not EIF build inputs.
+Members using the same role, release and build profile can use the same EIF
+with different launch endpoints. Rebuilding that image and comparing PCR0/1/2
+does not require the members' endpoint configuration. The public build inputs
+and private dependency access described under Building are still required.
+A mint image also carries `KMS_ALLOWED_ACCOUNT_IDS`, so members can share one
+mint image only if this list has the AWS account of the key of each member.
+
+A Production policy separately commits the Electrum host, the EVM RPC host,
+the SHA-256 of the CA and the four KMS values in attestation `user_data`.
+Full production-policy verification still needs independently approved values
+for those fields; it is more than checking image PCRs. Development policy,
+including no-SPV / IndexerTrusted, does not commit these fields. Operators must
+approve its launch endpoints and KMS inputs externally. Release enclaves validate
+their format and use TLS to authenticate the selected endpoints, but do not
+authenticate an operator approval or prove the provider's data is correct.
+
+Endpoint changes take effect on a new enclave launch; an active enclave refuses
+a second `SetEndpoints`. Reuse the same EIF and image PCR allowlist for endpoint
+changes. Key recovery and clone policy matching still apply: a burn donor with
+a different attested endpoint policy cannot clone into the new launch.
+
+Migration from releases using `ENDPOINTS_SHA256`: remove the old build setting
+and the `set-endpoints --print-sha256` step. The setting is no longer consumed,
+and the CLI flag has been removed. Build and approve the corrected image once,
+including any required KMS PCR allowlist update; subsequent endpoint changes
+do not require another image build. The attestation encoding and KMS encryption
+context are unchanged; no ciphertext-context migration is needed.
+
+For a provider such as Alchemy or Infura, put the absolute RPC path (for example
+`/v2/<key>`) in a restricted file and pass `EVM_RPC_PATH_FILE` at launch. The
+CLI and enclave accept only absolute ASCII paths up to 2048 bytes, without
+authorities, queries, fragments, percent escapes or dot segments. Omit the file
+to request `/`; an empty supplied file is rejected. The CLI accepts a trailing
+line ending. The client sends the path over TLS to the configured host and CA,
+and does not follow redirects. RPC transport errors and endpoint debug output
+omit the path. The dev images use `RUST_LOG=debug,alloy_transport_http=off`.
+Keep `alloy_transport_http=off` in custom debug or trace filters: Alloy HTTP
+logs can include the full URL and provider responses.
+
+The path and API key are absent from the EIF, image metadata, public attestation
+and KMS context. A verifier needs no provider credential. To rotate a key,
+replace the restricted file and restart using the same public endpoint values.
+No image rebuild, PCR allowlist change or KMS context change is needed. The
+parent supplies this file, so the key is not hidden from a compromised parent.
+The no-SPV endpoint-approval limitation described above still applies.
+
+`deploy/deploy-host.sh` also takes `EVM_RPC_PATH_FILE`. It keeps a copy in
+`/etc/utexo/evm-rpc-path`, with mode 0600 and the service user as owner, and
+writes that path in `/etc/utexo/enclave.env`. A deploy without the variable keeps
+the copy, so a new deploy does not lose the key. To rotate a key on such a host,
+replace the copy and restart the enclave. To go back to the path `/`, delete the
+copy and deploy again.
+
 A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
 |------------------------|-------|-------------|
 | `--electrum-url` / `ELECTRUM_URL` | `rgb-validation` | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, for the custom dev signet). TLS terminates inside the enclave. The forwarder listens on that port and pins `host` to loopback in `/etc/hosts`. A test, debug, `mock-attestation` or `allow-seed-import` build also accepts plaintext `tcp://host:port` and `http://host[:port]`; a release image refuses them. |
-| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. The JSON-RPC is served at `/`. |
+| `--evm-rpc-host` / `EVM_RPC_HOST` | `evm-rpc` | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | `evm-rpc` | TLS port, 1-65535, not the Electrum port. The forwarder listens on it. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | `evm-rpc` | DER of the only CA the EVM RPC TLS trusts. |
+| `--evm-rpc-path-file` / `EVM_RPC_PATH_FILE` | `evm-rpc`, optional | Restricted file containing an absolute RPC path such as `/v2/<key>`, up to 2048 bytes. Omission uses `/`; an empty supplied file is rejected. |
 | `--kms-key-arn` / `KMS_KEY_ARN` | `kms-persistence` | Full symmetric KMS key ARN; aliases are rejected. |
 | `--kms-region` / `KMS_REGION` | `kms-persistence` | Commercial AWS region matching the key ARN. The KMS forwarder listens on `127.0.0.2:443`. |
 | `--kms-seed-id` / `KMS_SEED_ID` | `kms-persistence` | Stable signer identity used in the KMS encryption context and storage namespace. |

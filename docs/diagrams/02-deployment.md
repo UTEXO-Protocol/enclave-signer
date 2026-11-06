@@ -82,6 +82,12 @@ flowchart TB
 - **Endpoints at launch**: `utexo-enclave-ctl.sh start` sends `set-endpoints`
   once to each fresh enclave (Electrum URL, EVM RPC host, CA, TLS port, and
   the KMS pin on mint signers). Until then the enclave signs nothing.
+  SPV and no-SPV profiles both keep these inputs and their digests outside
+  the EIF. Members can use different endpoints with one image per role,
+  release and build profile. Runtime TLS checks remain in the enclave.
+  Production attestation commits the documented public endpoint fields;
+  no-SPV Development attestation does not. Endpoint approval is a separate
+  deployment responsibility, not a property of matching image PCRs.
 
 Clones provide replicas of one signing identity. Independent quorum members
 need independently initialized seeds.

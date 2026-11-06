@@ -1288,6 +1288,7 @@ fn a_stalled_call_ends_at_the_timeout_in_force() {
         host: "rpc.test".into(),
         ca_der: hex::decode(ca_hex.trim()).unwrap(),
         tls_port: stalled.local_addr().unwrap().port(),
+        path: "/".into(),
     })
     .unwrap();
 

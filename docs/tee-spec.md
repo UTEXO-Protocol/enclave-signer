@@ -214,15 +214,27 @@ every enclave of the host.
 
 **Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
-EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. Production images keep these values outside the image
-and commit them through the attested policy. Without SPV, `ENDPOINTS_SHA256`
-binds network inputs to the image; KMS fields remain runtime inputs.
+EVM RPC TLS port, an optional private RPC path and, in a mint build, the KMS
+key ARN, region, seed id and expected EVM address. Every build keeps these
+values and any endpoint-derived digest outside the image. SPV and no-SPV members with the same role, release
+and build profile can use the same EIF with different endpoints. Image PCR
+reproduction and comparison do not require endpoint information. A mint image
+also carries `KMS_ALLOWED_ACCOUNT_IDS`, so members can share one mint image only
+if this list has the AWS account of the key of each member.
+A Production policy separately commits the endpoint and KMS fields listed in
+Sec 4 in attestation `user_data`; the Development policy does not.
+Endpoint approval is external deployment configuration, not an approval
+signature checked by the enclave. In no-SPV / IndexerTrusted mode a host can
+choose a different well-formed TLS endpoint at launch, and the Development
+attestation does not reveal or approve that choice. TLS authenticates that
+selected endpoint; it does not establish that the operator approved it.
 The burn signer requires the indexer URL; without SPV, it queries the indexer
 for confirmations.
 The enclave refuses a second set; changing launch values needs a restart,
 which clears the in-memory keys. Mint recovers its saved KMS identity; burn
-recovery requires a live approved donor with matching PCRs. Until the set, the
+recovery requires a live approved donor with matching PCRs and policy. Changing
+an attested host or CA can therefore prevent cloning from an old-policy donor,
+even when the image PCRs are unchanged. Until the set, the
 enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
@@ -244,14 +256,31 @@ Each loopback forwarder of a TLS endpoint (an `ssl://` or `https://` indexer,
 the EVM RPC, KMS) sends on only a connection that starts with a TLS handshake
 record (`enclave/src/egress.rs`). The enclave has no other network path, so no
 client can send plaintext to the host for such an endpoint, not even after an
-HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
-(`reqwest`) follow redirects, and their APIs here cannot turn that off. A
-redirect to a port with no forwarder, or to another host, has no route out.
+HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) disables redirects.
+`esplora-client` (`minreq`) can follow redirects; a redirect to a port with no
+forwarder, or to another host, has no route out.
 The parent -> enclave channel (vsock port 5000) is a separate inbound listener
 and is not affected. The EVM RPC forwarder listens on the
-EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
-it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
-build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+EVM RPC TLS port, and the client connects to `https://<host>:<port><path>`
+through it. TLS ends inside the enclave, which trusts only the configured CA
+in every build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+An empty wire `evm_rpc_path` uses `/`. The CLI reads a nonempty private path from
+`EVM_RPC_PATH_FILE`; a supplied empty file is rejected. Both parsers require an
+absolute ASCII path of at most 2048 bytes. They reject authorities, queries,
+fragments, percent escapes and dot segments without echoing the value. Only
+ASCII letters, digits and `/-._~` are accepted. RPC transport errors and endpoint
+debug output omit the path. The dev images use
+`RUST_LOG=debug,alloy_transport_http=off` to disable Alloy HTTP logs, which can
+include the full URL and provider responses. Custom debug or trace filters
+must keep `alloy_transport_http=off`. The client does not override the log filter.
+Builds without `evm-rpc` reject a nonempty path.
+
+A provider key in the path is runtime-only. Neither attestation policy nor KMS
+context includes it, so rotating it on restart does not change image PCRs,
+public policy or the recovery context. The attested host/CA in Production
+covers accepted paths at that endpoint, not a particular provider account.
+No-SPV Development still commits no endpoint fields. The existing KMS context
+and policy encoding are unchanged; this adds no ciphertext migration.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
 Each socket read or write has a 10-second idle timeout. A 90-second socket
@@ -312,9 +341,11 @@ SecurityPolicy = Production {
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` requires
   a mint/burn role, real attestation, `BITCOIN_NETWORK=signet` and
-  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
-  `SetEndpoints` enforces the measured network digest, and operators approve
-  KMS inputs separately.
+  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields.
+  Both profiles validate runtime endpoint syntax and enforce TLS in release;
+  neither embeds endpoint settings or their digest in the EIF. Operators
+  approve launch endpoints and KMS inputs separately. The enclave does not
+  verify an operator signature on those inputs.
   A build fails with both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
@@ -987,8 +1018,8 @@ delegated to the receiving contract and known gaps. Enforced checks fail closed.
 | P4 | Valid calldata | Allowed selector, 96 KiB cap, canonical ABI encoding, and route-specific destination-chain check. |
 | P5 | Correct destination | Pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`, V1 record). A V0 burn: direct route only. |
 | P6 | Release identity | RGB source chain 827166, empty source address, recomputed `burnId`, matching burn OpId, and exact settlement ids. |
-| P7 | Accepted Bitcoin history | Each witness must belong to the retained chain. |
-| P8 | Inclusion and relay agreement | Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. |
+| P7 | Accepted Bitcoin history | With `spv` enabled, each witness must belong to the retained chain. Without `spv`, the indexer supplies the trusted chain view. |
+| P8 | Inclusion and relay agreement | With `spv` enabled, Merkle inclusion, confirmation depth, tip freshness, and the BtcRelay checks below. Without `spv`, confirmation depth comes from the indexer. |
 | P9 | Ancestry deposits | Derive each deposit id from its mint; no chain read. `RgbSettlementModule.beforeFundsOut` enforces that each cited deposit exists. |
 | P10 | Payload matches intent | The typed digest commits to the decoded fields checked above. |
 | P11 | Reject failed checks | Return an error without a signature. |
@@ -998,21 +1029,26 @@ OpId of the settling burn. Settlement data must contain the exact verified
 `operationId`s. The list must be non-empty and canonically
 encoded. Operation IDs must be strictly ascending, without duplicates.
 
-P8 requires a 128-byte proof with source and latest height/commitment pairs.
+With `spv` enabled, P8 requires a 128-byte proof with source and latest
+height/commitment pairs.
 The source height must hold the last consignment witness transaction.
 The enclave verifies that anchor again while it holds the chain lock.
 The latest height must exist in the retained chain. It must be at most
 `MAX_RELAY_TIP_LAG_BLOCKS = 100` blocks below the enclave tip.
 
-With `BTC_RELAY_MODE=required`, each commitment must match the enclave's
-reconstructed BtcRelay record. The commitment is `keccak256` of the 160-byte
+With `spv` enabled and `BTC_RELAY_MODE=required`, each commitment must match
+the enclave's reconstructed BtcRelay record. The commitment is `keccak256` of the 160-byte
 `StoredBlockHeader`, using cumulative work from the checkpoint. Zero commitments
 are rejected. Records that need data below the checkpoint are also rejected.
 Production policy permits only this mode.
 
-With `BTC_RELAY_MODE=none`, both commitments must be zero. The enclave still
-checks heights, the source anchor, and freshness. This mode supports local
-systems without BtcRelay. It is not a production policy.
+With `spv` enabled and `BTC_RELAY_MODE=none`, both commitments must be zero.
+The enclave still checks heights, the source anchor, and freshness. This mode
+supports local systems without BtcRelay. It is not a production policy.
+
+With `spv` disabled, the signer requires empty RGB `merkle_proofs` and an
+empty release `proof`. It does not run the header, Merkle inclusion or
+BtcRelay checks above.
 
 The enclave signs `burnId` and the other decoded fields into the typed digest.
 A signature is not a check of their meaning. So `sourceBurnTxId`,
@@ -1219,6 +1255,12 @@ Known limits. Read them before deployment.
 - **Policy coverage.** The commitment does not hold all enforced settings
   (Sec 4). The attestation CLI authenticates the chain, contract and asset
   pins. The caller must compare them with the intended deployment.
+  No-SPV / IndexerTrusted uses the generic Development commitment, which
+  contains no endpoint or KMS settings. Its image PCRs prove code identity,
+  not approval of its runtime providers. A compromised host can substitute
+  its own valid TLS endpoint at launch; no in-enclave operator approval gate
+  prevents that. Treat the approved launch configuration and provider data
+  as additional trust assumptions for this profile.
 - **Build reproducibility.** rgb-lib comes from the private
   `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, and the RGB protocol
   crates it pins from the root `[patch.crates-io]`: public `rgb-protocol`

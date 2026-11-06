@@ -375,23 +375,50 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
     };
     #[cfg(not(feature = "vsock"))]
     let (electrum_url, set_port) = ("ssl://electrum.test:1".to_string(), port);
+    let config = BridgeConfig::default();
+    // No-SPV launch validation still requires the public-signet profile and
+    // bridge pins. Reach the TLS client through the same launch handler.
+    #[cfg(not(feature = "spv"))]
+    let config = BridgeConfig {
+        bitcoin_network: utexo_bridge_enclave::policy::BitcoinNetwork::Signet,
+        btc_relay_mode: utexo_bridge_enclave::config::BtcRelayMode::None,
+        chain_id: 42161,
+        bridge_contract: [1; 20],
+        funds_in_contract: BRIDGE,
+        token_contract: [3; 20],
+        rgb_asset_id: "test-asset".into(),
+        ..config
+    };
+    let (bitcoin_network, network) = if cfg!(feature = "spv") {
+        (bitcoin::Network::Regtest, Network::Regtest)
+    } else {
+        (bitcoin::Network::Signet, Network::Signet)
+    };
     let ctx = ServerContext::awaiting_launch(
-        EnclaveState::new(bitcoin::Network::Regtest),
-        BridgeConfig::default(),
-        std::sync::Mutex::new(HeaderChain::new(
-            Network::Regtest,
-            checkpoint_for(Network::Regtest),
-        )),
+        EnclaveState::new(bitcoin_network),
+        config,
+        std::sync::Mutex::new(HeaderChain::new(network, checkpoint_for(network))),
         BuildContext::current(),
     );
+    let endpoints = SetEndpointsRequest {
+        electrum_url,
+        evm_rpc_host: "rpc.test".into(),
+        evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
+        evm_rpc_tls_port: set_port.into(),
+        ..Default::default()
+    };
+    // Installing the mint seed source validates these values but does not
+    // contact KMS: this test never initializes keys.
+    #[cfg(all(feature = "kms-persistence", not(feature = "allow-seed-import")))]
+    let endpoints = SetEndpointsRequest {
+        kms_key_arn: "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+            .into(),
+        kms_region: "eu-west-1".into(),
+        kms_seed_id: "rpc-tls-test".into(),
+        ..endpoints
+    };
     let set = EnclaveRequest {
-        request: Some(Request::SetEndpoints(SetEndpointsRequest {
-            electrum_url,
-            evm_rpc_host: "rpc.test".into(),
-            evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
-            evm_rpc_tls_port: set_port.into(),
-            ..Default::default()
-        })),
+        request: Some(Request::SetEndpoints(endpoints)),
     };
     // The handler writes the response after the request in the buffer.
     let mut wire = Cursor::new(Vec::new());
