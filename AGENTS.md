@@ -144,10 +144,13 @@ measurements (PCR0/PCR1/PCR2), while using different EVM RPC connections.
   does not approve those fields, prove a connection occurred, or prove the
   provider's data is honest. EVM RPC data received over TLS remains an explicit
   trust assumption.
-- In no-SPV / IndexerTrusted mode, do not achieve common PCRs by merely
-  deleting the endpoint digest check. Replace member-specific image pins
-  with an explicit runtime approval mechanism, enforced before signing,
-  and matching attestation, verifier and deployment checks.
+- Apply the same image/runtime separation to SPV and no-SPV / IndexerTrusted
+  profiles. Endpoint approval belongs to the independently approved deployment
+  configuration; do not introduce an operator signing-key system as part of
+  endpoint configuration. Preserve runtime TLS and launch validation.
+  The current IndexerTrusted Development policy does not attest endpoints or
+  enforce their independent approval inside the enclave. Document that limit;
+  do not describe PCR verification or successful TLS as endpoint approval.
 - Keep secret rotation distinct from public release changes such as signer
   code, asset pins and protocol rules, which can legitimately change image
   measurements. Deployment measurements such as PCR3/PCR4 can differ between
