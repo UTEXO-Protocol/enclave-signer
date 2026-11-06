@@ -5,6 +5,9 @@ Use `BUILD_PROFILE=stage-signet` with `build/build-enclave.sh`, or select
 The profile builds Mint and Burn only. Tag builds and the `default` profile
 continue to use the recipe defaults.
 
+For both Mint and Burn, the stage profile fixes `SPV_MIN_CONFIRMATIONS=3`
+and `EVM_FINALITY_TAG=finalized`, overriding values in the caller's environment.
+
 ## Set the release inputs
 
 Set these GitHub Actions repository variables, or export them locally:

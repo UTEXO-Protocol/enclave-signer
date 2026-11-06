@@ -31,6 +31,8 @@ TOKEN_CONTRACT="$STAGE_TOKEN_CONTRACT"
 RGB_ASSET_ID="$STAGE_RGB_ASSET_ID"
 ENDPOINTS_SHA256="$STAGE_ENDPOINTS_SHA256"
 RUST_LOG=debug
+SPV_MIN_CONFIRMATIONS=3
+EVM_FINALITY_TAG=finalized
 
 if [ "$DOCKERFILE" = Dockerfile.enclave.mint ]; then
     # MINT_WITNESS_SAT is 1500 in the recipe; the connector must match it.

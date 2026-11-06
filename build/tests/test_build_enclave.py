@@ -26,6 +26,7 @@ MEASURED_PINS = dict(
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
     RGB_MAX_UNOWNED_SATS='1000', ENDPOINTS_SHA256='12' * 32,
+    SPV_MIN_CONFIRMATIONS='4', EVM_FINALITY_TAG='finalized',
 )
 
 
@@ -366,6 +367,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
                                      BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
+                                     SPV_MIN_CONFIRMATIONS='6', EVM_FINALITY_TAG='safe',
                                      RGB_ASSET_ID='rgb:old-asset', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
@@ -376,6 +378,8 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug')
+                self.assertEqual(args['SPV_MIN_CONFIRMATIONS'], '3')
+                self.assertEqual(args['EVM_FINALITY_TAG'], 'finalized')
                 self.assertEqual(args['FUNDS_IN_CONTRACT'],
                                  '0xe67c9eb5006512525f597c3fa6119891bd4efaa6')
                 if role == 'burn':
