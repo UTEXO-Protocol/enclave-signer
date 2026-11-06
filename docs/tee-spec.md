@@ -149,10 +149,61 @@ enables `kms-persistence`. Production images are built with
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
-protobuf, 24 MiB frame cap, no version field (`framing.rs`). The Bitcoin
-indexer and the EVM RPC are reached through in-enclave loopback forwarders
-that bridge over vsock to host-side `vsock-proxy` instances (vsock ports 8001
-and 8002); the enclave has no direct network stack.
+protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
+decode, `check_request_shape` counts the field occurrences on the wire and
+refuses a request with more than 2^19 (`MAX_WIRE_ELEMENTS`). The walk enters
+only the messages that `framing::Schema` names. A test reads `enclave.proto`
+and fails when a request message gets a repeated field outside them. The
+Bitcoin indexer and the EVM RPC are reached through in-enclave loopback
+forwarders. They bridge over vsock to host-side `vsock-proxy` instances
+(vsock ports 8001 and 8002). The enclave has no direct network stack.
+
+**Request memory model** (`memory.rs`). The enclave has a fixed amount of
+memory and no swap. So the heap one request can use has a bound that depends
+only on its size. The bound is `REQUEST_MEMORY_FACTOR` (24) times the frame,
+plus 64 MiB for the decoded protobuf elements. Most parsers that grow with
+their input stay within the factor. Reading a frame takes 3 times the frame.
+Consignment validation of a long history takes about 21 times the
+consignment, because rgb-lib decodes a second copy while the enclave keeps its
+own. A fascia of many rights takes about 11 times its bytes. The gas
+transaction parser stays under 0.1, and a PSBT whose bytes sit in large
+records takes about 1.5. A whole burn request through `dispatch` holds the
+decoded request during validation. It peaks at about 20 times its frame beyond
+the element term.
+
+Some parsers take more on the densest inputs measured, and each has a size
+limit:
+
+- a PSBT of one input and outputs with two empty records each: about 102
+  times, 1 MiB limit
+- an attestation document of CBOR nulls: about 48 times, 64 KiB limit
+- a consignment of transfers that turn one mint right into tens of
+  thousands: about 53 times, 10 MiB limit
+
+At those limits each fits the bound of the largest frame, 640 MiB, which each
+worker holds. A request holds one parsed PSBT at a time, and a fascia has the
+PSBT limit. A burn request with the densest consignment measured takes about
+632 MiB at the limit by the test's count. The real peak is lower, because the
+cost gate of validation refuses a chain this dense above about 2 MiB. The
+sender sets part of the rate through the order of the OpIds, which sets how
+full RGB validation keeps its B-trees. Validation clones the decoded
+consignment, so each decoded list keeps only its length.
+`MAX_CONSIGNMENT_BYTES` can lower that limit, and the enclave refuses to start
+with a larger value.
+
+The tests measure the frame, consignment, PSBT, fascia, gas transaction and
+attestation document parsers on the densest shapes measured. The other parsers
+have small size limits and refusal tests. The remaining request fields are
+fixed-size, refused before use, never read, or only compared, hashed or read
+once. `memory.rs` names the ones with no upper limit. Four workers, the bound
+for a 24 MiB frame and a 512 MiB baseline give the minimum usable memory
+(3072 MiB). A release build reads `MemTotal` from `/proc/meminfo` at boot. It
+refuses to start with less, or with no readable total. `MemTotal` leaves out
+the memory the kernel keeps for itself, so `run-enclave --memory` must give
+at least 4096 MiB, a whole number of GiB. The deploy scripts use that value
+and refuse a smaller `ENCLAVE_MEMORY`. `deploy-host.sh` and
+`utexo-enclave-ctl.sh check` also refuse a hugepage pool that cannot hold
+every enclave of the host.
 
 **Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
@@ -658,7 +709,9 @@ The enclave no longer signs an opaque digest. The request MUST carry the
 unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
-creation -- and computes the digest itself.
+creation -- and computes the digest itself. The preimage is at most 1 MiB
+(`MAX_GAS_TX_BYTES`). It decodes to at most 1024 RLP items (`MAX_RLP_ITEMS`)
+with a nesting depth of at most 8. So the input bounds the decoder's heap.
 
 Two further bounds, each fail-closed when unset:
 

@@ -52,6 +52,11 @@ fn main() {
     if let Err(msg) = bridge_config.check_mint_witness_budget() {
         panic!("{msg}");
     }
+    // Fail closed: a release build with too little memory for the largest
+    // requests does not start. See `memory.rs`.
+    if let Err(msg) = utexo_bridge_enclave::memory::check_at_boot(&build_ctx) {
+        panic!("{msg}");
+    }
 
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]

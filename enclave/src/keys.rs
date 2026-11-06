@@ -424,6 +424,7 @@ impl KeyManager {
         psbt_bytes: &[u8],
         allowed_account: Option<AccountType>,
     ) -> Result<(Vec<u8>, usize)> {
+        crate::config::check_psbt_size("psbt_bytes", psbt_bytes)?;
         let mut psbt = Psbt::deserialize(psbt_bytes)
             .map_err(|e| EnclaveError::Signing(format!("psbt deserialize: {e}")))?;
 

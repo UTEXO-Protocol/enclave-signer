@@ -257,8 +257,7 @@ mod nsm {
     }
 }
 
-// Facade tests only. attestation-verify tests the verifier.
-// Both tests need the mock path.
+// Facade tests on the mock path. attestation-verify tests the verifier.
 #[cfg(all(test, feature = "mock-attestation"))]
 mod tests {
     use super::*;
@@ -280,6 +279,52 @@ mod tests {
     fn facade_get_own_pcrs_returns_zero_in_mock() {
         let pcrs = get_own_pcrs().unwrap();
         assert_eq!(pcrs.pcr0, [0u8; 48]);
+    }
+}
+
+// The size limit of a peer document, on every feature set.
+#[cfg(test)]
+mod document_memory {
+    use super::*;
+
+    /// The request memory model (`memory.rs`). A peer document at the size
+    /// limit decodes into CBOR elements that take far more memory than their
+    /// bytes. It stays within the request bound. One byte over the limit
+    /// never reaches the decode. The real verifier runs here: the size check
+    /// is the same on both paths, and the CBOR tree is the real path's cost.
+    #[test]
+    fn a_peer_attestation_document_stays_within_the_request_bound() {
+        use crate::memory::peak;
+        use attestation_verify::MAX_DOCUMENT_BYTES;
+
+        // COSE_Sign1 with an unprotected header of `nulls` one-byte nulls: the
+        // shape that expands most in the decode. Protected header {1: -35},
+        // no payload, empty signature.
+        let document = |nulls: usize| {
+            let mut doc = vec![0x84, 0x44, 0xa1, 0x01, 0x38, 0x22, 0x9b];
+            doc.extend_from_slice(&(nulls as u64).to_be_bytes());
+            doc.resize(doc.len() + nulls, 0xf6);
+            doc.extend_from_slice(&[0xf6, 0x40]);
+            doc
+        };
+        let wrapper = 7 + 8 + 2;
+
+        let (doc, result, peak) = peak::measure(
+            || document(MAX_DOCUMENT_BYTES - wrapper),
+            |doc| {
+                attestation_verify::verify_attestation(doc, &ExpectedPcrs::zero(), None).map(|_| ())
+            },
+        );
+        assert_eq!(doc.len(), MAX_DOCUMENT_BYTES);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing COSE payload"), "{err}");
+        peak::assert_within_request_bound("peer attestation at the size limit", doc.len(), peak);
+
+        let over = document(MAX_DOCUMENT_BYTES - wrapper + 1);
+        let err = attestation_verify::verify_attestation(&over, &ExpectedPcrs::zero(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("the limit is"), "{err}");
     }
 }
 

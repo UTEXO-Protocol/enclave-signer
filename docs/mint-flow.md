@@ -142,7 +142,7 @@ refuses it.
 | `SPV_MIN_CONFIRMATIONS` | 3 | Image env, attested. Zero stops the boot. No mint check reads it. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
-| Fascia size | 16 MiB (`U24`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
+| Fascia size | 1 MiB (`MAX_PSBT_BYTES`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
 | `MINT_INPUTS` | 1 | A mint spends its right alone. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
@@ -221,7 +221,7 @@ does not sign the parent.
   would make it a tapret host that the opret check never sees. P2A is not
   P2TR.
 - **F4** `fascia` must not be empty and must decode as rgb-lib reads its
-  fascia file: strict encoding, nothing after it, at most 16 MiB. Its witness
+  fascia file: strict encoding, nothing after it, at most 1 MiB. Its witness
   txid must be the PSBT's unsigned txid. It discloses exactly one bundle, of
   the contract `RGB_ASSET_ID` names (compared as parsed ids). The request's
   `asset_id` must name it too.
