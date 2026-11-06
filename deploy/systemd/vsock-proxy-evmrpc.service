@@ -1,5 +1,5 @@
 [Unit]
-# EVM-RPC egress for the in-enclave FundsIn verification (evm-rpc feature).
+# EVM-RPC egress for the in-enclave FundsIn verification.
 # The enclave speaks TLS to https://<EVM_RPC_HOST> through its loopback
 # 127.0.0.1:<EVM_RPC_TLS_PORT>, which the in-enclave forwarder relays over vsock
 # port 8002.

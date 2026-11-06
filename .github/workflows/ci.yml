@@ -162,33 +162,32 @@ jobs:
       # BFA mint/burn EIF profiles - the shipped production images. The flow
       # ships as two signer roles, two enclaves: the mint signer (EVM -> RGB,
       # Dockerfile.enclave.mint) and the burn signer (RGB -> EVM,
-      # Dockerfile.enclave.burn). Each role implies `bfa-mint`, which pulls in
-      # rgb, bfa-validation and evm-rpc. Each lane compiles and tests
-      # only its own direction, and checks it refuses the other one
+      # Dockerfile.enclave.burn). Each role implies `rgb-validation`. Each lane
+      # compiles and tests only its own direction, and checks it refuses the other one
       # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
       # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer
       - name: Clippy (rgb mint signer)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer --all-targets -- -D warnings
       - name: Test (rgb mint signer)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer,mock-attestation,allow-seed-import
 
       - name: Test (mint custody VSOCK deadline)
-        run: cargo test --locked -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer --lib seed_persistence::tests::vsock_connect_rejects_expired_deadline_before_opening_a_socket -- --exact
+        run: cargo test --locked -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer --lib seed_persistence::tests::vsock_connect_rejects_expired_deadline_before_opening_a_socket -- --exact
 
       - name: Build (rgb burn signer)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
+        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer
       - name: Clippy (rgb burn signer)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer --all-targets -- -D warnings
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer --all-targets -- -D warnings
       - name: Test (rgb burn signer)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import
       # Three tests use a history of 10 000 transfers: the consignment memory
       # test, the whole burn request through dispatch, and the default request
       # limits. They are slow in a debug build and ignored by default. The
       # name filter runs only them.
       - name: Test (rgb burn signer, 10 000-transfer tests)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import --lib -- --ignored 10_000
+        run: cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import --lib -- --ignored 10_000
 
       - name: Check release (without SPV, mint and burn)
         run: |
@@ -266,7 +265,7 @@ jobs:
       - name: Test (RGB release stress, on request)
         if: github.event_name == 'workflow_dispatch' && inputs.run_stress
         timeout-minutes: 30
-        run: cargo test --locked --release -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+        run: cargo test --locked --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
@@ -423,7 +422,7 @@ jobs:
       # in one binary, neither would leave the role unstated.
       - name: Assert both signer roles at once is rejected
         run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,burn-signer 2>build.log; then
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv,mint-signer,burn-signer 2>build.log; then
             echo "::error::build unexpectedly SUCCEEDED with both mint-signer and burn-signer - the compile_error guard is missing or not firing"
             exit 1
           fi
@@ -436,8 +435,8 @@ jobs:
 
       - name: Assert mint/burn with no signer role is rejected
         run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features rgb,bfa-mint 2>build.log; then
-            echo "::error::build unexpectedly SUCCEEDED with bfa-mint but no signer role - the compile_error guard is missing or not firing"
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with spv but no signer role - the compile_error guard is missing or not firing"
             exit 1
           fi
           if ! grep -q "an RGB build requires a signer role" build.log; then
@@ -449,7 +448,7 @@ jobs:
 
       - name: Assert KMS persistence outside the mint signer is rejected
         run: |
-          for features in kms-persistence burn-signer,kms-persistence rgb,kms-persistence ccd,kms-persistence; do
+          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence ccd,kms-persistence; do
             if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$features" 2>build.log; then
               echo "::error::KMS persistence unexpectedly compiled with '$features'"
               exit 1

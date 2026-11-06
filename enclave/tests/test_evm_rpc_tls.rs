@@ -3,7 +3,7 @@
 //! answer a receipt request itself.
 // The mint path reads the deposit and the BFA mint lock over this channel.
 // The same channel authenticates the selected head and canonical receipt block.
-#![cfg(feature = "bfa-validation")]
+#![cfg(feature = "rgb-validation")]
 
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;

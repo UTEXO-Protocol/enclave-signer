@@ -1,6 +1,6 @@
 # Mint flow (EVM -> RGB)
 
-**Signer image:** `mint-signer` (`--no-default-features --features vsock,rgb,mint-signer`).
+**Signer image:** `mint-signer` (`--no-default-features --features vsock,spv,mint-signer`).
 **Checked against repository code:** 2026-11-04 (rgb-lib bfa.6 66bae096 move: locks keyed by lockId; plan B: the mint signer reads the rgb-lib fascia; witness mints).
 Deployment was not checked.
 

@@ -9,7 +9,7 @@ use super::endpoints::handle_set_endpoints;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
 use super::limits::{handle_get_limits, handle_set_limits};
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use super::rights_refill::handle_sign_rights_refill;
 use super::sign::handle_sign;
 #[cfg(evm_to_rgb)]
@@ -139,12 +139,12 @@ pub(super) fn dispatch(
             tracing::info!("request: SignRightsRefill");
             // Only the mint signer holds mint rights. Like every signing
             // request it waits for launch; the rule itself reads no network.
-            #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+            #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
             {
                 ctx.launch()
                     .and_then(|_| handle_sign_rights_refill(ctx, req))
             }
-            #[cfg(not(all(feature = "bfa-mint", evm_to_rgb)))]
+            #[cfg(not(all(feature = "rgb-validation", evm_to_rgb)))]
             {
                 let _ = req;
                 Err(wrong_signer_role("rights refills"))

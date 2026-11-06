@@ -196,7 +196,6 @@ pub fn validate_funds_out_source_burn_tx_id(
 /// `settlementData`, so replay safety does not rest on this order
 /// (F05-NEW-AF-04). An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
-#[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,
     locks: &[crate::networks::rgb::validation::VerifiedLock],

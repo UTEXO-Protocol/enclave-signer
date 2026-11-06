@@ -15,7 +15,7 @@ flowchart TB
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
         VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl://.]
         VPk["vsock-proxy 8003<br/>-<br/>mint signers only.<br/>8003 -> KMS 443. Relays TLS bytes only."]
-        VPe["vsock-proxy 8002<br/>―<br/>evm-rpc builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
+        VPe["vsock-proxy 8002<br/>―<br/>Mint and burn builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
             Bin[utexo-bridge-enclave<br/>Rust binary<br/>-<br/>Listens on vsock port 5000, any CID.<br/>One connection = one request;<br/>4 worker threads, queue of 16,<br/>10 s idle / 90 s socket deadline.<br/>Handler work is not cancelled by this deadline.<br/>No filesystem persistence.<br/>Env pins read at boot:<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS / BITCOIN_NETWORK<br/>MINT_WITNESS_SAT.<br/>Release bridge build refuses to boot<br/>unless the boot policy is valid Production.<br/>SetEndpoints resolves the SecurityPolicy once<br/>and commits it into attestation user_data.]
@@ -71,8 +71,8 @@ flowchart TB
   re-clone. Mint signers enable `kms-persistence` and recover the saved encrypted
   seed instead; peer cloning is disabled. See
   [KMS seed persistence](../kms-persistence.md).
-- **Bridge signing requires the `evm-rpc` feature** (both production images
-  have it through `bfa-validation`): the mint signer verifies the EVM
+- **Bridge signing requires the `rgb-validation` feature** (both production
+  images have it through their signer role): the mint signer verifies the EVM
   `FundsIn` deposit, the burn signer reads an asset's reject list. The burn
   signer derives the mint-ancestry deposit ids with no RPC read. A build without
   it refuses bridge PSBTs. Operators MUST run the host `vsock-proxy` allowlist

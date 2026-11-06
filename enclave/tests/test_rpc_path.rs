@@ -1,6 +1,6 @@
 //! The configured provider path reaches the pinned TLS host without leaking
 //! the API key in errors or logs when Alloy HTTP transport logging is disabled.
-#![cfg(feature = "evm-rpc")]
+#![cfg(feature = "rgb-validation")]
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;

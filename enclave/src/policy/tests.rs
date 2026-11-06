@@ -208,7 +208,7 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
 }
 
 /// The gate `SetEndpoints` runs, fed from a request as the handler feeds it.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 #[test]
 fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     let ca =

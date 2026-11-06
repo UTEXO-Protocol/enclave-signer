@@ -11,7 +11,7 @@
 //! the path. A receiving consumer then validates the consignment in full.
 //! Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
-#![cfg(all(feature = "rgb-validation", feature = "bfa-validation", evm_to_rgb))]
+#![cfg(all(feature = "rgb-validation", evm_to_rgb))]
 
 // Shared with the unit tests; this file uses only the mint half.
 #[allow(dead_code)]

@@ -131,7 +131,7 @@ pub(super) fn handle_sign_psbt(
 
 /// Signs the Colored inputs of a PSBT the caller validated: a rights refill.
 /// It has no chain pins to hold. Refuses a no-op.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub(super) fn sign_colored_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.

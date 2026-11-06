@@ -251,7 +251,7 @@ pub(crate) mod tests {
 
     /// Gives output `index` our key-path script at `child` below `account`,
     /// with the rule (C) metadata that names it.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "rgb-validation")]
     pub(crate) fn claim_output(
         psbt: &mut Psbt,
         index: usize,

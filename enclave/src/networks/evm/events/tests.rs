@@ -484,7 +484,6 @@ fn rejects_malformed_expected_operation_id() {
 }
 
 // The attested tag selects the head in both deposit verification paths.
-#[cfg(any(evm_to_rgb, feature = "bfa-validation"))]
 mod finality {
     use super::*;
     use std::cell::RefCell;
@@ -590,7 +589,6 @@ mod finality {
             |provider, tag| {
                 verify_funds_in_event(provider, &BRIDGE, tag, &TX, &op_id(7), 1000, 50).map(|_| ())
             },
-            #[cfg(feature = "bfa-validation")]
             |provider, tag| {
                 verify_rgb_funds_in(
                     provider,
@@ -936,7 +934,6 @@ fn issue_51_no_receipt_means_no_authorization() {
 
 // ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_old_funds_in_signature() {
     let mut log = rgb_companion_log(0xab, 100);
@@ -944,7 +941,6 @@ fn rejects_old_funds_in_signature() {
     assert!(decode_funds_in(&log, &word(0xab)).is_err());
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn decodes_funds_in_with_the_lock_id_as_topic2() {
     let log = rgb_companion_log(0xab, 100);
@@ -952,7 +948,6 @@ fn decodes_funds_in_with_the_lock_id_as_topic2() {
 }
 
 /// The topic is the lockId bytes as they are, a big-endian uint256.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn funds_in_reads_the_lock_id_big_endian() {
     let mut lock_id = [0u8; 32];
@@ -969,7 +964,6 @@ fn funds_in_reads_the_lock_id_big_endian() {
 
 /// A lock keyed by the bare OpId, or by the OpId in another tx, is not the
 /// lock of the mint in this tx.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
     use crate::networks::rgb::validation::lock_id;
@@ -988,14 +982,12 @@ fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
     }
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_for_a_different_lock_id() {
     let log = rgb_companion_log(0xab, 100);
     assert!(decode_funds_in(&log, &word(0xcd)).is_err());
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_amount_above_u64() {
     let log = LogEntry {
@@ -1006,7 +998,6 @@ fn rejects_funds_in_amount_above_u64() {
     assert!(decode_funds_in(&log, &word(0xab)).is_err());
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_with_unexpected_layout() {
     // The old layout: the id in data, not indexed.
@@ -1025,12 +1016,10 @@ fn rejects_funds_in_with_unexpected_layout() {
 }
 
 /// The mint's `beforeBlock` in the lock tests: the lock is at block 100.
-#[cfg(feature = "bfa-validation")]
 const BEFORE_BLOCK: u64 = 110;
 
 /// A real deposit tx emits both: the RGB companion (minted amount) and the
 /// BridgeFundsIn record (operationId, netAmount). Block 100.
-#[cfg(feature = "bfa-validation")]
 fn lock_provider() -> FakeEvm {
     FakeEvm {
         receipt: Some(receipt_with(
@@ -1044,7 +1033,6 @@ fn lock_provider() -> FakeEvm {
     }
 }
 
-#[cfg(feature = "bfa-mint")]
 #[test]
 fn verify_rgb_funds_in_accepts_a_verified_lock() {
     let p = lock_provider();
@@ -1070,7 +1058,6 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
 }
 
 /// An RGB receiver accepts only a lock in a block before `beforeBlock`.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
     let p = lock_provider();
@@ -1106,7 +1093,6 @@ fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
 }
 
 /// rgb-lib f3975623 has no scan window: a lock far below `beforeBlock` still counts.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
     let p = lock_provider();
@@ -1128,7 +1114,6 @@ fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
     }
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn node_chain_id_must_be_the_pinned_one() {
     let p = lock_provider();
@@ -1138,7 +1123,6 @@ fn node_chain_id_must_be_the_pinned_one() {
 }
 
 /// A deposit routed to another chain must not back an RGB mint.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
     let mut bridge = bridge_log(op_id(7), 1000, 950, 50);
@@ -1167,7 +1151,6 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
 
 /// Without the record, a `fundsOut` has nothing to cite, so the lock is not
 /// settlement evidence.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
     let p = FakeEvm {
@@ -1191,7 +1174,6 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
 
 /// Only the pinned emitter's log can back a mint: an attacker contract can
 /// emit the same event.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     let mut log = rgb_companion_log(0xab, 100);
@@ -1217,7 +1199,6 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
 
 /// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166). The id is a
 /// pure function of the 32-byte word, so it holds for a lockId word too.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
     let mut cfg = crate::config::BridgeConfig::default();
@@ -1245,7 +1226,6 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
 /// `rgbNetwork` = 827166. The contract test still pins the 96 form.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_matches_the_contract_vector() {
     let cfg = crate::config::BridgeConfig {
@@ -1263,7 +1243,6 @@ fn rgb_mint_deposit_id_matches_the_contract_vector() {
     );
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
     let cfg = crate::config::BridgeConfig {

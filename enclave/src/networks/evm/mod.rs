@@ -4,13 +4,13 @@
 pub mod burn_destination;
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub mod crosscheck;
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub mod events;
 #[cfg(rgb_to_evm)]
 pub mod gas_tx;
 #[cfg(rgb_to_evm)]
 pub mod lz_options;
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 pub mod reject_list;
 #[cfg(rgb_to_evm)]
 pub mod signing;

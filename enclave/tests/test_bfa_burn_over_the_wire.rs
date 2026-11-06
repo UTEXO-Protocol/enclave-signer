@@ -3,7 +3,7 @@
 //! RGB consensus, SPV inclusion, BtcRelay agreement, the issuer's reject list,
 //! release bindings and the final EIP-712 signature all run. Only the external
 //! reject-list transport is a fixture; no validated consignment is injected.
-#![cfg(all(feature = "bfa-mint", feature = "spv", rgb_to_evm))]
+#![cfg(all(feature = "spv", rgb_to_evm))]
 
 #[allow(dead_code)]
 #[path = "../src/test_support/bfa_consignment.rs"]

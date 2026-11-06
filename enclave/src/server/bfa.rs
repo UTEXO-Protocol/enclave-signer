@@ -3,7 +3,7 @@
 //! in that exact tx, to the request's own deposit on the pinned EVM chain,
 //! covered by the `EVM_FINALITY_TAG` head (M6).
 //!
-//! `server/mod.rs` gates this module on `bfa-validation`.
+//! `server/mod.rs` gates this module on `rgb-validation`.
 
 use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
@@ -58,7 +58,7 @@ pub(super) fn derived_locks(
 
 /// M6: the receipt of `tx_hash` holds the one deposit the mint's lockId derives,
 /// on the pinned chain, before its `beforeBlock`. The pins are checked before any RPC.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(evm_to_rgb)]
 pub(super) fn bind_mint_deposit(
     ctx: &ServerContext,
     tx_hash: &[u8; 32],
@@ -80,7 +80,7 @@ pub(super) fn bind_mint_deposit(
     }
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "bfa-mint build but the EVM RPC client is unavailable - refusing to sign a mint \
+            "the EVM RPC client is unavailable - refusing to sign a mint \
              without independently verifying its FundsIn lock"
                 .into(),
         )
@@ -100,7 +100,7 @@ pub(super) fn bind_mint_deposit(
 }
 
 /// The request's deposit must equal the mint's derived lock.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(evm_to_rgb)]
 fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<()> {
     if paid != derived {
         return Err(EnclaveError::CrossCheck(format!(
@@ -117,5 +117,5 @@ fn bind_request_deposit(derived: &VerifiedLock, paid: &VerifiedLock) -> Result<(
     Ok(())
 }
 
-#[cfg(all(test, feature = "bfa-mint"))]
+#[cfg(test)]
 mod tests;

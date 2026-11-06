@@ -13,10 +13,10 @@
 //! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
 //! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 \
-//!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live -- --ignored
+//!     cargo test -p utexo-bridge-enclave --features mint-signer --test test_evm_event_live -- --ignored
 //! ```
 // FundsIn deposit verification: the EVM -> RGB direction.
-#![cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#![cfg(all(feature = "rgb-validation", evm_to_rgb))]
 
 use attestation_verify::EvmFinalityTag;
 

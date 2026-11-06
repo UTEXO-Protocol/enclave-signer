@@ -103,9 +103,9 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: None,
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_binder: None,
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_sats: None,
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: None,

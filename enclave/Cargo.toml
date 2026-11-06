@@ -92,12 +92,11 @@ aws-nitro-enclaves-nsm-api = "0.5"
 
 [features]
 # A plain `cargo build` is the Concordium-only dev build. RGB needs a signer
-# role. Production images are the mint and burn signers below, with `vsock`. RGB
-# images get `evm-rpc` through `bfa-validation` (see build/Dockerfile.enclave*).
+# role. Production images are the mint and burn signers below, with `vsock`.
 #
 # Single-network EIFs, one flow each:
-#   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
-#   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
+#   RGB mint:         `--no-default-features --features vsock,spv,mint-signer`
+#   RGB burn:         `--no-default-features --features vsock,spv,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (CCD -> EVM
 #                     release and SignCcd; a release build refuses EVM signing
 #                     until EVM_CHAIN_ID and the proxy address are pinned).
@@ -105,14 +104,13 @@ aws-nitro-enclaves-nsm-api = "0.5"
 # signer role whenever `rgb-validation` is on.
 default = ["ccd"]
 
-# Network-selection umbrellas. Enable one for a single-network EIF, or both
-# for the combined build. They gate only request handling (dispatch arms,
-# validators, SPV). Key derivation and the attestation pubkey bundle are the
-# same in every build, so the parent verifier does not change.
+# Network selection gates only request handling (dispatch arms, validators,
+# SPV). Key derivation and the attestation pubkey bundle are the same in every
+# build, so the parent verifier does not change.
 #
-# `rgb` = the RGB/BTC bridge stack. `spv` implies `rgb-validation`, so this
-# pulls the RGB deps and the SPV header chain. `evm-rpc` is a separate opt-in.
-rgb = ["spv"]
+# A signer role turns on the RGB/BTC bridge stack (`rgb-validation`). `spv` adds
+# the SPV header chain to it.
+#
 # `ccd` = the Concordium bridge stack. No extra deps: ed25519 is always on to
 # keep key derivation and the attestation bundle the same in every build.
 ccd = []
@@ -138,12 +136,22 @@ kms-persistence = [
 vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
-# In-enclave RGB consignment validation via rgbstd. Without `spv`, only
-# public-signet mint/burn builds are allowed (lib.rs/policy.rs); Bitcoin
-# confirmations are trusted from the TLS indexer.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:rustls-pki-types"]
+# The RGB bridge stack that a signer role turns on. In the enclave it validates
+# RGB consignments with rgbstd and binds BFA mints to EVM locks. BFA is the only
+# schema the enclave admits. Each BFA `mint` leaves an EVM lock claim that RGB
+# consensus cannot finalize alone.
+#
+# The enclave reads `FundsIn` logs with its own alloy JSON-RPC client. It fails
+# closed on a missing or invalid receipt, or an unsafe/noncanonical block. TLS to
+# the pinned RPC host and CA ends inside the enclave. The host relays only
+# ciphertext through the vsock forwarder.
+#
+# Without `spv`, only public-signet mint/burn builds are allowed
+# (lib.rs/policy.rs); Bitcoin confirmations are trusted from the TLS indexer.
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
 # Bitcoin SPV verification of consignment witness txids before EVM signing.
 # Implies `rgb-validation`: SPV reads the witness txids from the consignment.
+# Only a public-signet image can omit it (`build/build-enclave.sh`).
 # Builds without RGB validation refuse RGB sources; CCD release signing
 # still requires EVM domain pins (networks/evm/validation.rs).
 spv = ["rgb-validation"]
@@ -153,34 +161,20 @@ mock-attestation = ["attestation-verify/mock"]
 # Accept all-zero peer PCRs for debug clone tests (F03-AF-12).
 # Never enable in production builds.
 allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
-# In-enclave EVM `FundsIn` event verification for an EVM -> RGB `Sign`.
-# Default OFF. The enclave fetches the deposit receipt with an in-enclave alloy
-# JSON-RPC client.
-# It fails closed on a missing or invalid receipt, or an unsafe/noncanonical block.
-# TLS to the pinned RPC host and CA ends inside the enclave. The host relays
-# only ciphertext through the vsock forwarder.
-# Implies `rgb-validation`: the bridge path and amount/asset context are there.
-evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
-# Binds BFA mint anchors to EVM locks, in either RGB flow. BFA is the only
-# schema the enclave admits. Each BFA `mint` leaves an EVM lock claim that
-# RGB consensus cannot finalize alone. Without this feature, every mint and
-# every consignment with mint ancestry is refused.
-# Needs `evm-rpc`: the mint signer binds the anchor to its own `FundsIn` read.
-bfa-validation = ["evm-rpc"]
-bfa-mint = ["rgb-validation", "bfa-validation", "dep:strict_encoding"]
 
 # Mint/burn signer role. EXACTLY ONE is required when `rgb-validation` is on
 # (lib.rs `compile_error!`). Each role ships as its own image with its own PCR0
 # and seed. A mint signer has no release rule; a burn signer has no mint rule.
 # The role is attested (`SignerRole`).
 #
-# Both keep `bfa-mint`: a burn consignment carries mint ancestry.
+# Both need `rgb-validation`: a burn consignment carries mint ancestry.
 # `build.rs` turns the role into the `evm_to_rgb` / `rgb_to_evm` cfgs.
 #
-# `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo).
-mint-signer = ["bfa-mint", "kms-persistence"]
+# `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo). It
+# reads each mint and refill from its fascia, so it needs `strict_encoding`.
+mint-signer = ["rgb-validation", "kms-persistence", "dep:strict_encoding"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
-burn-signer = ["bfa-mint"]
+burn-signer = ["rgb-validation"]
 
 [dev-dependencies]
 rand = "0.10.0"

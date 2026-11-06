@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Burn signer enclave image: RGB -> EVM only (vsock + rgb + burn-signer).
+# Burn signer enclave image: RGB -> EVM only (vsock + spv + burn-signer).
 # rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
 # rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
@@ -33,20 +33,19 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
-# (so this binary is RGB-only). The signer role implies
-# `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
-# alloy + tokio); it needs a second host vsock-proxy
-# (EVM_RPC_VSOCK_PORT, default 8002).
+# `spv` implies `rgb-validation`. `--no-default-features` drops `ccd`
+# (so this binary is RGB-only). The signer role implies `rgb-validation`,
+# which includes in-enclave FundsIn verification (alloy + tokio). It needs a
+# second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `burn-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
+# `burn-signer` (implies `rgb-validation`: the mint/burn flow + BFA validation)
 # builds the RGB -> EVM direction only: it signs the `fundsOut` release for a
 # verified RGB burn, and the gas tx that submits it (`SignRawDigest`). It
 # still runs BFA mint scripts, because a burn carries mint ancestry, but it
 # carries no mint PSBT rule at all - the mint signer is
 # Dockerfile.enclave.mint. Two roles, two PCR0s, two seeds, two running
 # enclaves.
-ARG ENCLAVE_FEATURES=vsock,rgb,burn-signer
+ARG ENCLAVE_FEATURES=vsock,spv,burn-signer
 RUN --mount=type=secret,id=lib_key \
     --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
@@ -115,7 +114,7 @@ ENV EVM_CHAIN_ID=${EVM_CHAIN_ID} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=${BITCOIN_NETWORK}
 
-# In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
+# In-enclave EVM verification. The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
