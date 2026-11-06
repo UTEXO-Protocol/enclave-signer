@@ -71,7 +71,7 @@ sequenceDiagram
         Srv->>Inv: RGB invoice, blinded seal only
         Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
     else empty (v2 Bridge)
-        Note right of Srv: recipient bound by the mint lockId (step 3)
+        Note right of Srv: recipient bound by the mint lockId (step 4, M6)
     end
 
     Note over Srv,State: 6 — reserve replay key

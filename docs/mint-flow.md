@@ -16,10 +16,19 @@ document differ, investigate the difference. Either can contain an error.
    The mint commits to `beforeBlock`: its EVM lock must be in an earlier
    (L2) block. The lockId is `LockId(opid, txid)`: the tagged SHA-256
    (`urn:lnp-bp:rgb:lock#2026-11-04`) of the mint OpId and the mint txid in
-   internal byte order, used as is as the `uint256` word. It commits the mint
+   internal byte order, used as is as the `uint256` word. It is
+   `SHA256(t || t || opid || txid)` with `t = SHA256(tag)`, each id as its 32
+   bytes. Test vector: opid bytes 0x00 to 0x1f and txid bytes 0x20 to 0x3f
+   give `1ce683c92fdfb3ef54e39c7b461e731dad02cd240b366441f34a2c2e849a9876`.
+   It commits the mint
    to its exact tx, so the mint tx must never change after the lock: no RBF,
    rebuild or batching, and a retry signs the same PSBT. Another tx of the
-   mint names another lock, which M6 refuses.
+   mint names another lock, which M6 refuses. After the lock, the only way
+   to raise the fee is a CPFP child that spends an output of the mint tx.
+   rgb-lib sends a mint's change to the colored keychain, and `SignBtc` never
+   signs a colored input. So only a `SignRightsRefill` whose fee input spends
+   that change can fund the child. For a witness mint, the user's output can
+   too.
 2. The user locks ERC-20 tokens in the Bridge contract on EVM. The
    `fundsIn` call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
@@ -567,6 +576,11 @@ when it accepts the mint, and refuses a bad one.
   hour of the invoice is left when it prepares the mint, while the lock may
   come any time before `beforeBlock`, `INIT_OP_TTL` later. The bridge must
   bound this: an invoice has to outlive its mint's `beforeBlock`.
+- Receive limits of the receiver's wallet. `process_received_consignment`
+  refuses a locked mint when the receiving UTXO passes
+  `max_allocations_per_utxo`, when other unpaid invoices on it fill that cap
+  or the bundle limit, or when its asset amount passes `u64::MAX`. The
+  enclave cannot check these: they depend on the receiver's wallet.
 
 A host that controls the bridge can then make a mint no receiver accepts,
 after the user locked. It cannot mint units that no deposit backs, and it

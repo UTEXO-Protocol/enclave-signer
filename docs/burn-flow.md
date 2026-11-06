@@ -540,7 +540,9 @@ script of any length), scans the tx inputs for each seal, and hashes the
 bundle id, a commitment to the whole input map (`validate_transition`, and
 the bundle id once more per bundle). An honest bundle carries one or two
 transitions, so these stay linear; a forged one of thousands of transitions does not. The
-walk cost is counted the way rgb-lib walks (`rejected_opouts`): from each
+walk cost is counted as a bound on rgb-lib's walk (`rejected_opouts`). In
+rgb-lib 5010eefa the origins share one `rejected` map (`history_rejected`), so
+a shared history is walked once. The model counts it once per origin: each
 origin on its own, with no list entry to cut it short, stopping just past the
 cap. So a burn of many separate lines costs a few steps per line, however
 long each line's history; only origins that share a long history cost much.
