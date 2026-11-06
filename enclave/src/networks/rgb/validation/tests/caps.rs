@@ -672,8 +672,8 @@ fn the_time_budget_counts_the_inspection_of_a_forged_burn() {
 #[test]
 #[ignore = "builds a 6 MB history; run it in release on request"]
 fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
-    // Between the merge without its walk and the 23.5 s with it.
-    crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 21_000);
+    // Between the 17.2 s of the merge without its walk and the 19.7 s with it.
+    crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 18_000);
     let bytes = merged_chain(listed(), 1_400, 11_500);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
     let walk = reject_walk_cost(&load(&bytes), MAX_REJECT_WALK_COST);
