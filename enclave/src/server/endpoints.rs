@@ -35,7 +35,12 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
-    let endpoints = Endpoints::parse(&req).map_err(EnclaveError::InvalidRequest)?;
+    let endpoints = Endpoints::parse(
+        &req,
+        &ctx.bridge_config.kms_allowed_accounts,
+        ctx.build_ctx.debug_or_test,
+    )
+    .map_err(EnclaveError::InvalidRequest)?;
     #[cfg(feature = "evm-rpc")]
     let tls = endpoints
         .evm_rpc_tls
@@ -200,7 +205,13 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn awaiting(build_ctx: BuildContext) -> ServerContext {
-        let bridge_config = crate::config::BridgeConfig::default();
+        awaiting_with(crate::config::BridgeConfig::default(), build_ctx)
+    }
+
+    fn awaiting_with(
+        bridge_config: crate::config::BridgeConfig,
+        build_ctx: BuildContext,
+    ) -> ServerContext {
         ServerContext::awaiting_launch(
             EnclaveState::new(bitcoin::Network::Regtest),
             bridge_config,
@@ -308,6 +319,35 @@ mod tests {
         assert!(health(&ctx).endpoints_set);
     }
 
+    /// The image pins the AWS accounts of the KMS key. A key ARN in another
+    /// account is refused, and a release image with no list refuses every key.
+    #[cfg(feature = "kms-persistence")]
+    #[test]
+    fn a_key_in_an_unpinned_account_is_refused() {
+        let message = |ctx: &ServerContext| match call(ctx, Request::SetEndpoints(valid(1))) {
+            Response::Error(e) => e.message,
+            other => panic!("expected an error, got {other:?}"),
+        };
+        // KEY_ARN is in account 123456789012.
+        let other_account = crate::config::BridgeConfig {
+            kms_allowed_accounts: vec!["999999999999".into()],
+            ..Default::default()
+        };
+        let ctx = awaiting_with(other_account, BuildContext::current());
+        let got = message(&ctx);
+        assert!(got.contains("does not pin"), "{got}");
+        assert!(!health(&ctx).endpoints_set);
+
+        let release = BuildContext {
+            debug_or_test: false,
+            ..BuildContext::current()
+        };
+        let ctx = awaiting_with(crate::config::BridgeConfig::default(), release);
+        let got = message(&ctx);
+        assert!(got.contains("not pinned"), "{got}");
+        assert!(!health(&ctx).endpoints_set);
+    }
+
     #[test]
     fn a_refused_set_leaves_the_slot_empty() {
         let ctx = awaiting(BuildContext::current());
@@ -385,7 +425,7 @@ mod tests {
             eprintln!("skipped: {} is not on lo0", crate::kms::KMS_LOOPBACK);
             return;
         }
-        let plan = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
+        let plan = forwarder_plan(&Endpoints::parse(&valid(1), &[], true).unwrap());
         let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _, _)| *a).collect();
         assert_eq!(addrs.len(), plan.len(), "{plan:?}");
         let free = TcpListener::bind("127.0.0.1:0")
@@ -426,7 +466,7 @@ mod tests {
     /// plaintext indexer.
     #[test]
     fn tls_endpoints_get_tls_only_forwarders() {
-        let tls = forwarder_plan(&Endpoints::parse(&valid(1)).unwrap());
+        let tls = forwarder_plan(&Endpoints::parse(&valid(1), &[], true).unwrap());
         assert!(
             tls.iter().all(|&(_, _, require_tls)| require_tls),
             "{tls:?}"
@@ -435,10 +475,14 @@ mod tests {
         #[cfg(feature = "rgb-validation")]
         {
             let plaintext = forwarder_plan(
-                &Endpoints::parse(&SetEndpointsRequest {
-                    electrum_url: "tcp://electrum1.test:50001".into(),
-                    ..valid(1)
-                })
+                &Endpoints::parse(
+                    &SetEndpointsRequest {
+                        electrum_url: "tcp://electrum1.test:50001".into(),
+                        ..valid(1)
+                    },
+                    &[],
+                    true,
+                )
                 .unwrap(),
             );
             let indexer = plaintext
@@ -539,7 +583,7 @@ mod tests {
         });
         let winners: Vec<u8> = results.iter().filter(|r| r.1).map(|r| r.0).collect();
         assert_eq!(winners.len(), 1, "{results:?}");
-        let want = Endpoints::parse(&valid(winners[0])).unwrap();
+        let want = Endpoints::parse(&valid(winners[0]), &[], true).unwrap();
         assert_eq!(ctx.launch().unwrap().endpoints, want);
     }
 }

@@ -214,13 +214,17 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     let ca =
         hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim()).unwrap();
     let launch = |host: &str, ca_der: Vec<u8>| {
-        let e = crate::config::Endpoints::parse(&crate::proto::SetEndpointsRequest {
-            electrum_url: "ssl://electrum.test:50002".into(),
-            evm_rpc_host: host.into(),
-            evm_rpc_ca_der: ca_der,
-            evm_rpc_tls_port: 443,
-            ..Default::default()
-        })?;
+        let e = crate::config::Endpoints::parse(
+            &crate::proto::SetEndpointsRequest {
+                electrum_url: "ssl://electrum.test:50002".into(),
+                evm_rpc_host: host.into(),
+                evm_rpc_ca_der: ca_der,
+                evm_rpc_tls_port: 443,
+                ..Default::default()
+            },
+            &[],
+            true,
+        )?;
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, pin) = crate::bootstrap::resolve_evm_data_source(tls);
         let ctx = release_bridge_ctx();

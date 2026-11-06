@@ -128,6 +128,31 @@ impl KmsConfig {
         Ok(())
     }
 
+    /// The key must be in an AWS account the image pins. `allowed` is the list
+    /// from the measured image env
+    /// ([`crate::config::BridgeConfig::kms_allowed_accounts`]). Else the host
+    /// could name a key in its own account and decrypt the seed it is given.
+    /// With no list, `allow_unpinned` (a dev or test build) skips the check and
+    /// a release build refuses.
+    pub fn validate_account(&self, allowed: &[String], allow_unpinned: bool) -> Result<()> {
+        if allowed.is_empty() {
+            if allow_unpinned {
+                return Ok(());
+            }
+            return Err(fail(
+                "KMS_ALLOWED_ACCOUNT_IDS is not pinned in the image - refusing a host-chosen KMS account",
+            ));
+        }
+        // `validate` has checked the shape: field 4 is the account id.
+        let account = self.key_arn.split(':').nth(4).unwrap_or_default();
+        if !allowed.iter().any(|id| id == account) {
+            return Err(fail(
+                "KMS_KEY_ARN is in an AWS account this image does not pin (KMS_ALLOWED_ACCOUNT_IDS)",
+            ));
+        }
+        Ok(())
+    }
+
     /// The KMS host name the SDK resolves for this region. A vsock build pins
     /// it to loopback and forwards [`KMS_PORT`] to the parent.
     pub fn endpoint_host(&self) -> String {

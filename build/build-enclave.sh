@@ -13,6 +13,8 @@
 #   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
 #                    (mint, burn)
+#   KMS_ALLOWED_ACCOUNT_IDS  mint only: AWS accounts of the seed KMS key; the
+#                    recipe fails the build without it
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
@@ -90,6 +92,23 @@ if declares_build_arg RGB_ASSET_ID; then
     fi
     BUILD_ARGS+=(--build-arg "RGB_ASSET_ID=$RGB_ASSET_ID")
     echo "    rgb asset id : $RGB_ASSET_ID"
+fi
+
+# The mint recipe pins the AWS accounts of the seed KMS key. Refuse a missing
+# or malformed list here, before the long build: the recipe's own check only
+# tests that it is not empty.
+if declares_build_arg KMS_ALLOWED_ACCOUNT_IDS; then
+    if [ -z "${KMS_ALLOWED_ACCOUNT_IDS:-}" ]; then
+        echo "Error: $DOCKERFILE requires KMS_ALLOWED_ACCOUNT_IDS (the AWS account id of the seed KMS key)." >&2
+        echo "       Set KMS_ALLOWED_ACCOUNT_IDS=<12-digit id>[,<12-digit id>...] and re-run." >&2
+        exit 1
+    fi
+    if ! [[ "$KMS_ALLOWED_ACCOUNT_IDS" =~ ^[0-9]{12}(,[0-9]{12})*$ ]]; then
+        echo "Error: KMS_ALLOWED_ACCOUNT_IDS must be comma-separated 12-digit AWS account ids, got '$KMS_ALLOWED_ACCOUNT_IDS'." >&2
+        exit 1
+    fi
+    BUILD_ARGS+=(--build-arg "KMS_ALLOWED_ACCOUNT_IDS=$KMS_ALLOWED_ACCOUNT_IDS")
+    echo "    kms accounts : $KMS_ALLOWED_ACCOUNT_IDS"
 fi
 
 # Optional measured configuration for the mint/burn recipes. Unset values

@@ -324,7 +324,8 @@ profile. CI asserts every guard fires.
 
 ### Enclave image (EIF)
 
-No image takes a KMS value: the mint enclave gets them at launch. See
+The mint image carries the KMS account list (`KMS_ALLOWED_ACCOUNT_IDS`). The
+mint enclave gets the other KMS values at launch. See
 [mint KMS setup](docs/kms-persistence.md) for the parent and policy requirements.
 
 Every enclave image needs, at build time, the deploy key of
@@ -336,7 +337,8 @@ the `UTEXO-Protocol/<repo>-s-bfa` mirrors of the RGB protocol crates
 them for the cargo build only. They are never in a layer, the image or PCR0.
 
 ```bash
-RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
+RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" KMS_ALLOWED_ACCOUNT_IDS="<12-digit AWS account id>" \
+  DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn ./build/build-enclave.sh   # burn signer
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 ```
@@ -356,7 +358,15 @@ The helper and Dockerfile reject an empty value. They do not validate the id
 or reject a value that contains only spaces. The image contains the asset pin.
 A runtime environment override is not the provisioning procedure.
 
-The EIF workflow gets this value from the repository variable `BFA_RGB_ASSET_ID`.
+The mint image also needs `KMS_ALLOWED_ACCOUNT_IDS`: the 12-digit AWS account
+ids of the seed KMS key, comma-separated. The helper refuses a missing or
+malformed list before Docker starts. `make build_enclave_mint` takes it from the
+environment too. The image contains the list, so PCR0 measures it. The burn
+image does not take it.
+
+The EIF workflow gets the asset from the repository variable `BFA_RGB_ASSET_ID`.
+It gets the account list from the repository variable `KMS_ALLOWED_ACCOUNT_IDS`,
+and the mint build fails when that variable is unset.
 It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
 This file accompanies the EIF in the Actions artifact and S3 bundle.
 
@@ -444,9 +454,11 @@ and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 The production Dockerfiles bake the bridge pins as `ENV` (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`, `FUNDS_IN_CONTRACT`,
 `TOKEN_CONTRACT`, `GAS_TX_ALLOWED_TO`, `BTC_MAX_TOTAL_SATS`, ...), so they are
-measured into PCR0. The cloning secret is never baked. The chain endpoints and
-the KMS values are not in the image: a rebuild of the EIF gets the same PCR0
-without knowing them (build access: see Building).
+measured into PCR0. The mint image also bakes `KMS_ALLOWED_ACCOUNT_IDS`, so a
+rebuild of the EIF gets the same PCR0 only with the same list. The cloning
+secret is never baked. The chain endpoints and the other KMS values are not in
+the image: a rebuild gets the same PCR0 without knowing them (build access: see
+Building).
 
 ## Running
 
