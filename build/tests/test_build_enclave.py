@@ -400,6 +400,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
                                      BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
+                                     SPV_MIN_CONFIRMATIONS='6', EVM_FINALITY_TAG='safe',
                                      RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
@@ -410,6 +411,9 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug,alloy_transport_http=off')
+                # Every recipe fixes these two. The environment cannot change them.
+                self.assertNotIn('SPV_MIN_CONFIRMATIONS', args)
+                self.assertNotIn('EVM_FINALITY_TAG', args)
                 self.assertEqual(args['FUNDS_IN_CONTRACT'],
                                  '0xe67c9eb5006512525f597c3fa6119891bd4efaa6')
                 if role == 'burn':
@@ -419,7 +423,6 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertEqual(args['GAS_TX_MAX_GAS_LIMIT'], '3000000')
                     self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], inputs['STAGE_GAS_TX_ALLOWED_SELECTORS'])
                 else:
-                    self.assertEqual(args['RGB_MAX_UNOWNED_SATS'], '1500')
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
 
     def test_stage_profile_refuses_legacy_recipe_and_unknown_profile(self):

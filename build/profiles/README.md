@@ -38,6 +38,9 @@ Use an asset issued on the BFA schema supported by this revision. Do not reuse
 the old `BFA_RGB_ASSET_ID` variable for this profile. Verify the selectors against
 the deployed Multisig ABI. `STAGE_GAS_TX_ALLOWED_SELECTORS` is required only for Burn.
 
+Mint also needs `KMS_ALLOWED_ACCOUNT_IDS`, as every mint image does. The workflow
+reads it from the repository variable of that name. A local build must export it.
+
 Endpoints are launch configuration, not stage build inputs. Do not set
 `STAGE_ENDPOINTS_SHA256` or calculate a build digest. With PR #371, members can
 use different endpoint hosts, ports and CA files with the same EIF for a given
@@ -73,8 +76,7 @@ can include private RPC paths or response bodies. It does not enable Nitro
 debug mode, mock attestation or seed import.
 
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the
-connector. Its `RGB_MAX_UNOWNED_SATS` is 1500. The recipe's other limits remain
-in effect, including `BTC_MAX_TOTAL_SATS=1000000`. Both stage roles require
+connector. The recipe's other limits remain in effect, including `BTC_MAX_TOTAL_SATS=1000000`. Both stage roles require
 3 confirmations. Review these limits before publishing a release.
 
 The Burn profile pins gas destination to the stage Multisig and uses limits

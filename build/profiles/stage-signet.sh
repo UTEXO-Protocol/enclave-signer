@@ -27,10 +27,8 @@ TOKEN_CONTRACT="$STAGE_TOKEN_CONTRACT"
 RGB_ASSET_ID="$STAGE_RGB_ASSET_ID"
 RUST_LOG=debug,alloy_transport_http=off
 
-if [ "$DOCKERFILE" = Dockerfile.enclave.mint ]; then
-    # MINT_WITNESS_SAT is 1500 in the recipe; the connector must match it.
-    RGB_MAX_UNOWNED_SATS=1500
-else
+# MINT_WITNESS_SAT is 1500 in the mint recipe; the connector must match it.
+if [ "$DOCKERFILE" = Dockerfile.enclave.burn ]; then
     : "${STAGE_GAS_TX_ALLOWED_SELECTORS:?Confirm the selectors against the new Multisig ABI}"
     [[ "$STAGE_GAS_TX_ALLOWED_SELECTORS" =~ ^0x[0-9a-fA-F]{8}(,0x[0-9a-fA-F]{8})*$ ]] || {
         echo 'Error: STAGE_GAS_TX_ALLOWED_SELECTORS must be comma-separated 4-byte hex selectors' >&2; exit 1
