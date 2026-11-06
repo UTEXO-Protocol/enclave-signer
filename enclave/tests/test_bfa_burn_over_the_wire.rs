@@ -250,6 +250,8 @@ impl EvmReceiptProvider for EmptyRejectList {
     }
 }
 
+// The contract keeps the `rgbOpId` typehash label, but that word is the
+// LockId of the mint transition in its exact Bitcoin witness transaction.
 fn mint_deposit_id(lock_id: [u8; 32]) -> B256 {
     keccak256((
         keccak256("UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"),
@@ -269,6 +271,7 @@ fn burn_id(p: &FundsOutParams) -> U256 {
 struct Fixture {
     ctx: ServerContext,
     source: RgbSource,
+    mint: bfa_consignment::Mint,
     params: FundsOutParams,
     route: Route,
     list_reads: Arc<AtomicUsize>,
@@ -357,6 +360,7 @@ impl Fixture {
         Self {
             ctx,
             source,
+            mint: history.mints[0],
             params,
             route,
             list_reads,
@@ -542,6 +546,32 @@ fn signs_real_burn_and_verifies_direct_eip712_signature() {
 #[test]
 fn signs_real_burn_and_verifies_layerzero_eip712_signature() {
     Fixture::new(Route::LayerZero).control();
+}
+
+#[test]
+fn refuses_settlement_ids_derived_from_the_bare_opid_or_another_mint_transaction() {
+    for route in [Route::Direct, Route::LayerZero] {
+        let fixture = Fixture::new(route);
+        fixture.control();
+        let mut other_txid = fixture.mint.witness_id.to_byte_array();
+        other_txid[0] ^= 1;
+        for wrong_lock in [
+            bfa_consignment::opid_bytes(fixture.mint.opid),
+            bfa_consignment::lock_id_bytes(
+                fixture.mint.opid,
+                bitcoin::Txid::from_byte_array(other_txid),
+            ),
+        ] {
+            let mut params = fixture.params.clone();
+            params.settlementData = (vec![mint_deposit_id(wrong_lock)],)
+                .abi_encode_params()
+                .into();
+            assert_refusal(
+                exchange(&fixture.ctx, fixture.request(params)),
+                "settlementData mismatch",
+            );
+        }
+    }
 }
 
 #[test]
