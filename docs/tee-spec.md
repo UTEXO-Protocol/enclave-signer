@@ -51,7 +51,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
 | Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
-| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. The swap flow reads it for witness status and off-PSBT seals | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); the burn path counts a witness as mined only through an SPV proof against the enclave header chain. The mint and burn launches still pin the URL until the images drop the indexer. |
+| Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. A burn signer built without `spv` (public Signet, `Development` policy) trusts it for witness status and confirmation depth (Known limits) | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); an `spv` burn counts a witness as mined only through an SPV proof against the enclave header chain. TLS authenticates the indexer; it proves no Bitcoin consensus. The mint and burn launches still pin the URL until the images drop the indexer. |
 | EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
 | AWS KMS (mint only) | seed generation, encryption, and decryption | host access to plaintext, subject to the configured KMS policies |
@@ -124,8 +124,8 @@ Four crates plus the infrastructure they touch:
     the mint signer's PSBT core (`psbt_commit.rs`) and parent proof
     (`parent_proof.rs`),
     invoice recipient bind (`invoice.rs`), taproot signing, the SPV header
-    chain (`spv/`), plain-BTC ownership and sats gates, and the per-build flow
-    rules in `flow/{swap,mint_burn}.rs`;
+    chain (`spv/`), plain-BTC ownership and sats gates, and the flow rules in
+    `flow.rs`;
   - `networks/evm/` -- `fundsOut` / `lzFundsOut` calldata validation and
     crosschecks, EIP-712 signing, `FundsIn` event verification
     (`events.rs`), gas-tx validation;
@@ -202,8 +202,8 @@ refuses to start with less, or with no readable total. `MemTotal` leaves out
 the memory the kernel keeps for itself, so `run-enclave --memory` must give
 at least 4096 MiB, a whole number of GiB. The deploy scripts use that value
 and refuse a smaller `ENCLAVE_MEMORY`. `deploy-host.sh` and
-`utexo-enclave-ctl.sh check` also refuse a hugepage pool that cannot hold
-every enclave of the host.
+`utexo-enclave-ctl.sh check` also refuse a hugepage pool smaller than the
+launch value of the one enclave they check.
 
 **Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
@@ -237,9 +237,9 @@ Each loopback forwarder of a TLS endpoint (an `ssl://` or `https://` indexer,
 the EVM RPC, KMS) sends on only a connection that starts with a TLS handshake
 record (`enclave/src/egress.rs`). The enclave has no other network path, so no
 client can send plaintext to the host for such an endpoint, not even after an
-HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
-(`reqwest`) follow redirects, and their APIs here cannot turn that off. A
-redirect to a port with no forwarder, or to another host, has no route out.
+HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) disables redirects.
+`esplora-client` (`minreq`) can follow redirects; a redirect to a port with no
+forwarder, or to another host, has no route out.
 The parent -> enclave channel (vsock port 5000) is a separate inbound listener
 and is not affected. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
@@ -284,13 +284,13 @@ SecurityPolicy = Production {
 
 - **Resolution** (`policy.rs`): any dev feature
   (`mock-attestation`, `allow-seed-import`), a
-  debug/test build, a non-bridge
+  debug/test build, a build without `spv`, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
-  `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
+  `spv` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is
   `Disabled` without `evm-rpc`. Otherwise it is `PinnedTlsRpc` with the host
   and the CA SHA-256 of the launch set. The verifier pins both.
-- **Boot gate:** a release `rgb-validation` build that does not resolve to a
+- **Boot gate:** a release `spv` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
   and `TOKEN_CONTRACT` must be non-zero, and `BTC_RELAY_MODE` must be `required`.
   A mainnet EVM chain (`EVM_CHAIN_ID` 1 or 42161) requires
@@ -304,7 +304,9 @@ SecurityPolicy = Production {
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` requires
   a mint/burn role, real attestation, `BITCOIN_NETWORK=signet` and
-  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
+  `BTC_RELAY_MODE=none`. Such a build boots and signs on
+  `Development { IndexerTrusted }`, and on no other policy. The gas rule and
+  `SPV_MIN_CONFIRMATIONS` are measured there, not attested. Its Development policy does not commit launch fields;
   `SetEndpoints` enforces the measured network digest, and operators approve
   KMS inputs separately.
   A build fails with both signer roles or with neither.
@@ -426,7 +428,8 @@ shapes no longer exist.
 ### 7.1 RGB burn -> EVM unlock (`fundsOut`)
 
 For an RGB source, `fundsOut` signing runs the checks in Sec 9:
-validated consignment, SPV-confirmed anchors, canonical calldata, pinned
+validated consignment, anchors confirmed by SPV (by the indexer on a no-SPV
+build, Sec 8), canonical calldata, pinned
 chain/contract, amount coverage, a deadline at most 1 day ahead. On the
 LayerZero route also: `minAmountLD` in `(0, amount]`, and `extraOptions`
 empty or one gas-only executor `lzReceive` option.
@@ -518,8 +521,8 @@ against the request only.
 
 A bridge PSBT request MUST carry the EVM deposit tx hash. The mint signer
 reads the mint from the fascia of the PSBT's tx (`RgbDestination.fascia`, 9)
-and needs the parent fascia (`parent_fascia`, 10); the retired swap flow
-needs the RGB consignment. Listener-supplied
+and needs the parent fascia (`parent_fascia`, 10). It reads no consignment.
+Listener-supplied
 `event_valid` / `event_finalized` booleans are ignored. The
 enclave checks the deposit against the approved provider's receipt, blocks
 and selected finality head, subject to the trust assumption in Sec 2. These checks fail closed
@@ -600,22 +603,10 @@ Accepted residual: a host that pays
 for a junk parent tx can make a refill destroy one right on its fee input, at
 most 12 per enclave hour; it cannot take a right.
 
-**Swap flow (retired).** The PSBT is bound to the validated consignment:
-unsigned txid == witness txid, every input a native SegWit output (so it
-finalizes with an empty `scriptSig` and the unsigned txid is the final txid),
-input prevouts == witness prevouts, `SIGHASH_ALL` / taproot `DEFAULT` only,
-the bundle the PSBT commits hides no transition, every transition it commits
-must be a `TS_TRANSFER`, and the group's asset outputs must cover the
-credited amount (`>=`, since the surplus is bridge change). Every colored
-input the enclave signs must spend a seal the signed bundle closes.
-Independently, every `OS_ASSET` output is split into legs: a confidential
-(blinded) leg is the recipient, a revealed leg MUST be proven self-owned
-(the script of the enclave's single Colored input, or a BIP-86 key-path output
-of its Colored account at a wallet child path `[0, i]`, both steps
-non-hardened; at most 4 off-PSBT change outpoints), and the recipient
-legs MUST sum exactly to `amount - commission`.
-The destination amount the route check uses is this enclave-derived recipient
-total, not the wire `psbt_output_amount`. A pinned fee policy, shared with the
+The destination amount the route check uses is `mint.issued` from the fascia,
+not the wire `psbt_output_amount`.
+
+**Fee policy.** A pinned fee policy, shared with the
 plain-BTC `SignBtc` path, rejects a PSBT whose miner fee exceeds a compile-time
 maximum fee rate (over the unsigned size, which the host cannot pad) or a
 compile-time maximum absolute fee, and one that does not fund 1 sat/vB over its
@@ -815,7 +806,7 @@ Both are trust exceptions to Sec 2, summarized in Sec 13.
 
 ## 8. RGB / Bitcoin / SPV verification
 
-The consignment pipeline runs on the burn path and in the swap flow; the mint
+The consignment pipeline runs on the burn path; the mint
 signer runs none (Sec 7.2). Cheap checks first: non-empty payload within
 `MAX_CONSIGNMENT_BYTES`, proof count and bytes within `MAX_MERKLE_PROOFS` /
 `MAX_TOTAL_PROOF_BYTES`, `keccak256(consignment) == consignment_hash`
@@ -844,17 +835,14 @@ the resolvers is a refusal of the request, and so is any rgb-lib warning. It
 resolves every witness on chain:
 the transaction comes from the consignment, its status from a source the
 enclave trusts, and it must be mined at least `SPV_MIN_CONFIRMATIONS` deep.
-On the burn path that source is the request's Merkle proofs, verified against
-the enclave header chain (rule 4 below) before consensus runs. In the swap
-flow it is the pinned indexer, through non-verbose calls only, and the depth
-counts every block from the indexer's tip, testnet min-difficulty ones
-included. There a witness that a mined witness spends needs no lookup: Bitcoin
-consensus makes it at least as deep. An unmined, unknown
+In an `spv` build that source is the request's Merkle proofs, verified against
+the enclave header chain (rule 4 below) before consensus runs. A burn signer
+built without `spv` uses the pinned indexer instead, through non-verbose calls
+only, and the depth counts every block from the indexer's tip. That build runs
+on public Signet only, and it trusts the indexer (Known limits). An unmined, unknown
 or shallow witness fails consensus, so single-use seals hold: of two
-conflicting transfers of the same units, only the mined one validates. The
-only unmined witness allowed is the transaction being signed, as the last
-witness, in the swap flow; the PSBT bind then requires it to be the PSBT's
-own transaction. A proof the consignment carries is never used: the
+conflicting transfers of the same units, only the mined one validates. A proof
+the consignment carries is never used: the
 resolver offers no block headers, so rgb-ops asks the resolver instead. Phase 2 also
 confirms each claim only
 against a lock bound to its exact `(lockId, amount)`, lockId being
@@ -887,10 +875,8 @@ The two readings must name the same settling transition. The validated
 contract id must then equal the
 declared asset id and the pinned `RGB_ASSET_ID` (on the `fundsOut` path this
 last leg applies once the bridge is configured; on the PSBT paths it is
-unconditional). The RGB-source path then checks the SPV proofs again, with
-freshness, exact coverage and block pins. The swap destination path binds the
-transaction being signed to the consignment; that transaction need not
-already be mined.
+unconditional). In an `spv` build the RGB-source path then checks the SPV
+proofs again, with freshness, exact coverage and block pins.
 
 For an RGB-source request, the SPV layer enforces these rules:
 
@@ -939,7 +925,7 @@ For an RGB-source request, the SPV layer enforces these rules:
    The attested policy commits it.
 
 `SPV_MIN_CONFIRMATIONS` is read from the image env at boot, so PCR0 measures
-it, and the attested policy commits it. The burn image bakes 6, the mint image
+it, and a `Production` attested policy commits it. The mint and burn images bake
 3. The host cannot set it: a Nitro enclave takes no env from the host, and a
 value of zero or a non-number stops the boot. The other SPV thresholds above
 are compile-time constants. EVM receipts always require coverage by the
@@ -1070,7 +1056,8 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   selected finality head. `PinnedTlsRpc` retains trust in the approved provider's
   data (Sec 2); CCD source validity is delegated to the listener.
 - Plain-BTC and bridge PSBTs sign only vanilla and colored accounts respectively.
-  Unowned output budgets permit bounded outputs outside proved custody scripts.
+  The plain-BTC unowned budget permits bounded outputs outside proved custody
+  scripts.
 - Cloning transfers an encrypted seed between enclaves with matching
   PCR0/1/2 and PCR3 (same image, same IAM role). Clones share one signing
   identity; they are not independent quorum members.
@@ -1085,7 +1072,7 @@ incomplete header chain; cross-network consignment; missing/failed/unconfirmed
 `FundsIn` verification; unavailable finality head or mismatched receipt block hash;
 `operationId` mismatch; fee over the pinned fee rate or
 absolute maximum, or under the relay floor (both PSBT paths); PSBT not
-anchored to the consignment (swap) or not committing exactly one mint or
+committing exactly one mint or
 refill of the asset, or without its rgb-lib fascia or a parent fascia that
 pins the spent right (mint signer); disallowed output script or value cap exceeded
 (plain BTC); non-allowlisted gas tx; wrong phase; expired deadline; duplicate bridge operation within the local cache window; oversized frame, field, or header batch.
@@ -1210,7 +1197,7 @@ Known limits. Read them before deployment.
   deploy key of the first (`lib_key`); the build scripts also still require
   `rgb_deps_token`, which maps no URL since rgb-lib bfa.6. Both are BuildKit secrets: never in a
   layer, the image or PCR0. Until the RGB-Tools release is public, only a
-  holder of that access can reproduce PCR0. All five EIF recipes pin both base images
+  holder of that access can reproduce PCR0. All three EIF recipes pin both base images
   by digest and install packages from the signed Debian snapshot
   `20261007T000000Z` over HTTPS. The parent and dev image recipes use live APT
   repositories. EIF CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`,
@@ -1229,6 +1216,13 @@ Known limits. Read them before deployment.
   `BTC_RELAY_MODE=required` and a relay that applies the same rule. Signet
   does not check PoW, `nBits` or its challenge signature (Sec 8). Regtest also
   skips PoW and `nBits` checks. The mint path reads no witness status.
+- **Builds without SPV.** A burn signer built without `spv` trusts the pinned
+  indexer for witness status and confirmation depth. TLS authenticates that
+  endpoint; it proves no Bitcoin consensus. So the indexer can report a witness
+  as mined or deep when it is not, and a release can then be signed. The build
+  checks no Merkle proof and no BtcRelay commit: it requires both to be empty.
+  It runs on public Signet only and attests `Development`, so `attest-verify`
+  and `verify-launch` refuse it.
 - **Request deadlines.** The socket deadline does not cancel handler work.
   Multiple indexer or RPC calls can take longer than the response budget.
 - **Value limits.** Wire asset amounts are `u64`. The enclave refuses larger

@@ -494,10 +494,10 @@ mod transfer {
         );
     }
 
-    /// A last transition that is not this build's withdrawal type must be
-    /// refused. `TS_MINT` is a deposit shape in both flows, so both builds
-    /// refuse it. This also keeps a mint-shaped consignment out of a swap
-    /// enclave.
+    /// A last transition that is not a burn must be refused. `TS_MINT` is the
+    /// deposit shape of this flow, so the build refuses a consignment that
+    /// settles on a mint: a mint destroys no units, so it cannot back a
+    /// release.
     #[test]
     fn rejects_when_last_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);

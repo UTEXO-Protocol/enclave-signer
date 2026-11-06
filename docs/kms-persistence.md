@@ -128,8 +128,10 @@ the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
 host deployment. Do not run a second listener on `8003` or `8004`.
 
-`deploy/deploy-host.sh` deploys only the combined image, so it does not launch the mint signer.
-Set the mint signer's KMS values with `cli set-endpoints`.
+`deploy/deploy-host.sh` takes `SIGNER_ROLE=mint` or `burn` and deploys one CID per run. It writes
+the KMS values of its environment to `/etc/utexo/enclave.env`, and `utexo-enclave-ctl.sh start`
+sends them in `set-endpoints`. A mint enclave refuses blank KMS values, and `start` then terminates
+it, so you cannot add them by hand after the deploy. `release-eif.yml` exports no KMS value.
 No deployment script provisions the KMS relay, broker storage settings, or AWS policies.
 
 ## AWS permissions and persistence

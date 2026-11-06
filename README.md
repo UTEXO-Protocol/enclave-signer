@@ -48,8 +48,9 @@ Reference material:
 3. The enclave holds the keys. It checks the request and signs, or refuses.
 4. The enclave reaches the Bitcoin indexer (Electrum or Esplora) and the EVM
    JSON-RPC through host vsock proxies. TLS ends inside the enclave. A release
-   image accepts only an `ssl://` or `https://` indexer URL. Only the retired
-   swap flow reads the indexer.
+   image accepts only an `ssl://` or `https://` indexer URL. An `spv` image
+   reads no indexer to sign. A burn signer built without `spv`, on public
+   Signet only, takes witness status and depth from the pinned indexer.
 5. The parent sends Bitcoin block headers to the enclave. On mainnet, the
    enclave checks proof of work and maintains its own header chain.
    On testnet4 it also applies the 20-minute rule and BIP94. On the testnets
@@ -69,7 +70,7 @@ See the [component diagram](docs/diagrams/01-components.md) and the
 | `enclave-proto/` | - | Vendored `enclave` protobuf package. Pre-generated Rust, no `build.rs`. |
 | `attestation-verify/` | - | Nitro attestation verifier (COSE_Sign1, cert chain to the AWS root, PCRs). Also the encoding of the security-policy commitment. The enclave and the parent both use it. |
 | `parent/` | `utexo-bridge-parent` | gRPC server on the EC2 host. Translates `ParentService` RPCs to the enclave wire protocol. Syncs Bitcoin headers. |
-| `parent/` | `utexo-bridge-parent-cli` | Direct enclave client: endpoints, key init, cloning, keys, header sync, manual signing, health. |
+| `parent/` | `utexo-bridge-parent-cli` | Direct enclave client: endpoints, key init, cloning, keys, last saved block, manual signing, health. |
 | `parent/` | `attest-verify` | Gets an attested public key through the parent and verifies it end to end. |
 
 `parent/` is a **separate cargo workspace** with its own `Cargo.lock`. See
@@ -196,11 +197,15 @@ The enclave resolves one `SecurityPolicy` when the operator sets the
 endpoints at launch. The policy comes from build flags, image pins and the
 endpoints. It is `Production { ... }` or `Development { reason }`.
 
-- A release bridge build refuses to boot if its pins do not make a valid
+- A release `spv` build refuses to boot if its pins do not make a valid
   `Production` policy.
 - It also refuses endpoints that do not make a valid `Production` policy.
+- A release build without `spv` never makes a `Production` policy. With the
+  public-Signet pins it boots and signs on `Development { IndexerTrusted }`,
+  which commits no policy field.
 - The policy goes into the attestation `user_data`, with the signer role.
-- `attest-verify` builds the expected policy and fails on any difference.
+- `attest-verify` builds the expected policy and fails on any difference. It
+  expects `Production`, so it refuses a build without `spv`.
 
 See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
 
@@ -224,6 +229,8 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
 - `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
   clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
   the enclave.
+- The parent runs at most `GRPC_MAX_CONCURRENT_SIGN` `Sign` requests at once. A
+  `Sign` above that gets `UNAVAILABLE` at once, and the parent does not queue it.
 - `GET /health` on a loopback port tells if the enclave can sign now. See
   [Readiness endpoint](#readiness-endpoint).
 
@@ -265,6 +272,9 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
   credential, attestation, PCR or pubkey (`PERMISSION_DENIED`), `6` replayed
   attestation nonce (`ALREADY_EXISTS`), `7` seed-export hard cap
   (`RESOURCE_EXHAUSTED`).
+- `8` the deposit receipt is above the selected EVM finality head
+  (`FAILED_PRECONDITION`, with the fixed message prefix
+  `evm event pending finality:`). The bridge waits and retries.
 
 ## Prerequisites
 
@@ -426,7 +436,7 @@ The script builds the Docker image with `SOURCE_DATE_EPOCH` set to the commit
 time, converts it with `nitro-cli build-enclave`, and writes the EIF,
 `PCR.json` and `SHA256SUMS` to `build/`. Reproducibility inputs: pinned
 toolchain, digest-pinned base images, `--locked`, `CARGO_INCREMENTAL=0`,
-path-prefix remapping, pre-generated proto code. All five EIF recipes use
+path-prefix remapping, pre-generated proto code. All three EIF recipes use
 digest-pinned Debian 13 Trixie images for both build and runtime stages.
 The builder uses Rust `1.96.1`, matching `rust-toolchain.toml`.
 Both stages install packages from the signed Debian snapshot
@@ -448,7 +458,8 @@ measurements do not apply to these images.
 variants on a plain runner with `nitro-cli 1.4.5` and uploads EIF + PCRs + host
 binaries to `s3://<bucket>/eif/<git_sha>/rgb-mint/` and `rgb-burn/`.
 `release-eif.yml` takes a `signer_role` (`mint` or `burn`): `deploy/deploy-host.sh`
-fetches `eif/<git_sha>/rgb-<role>/utexo-bridge-enclave-<role>.eif` and runs it on every CID.
+fetches `eif/<git_sha>/rgb-<role>/utexo-bridge-enclave-<role>.eif` and runs it on one CID.
+The workflow passes no `ENCLAVE_CID`, so it uses the default, CID 16.
 The `cd-*.yml` workflows push container images for
 the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
 and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
@@ -472,20 +483,25 @@ Building).
 RUST_LOG=debug cargo run -p utexo-bridge-enclave
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
-RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --manifest-path parent/Cargo.toml
+RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true \
+  cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent
 
 # Or: parent reachable from other hosts, plaintext, no mTLS (see "insecure-dev" below)
 RUST_LOG=debug GRPC_HOST=0.0.0.0 GRPC_PORT=50051 \
-  cargo run --manifest-path parent/Cargo.toml --features insecure-dev
+  cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent --features insecure-dev
 
 # CLI (shell function works in bash and zsh)
 cli() { cargo run --manifest-path parent/Cargo.toml --bin utexo-bridge-parent-cli -- "$@"; }
-cli set-endpoints --electrum-url tcp://<host>:<port>   # once, before any signature (debug build; release needs ssl://)
+cli set-endpoints   # once, before any signature
 cli init
 cli get-keys
-cli get-last-saved-block
 cli --help
 ```
+
+The default enclave build is `ccd`. It takes no chain endpoints and refuses
+`get-last-saved-block`. On an RGB role build, `set-endpoints` also needs
+`--electrum-url`, `--evm-rpc-host`, `--evm-rpc-tls-port` and
+`--evm-rpc-ca-der-file`. See [Production (Nitro)](#production-nitro).
 
 `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
 
@@ -532,8 +548,9 @@ host, or start the `utexo-parent@` units. Each parent unit also starts its
 enclave unit and the allocator service.
 
 Both deploy scripts read `memory_mib` and the hugepages that the kernel holds.
-`deploy-host.sh` refuses a pool that cannot hold every enclave before it
-downloads or stops anything. `systemctl restart` stops the old enclave before
+`deploy-host.sh` refuses a pool smaller than the launch value of the one
+enclave it deploys, before it downloads or stops anything. It does not count
+pages that another enclave of the host holds. `systemctl restart` stops the old enclave before
 `start` runs. So run `utexo-enclave-ctl.sh check <cid>` before each step of a
 rolling restart. It makes the same checks and changes nothing. `start` refuses
 only when the free hugepages cannot hold its own enclave.
@@ -588,9 +605,10 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ./utexo-bridge-parent
 ```
 
-`deploy/deploy-host.sh` installs the systemd units for a three-enclave host:
-CIDs 16 / 18 / 20 with parents on ports 50051 / 50052 / 50053. It verifies the
-EIF checksum and PCR0 against the S3 manifest before and after start.
+`deploy/deploy-host.sh` installs the systemd template units and starts one
+enclave and its parent. The supported CIDs are 16 / 18 / 20, with parents on
+ports 50051 / 50052 / 50053. It verifies the EIF checksum and PCR0 against the
+S3 manifest before and after start.
 A restart removes the in-memory keys. Initialize or clone each enclave again.
 Mint signers recover their saved KMS seed through `InitializeKey`. They require
 the verified address pin and do not support peer cloning.
@@ -666,7 +684,7 @@ Data sources and transport:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it. The mint and burn images still pin the URL and start its forwarder. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only a burn signer built without `spv` reads it. The mint and burn images still pin the URL and start its forwarder. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host vsock-proxy port for AWS KMS. |
 | `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. Every image sets `finalized`. |
@@ -719,7 +737,7 @@ Limits and dev knobs:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_CONSIGNMENT_BYTES` | 10 MiB | Consignment size limit. Sized for a history of 10,000 transitions, each with an SPV proof. The enclave refuses to start with a larger value, because the request memory model holds only up to 10 MiB. |
+| `MAX_CONSIGNMENT_BYTES` | 10 MiB | Consignment size limit. Sized for a history of 10,000 transitions, each with an SPV proof. The enclave refuses to start with a larger value, because the request memory model holds only up to 10 MiB. Unset, unparseable or zero gives the default. The enclave reads it from the image env at boot, so PCR0 measures it. No supplied image sets it, and the attested policy does not commit it. |
 | `MAX_MERKLE_PROOFS` | `16384` | Proof-count limit per request. A burn needs one proof for each witness tx in its history. |
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes limit per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash:bits:time[:chainwork]` moves the SPV anchor forward. `bits` and `time` are those of that block. The median-time-past rule reads `time`, and on mainnet and the testnets the `nBits` checks read both. Without `chainwork` (Core's `getblockheader` value), the enclave refuses every RGB-source release under `BTC_RELAY_MODE=required`. `none` needs no chainwork. A production-shaped build refuses to boot when set. |
@@ -729,17 +747,29 @@ Limits and dev knobs:
 
 ### Parent
 
+The parent reads these from its environment at start, so a change needs a
+restart. They are not in the enclave image, and the attested policy does not
+commit them. A number that does not parse takes the default with no log, unless
+the row says otherwise. `deploy-host.sh` rewrites `/etc/utexo/parent-<CID>.env`
+on each run, so a value set by hand in that file is lost. It writes no
+`GRPC_MAX_CONCURRENT*`, `GRPC_REQUEST_TIMEOUT_SECS` or `SIGNED_RESPONSE_*`
+value, so a deployed parent uses their defaults.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRPC_HOST` | `127.0.0.1` | Bind address. The deploy script defaults to the private EC2 address. |
 | `GRPC_PORT` | `5000` | gRPC port. Deployments use 50051-50053. |
+| `GRPC_MAX_CONCURRENT` | `128` | Requests in progress over all connections. The parent refuses a request above the limit and does not queue it. `0` acts as `1`. |
+| `GRPC_MAX_CONCURRENT_SIGN` | `8` | `Sign` requests in progress. A `Sign` above the limit gets `UNAVAILABLE` at once. `0` acts as `1`. The `MemoryMax=1G` of the parent unit counts on the default, so review it before you raise this value. |
+| `GRPC_MAX_CONCURRENT_PER_CONN` | `32` | Requests in progress on one connection, and the HTTP/2 stream limit. `0` acts as `1`. |
+| `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC request. The connection deadline is 300 s plus this value plus 10 s ([parent mTLS](docs/parent-mtls.md)). `0` acts as `1`. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
-| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for one hour, so keep the two aligned. |
-| `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. |
-| `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. |
+| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for one hour, so keep the two aligned. With `0`, no retry gets a kept reply. |
+| `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. `0` still keeps one reply. |
+| `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. The parent does not keep a larger reply. `0` keeps none. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |
 | `HEALTH_PORT` | `5001` | Port for `GET /health` |
 | `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, `1..=10000`. Out of range stops the parent at boot. |
@@ -799,7 +829,7 @@ utexo-bridge-parent-cli --addr vsock://16 health
 cargo test                                                              # enclave workspace, default features
 cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
-cargo test -p utexo-bridge-enclave --features evm-rpc
+cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer --test test_evm_event_live
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
 ```

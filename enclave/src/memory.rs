@@ -173,8 +173,8 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// carry this value and the minimum as literals, and a test pins them to the
 /// constants. The deploy scripts refuse a smaller `ENCLAVE_MEMORY`, or one
 /// that is not a whole number of GiB. `deploy-host.sh` and
-/// `utexo-enclave-ctl.sh check` also refuse a hugepage pool that cannot hold
-/// every enclave of the host at the launch value. `utexo-enclave-ctl.sh
+/// `utexo-enclave-ctl.sh check` also refuse a hugepage pool smaller than the
+/// launch value of the one enclave they check. `utexo-enclave-ctl.sh
 /// start` refuses only when the free hugepages cannot hold its own enclave.
 pub const RUN_ENCLAVE_MEMORY_MIB: usize = 4096;
 

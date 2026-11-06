@@ -27,14 +27,14 @@ requests and relays bytes; it is outside the enclave trust boundary.
 | Area | Code or configuration | Read with the change |
 | --- | --- | --- |
 | Enclave validation, signing and lifecycle | `enclave/src/` | [Technical specification](docs/tee-spec.md) |
-| Mint signing, plain BTC and rights refill | `enclave/src/networks/rgb/`, `enclave/src/keys/` | [Mint flow](docs/mint-flow.md) |
+| Mint signing, plain BTC and rights refill | `enclave/src/networks/rgb/`, `enclave/src/networks/evm/`, `enclave/src/keys.rs` | [Mint flow](docs/mint-flow.md) |
 | Burn validation and EVM releases | `enclave/src/networks/rgb/`, `enclave/src/networks/evm/` | [Burn flow](docs/burn-flow.md) |
 | Destination records and route bindings | EVM validation and shared vectors | [Record format](docs/burn-destination.md), [integration plan](docs/burn-destination-integration.md) |
 | Attestation and public verification | `attestation-verify/`, enclave attestation, parent verifier | [Attested keys](docs/pubkey-attestation.md), [verify a signer](docs/verify-a-signer.md) |
 | Mint seed recovery | Enclave KMS and parent storage broker | [KMS persistence](docs/kms-persistence.md) |
 | Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md), [clone result codes](docs/clone-cli-results.md) |
 | Wire schema | `enclave-proto/`, `parent/Cargo.toml` | [Proto provenance and sync procedure](enclave-proto/README.md) |
-| Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [README](README.md), relevant configuration and rollout instructions |
+| Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [README](README.md), [stage profile](build/profiles/README.md), relevant configuration and rollout instructions |
 | Architecture and request sequences | Related handlers and adapters | [Diagram index](docs/diagrams/README.md) |
 
 The root Cargo workspace contains the enclave, vendored enclave protocol and
@@ -102,17 +102,23 @@ A behavior change is incomplete until its affected descriptions agree with it.
 - Keep mint and burn capabilities, seeds and images separate. A mint signer
   must not gain a burn or gas-signing path; a burn signer must not gain a
   mint or plain-BTC path through an adapter or feature combination.
+- Do not make key derivation or the shape of the attested key bundle depend on
+  a feature or role. Gate the request path instead.
 - Check the actual feature graph and release recipes. The default development
   feature set is not the production configuration. Retired swap flows and
   historical Helios or IFA designs are not templates for new production work.
   Keep the attested role and the direction cfgs set by `enclave/build.rs`
   consistent; reject a build that claims one role but enables another's path.
 - Keep dev-only seed import, mock attestation, all-zero peer PCR allowances
-  and insecure transport out of release binaries. Preserve compile-time
-  rejection tests, including role-specific and no-SPV combinations.
+  and insecure transport out of release enclave binaries. Preserve
+  compile-time rejection tests, including role-specific and no-SPV combinations.
 - A stage or no-SPV profile changes specified validation assumptions. It does
   not automatically authorize weaker seed custody, raw signing or mock
   attestation.
+- An RGB build without `spv` has no SPV proof. Its burn signer trusts the
+  indexer for Bitcoin witness status. Limit such a build to public Signet and a
+  Development policy. It must not resolve to a Production policy or claim
+  SPV-verified data.
 
 ## Common EIFs and independent federation RPCs
 
@@ -126,16 +132,18 @@ measurements (PCR0/PCR1/PCR2), while using different EVM RPC connections.
   out of the EIF, build arguments, image metadata, logs and public attestation
   data, including public policy commitments derived from secret-bearing URLs.
 - Never include a credential or member-specific endpoint in a digest baked
-  into the EIF, such as `ENDPOINTS_SHA256`. Excluding only the API key is
-  insufficient if the host or CA still makes each member's image different.
+  into the EIF. Excluding only the API key is insufficient if the host or CA
+  still makes each member's image different.
 - Key rotation must not require an EIF rebuild or changes to image PCR
   allowlists. A restart or a new launch configuration may still be required.
   Changing an approved endpoint can require a new policy approval and
   attestation, while leaving the common image unchanged.
-- Preserve in-enclave TLS hostname verification, CA pinning, chain-ID checks
-  and strict path validation. Credentials must not change the approved
-  authority or network. Host proxies relay bytes; they do not terminate the
-  enclave's authenticated connection.
+- Preserve in-enclave TLS hostname verification, CA pinning, refusal of EVM RPC
+  redirects, chain-ID checks and strict path validation. Credentials must not
+  change the approved authority or network. Host proxies relay bytes; they do
+  not terminate the enclave's authenticated connection. In the enclave, a
+  forwarder for a TLS endpoint must accept only a connection that starts with a
+  TLS handshake.
 - Separate image identity from runtime endpoint policy. Preserve independent
   verification of the approved host and CA with
   `--expect-evm-rpc-host` and `--expect-evm-rpc-ca-sha256`.
@@ -148,12 +156,12 @@ measurements (PCR0/PCR1/PCR2), while using different EVM RPC connections.
   profiles. Endpoint approval belongs to the independently approved deployment
   configuration; do not introduce an operator signing-key system as part of
   endpoint configuration. Preserve runtime TLS and launch validation.
-  The current IndexerTrusted Development policy does not attest endpoints or
-  enforce their independent approval inside the enclave. Document that limit;
-  do not describe PCR verification or successful TLS as endpoint approval.
+  Where the attested policy commits no endpoint fields, it cannot show which
+  endpoints a signer uses. Document that limit; do not describe PCR verification
+  or successful TLS as endpoint approval.
 - Keep secret rotation distinct from public release changes such as signer
   code, asset pins and protocol rules, which can legitimately change image
-  measurements. Deployment measurements such as PCR3/PCR4 can differ between
+  measurements. Deployment measurements such as PCR3 can differ between
   members; preserve the separate rules that use them.
 
 These are design requirements, not a claim that every existing build meets
@@ -179,14 +187,19 @@ report that conflict and keep it visible until the implementation is fixed.
   signer is live now, that a key has never been copied, or that its RPC works.
 - Treat each clone cluster as one signing identity. Replicas sharing a seed
   are not independent federation votes. Preserve clone checks for image PCRs,
-  parent-role PCR3, the runtime cloning secret, peer keys and replay.
+  parent-role PCR3, the policy commitment, the runtime cloning secret, peer
+  keys and replay.
 - Keep mint KMS recovery separate from burn cloning. Storage, KMS or identity
   failures must not silently create a replacement seed. Preserve conditional
   creation, encryption context and recovered-address checks. Without an
   expected address, existing ciphertext must be refused; first bootstrap may
   activate only the ciphertext generated by that call.
-- Keep member-specific KMS settings in independently approved launch
-  configuration, not inputs that produce a different EIF per member.
+- Keep member-specific KMS settings, such as the key ARN, in independently
+  approved launch configuration, not inputs that produce a different EIF per
+  member. The KMS account list is the exception: keep it in the mint image,
+  because PCR0 measures it and the host then cannot name a key in an unlisted
+  account. Members can share one mint image only if the list has the account of
+  each member's key.
 - In production custody, the parent may relay credentials and ciphertext but
   must not receive the plaintext seed. Keep secrets redacted and zeroized.
   Do not log sensitive URLs, transport errors or debug structures that contain
@@ -211,6 +224,9 @@ report that conflict and keep it visible until the implementation is fixed.
   encoding against the relevant contract revision. Test direct and LayerZero
   routes separately; keep their destination and payload bindings equivalent
   where the protocol requires it.
+- Decode the LayerZero `extraOptions` of a release before signing it, and allow
+  only known gas-only forms. A native drop, compose option or `lzReceive` value
+  moves native tokens that the burn did not name.
 - Select an EVM deposit by the protocol's identity and require an unambiguous
   match. Do not assume the first receipt log is the intended deposit.
   Preserve successful-receipt, finality-head and canonical-block checks.
@@ -218,6 +234,9 @@ report that conflict and keep it visible until the implementation is fixed.
   ancestry, order and destination records to the same validated operation.
   Use the shared destination vectors across components; do not reconstruct a
   length-sensitive record from padded calldata.
+- A burn on RGB is permanent. Never change a published burn destination version
+  or remove the enclave's check for it, even a legacy one. A new format needs a
+  new version.
 - Treat gas transaction signing as its own restricted capability. Validate the
   unsigned transaction, digest, destination, selector, value, gas and fee
   limits. Never reintroduce arbitrary EVM digest or raw-message signing.
@@ -230,9 +249,9 @@ report that conflict and keep it visible until the implementation is fixed.
   and time. Reject overflow, truncation, invalid lengths and non-canonical
   encodings before signing. Do not panic or assert on malformed request data;
   a panic can abort the enclave.
-- Fresh PSBT signing must reject a request that signs no eligible input. An
-  explicit identical-request retry may return the previously produced
-  signature; that is not a new signing operation.
+- Fresh PSBT signing must reject a request that signs no eligible input. A
+  retry of an identical request may get the reply kept from the first signing;
+  that is not a new signing operation.
 
 ## RGB, Bitcoin and PSBT rules
 
@@ -241,6 +260,13 @@ report that conflict and keep it visible until the implementation is fixed.
   bindings. Do not claim mint validates history it does not read.
 - Use the pinned canonical RGB schema and type definitions. Do not trust a
   consignment to supply the rules against which it will be validated.
+- Validate a consignment only with rgb-lib's
+  `validate_consignment_with_resolver`, and confirm a mint claim only against a
+  lock the enclave bound. Refuse on a resolver error or an rgb-lib warning.
+  `clippy.toml` bans the direct calls; update the bans when an RGB crate renames
+  those methods.
+- Bind the asset before any external read that a consignment selects. A
+  consignment of another asset must not choose what the enclave reads.
 - Bind consensus results to the exact terminal operation and Bitcoin witness
   used for signing. A matching summary alone does not prove the signed
   transaction is the validated operation.
@@ -251,15 +277,21 @@ report that conflict and keep it visible until the implementation is fixed.
   transaction and PSBT commitment rules together. For refill, preserve custody
   of the rights and its separate limits. Do not generalize away documented
   witness-recipient or fee-input limitations.
+- A mint's lock names one Bitcoin transaction: `LockId` commits the mint OpId
+  and the txid. After the lock, no path may change that transaction by RBF, a
+  rebuild or batching. A retry uses the same PSBT. Only a CPFP child can raise
+  the fee.
 - Derive fees and output budgets from the transaction actually signed.
   Signature merging must not change ownership classification or bypass
   caps, sighash rules or output-key checks.
   Keep market-fee selection separate from deterministic signing limits; do
   not reintroduce live fee estimates that can strand an already funded request.
-- For SPV builds, verify Merkle inclusion and position and enforce path-depth
-  limits. Check header ancestry, network rules, difficulty, chainwork,
-  timestamps, confirmations and freshness as required by that network.
-  Test reorgs and boundary cases.
+- For SPV builds, verify Merkle inclusion and position, enforce path-depth
+  limits and refuse a path node that is a 64-byte transaction. Check header
+  ancestry, network rules, difficulty, chainwork, timestamps, confirmations and
+  freshness as required by that network. Test reorgs and boundary cases.
+- The SPV checkpoint is a trust anchor. A release build uses only the
+  compiled-in value. The parent and the operator must not be able to set it.
 - Preserve the validated chain view until key use, or revalidate under the
   required lock. A reorg between validation and signing must not invalidate
   the proof the signature relies on.
@@ -276,12 +308,23 @@ report that conflict and keep it visible until the implementation is fixed.
 - Account for all simultaneously live copies: encoded input, decoded objects,
   queues, worker concurrency, caches and temporary files. Enclave scratch
   files can use RAM. A per-field cap is not a process-memory bound.
+- Bound request-controlled text before it reaches a log line or an error reply.
+  A long log line can hold heap after its request ends.
+- Measure a cost model or memory model again when the code or dependency it
+  describes changes.
 - Carry a request deadline through queueing, connection setup, reads, writes,
   RPC retries and expensive work. A socket timeout alone does not cancel a
   handler or prove that signing stopped.
+- Order timeouts around a state commit so that the committing side gives up
+  first. On a signing exchange, the parent must wait longer than the enclave's
+  request deadline. Otherwise the enclave can commit a replay key for a reply
+  that nobody reads.
 - Put limits on the actual untrusted entry path, including direct vsock and
   every production caller of a helper. Per-client limits do not replace a
   global connection or work budget.
+- Do not count a health probe, such as the `PublicKey` call of the signer node,
+  against a limit on expensive work. A failed probe can make a client reconnect,
+  which cancels its requests on the old connection.
 - Define state changes and rollback for validation failure, timeouts, signing
   failure, serialization failure and lost responses. Document the response
   write or persistence point that commits an operation.
@@ -296,6 +339,16 @@ report that conflict and keep it visible until the implementation is fixed.
   Preserve half-close and EOF behavior in relays.
 - Retry only errors the protocol treats as temporary, such as pending
   finality. Malformed or unauthorized requests must not become endless retries.
+  Between the enclave and the parent, identify a retryable state by
+  `ErrorResponse.code`, not its text. A text or prefix that a caller matches is
+  a contract. Find its consumers, including other repositories, before you
+  change it.
+- A time, memory or size limit can be runtime configuration only if no accepted
+  value lets a compromised parent do more than delay or drop a request or
+  restart the enclave. Such a limit needs no attestation. Keep values that
+  safety depends on in the image, such as the SPV depth, the finality tag, fee
+  limits, and the chain, contract and asset pins. A profile or build argument
+  must not change the SPV depth or the finality tag.
 
 ## Schema, ABI and dependency changes
 
@@ -305,6 +358,9 @@ report that conflict and keep it visible until the implementation is fixed.
 - Keep the parent's upstream proto revision, vendored hashes, both lockfiles
   and compatibility tests aligned. Preserve fields through every adapter.
   Test unknown enum values, missing required data and cross-route replies.
+- A repeated field in a request message must be reachable by the request shape
+  check: `enclave/src/framing.rs` for the enclave wire,
+  `parent/src/request_shape.rs` for the parent gRPC API.
 - Do not renumber or repurpose wire fields, change canonical encodings or
   move key derivation paths without an explicit compatibility and rollout plan.
   Document exact hash formulas, domain tags, field widths and order, byte order
@@ -314,6 +370,9 @@ report that conflict and keep it visible until the implementation is fixed.
   or migration plan for existing holders.
   Check Rust requirements and native-library compatibility between builder
   and runtime images too; a successful link does not prove the binary starts.
+- Keep the root `[patch.crates-io]` at the crates and revs of the pinned
+  rgb-lib's own patches. Cargo ignores a dependency's patches, so another rev
+  can change the RGB consensus code the enclave runs.
 - Keep the root and parent dependency patches and release profiles aligned
   where they intentionally match. Update related fixtures, schema IDs,
   scanners, CI helpers and docs together.
@@ -327,12 +386,20 @@ report that conflict and keep it visible until the implementation is fixed.
 - Preserve the pinned Rust toolchain, locked dependencies, base-image digests,
   package snapshots, build timestamps, path remapping and committed generated
   code used for EIF builds. Changes to these inputs can change measurements.
+- Do not restore a tool or input of a measured build from a CI cache. Pin a
+  tool cloned from Git to its commit, not only its tag.
+- A measured value reaches an image only through a recipe default, a named
+  profile or a named release input. A variable in the caller's environment, such
+  as `RUST_LOG`, must not change the image.
 - Keep build credentials in temporary secret mounts or scoped credential
   helpers. Do not place them in URLs, build arguments, layers or artifacts.
   Keep parent-only private dependencies out of enclave resolution.
 - Public reproducibility needs accessible source and recorded non-secret build
   inputs. Do not claim a build is public or credential-free while required
   dependencies remain private. Report that limitation.
+- Keep infrastructure identifiers such as account IDs, bucket names and instance
+  IDs out of this public repository. Read them from repository variables or
+  secrets, or from the environment outside CI, and use placeholders in examples.
 - Record the actual source revision, role/profile, asset and other measured
   inputs, tool versions, image environment, checksums and PCRs with a release.
   Current repository variables are not a record of an older build.
@@ -345,6 +412,9 @@ report that conflict and keep it visible until the implementation is fixed.
   routing traffic. Liveness checks and partial bundle exports are insufficient.
   Check host and allocator capacity before stopping working enclaves.
   Distinguish measured usable memory from requested memory and estimates.
+  A deploy for one vsock CID must not touch the services of another CID.
+- A host script that runs as root must not run, read, chmod or chown a path the
+  service user controls. Do that step as the service user.
 - Preserve TLS/ACL rules and transport timeouts on clients as well as servers.
   Keep error classes, CLI exit codes and retry behavior consistent.
 - For changed measurements, identify required release approvals and updates to
@@ -354,8 +424,9 @@ report that conflict and keep it visible until the implementation is fixed.
   Apply trust checks to every trigger, including manual dispatch. Do not
   expose secrets, write tokens or private build artifacts to untrusted PR
   code or fork-readable caches. Keep privileged action inputs pinned and shell
-  arguments quoted. Do not relax TLS, authentication or release feature
-  guards to make CI pass.
+  arguments quoted. Pass untrusted values to scripts through `env`, not as
+  `${{ }}` text. Do not relax TLS, authentication or release feature guards to
+  make CI pass.
 
 ## Tests and validation
 
@@ -385,6 +456,10 @@ production role. Do not combine mutually exclusive features with
   cfgs. Compiling a test or using a filter that matches zero tests is not
   coverage. A negative compile check must fail on the intended guard, not on
   an unrelated missing dependency.
+- Keep a release-only runtime refusal testable. Pass the build mode in as an
+  input, as `BuildContext` does. Unit tests do not compile code behind
+  `not(test)`, and debug test runs do not compile code behind
+  `not(debug_assertions)`.
 - A regression test must reach the affected production call path, exercise the
   reported failure and fail if the check is removed. Start from a valid fixture
   and change the one property under test so an earlier error cannot hide a bug.

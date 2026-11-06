@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Burn signer enclave image: RGB -> EVM only (vsock + rgb + burn-signer).
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.burn .
@@ -131,7 +131,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
 # Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
 # pin binds them instead.
-# SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1), attested.
+# SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1). A Production policy attests it.
 ARG GAS_TX_ALLOWED_TO=${FUNDS_IN_CONTRACT}
 ARG GAS_TX_MAX_GAS_LIMIT=0
 ARG GAS_TX_MAX_FEE_PER_GAS=0

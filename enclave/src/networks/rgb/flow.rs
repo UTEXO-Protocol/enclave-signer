@@ -25,7 +25,7 @@ pub fn is_signing_transition(transition_type: u16) -> bool {
 
 /// The minted units equal the net deposit (M5).
 ///
-/// This is exact equality, not the send/receive lower bound. A mint has no
+/// This is exact equality, not a lower bound. A mint has no
 /// prior allocation to return as change, so the credit must cover every
 /// minted unit. A surplus is an over-mint: supply with no deposit.
 #[cfg(evm_to_rgb)]

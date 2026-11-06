@@ -1,6 +1,6 @@
 # Separate workspace from the enclave workspace at the repo root. The parent
 # needs the private `federated-signer-proto` crate. A shared workspace makes
-# every enclave build need that credential and breaks public PCR0 reproduction.
+# every enclave build need that credential.
 #
 # Build the parent from this directory (`cd parent && cargo build`).
 # This workspace has its own Cargo.lock. The `[profile.release]` block copies

@@ -2,8 +2,8 @@
 # Enclave (dev mode, TCP, no vsock) WITH the BFA mint path, one signer role.
 # SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
 # (RGB -> EVM). The two roles are two enclaves with two seeds.
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
