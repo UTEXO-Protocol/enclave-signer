@@ -10,14 +10,15 @@ FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a
 
 # Pin packages to a signed snapshot over HTTPS.
 # Disable expiry checks so the fixed snapshot remains usable after Valid-Until.
-RUN set -eux; \
+RUN --mount=type=bind,source=build/apt-snapshot-install.sh,target=/usr/local/bin/apt-snapshot-install.sh \
+    set -eux; \
     printf '%s\n' \
       'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
       'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
       > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    sh /usr/local/bin/apt-snapshot-install.sh \
     pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
 
@@ -58,7 +59,8 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 
 # Disable expiry checks for the fixed snapshot; keep signature checks enabled.
 # Remove package-manager logs and caches in the installation layer.
-RUN set -eux; \
+RUN --mount=type=bind,source=build/apt-snapshot-install.sh,target=/usr/local/bin/apt-snapshot-install.sh \
+    set -eux; \
     printf '%s\n' \
       'deb https://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' \
       'deb https://snapshot.debian.org/archive/debian-security/20261007T000000Z trixie-security main' \
@@ -66,7 +68,7 @@ RUN set -eux; \
     rm -f /etc/apt/sources.list.d/*; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
     printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/98ca; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    sh /usr/local/bin/apt-snapshot-install.sh \
     bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \

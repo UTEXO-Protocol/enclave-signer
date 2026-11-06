@@ -5,6 +5,14 @@ Use `BUILD_PROFILE=stage-signet` with `build/build-enclave.sh`, or select
 The profile builds Mint and Burn only. Tag builds and the `default` profile
 continue to use the recipe defaults.
 
+Mint and Burn disable APT's delayed-item retries and make up to four attempts
+to fetch indexes and packages, with 30, 60 and 120 second pauses. This avoids
+the retry loop described in [Debian bug #1152704](https://bugs.debian.org/1152704).
+Completed downloads are retained between attempts. The snapshot date and
+signature checks remain fixed; installation
+starts only after all packages have downloaded. Persistent failures stop the
+build. This does not recover an out-of-memory failure on the build runner.
+
 ## Set the release inputs
 
 Set these GitHub Actions repository variables, or export them locally:
