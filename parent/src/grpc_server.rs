@@ -10,7 +10,14 @@ use crate::enclave_proto::{
 use crate::error::ParentError;
 use crate::framing;
 
-const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(30);
+use crate::signed_responses::{Claim, Lead, SignedResponses};
+
+/// Longer than the enclave's own 30 s socket deadline (`conn::TOTAL_REQUEST_TIMEOUT`),
+/// which starts at accept while this timer starts before the worker is queued.
+/// The enclave must give up first: its failed write then rolls its replay key
+/// back, while a parent that gives up first leaves a committed key and a
+/// response nobody read.
+const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(40);
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -40,9 +47,10 @@ async fn send_within(
     target: EnclaveTarget,
     req: EnclaveRequest,
     timeout: Duration,
+    lead: Option<Lead>,
 ) -> Result<EnclaveResponse, Status> {
     let deadline = Instant::now() + timeout;
-    let worker = tokio::task::spawn_blocking(move || exchange(&target, &req, deadline));
+    let worker = tokio::task::spawn_blocking(move || exchange(&target, &req, deadline, lead));
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker).await {
         Ok(join_result) => {
             join_result.map_err(|e| Status::internal(format!("spawn_blocking join failed: {e}")))?
@@ -51,12 +59,16 @@ async fn send_within(
     }
 }
 
-/// Connect, write `req` and read the response before `deadline`.
+/// Connect, write `req` and read the response before `deadline`. With a
+/// `lead`, a signed-PSBT reply is stored for a retry here, on the worker:
+/// the gRPC future that waits for this exchange may already be gone, and
+/// the reply must not go with it.
 #[allow(clippy::result_large_err)]
 fn exchange(
     target: &EnclaveTarget,
     req: &EnclaveRequest,
     deadline: Instant,
+    lead: Option<Lead>,
 ) -> Result<EnclaveResponse, Status> {
     let (domain, addr, connect_failed) = match target {
         EnclaveTarget::Tcp(addr) => {
@@ -95,11 +107,22 @@ fn exchange(
     sock.connect_timeout(&addr, left).map_err(connect_status)?;
     let mut stream = DeadlineStream { sock, deadline };
     framing::write_message(&mut stream, req).map_err(|e| io_status(e, "enclave write failed"))?;
-    framing::read_message(&mut stream).map_err(|e| io_status(e, "enclave read failed"))
+    let response: EnclaveResponse =
+        framing::read_message(&mut stream).map_err(|e| io_status(e, "enclave read failed"))?;
+    if let Some(lead) = lead {
+        if let Some(enclave_response::Response::SignedPsbt(signed)) = &response.response {
+            lead.complete(signed);
+        }
+        // Any other reply drops the lead: waiters make their own attempt.
+    }
+    Ok(response)
 }
 
 fn timed_out() -> Status {
-    Status::deadline_exceeded("enclave request timed out (30s)")
+    Status::deadline_exceeded(format!(
+        "enclave request timed out ({}s)",
+        ENCLAVE_TIMEOUT.as_secs()
+    ))
 }
 
 fn is_timeout(e: &io::Error) -> bool {
@@ -109,10 +132,13 @@ fn is_timeout(e: &io::Error) -> bool {
     )
 }
 
-/// A socket timeout gives the same status as the outer timer.
+/// A socket timeout gives the same status as the outer timer. Any other
+/// socket failure is a transport fault the caller may retry: the enclave
+/// commits a replay key only after its write succeeds.
 fn io_status(e: ParentError, context: &str) -> Status {
     match e {
         ParentError::Io(e) if is_timeout(&e) => timed_out(),
+        ParentError::Io(e) => Status::unavailable(format!("{context}: {e}")),
         e => Status::internal(format!("{context}: {e}")),
     }
 }
@@ -161,11 +187,28 @@ impl Write for DeadlineStream {
 #[derive(Clone)]
 pub struct ParentAdapterService {
     target: EnclaveTarget,
+    /// Replies of EVM->RGB bridge signs, kept for a retry of the same request.
+    signed: std::sync::Arc<SignedResponses>,
 }
 
 impl ParentAdapterService {
+    /// A service with the default reply store (one hour, 1,024 replies, 16 MiB).
     pub fn new(target: EnclaveTarget) -> Self {
-        Self { target }
+        Self::with_signed_responses(
+            target,
+            SignedResponses::new(
+                crate::signed_responses::DEFAULT_TTL,
+                crate::signed_responses::DEFAULT_MAX_ENTRIES,
+                crate::signed_responses::DEFAULT_MAX_BYTES,
+            ),
+        )
+    }
+
+    pub fn with_signed_responses(
+        target: EnclaveTarget,
+        signed: std::sync::Arc<SignedResponses>,
+    ) -> Self {
+        Self { target, signed }
     }
 
     /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
@@ -176,7 +219,16 @@ impl ParentAdapterService {
         &self,
         req: EnclaveRequest,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT).await
+        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, None).await
+    }
+
+    /// Like [`Self::send_to_enclave`], and a signed-PSBT reply completes `lead`.
+    async fn send_to_enclave_leading(
+        &self,
+        req: EnclaveRequest,
+        lead: Option<Lead>,
+    ) -> Result<EnclaveResponse, Status> {
+        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, lead).await
     }
 
     /// Unwrap an enclave error response into a gRPC Status.
@@ -559,8 +611,32 @@ impl ParentService for ParentAdapterService {
                     })),
                 };
 
+                // An EVM->RGB bridge sign: the reply is kept for a retry of the
+                // same request, and a retry of a request still in flight joins
+                // it instead of reaching the enclave (see `signed_responses`).
+                let lead = if expects_evm {
+                    None
+                } else {
+                    match self.signed.claim(SignedResponses::key(&enclave_req)).await {
+                        Claim::Serve(signed) => {
+                            tracing::info!(
+                                psbt_len = signed.signed_psbt.len(),
+                                "gRPC Sign: retried RGB transaction answered from the kept reply"
+                            );
+                            return Ok(Response::new(SignatureResponse {
+                                signer_network_id,
+                                signature: signed.signed_psbt,
+                                identifier: None,
+                                call_data: Vec::new(),
+                                public_key: Vec::new(),
+                            }));
+                        }
+                        Claim::Lead(lead) => Some(lead),
+                    }
+                };
+
                 let start = std::time::Instant::now();
-                let resp = self.send_to_enclave(enclave_req).await?;
+                let resp = self.send_to_enclave_leading(enclave_req, lead).await?;
                 tracing::debug!(
                     elapsed_ms = start.elapsed().as_millis() as u64,
                     "enclave round-trip"
@@ -1018,7 +1094,7 @@ mod tests {
     /// Run `exchange` with `BUDGET` and check that it stops at the deadline.
     fn assert_stops_at_deadline(target: EnclaveTarget, req: EnclaveRequest) {
         let start = Instant::now();
-        let err = exchange(&target, &req, start + BUDGET).unwrap_err();
+        let err = exchange(&target, &req, start + BUDGET, None).unwrap_err();
         assert_eq!(err.code(), Code::DeadlineExceeded, "{err:?}");
         assert!(start.elapsed() < BUDGET + SLACK, "{:?}", start.elapsed());
     }
@@ -1035,7 +1111,7 @@ mod tests {
         rt.block_on(async {
             let (release, wait) = std::sync::mpsc::channel::<()>();
             let blocker = tokio::task::spawn_blocking(move || wait.recv());
-            let err = send_within(target, health(), Duration::from_millis(50))
+            let err = send_within(target, health(), Duration::from_millis(50), None)
                 .await
                 .unwrap_err();
             assert_eq!(err.code(), Code::DeadlineExceeded);
@@ -1118,5 +1194,25 @@ mod tests {
             }
         });
         assert_stops_at_deadline(tcp(addr), health());
+    }
+
+    /// A socket failure that is not a timeout is `Unavailable`, which the
+    /// node retries: the enclave read the request and closed the connection.
+    #[test]
+    fn a_closed_connection_is_unavailable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let _: EnclaveRequest = framing::read_message(&mut peer).unwrap();
+        });
+        let err = exchange(&tcp(addr), &health(), Instant::now() + BUDGET, None).unwrap_err();
+        assert_eq!(err.code(), Code::Unavailable, "{err:?}");
+    }
+
+    /// The enclave must give up before the parent (see `ENCLAVE_TIMEOUT`).
+    #[test]
+    fn the_parent_waits_longer_than_the_enclave_socket_deadline() {
+        assert!(ENCLAVE_TIMEOUT > utexo_bridge_enclave::conn::TOTAL_REQUEST_TIMEOUT);
     }
 }

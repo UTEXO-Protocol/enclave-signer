@@ -23,7 +23,7 @@ use crate::grpc_server::ParentAdapterService;
 use crate::header_sync::SyncStatus;
 
 /// Time to wait before the answer is "cannot tell". It is shorter than the
-/// 30s enclave timeout, so a probe answers within its poll interval.
+/// 40s enclave timeout, so a probe answers within its poll interval.
 ///
 /// It limits the answer, not the enclave work. The request runs on a blocking
 /// thread that cannot be cancelled. Transport timeouts limit individual socket

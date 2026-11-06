@@ -17,11 +17,17 @@ pub(super) const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default maximum count of recorded nonces.
 pub(super) const DEFAULT_NONCE_MAX: usize = 10_000;
 
-/// Default TTL for the PSBT bridge-operation dedup guard.
-/// The listener can retry an unsettled EVM->RGB deposit. Thus the window must
-/// be longer than normal retry and confirmation latency.
+/// Default TTL for the PSBT bridge-operation dedup guard. Inside the window a
+/// second request for the same deposit is refused. A retry of the same
+/// request does not reach the enclave: the parent answers it from the reply
+/// it kept (parent `signed_responses`). One hour covers the listener's retry
+/// backoff and the usual confirmation of the first transaction. The PSBT is
+/// not part of the key, so a mint rebuilt for the same deposit (other inputs,
+/// higher fee) is refused until the hour has passed.
+/// Safety does not rest on it: every signed mint spends the pinned right
+/// output (mint-flow.md §6).
 /// See [`super::EnclaveState::op_replay_guard`].
-pub(super) const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub(super) const DEFAULT_OP_DEDUP_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum count of recorded bridge operations (approx 8 MB at 80 bytes each).
 /// On overflow, the guard evicts the oldest entry and does not block signing.

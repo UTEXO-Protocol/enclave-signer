@@ -15,6 +15,9 @@ fn parent() -> Config {
         grpc_max_concurrent: 128,
         grpc_max_concurrent_per_conn: 32,
         grpc_request_timeout_secs: 120,
+        signed_response_ttl_secs: 3600,
+        signed_response_max_entries: 1024,
+        signed_response_max_bytes: 16 << 20,
     }
 }
 

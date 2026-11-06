@@ -80,7 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind the probe first, so a bad HEALTH_PORT fails at boot.
     let health_listener = health::bind(health_addr).await?;
-    let service = ParentAdapterService::new(target);
+    let service = ParentAdapterService::with_signed_responses(
+        target,
+        utexo_bridge_parent::signed_responses::SignedResponses::new(
+            Duration::from_secs(cfg.signed_response_ttl_secs),
+            cfg.signed_response_max_entries,
+            cfg.signed_response_max_bytes,
+        ),
+    );
 
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop
@@ -113,6 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
         .load_shed(true)
+        // Rotate connections. With a grace set, tonic 0.14 sends no GOAWAY at
+        // the age: it closes the connection at age plus grace, so rotation can
+        // cut a request still in flight. A cut EVM->RGB sign is not lost: the
+        // parent keeps its reply and answers the retry (`signed_responses`).
         .max_connection_age(Duration::from_secs(300))
         .max_connection_age_grace(Duration::from_secs(30))
         .concurrency_limit_per_connection(per_conn)

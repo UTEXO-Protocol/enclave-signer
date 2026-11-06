@@ -18,6 +18,7 @@ pub mod header_sync;
 pub mod health;
 pub mod launch_check;
 pub mod seed_persistence;
+pub mod signed_responses;
 pub mod transport_security;
 
 pub mod grpc_proto {
