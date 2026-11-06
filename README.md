@@ -471,7 +471,7 @@ Building).
 
 ```bash
 # Enclave on 127.0.0.1:5000
-RUST_LOG=debug cargo run -p utexo-bridge-enclave
+RUST_LOG=debug,alloy_transport_http=off cargo run -p utexo-bridge-enclave
 
 # Parent gRPC server (GRPC_PORT defaults to 5000; pick another port when both run on one host)
 RUST_LOG=debug GRPC_PORT=50051 GRPC_ALLOW_INSECURE_LOOPBACK=true cargo run --manifest-path parent/Cargo.toml
@@ -738,7 +738,9 @@ authorities, queries, fragments, percent escapes or dot segments. Omit the file
 to request `/`; an empty supplied file is rejected. The CLI accepts a trailing
 line ending. The client sends the path over TLS to the configured host and CA,
 and does not follow redirects. RPC transport errors and endpoint debug output
-omit the path.
+omit the path. The dev images use `RUST_LOG=debug,alloy_transport_http=off`.
+Keep `alloy_transport_http=off` in custom debug or trace filters: Alloy HTTP
+logs can include the full URL and provider responses.
 
 The path and API key are absent from the EIF, image metadata, public attestation
 and KMS context. A verifier needs no provider credential. To rotate a key,

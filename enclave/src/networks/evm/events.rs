@@ -795,7 +795,6 @@ fn rpc_timeout() -> std::time::Duration {
 pub struct AlloyEvmClient {
     runtime: tokio::runtime::Runtime,
     provider: alloy::providers::RootProvider,
-    redact_rpc_tracing: bool,
 }
 
 impl AlloyEvmClient {
@@ -829,7 +828,6 @@ impl AlloyEvmClient {
         Ok(Self {
             runtime: Self::runtime()?,
             provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
-            redact_rpc_tracing: tls.path != "/",
         })
     }
 
@@ -843,19 +841,6 @@ impl AlloyEvmClient {
             })
     }
 
-    fn rpc<F: std::future::Future>(&self, future: F) -> F::Output {
-        use tracing::instrument::WithSubscriber;
-        if self.redact_rpc_tracing {
-            // Alloy records the full URL in a debug span and response bodies at
-            // trace level. A provider can echo its API key in a response. Keep
-            // these RPC futures out of tracing without changing other logs.
-            self.runtime
-                .block_on(future.with_subscriber(tracing::subscriber::NoSubscriber::default()))
-        } else {
-            self.runtime.block_on(future)
-        }
-    }
-
     fn fetch_block(
         &self,
         number: alloy::rpc::types::BlockNumberOrTag,
@@ -863,7 +848,8 @@ impl AlloyEvmClient {
         use alloy::providers::Provider;
         let timeout = rpc_timeout();
         let block = self
-            .rpc(async {
+            .runtime
+            .block_on(async {
                 tokio::time::timeout(timeout, async {
                     self.provider.get_block_by_number(number).await
                 })
@@ -899,7 +885,8 @@ impl EvmReceiptProvider for AlloyEvmClient {
         // block. As a `block_on` argument it panics with "there is no reactor
         // running", and `panic = "abort"` stops the enclave.
         let receipt = self
-            .rpc(async {
+            .runtime
+            .block_on(async {
                 tokio::time::timeout(timeout, self.provider.get_transaction_receipt(hash)).await
             })
             .map_err(|_elapsed| {
@@ -931,7 +918,8 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_chain_id(&self) -> Result<u64> {
         use alloy::providers::Provider;
         let timeout = rpc_timeout();
-        self.rpc(async { tokio::time::timeout(timeout, self.provider.get_chain_id()).await })
+        self.runtime
+            .block_on(async { tokio::time::timeout(timeout, self.provider.get_chain_id()).await })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
@@ -954,7 +942,8 @@ impl EvmReceiptProvider for AlloyEvmClient {
             .input(Bytes::copy_from_slice(data).into());
         let timeout = rpc_timeout();
         let out = self
-            .rpc(async {
+            .runtime
+            .block_on(async {
                 tokio::time::timeout(timeout, async {
                     self.provider
                         .call(request)

@@ -64,7 +64,8 @@ USER enclave
 
 ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
 ENV BITCOIN_NETWORK=testnet
-ENV RUST_LOG=debug
+# Alloy HTTP debug logs include the provider URL, which can contain an API key.
+ENV RUST_LOG=debug,alloy_transport_http=off
 # CD runs the mint signer from this image. The runtime env may change it.
 ENV MINT_WITNESS_SAT=1500
 

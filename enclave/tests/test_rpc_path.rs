@@ -1,5 +1,5 @@
 //! The configured provider path reaches the pinned TLS host without leaking
-//! the API key in errors or global debug/trace logs.
+//! the API key in errors or logs when Alloy HTTP transport logging is disabled.
 #![cfg(feature = "evm-rpc")]
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,6 +12,13 @@ use utexo_bridge_enclave::networks::evm::events::{AlloyEvmClient, EvmReceiptProv
 
 #[derive(Clone)]
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+#[derive(Clone, Copy)]
+enum ResponseKind {
+    Success,
+    RpcError,
+    TransportError,
+}
 
 impl Write for LogWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -30,7 +37,9 @@ fn rpc_path_reaches_pinned_tls_host_and_errors_hide_credentials() {
     let logs = LogWriter(Arc::new(Mutex::new(Vec::new())));
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "trace,alloy_transport_http=off",
+        ))
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
@@ -38,19 +47,25 @@ fn rpc_path_reaches_pinned_tls_host_and_errors_hide_credentials() {
     // logs from the client's Tokio workers and spawned HTTP tasks. Like enclave
     // bootstrap, try_init also forwards dependencies' `log` events to tracing.
     subscriber.try_init().unwrap();
-    tracing::info!("RPC log capture is active");
-    std::thread::spawn(|| tracing::info!("Background log capture is active"))
+    tracing::trace!("RPC log capture is active");
+    std::thread::spawn(|| tracing::trace!("Background log capture is active"))
         .join()
         .unwrap();
-    for (method, success) in [
+    for (method, response_kind) in [
         "eth_chainId",
         "eth_getTransactionReceipt",
         "eth_getBlockByNumber",
         "eth_call",
     ]
     .into_iter()
-    .flat_map(|method| [true, false].map(|success| (method, success)))
-    {
+    .flat_map(|method| {
+        [
+            ResponseKind::Success,
+            ResponseKind::RpcError,
+            ResponseKind::TransportError,
+        ]
+        .map(|response_kind| (method, response_kind))
+    }) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let cert =
@@ -96,7 +111,12 @@ fn rpc_path_reaches_pinned_tls_host_and_errors_hide_credentials() {
             reader.read_exact(&mut body).unwrap();
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["method"], method);
-            let response = if success {
+            if matches!(response_kind, ResponseKind::TransportError) {
+                // Closing after the request produces a real reqwest transport
+                // error. Its underlying error may contain the credential URL.
+                return;
+            }
+            let response = if matches!(response_kind, ResponseKind::Success) {
                 let result = match method {
                     "eth_chainId" => serde_json::json!("0xa4b1"),
                     "eth_call" => serde_json::json!("0x"),
@@ -130,7 +150,7 @@ fn rpc_path_reaches_pinned_tls_host_and_errors_hide_credentials() {
             _ => unreachable!(),
         };
         server.join().unwrap();
-        if success {
+        if matches!(response_kind, ResponseKind::Success) {
             result.unwrap();
         } else {
             let error = result.unwrap_err().to_string();
@@ -139,7 +159,7 @@ fn rpc_path_reaches_pinned_tls_host_and_errors_hide_credentials() {
             assert!(error.contains("failed"));
         }
     }
-    tracing::info!("RPC log capture remains active");
+    tracing::trace!("RPC log capture remains active");
     let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(captured.contains("RPC log capture is active"));
     assert!(captured.contains("Background log capture is active"));
