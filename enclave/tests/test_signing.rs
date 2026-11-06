@@ -372,7 +372,7 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
     psbt.serialize()
 }
 
-#[cfg(evm_to_rgb)]
+#[cfg(all(evm_to_rgb, any(feature = "evm-rpc", not(feature = "rgb-validation"))))]
 fn sign_psbt_request(
     evm_tx_hash: Vec<u8>,
     evm_event_valid: bool,
