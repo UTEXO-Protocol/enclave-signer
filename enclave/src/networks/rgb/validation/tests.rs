@@ -1280,7 +1280,7 @@ fn the_binder_sees_the_genesis_bridge() {
 #[test]
 fn refuses_mint_anchors_without_a_binder() {
     let err = error_of(validate_bound(&burn_bytes(), None));
-    assert!(err.contains("binds none"), "{err}");
+    assert!(err.contains("no lock binder"), "{err}");
 }
 
 #[test]
@@ -1949,7 +1949,7 @@ fn each_rgb_lib_refusal_names_what_failed() {
     };
     let cases = [
         (E::MintLockNotFound { opid: "op".into() }, "no bound lock"),
-        (E::NoClaimResolver, "binds none"),
+        (E::NoClaimResolver, "no lock binder"),
         (E::NoRejectListResolver, "cannot read it"),
         (
             E::ConsignmentRejected { opouts: vec![] },

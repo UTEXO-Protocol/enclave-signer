@@ -535,7 +535,6 @@ mod transfer {
 }
 
 // Settlement bind - `validate_funds_out_settlement`.
-#[cfg(feature = "bfa-mint")]
 mod settlement {
     use super::*;
     use crate::networks::rgb::validation::VerifiedLock;
@@ -701,7 +700,6 @@ mod settlement {
 
 // LayerZero route (#264): `lzFundsOut` runs the same burn binds as `fundsOut`.
 // Each case decodes real `lzFundsOut` calldata through the LZ path.
-#[cfg(feature = "bfa-mint")]
 mod lz_route {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;

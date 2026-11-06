@@ -96,5 +96,5 @@ fn route_proof_rejects_a_transfer() {
 }
 
 /// The mint signer's routes, from the PSBT, its fascia and its parent's alone.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 mod psbt_path;

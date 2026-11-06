@@ -31,7 +31,7 @@ pub struct Launch {
     /// Then `handle_sign` fails closed in bridge mode.
     /// The host relays the RPC traffic through the loopback vsock forwarder.
     /// TLS ends inside the enclave. See [`crate::networks::evm::events`].
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     pub evm_rpc_client:
         Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
 }
@@ -123,7 +123,7 @@ impl ServerContext {
             policy,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
-            #[cfg(feature = "evm-rpc")]
+            #[cfg(feature = "rgb-validation")]
             evm_rpc_client: None,
         });
     }

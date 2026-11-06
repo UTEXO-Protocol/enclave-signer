@@ -372,7 +372,7 @@ fn btc_psbt_to_ours(from: &OurAddress, input_sats: u64, outputs: &[(&OurAddress,
     psbt.serialize()
 }
 
-#[cfg(all(evm_to_rgb, any(feature = "evm-rpc", not(feature = "rgb-validation"))))]
+#[cfg(evm_to_rgb)]
 fn sign_psbt_request(
     evm_tx_hash: Vec<u8>,
     evm_event_valid: bool,
@@ -391,7 +391,7 @@ fn sign_psbt_request(
             token: vec![],
             recipient: vec![],
             commission: evm_commission,
-            // Unchecked in non-`evm-rpc` builds, but must still be 32 bytes.
+            // Unchecked without `rgb-validation`, but must still be 32 bytes.
             funds_in_operation_id: vec![0x33; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
@@ -775,7 +775,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 // PSBT signing tests
 
 #[test]
-#[cfg(all(evm_to_rgb, feature = "evm-rpc"))]
+#[cfg(all(evm_to_rgb, feature = "rgb-validation"))]
 fn test_sign_psbt_before_init() {
     let port = common::start_test_server();
 
@@ -797,12 +797,11 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// A build without the `evm-rpc` FundsIn verifier must refuse a bridge-mode
-/// PSBT. In the minimal build, the `evm-rpc` fail-closed guard is the first
-/// bridge-mode gate.
+/// A build without the `FundsIn` verifier must refuse a bridge-mode PSBT. In
+/// the minimal build, that fail-closed guard is the first bridge-mode gate.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
-fn test_no_evm_rpc_build_refuses_bridge_psbt() {
+fn test_no_rgb_validation_build_refuses_bridge_psbt() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -816,7 +815,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 
     // Bridge mode (EVM source + RGB destination) with a shape-valid PSBT and
     // consistent amounts. It passes the route cross-checks and reaches the
-    // evm-rpc guard. The listener booleans are true but ignored.
+    // `FundsIn` guard. The listener booleans are true but ignored.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0xAA; 32],
@@ -834,8 +833,8 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("--features evm-rpc"),
-                "expected an evm-rpc feature refusal, got: {}",
+                e.message.contains("--features mint-signer"),
+                "expected a mint-signer feature refusal, got: {}",
                 e.message
             );
         }
@@ -843,21 +842,16 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     }
 }
 
-/// The first RGB bind refusal of a bare PSBT: the swap flow needs a
-/// consignment, the mint signer reads the PSBT's own data and inputs.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
-const RGB_BIND_REFUSAL: &str = if cfg!(feature = "bfa-mint") {
-    "witness_utxo"
-} else {
-    "consignment"
-};
+/// The first RGB bind refusal of a bare PSBT: the mint signer reads the
+/// PSBT's own data and inputs.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+const RGB_BIND_REFUSAL: &str = "witness_utxo";
 
 // An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
 // An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
 // bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
     let port = common::start_test_server();
 
@@ -902,7 +896,6 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
     // The deposit stub lets the run pass the FundsIn gate and reach the
     // consignment bind.

@@ -78,9 +78,9 @@ pub struct Committed {
     pub opid: OpId,
     pub tx: Transaction,
     // Only the mint signer's tests read the PSBT and the fascia.
-    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "rgb-validation", evm_to_rgb)), allow(dead_code))]
     pub psbt: Psbt,
-    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "rgb-validation", evm_to_rgb)), allow(dead_code))]
     pub fascia: Fascia,
 }
 
@@ -95,19 +95,19 @@ impl Committed {
     }
 
     /// The lockId of this transition in this tx, as a mint's lock names it.
-    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "rgb-validation", evm_to_rgb)), allow(dead_code))]
     pub fn lock_id(&self) -> [u8; 32] {
         lock_id_bytes(self.opid, self.tx.compute_txid())
     }
 
     /// The fascia file bytes, as the bridge sends them.
-    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "rgb-validation", evm_to_rgb)), allow(dead_code))]
     pub fn fascia_bytes(&self) -> Vec<u8> {
         fascia_bytes(&self.fascia)
     }
 
     /// The committed transition, as the fascia discloses it.
-    #[cfg_attr(not(all(feature = "bfa-mint", evm_to_rgb)), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "rgb-validation", evm_to_rgb)), allow(dead_code))]
     pub fn transition(&self) -> Transition {
         self.fascia
             .bundles()

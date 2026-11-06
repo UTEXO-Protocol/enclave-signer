@@ -2,7 +2,7 @@
 //! Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 use crate::config::EvmRpcTls;
 use crate::networks::rgb::spv::Network;
 #[cfg(feature = "spv")]
@@ -12,7 +12,7 @@ use crate::networks::rgb::spv::{
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
 use crate::policy::SecurityPolicy;
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
@@ -118,7 +118,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
 /// The EVM `FundsIn` verification source and its TLS pin.
 ///
 /// Uses the same rule as [`build_evm_rpc_client`]: the pinned TLS of `tls`.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub fn resolve_evm_data_source(tls: &EvmRpcTls) -> (EvmDataSource, Option<EvmRpcTlsPin>) {
     use sha2::Digest;
     let pin = EvmRpcTlsPin {
@@ -275,7 +275,7 @@ pub fn build_header_chain(
 /// The client reaches the RPC through the loopback forwarder, with TLS to the
 /// pinned host and CA. `None` makes the launch fail. There is no fallback to an
 /// unverified path.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub fn build_evm_rpc_client(
     tls: &EvmRpcTls,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {

@@ -162,9 +162,8 @@ jobs:
       # BFA mint/burn EIF profiles - the shipped production images. The flow
       # ships as two signer roles, two enclaves: the mint signer (EVM -> RGB,
       # Dockerfile.enclave.mint) and the burn signer (RGB -> EVM,
-      # Dockerfile.enclave.burn). Each role implies `bfa-mint`, which pulls in
-      # rgb-validation, bfa-validation and evm-rpc. Each lane compiles and tests
-      # only its own direction, and checks it refuses the other one
+      # Dockerfile.enclave.burn). Each role implies `rgb-validation`. Each lane
+      # compiles and tests only its own direction, and checks it refuses the other one
       # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
       # retains the existing entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
@@ -436,8 +435,8 @@ jobs:
 
       - name: Assert mint/burn with no signer role is rejected
         run: |
-          if cargo build -p utexo-bridge-enclave --no-default-features --features spv,bfa-mint 2>build.log; then
-            echo "::error::build unexpectedly SUCCEEDED with bfa-mint but no signer role - the compile_error guard is missing or not firing"
+          if cargo build -p utexo-bridge-enclave --no-default-features --features spv 2>build.log; then
+            echo "::error::build unexpectedly SUCCEEDED with spv but no signer role - the compile_error guard is missing or not firing"
             exit 1
           fi
           if ! grep -q "an RGB build requires a signer role" build.log; then

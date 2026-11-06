@@ -35,14 +35,14 @@ pub(super) fn handle_set_endpoints(
     let kms_accounts: &[String] = &[];
     let endpoints = Endpoints::parse(&req, kms_accounts, ctx.build_ctx.debug_or_test)
         .map_err(EnclaveError::InvalidRequest)?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     let tls = endpoints
         .evm_rpc_tls
         .as_ref()
         .ok_or_else(|| EnclaveError::InvalidRequest("the EVM RPC endpoint is not set".into()))?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     let (evm_source, evm_rpc_tls) = crate::bootstrap::resolve_evm_data_source(tls);
-    #[cfg(not(feature = "evm-rpc"))]
+    #[cfg(not(feature = "rgb-validation"))]
     let (evm_source, evm_rpc_tls) = (crate::policy::EvmDataSource::Disabled, None);
     let policy = SecurityPolicy::resolve(
         &ctx.build_ctx,
@@ -75,13 +75,13 @@ pub(super) fn handle_set_endpoints(
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = crate::bootstrap::build_rgb_validator(endpoints.electrum_url.clone())
         .ok_or_else(|| EnclaveError::Internal("cannot build the RGB validator".into()))?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     let evm_rpc_client = crate::bootstrap::build_evm_rpc_client(tls)
         .ok_or_else(|| EnclaveError::Internal("cannot build the EVM RPC client".into()))?;
     let launch = Launch {
         #[cfg(feature = "rgb-validation")]
         rgb_validator: Some(rgb_validator),
-        #[cfg(feature = "evm-rpc")]
+        #[cfg(feature = "rgb-validation")]
         evm_rpc_client: Some(evm_rpc_client),
         endpoints,
         policy,
@@ -146,7 +146,7 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32, bool)> {
         vsock_port("ESPLORA_VSOCK_PORT", 8001),
         endpoints.indexer_uses_tls(),
     ));
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     if let Some(tls) = &endpoints.evm_rpc_tls {
         plan.push((
             SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, tls.tls_port),
@@ -229,7 +229,7 @@ mod tests {
         if cfg!(feature = "rgb-validation") {
             req.electrum_url = format!("ssl://electrum{n}.test:50002");
         }
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             req.evm_rpc_host = format!("rpc{n}.test");
             req.evm_rpc_ca_der =
                 hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim())
@@ -302,7 +302,7 @@ mod tests {
             assert!(not_ready(call(&ctx, request)));
         }
         // The mint signer serves the refill, so it waits for the set too.
-        if cfg!(all(feature = "bfa-mint", evm_to_rgb)) {
+        if cfg!(all(feature = "rgb-validation", evm_to_rgb)) {
             let refill = Request::SignRightsRefill(SignRightsRefillRequest::default());
             assert!(not_ready(call(&ctx, refill)));
         }
@@ -349,7 +349,7 @@ mod tests {
             electrum_url: "ftp://electrum.test:1".into(),
             ..valid(1)
         }];
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             bad.push(SetEndpointsRequest {
                 evm_rpc_host: "rpc.test:443".into(),
                 ..valid(1)
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(ctx.launch().unwrap().endpoints, first);
     }
 
-    #[cfg(all(feature = "spv", feature = "evm-rpc"))]
+    #[cfg(feature = "spv")]
     #[test]
     fn the_same_spv_build_accepts_different_runtime_hosts_ports_and_ca() {
         let first = valid(1);

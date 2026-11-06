@@ -2,7 +2,7 @@
 //!
 //! The flow is `wire.rs` -> `dispatch.rs` -> one handler module.
 
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 mod bfa;
 // KMS persistence disables cloning. All replicas recover the same seed from
 // KMS, so the cloning handshake has no purpose.
@@ -17,10 +17,10 @@ mod limits;
 #[cfg(feature = "rgb-validation")]
 mod rate_limit;
 // Only a build that validates consignments reads the reject list.
-#[cfg(all(feature = "bfa-validation", rgb_to_evm))]
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 mod reject_list;
 // The mint signer's own rights send. No other role holds mint rights.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 mod rights_refill;
 mod sign;
 mod signers;

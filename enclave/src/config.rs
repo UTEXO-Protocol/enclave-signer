@@ -592,7 +592,7 @@ impl std::fmt::Debug for EvmRpcTls {
 /// Accept only an absolute path with unreserved ASCII characters. Keeping
 /// authority, query, fragment and escaping out makes the TLS host independent
 /// of the credential and avoids URL-parser normalization of dot segments.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 fn parse_evm_rpc_path(value: &str) -> std::result::Result<String, String> {
     let path = if value.is_empty() { "/" } else { value };
     if path.len() > 2048
@@ -618,7 +618,7 @@ pub struct Endpoints {
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
-    /// `None` without `evm-rpc`.
+    /// `None` without `rgb-validation`.
     pub evm_rpc_tls: Option<EvmRpcTls>,
     /// `None` without `kms-persistence`, and in an import-only build with no
     /// KMS values.
@@ -673,7 +673,7 @@ impl Endpoints {
             (String::new(), 0)
         };
 
-        #[cfg(feature = "evm-rpc")]
+        #[cfg(feature = "rgb-validation")]
         let evm_rpc_tls = {
             let host = parse_host("evm_rpc_host", &req.evm_rpc_host)?;
             // A CA certificate is a few KiB. Refuse more before the parse and
@@ -703,7 +703,7 @@ impl Endpoints {
                 path: parse_evm_rpc_path(&req.evm_rpc_path)?,
             })
         };
-        #[cfg(not(feature = "evm-rpc"))]
+        #[cfg(not(feature = "rgb-validation"))]
         let evm_rpc_tls = {
             unused("evm_rpc_path", req.evm_rpc_path.is_empty())?;
             unused("evm_rpc_host", req.evm_rpc_host.is_empty())?;
@@ -776,11 +776,7 @@ impl Endpoints {
     }
 }
 
-#[cfg(any(
-    not(feature = "rgb-validation"),
-    not(feature = "evm-rpc"),
-    not(feature = "kms-persistence")
-))]
+#[cfg(any(not(feature = "rgb-validation"), not(feature = "kms-persistence")))]
 fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
     if empty {
         Ok(())
@@ -1177,7 +1173,7 @@ mod tests {
         if cfg!(feature = "rgb-validation") {
             req.electrum_url = "ssl://Electrum.test:50002".into();
         }
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             req.evm_rpc_host = "RPC.Test".into();
             req.evm_rpc_ca_der = hex::decode(CA_HEX.trim()).unwrap();
             req.evm_rpc_tls_port = 443;
@@ -1222,7 +1218,7 @@ mod tests {
             assert_eq!(e.electrum_host, "electrum.test");
             assert_eq!(e.electrum_port, 50002);
         }
-        assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "evm-rpc"));
+        assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "rgb-validation"));
         if let Some(tls) = e.evm_rpc_tls {
             assert_eq!(tls.host, "rpc.test");
             assert_eq!(tls.tls_port, 443);
@@ -1297,7 +1293,7 @@ mod tests {
         // The EVM RPC forwarder takes another loopback port than Esplora's 443.
         let e = parse_with(|r| {
             r.electrum_url = "https://esplora.test".into();
-            if cfg!(feature = "evm-rpc") {
+            if cfg!(feature = "rgb-validation") {
                 r.evm_rpc_tls_port = 8443;
             }
         })
@@ -1323,7 +1319,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_host_must_be_a_host_name() {
         // A DNS name up to 253 bytes total, no label over 63.
@@ -1364,7 +1360,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_ca_must_be_a_valid_certificate() {
         let der = hex::decode(CA_HEX.trim()).unwrap();
@@ -1415,7 +1411,7 @@ mod tests {
         peak::assert_within_request_bound("SetEndpoints with a 4 MiB key ARN", arn.len(), peak);
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_tls_port_must_be_a_free_port() {
         for port in [0, 65536, 50002] {
@@ -1423,7 +1419,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "evm-rpc"))]
+    #[cfg(not(feature = "rgb-validation"))]
     #[test]
     fn unsupported_rpc_paths_are_refused_without_echoing_them() {
         Endpoints::parse(&valid(), &[], true).unwrap();
@@ -1437,7 +1433,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rpc_path_is_parsed_and_debug_redacted() {
         let root = parse_with(|_| {}).unwrap();
@@ -1448,7 +1444,7 @@ mod tests {
         assert!(format!("{e:?}").contains("[REDACTED]"));
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rpc_path_rejects_authority_query_fragment_and_normalization() {
         for bad in [
@@ -1477,7 +1473,7 @@ mod tests {
         if !cfg!(feature = "rgb-validation") {
             assert!(parse_with(|r| r.electrum_url = "ssl://electrum.test:50002".into()).is_err());
         }
-        if !cfg!(feature = "evm-rpc") {
+        if !cfg!(feature = "rgb-validation") {
             assert!(parse_with(|r| r.evm_rpc_host = "rpc.test".into()).is_err());
             assert!(parse_with(|r| r.evm_rpc_ca_der = vec![1]).is_err());
             assert!(parse_with(|r| r.evm_rpc_tls_port = 443).is_err());

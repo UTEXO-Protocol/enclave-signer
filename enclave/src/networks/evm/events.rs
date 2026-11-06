@@ -26,7 +26,6 @@ use attestation_verify::EvmFinalityTag;
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "bfa-validation")]
 use crate::networks::rgb::validation::VerifiedLock;
 
 /// Reads a uint256 ABI word at a byte offset as u64. Fails if the data is too
@@ -165,7 +164,6 @@ fn event_topic0(sig: &str) -> [u8; 32] {
 /// uses them and the BFA path loops over a full mint ancestry.
 static BRIDGE_FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(BRIDGE_FUNDS_IN_SIG));
-#[cfg(feature = "bfa-validation")]
 static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(FUNDS_IN_SIG));
 
@@ -571,14 +569,12 @@ fn check_finality_snapshot(
 }
 
 /// `FundsIn` topic that holds the indexed lockId (the contract keeps the `rgbOpId` name).
-#[cfg(feature = "bfa-validation")]
 const FUNDS_IN_LOCK_ID_TOPIC: usize = 2;
 
 /// Decodes a `FundsIn` log, binds it to `expected_lock_id`, and returns the amount.
 ///
 /// Only one layout is accepted: topic0, the indexed sender and the indexed
 /// `lockId` (the `LockId` digest bytes as a big-endian uint256), then the amount word.
-#[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
         return Err(EnclaveError::CrossCheck(
@@ -604,13 +600,11 @@ fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
 
 /// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
 /// The contract kept the `rgbOpId` label; the word it names is the lockId.
-#[cfg(feature = "bfa-validation")]
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
 
 /// The `operationId` of the one deposit that can back a mint. Every input is
 /// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
-#[cfg(feature = "bfa-validation")]
 pub fn rgb_mint_deposit_id(
     cfg: &crate::config::BridgeConfig,
     lock_id: &[u8; 32],
@@ -652,7 +646,6 @@ pub fn rgb_mint_deposit_id(
 }
 
 /// The lock of a mint: its deposit id, with the minted units as net amount.
-#[cfg(feature = "bfa-validation")]
 pub fn derived_lock(
     cfg: &crate::config::BridgeConfig,
     lock_id: [u8; 32],
@@ -684,7 +677,6 @@ pub fn derived_lock(
 /// `FundsIn` with `lock_id` and `minted` as amount. Other deposits in the tx
 /// are ignored. A later `fundsOut` must cite its `operationId` in
 /// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
-#[cfg(feature = "bfa-validation")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
@@ -770,7 +762,6 @@ pub fn verify_rgb_funds_in(
 
 /// The node must report the pinned chain. A receipt from a node on another
 /// chain (for example a testnet Bridge at the same address) backs nothing.
-#[cfg(feature = "bfa-validation")]
 pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Result<u64> {
     let node = provider.get_chain_id()?;
     if node != pinned {

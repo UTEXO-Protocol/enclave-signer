@@ -141,9 +141,9 @@ Four crates plus the infrastructure they touch:
   protocol, the operator CLI, and the `attest-verify` CLI.
 
 **Cargo features.** `spv` (implies `rgb-validation`),
-`ccd`, `evm-rpc`, `bfa-mint`,
+`ccd`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
-or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also
+or `burn-signer` (RGB -> EVM), each implying `rgb-validation`. `mint-signer` also
 enables `kms-persistence`. Production images are built with
 `--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
@@ -273,7 +273,7 @@ debug output omit the path. The dev images use
 `RUST_LOG=debug,alloy_transport_http=off` to disable Alloy HTTP logs, which can
 include the full URL and provider responses. Custom debug or trace filters
 must keep `alloy_transport_http=off`. The client does not override the log filter.
-Builds without `evm-rpc` reject a nonempty path.
+Builds without `rgb-validation` reject a nonempty path.
 
 A provider key in the path is runtime-only. Neither attestation policy nor KMS
 context includes it, so rotating it on restart does not change image PCRs,
@@ -325,7 +325,7 @@ SecurityPolicy = Production {
   build, or a missing pin resolves to `Development`. Only a release
   `rgb-validation` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
   `RGB_ASSET_ID` all set resolves to `Production`. `evm_source` is
-  `Disabled` without `evm-rpc`. Otherwise it is `PinnedTlsRpc` with the host
+  `Disabled` without `rgb-validation`. Otherwise it is `PinnedTlsRpc` with the host
   and the CA SHA-256 of the launch set. The verifier pins both.
 - **Boot gate:** a release `rgb-validation` build that does not resolve to a
   valid `Production` policy MUST refuse to boot (panic). The FundsIn contract
@@ -484,7 +484,7 @@ Regression tests compare the domain separator and digest with stored
 contract/backend fixtures. These tests do not inspect the deployed contract.
 The response returns the calldata unchanged.
 
-**Settlement bind (`bfa-mint`).** `settlementData` is
+**Settlement bind.** `settlementData` is
 `abi.encode(bytes32[] operationIds)`, the deposits the release settles. Each
 id hashes its deposit's netAmount, so no amounts are cited. For each mint in
 the burn's ancestry, the enclave derives the `operationId` of the one deposit
@@ -527,7 +527,7 @@ in-enclave check fails earlier and names the expected value.
 
 A mint/burn enclave signs `TS_BURN` unlocks and nothing else, binding the
 release to the payout target the burn transition commits to (`burnReason`).
-The BFA line is a mint/burn build (`bfa-mint`), where a deposit is a BFA
+The BFA line is a mint/burn build, where a deposit is a BFA
 `mint` against a verified `FundsIn` lock. A mint/burn build is further split by
 signer role: the **mint signer** compiles only the EVM -> RGB direction (mint
 PSBT, `SignBtc`, `SignRightsRefill`), the **burn signer** only the RGB -> EVM direction
@@ -663,7 +663,7 @@ could strand a mint whose EVM lock already settled when the fee market moved,
 so the operational fee check belongs to the bridge, before the lock. Raising a
 ceiling ships a new enclave image, so it needs federation agreement.
 
-**EVM data source:** a build without `evm-rpc` refuses bridge PSBTs outright.
+**EVM data source:** a build without `rgb-validation` refuses bridge PSBTs outright.
 Deposits above the selected head refuse signing and can be retried once that
 head covers them. A missing, malformed or unsupported tag response refuses signing.
 With `PinnedTlsRpc`, TLS ends inside the enclave and authenticates the pinned

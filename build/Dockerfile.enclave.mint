@@ -34,12 +34,11 @@ WORKDIR /build/enclave
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `spv` implies `rgb-validation`. `--no-default-features` drops `ccd`
-# (so this binary is RGB-only). The signer role implies
-# `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
-# alloy + tokio); it needs a second host vsock-proxy
-# (EVM_RPC_VSOCK_PORT, default 8002).
+# (so this binary is RGB-only). The signer role implies `rgb-validation`,
+# which includes in-enclave FundsIn verification (alloy + tokio). It needs a
+# second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
+# `mint-signer` (implies `rgb-validation`: the mint/burn flow + BFA validation)
 # builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
@@ -116,7 +115,7 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=${BITCOIN_NETWORK}
 
-# In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
+# In-enclave EVM verification. The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.

@@ -34,7 +34,7 @@ WORKDIR /build/enclave
 # `ccd` is listed because Concordium signing sits behind that feature; without it
 # every CCD request answers "not compiled in".
 #
-# The signer role implies `bfa-mint`, and `mock-attestation` is on.
+# The signer role implies `rgb-validation`, and `mock-attestation` is on.
 # `ccd` stays in the list: init-enclaves.sh ends by asking each adapter for its
 # CCD_GOVERNANCE public key and fails the whole run if that answers "not
 # compiled in".
@@ -44,7 +44,7 @@ RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
 RUN --mount=type=secret,id=lib_key \
     --mount=type=secret,id=rgb_deps_token \
-    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE
+    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,ccd,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

@@ -99,7 +99,7 @@ pub struct EnclaveState {
     pub op_replay_guard: NonceReplayGuard,
 
     /// RR15: rights refills admitted past the cheap gate in the last hour.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub refill_rate: super::RefillRateLimit,
 
     /// Successful exports from this enclave process. (F03-AF-10)
@@ -160,7 +160,7 @@ impl EnclaveState {
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
             op_replay_guard: NonceReplayGuard::for_mint_operations(),
-            #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+            #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
             refill_rate: super::RefillRateLimit::default(),
             seed_export_count: AtomicU64::new(0),
             seed_export_slots: AtomicU64::new(0),

@@ -45,15 +45,14 @@ pub struct ValidationContext<'a> {
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
     /// Binds the mint a PSBT commits to the request's EVM deposit (M6).
     /// `None` fails the mint closed.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
     /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
     /// keys are not held across I/O. `None` fails the mint closed.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
-    /// Binds each BFA mint anchor of a consignment to an EVM lock. `None` on
-    /// builds without `bfa-validation`: a consignment with a mint anchor is
-    /// then refused.
+    /// Binds each BFA mint anchor of a consignment to an EVM lock. With
+    /// `None`, a consignment with a mint anchor is refused.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     pub anchor_binder: Option<crate::networks::rgb::validation::AnchorBinder<'a>>,
     /// Reads the asset's reject list.

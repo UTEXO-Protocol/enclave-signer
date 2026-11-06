@@ -8,7 +8,7 @@
 
 mod cloning_session;
 mod enclave;
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 mod refill_rate;
 mod replay_guard;
 
@@ -17,6 +17,6 @@ mod tests;
 
 pub use cloning_session::CloningSession;
 pub use enclave::{EnclaveState, ExportQuotaReservation, Phase};
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use refill_rate::{RefillRateLimit, MAX_REFILLS_PER_HOUR};
 pub use replay_guard::{NonceReplayGuard, ReplayReservation};

@@ -53,7 +53,7 @@ impl SignerRole {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvmDataSource {
-    /// No EVM verification in the build (`evm-rpc` off). The enclave rejects
+    /// No EVM verification in the build (`rgb-validation` off). The enclave rejects
     /// every EVM->RGB bridge request.
     Disabled = 0,
     /// Plaintext JSON-RPC over the host relay. The host can forge the
