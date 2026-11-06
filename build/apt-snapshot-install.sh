@@ -41,8 +41,63 @@ fetch() {
         "$@"
 }
 
+fetch_from_debian_cdn() (
+    # Use only the already authenticated snapshot indexes. Never refresh from
+    # the live CDN: that would allow the selected package versions to drift.
+    plan=$(mktemp)
+    trap 'rm -f "$plan"' EXIT
+    apt-get -qq -o Acquire::ForceHash=SHA256 --print-uris \
+        install -y --no-install-recommends "$@" > "$plan"
+
+    count=0
+    while read -r uri filename size hash extra; do
+        # APT can print informational lines as well as quoted download URIs.
+        case "$uri" in "'"*) ;; *) continue ;; esac
+        uri=${uri#\'}
+        uri=${uri%\'}
+        case "$uri" in
+            https://snapshot.debian.org/archive/debian/*/pool/*)
+                archive=debian ;;
+            https://snapshot.debian.org/archive/debian-security/*/pool/*)
+                archive=debian-security ;;
+            *) echo "Unsupported snapshot URI: $uri" >&2; exit 100 ;;
+        esac
+        # No shell evaluation of the plan; reject unsafe paths and weak hashes.
+        case "$filename" in
+            ''|.*|*[!a-zA-Z0-9._+%:~=-]*) exit 100 ;;
+        esac
+        digest=${hash#SHA256:}
+        case "$digest" in ''|*[!a-fA-F0-9]*) exit 100 ;; esac
+        [ "$hash" != "$digest" ] && [ "${#digest}" -eq 64 ] && [ -z "$extra" ] || exit 100
+        relative=${uri#https://snapshot.debian.org/archive/}
+        relative=${relative#*/}
+        relative=${relative#*/}
+        case "$relative" in pool/*.deb) ;; *) exit 100 ;; esac
+        case "$relative" in *../*|*\?*|*\#*) exit 100 ;; esac
+
+        echo "Snapshot unavailable; fetching $filename from official Debian CDN" >&2
+        # apt-helper uses APT's TLS settings and rejects a hash mismatch. APT
+        # checks the cached archives again before the offline installation.
+        PATH="$PATH:/usr/lib/apt" apt-helper \
+            -o Acquire::Retries=0 \
+            -o Acquire::http::Timeout=60 \
+            -o Acquire::https::Timeout=60 \
+            download-file "https://deb.debian.org/$archive/$relative" \
+            "/var/cache/apt/archives/partial/$filename" "$hash"
+        mv "/var/cache/apt/archives/partial/$filename" "/var/cache/apt/archives/$filename"
+        count=$((count + 1))
+    done < "$plan"
+    [ "$count" -gt 0 ] || exit 100
+)
+
 # Do not accept a partially refreshed index. Retain downloaded archives across
 # retries, then run package installation once, with networking disabled in APT.
 fetch -o APT::Update::Error-Mode=any update
-fetch install -y --no-install-recommends --download-only "$@"
+if fetch install -y --no-install-recommends --download-only "$@"; then
+    :
+else
+    status=$?
+    [ "$status" -eq 100 ] || exit "$status"
+    fetch_from_debian_cdn "$@"
+fi
 apt-get install -y --no-install-recommends --no-download "$@"
