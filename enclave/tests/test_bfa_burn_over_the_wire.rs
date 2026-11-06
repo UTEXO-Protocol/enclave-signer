@@ -551,7 +551,8 @@ fn refuses_release_fields_not_authorized_by_the_validated_burn() {
     for route in [Route::Direct, Route::LayerZero] {
         let fixture = Fixture::new(route);
         fixture.control();
-        let edits: [(&str, fn(&mut FundsOutParams)); 5] = [
+        type ReleaseEdit = (&'static str, fn(&mut FundsOutParams));
+        let edits: [ReleaseEdit; 5] = [
             ("recipient mismatch", |p| {
                 p.recipient = Address::from([0x99; 20])
             }),

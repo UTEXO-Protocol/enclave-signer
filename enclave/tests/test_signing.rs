@@ -702,8 +702,6 @@ fn evm_destination_rejects_unconfigured_bridge_config() {
             chain_pins: &pins,
             anchor_binder: None,
             reject_list_reader: None,
-            #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
-            self_owned_psbt_outputs: None,
             #[cfg(evm_to_rgb)]
             psbt_fee_key_paths: None,
         };
