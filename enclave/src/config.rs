@@ -35,7 +35,7 @@ pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 /// Env var of [`BridgeConfig::spv_min_confirmations`].
 pub const SPV_MIN_CONFIRMATIONS_ENV: &str = "SPV_MIN_CONFIRMATIONS";
 /// Default depth of each Bitcoin witness tx before the enclave signs.
-pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 6;
+pub const DEFAULT_SPV_MIN_CONFIRMATIONS: u32 = 3;
 
 /// Env var of [`BridgeConfig::mint_witness_sat`].
 pub const MINT_WITNESS_SAT_ENV: &str = "MINT_WITNESS_SAT";
@@ -133,7 +133,7 @@ pub struct BridgeConfig {
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
-    /// 6, at least 1). Image env, so PCR0 measures it, and attested.
+    /// 3, at least 1). Image env, so PCR0 measures it, and attested.
     pub spv_min_confirmations: u32,
     /// Exact sats a witness mint pays to its recipient's output
     /// (`MINT_WITNESS_SAT`, default 1500, 546 to 10_000). It must equal the
@@ -152,7 +152,7 @@ fn parse_evm_finality_tag(
 ) -> std::result::Result<EvmFinalityTag, String> {
     match value {
         Ok(value) => value.parse(),
-        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Safe),
+        Err(std::env::VarError::NotPresent) => Ok(EvmFinalityTag::Finalized),
         Err(std::env::VarError::NotUnicode(_)) => Err("value must be valid Unicode".into()),
     }
 }
@@ -206,7 +206,7 @@ impl Default for BridgeConfig {
             rgb_max_unowned_sats: 0,
             btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
-            evm_finality_tag: EvmFinalityTag::Safe,
+            evm_finality_tag: EvmFinalityTag::Finalized,
             token_contract: [0u8; 20],
             bitcoin_network: BitcoinNetwork::Mainnet,
             btc_relay_mode: BtcRelayMode::Required,
@@ -916,7 +916,7 @@ mod tests {
     fn finality_tag_env_defaults_only_when_absent() {
         assert_eq!(
             parse_evm_finality_tag(Err(std::env::VarError::NotPresent)).unwrap(),
-            EvmFinalityTag::Safe
+            EvmFinalityTag::Finalized
         );
         for (value, tag) in [
             ("latest", EvmFinalityTag::Latest),
@@ -988,9 +988,9 @@ mod tests {
     }
 
     #[test]
-    fn spv_min_confirmations_defaults_to_six_when_unset() {
-        assert_eq!(parse_spv_min_confirmations(None), Ok(6));
-        assert_eq!(parse_spv_min_confirmations(Some(" ")), Ok(6));
+    fn spv_min_confirmations_defaults_to_three_when_unset() {
+        assert_eq!(parse_spv_min_confirmations(None), Ok(3));
+        assert_eq!(parse_spv_min_confirmations(Some(" ")), Ok(3));
     }
 
     #[test]

@@ -30,7 +30,7 @@ flowchart TD
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
         p3stale -->|yes| p3net{consignment chain_net == enclave network?}
         p3net -->|no| p3nr[REFUSE — cross-network replay]:::refuse
-        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS (default 6)"]
+        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS (default 3)"]
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end

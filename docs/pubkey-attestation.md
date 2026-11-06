@@ -191,9 +191,9 @@ policy_commitment =
     u8(0x00)                                        // development discriminant
 ```
 
-V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (default `safe`),
-and to `spv_min_confirmations` (`SPV_MIN_CONFIRMATIONS`: 6 in the burn image, 3
-in the mint image).
+V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (`finalized` in
+every image, and the default), and to `spv_min_confirmations`
+(`SPV_MIN_CONFIRMATIONS`: 3 in every image; only the burn signer checks it).
 Every EVM `FundsIn` receipt must be at or below the selected head, with its
 block hash matching the canonical block at that height. The enclave
 revalidates the selected head snapshot to detect a reorg. The enclave trusts
@@ -331,9 +331,9 @@ attest-verify \
     --expect-signer-role burn \
     --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
-    --expect-evm-finality-tag safe \
+    --expect-evm-finality-tag finalized \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-    --expect-spv-min-confirmations 6 \
+    --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
@@ -365,7 +365,7 @@ attest-verify \
 attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-finality-tag safe \
+    --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
     --expect-electrum-host <electrum host> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \

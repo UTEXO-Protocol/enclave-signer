@@ -108,7 +108,7 @@ them, and decide whether you accept each one:
 | `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json` |
 | `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json` |
 | `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json` (`safe` or `finalized`; `latest` is refused) |
-| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 6 for burn, 3 for mint) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
+| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 3) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
 | `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json` |
 | `electrum_host` | `--expect-electrum-host` | the Electrum server you accept |
 | `evm_rpc_tls.host` | `--expect-evm-rpc-host` | the EVM RPC host you accept |
@@ -139,8 +139,8 @@ bash build/verify-signer.sh https://<published location>/attestation-16.json \
   --expect-rgb-asset-id 'rgb:<BFA contract id>' \
   --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
-  --expect-evm-finality-tag safe \
-  --expect-spv-min-confirmations 6 \
+  --expect-evm-finality-tag finalized \
+  --expect-spv-min-confirmations 3 \
   --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
   --expect-electrum-host <electrum host> \
   --expect-evm-rpc-host <rpc host> \

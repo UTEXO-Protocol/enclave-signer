@@ -83,7 +83,7 @@ the user. The mint signer signs the Bitcoin transaction that does the mint.
 Before it signs, the mint signer:
 
 1. Gets the EVM deposit receipt itself. The receipt must be a success, be at
-   or below the RPC head selected by `EVM_FINALITY_TAG` (default `safe`), and
+   or below the RPC head selected by `EVM_FINALITY_TAG` (`finalized`), and
    have the canonical block hash at its height.
 2. Finds exactly one `BridgeFundsIn` event from the pinned `FUNDS_IN_CONTRACT`.
    The `operationId`, amount and commission must match the request.
@@ -136,7 +136,7 @@ Before it signs, the burn signer:
    The mint signer reads no list. Any read failure refuses, so burn hosts
    need the EVM RPC proxy (`vsock-proxy 8002`) for such an asset.
 2. Checks that each Bitcoin transaction of the consignment is in its own
-   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (default 6).
+   header chain, at least `SPV_MIN_CONFIRMATIONS` blocks deep (3).
    The chain tip must be less than 2 hours old.
 3. Decodes the `fundsOut` calldata. The encoding must be canonical. Chain,
    contract and deadline must be correct.
@@ -605,8 +605,8 @@ Data sources and transport:
 | `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only the swap flow reads it. The mint and burn images still pin the URL and start its forwarder. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host vsock-proxy port for AWS KMS. |
-| `EVM_FINALITY_TAG` | `safe` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. |
-| `SPV_MIN_CONFIRMATIONS` | `6` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Baked into the image: 3 in the mint image (no mint check reads it), 6 in the burn image. |
+| `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. Every image sets `finalized`. |
+| `SPV_MIN_CONFIRMATIONS` | `3` | Attested minimum depth of each Bitcoin witness tx, by SPV on the burn path. Zero or a non-number stops the boot. Every image sets 3; no mint check reads it. |
 | `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats a witness mint pays to the user's output. Unset or empty gives 1500; a non-number or a value outside 546 to 10000 stops the boot (every image parses it). It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that ([mint flow](docs/mint-flow.md) M8). Baked into the mint image (1500), so PCR0 measures it; not attested. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, non-vsock builds only. |
 | `RUST_LOG` | unset | Log filter. |
@@ -619,8 +619,8 @@ detect a reorg during verification.
 | Tag | Arbitrum acceptance |
 |-----|---------------------|
 | `latest` | Current L2 tip; lowest latency, with sequencer and L1 reorg risk. Development builds only: a production policy refuses it at boot. |
-| `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. Default. |
-| `finalized` | Batch covered by L1's finalized head. |
+| `safe` | Batch posted and covered by L1's safe head, with residual L1 reorg risk. |
+| `finalized` | Batch covered by L1's finalized head. Default, and the value of every image. |
 
 Values must use the exact lowercase spelling. See
 [Arbitrum finality guidance](https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs).

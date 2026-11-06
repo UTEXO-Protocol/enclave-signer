@@ -116,7 +116,10 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
 # Production accepts safe or finalized and refuses latest at boot; missing tag
-# support refuses signing.
+# support refuses signing. Every image takes finalized, like the federation
+# listener: RGB receivers accept a mint only once its lock is finalized, so
+# signing earlier gains no time, and a mint signed over a lock that is then
+# reorged out loses its mint right.
 # FUNDS_IN_CONTRACT is set EXPLICITLY because it differs from
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
@@ -125,10 +128,11 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
 # Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
 # pin binds them instead.
-# SPV_MIN_CONFIRMATIONS: depth of each mint history witness (at least 1), attested.
-# In practice that is the rights send that made the right; 3 matches the bridge's
-# INIT_OP_MIN_CONFIRMATIONS (the burn image keeps 6).
-# The connector must pass mint_begin min_confirmations of at least this value.
+# SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
+# the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
+# Here it only decides when the health check reports the SPV header chain
+# synced, that many blocks past the checkpoint. Every image sets 3, the depth
+# the burn signer checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every
 # witness mint is refused after its lock. Measured, not attested.
@@ -137,7 +141,7 @@ ENV ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
 ARG RGB_MAX_UNOWNED_SATS=1500
 ENV RGB_MAX_UNOWNED_SATS=${RGB_MAX_UNOWNED_SATS} \
     BTC_RELAY_MODE=${BTC_RELAY_MODE} \
-    EVM_FINALITY_TAG=safe \
+    EVM_FINALITY_TAG=finalized \
     SPV_MIN_CONFIRMATIONS=3 \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \

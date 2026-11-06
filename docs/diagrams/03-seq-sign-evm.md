@@ -57,7 +57,7 @@ sequenceDiagram
     loop each MerkleProofEntry
         Spv->>Spv: merkle path depth ≤ 32
         Spv->>Chain: header_at(block_height)
-        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (default 6, attested)
+        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (default 3, attested)
         Spv->>Spv: verify_merkle_proof(txid, position, path, root)
     end
     Spv->>Chain: pin each proof block (ChainPins)

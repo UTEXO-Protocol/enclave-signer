@@ -379,7 +379,7 @@ mod tests {
         assert!(matches!(
             expected(),
             AttestedPolicy::Production {
-                evm_finality_tag: EvmFinalityTag::Safe,
+                evm_finality_tag: EvmFinalityTag::Finalized,
                 ..
             }
         ));
@@ -554,10 +554,10 @@ mod tests {
 
     #[test]
     fn evm_finality_tag_mismatch_aborts() {
-        for tag in [EvmFinalityTag::Latest, EvmFinalityTag::Finalized] {
+        for tag in [EvmFinalityTag::Latest, EvmFinalityTag::Safe] {
             assert_mismatch(
                 set!(evm_finality_tag, tag),
-                &format!("evm_finality_tag mismatch: expected safe, attested {tag}"),
+                &format!("evm_finality_tag mismatch: expected finalized, attested {tag}"),
             );
         }
     }
