@@ -305,10 +305,10 @@ has one role, its own PCR0 and its own seed. Use `--no-default-features`:
 
 ```bash
 # Mint signer (EVM -> RGB)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,mint-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer
 
 # Burn signer (RGB -> EVM)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,burn-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer
 ```
 
 Other builds stay in the tree. They are not the production bridge:
@@ -318,7 +318,7 @@ Other builds stay in the tree. They are not the production bridge:
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
 
 # Local TCP dev build (debug profile, seed import allowed)
-cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,rgb,mint-signer,ccd,evm-rpc
+cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,mint-signer,ccd,evm-rpc
 ```
 
 Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
@@ -350,7 +350,7 @@ DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 ```
 
 `Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` build the BFA signer images.
-Each signer role enables `bfa-mint`. This enables `rgb` and
+Each signer role enables `bfa-mint`. This enables `rgb-validation` and
 `bfa-validation`. BFA validation also enables `evm-rpc`.
 
 Run the two roles as separate enclaves with independent seeds. Mint signers use
@@ -856,8 +856,8 @@ utexo-bridge-parent-cli --addr vsock://16 health
 ```bash
 cargo test                                                              # enclave workspace, default features
 cargo test -p attestation-verify --features mock                          # dependency tests need their own invocation
-cargo test -p utexo-bridge-enclave --no-default-features --features rgb,mint-signer,mock-attestation,allow-seed-import
-cargo test -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --features evm-rpc
 cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
@@ -893,7 +893,7 @@ ordinary PR runs. Use **Actions → CI → Run workflow → run_stress** for the
 release-mode suite, or run:
 
 ```bash
-cargo test --release -p utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+cargo test --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
 ```
 
 Live EVM event checks are explicitly ignored because they require an RPC and a
@@ -904,13 +904,12 @@ an unconfigured ordinary CI run no longer reports these tests as passed.
 
 ## Feature flags
 
-Any feature that turns on `rgb-validation` (`rgb`, `spv`, `evm-rpc`, `bfa-validation`)
+Any feature that turns on `rgb-validation` (`spv`, `evm-rpc`, `bfa-validation`)
 needs exactly one signer role (`mint-signer` or `burn-signer`), or the build fails.
 The default set is `ccd`.
 
 | Feature | Implies | Description |
 |---------|---------|-------------|
-| `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `bfa-mint` | `rgb-validation`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |

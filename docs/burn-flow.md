@@ -1,6 +1,6 @@
 # Burn flow (RGB -> EVM)
 
-**Signer image:** `burn-signer` (`--no-default-features --features vsock,rgb,burn-signer`).
+**Signer image:** `burn-signer` (`--no-default-features --features vsock,spv,burn-signer`).
 **Checked against repository code:** 2026-11-04, rgb-lib-bfa 5010eefa
 (RGB-Tools bfa 66bae096).
 Deployment was not checked.
@@ -553,7 +553,7 @@ cap. So a burn of many separate lines costs a few steps per line, however
 long each line's history; only origins that share a long history cost much.
 
 Measured in release mode on an Apple M1 Pro (`cargo test --release -p
-utexo-bridge-enclave --no-default-features --features rgb,burn-signer --lib
+utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib
 caps -- --ignored --nocapture --test-threads=1`, `validation/tests/caps.rs`),
 on rgb-lib 1ae1c160, 2026-10-30, at a load under 4 unless a cell names more,
 two runs each; a row marked "one run" ran once. The enclave's CPU may be

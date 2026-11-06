@@ -62,7 +62,7 @@ compile_error!(
 compile_error!(
     "an RGB build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
-     vsock,rgb,mint-signer`"
+     vsock,spv,mint-signer`"
 );
 
 // The attested role reads the features. The gates read the `build.rs` cfgs.

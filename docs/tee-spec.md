@@ -140,7 +140,7 @@ Four crates plus the infrastructure they touch:
   (`parent.ParentService`) bridging the listener to the enclave's wire
   protocol, the operator CLI, and the `attest-verify` CLI.
 
-**Cargo features.** `rgb` (implies `spv`, which implies `rgb-validation`),
+**Cargo features.** `spv` (implies `rgb-validation`),
 `ccd`, `evm-rpc`, `bfa-mint`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
 or `burn-signer` (RGB -> EVM), each implying `bfa-mint`. `mint-signer` also

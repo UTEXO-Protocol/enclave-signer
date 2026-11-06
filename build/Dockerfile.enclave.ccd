@@ -32,7 +32,7 @@ WORKDIR /build/enclave
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `--no-default-features --features vsock,ccd`: Concordium + shared EVM signing
-# only. No `rgb`/`spv`/`rgb-validation`/`evm-rpc`, so the heavy RGB deps are not
+# only. No `spv`/`rgb-validation`/`evm-rpc`, so the heavy RGB deps are not
 # compiled. `--locked` pins to Cargo.lock exactly, so a rebuild of the same
 # commit cannot re-resolve a git dep and shift PCR0.
 # Cargo still loads every git source of the lock, so it fetches the rgb-lib
