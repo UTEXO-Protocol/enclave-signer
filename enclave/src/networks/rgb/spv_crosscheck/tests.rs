@@ -720,3 +720,158 @@ fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
         "got: {err}"
     );
 }
+
+// ===== Position binding and 64-byte transaction nodes (VAL-UENC-15) =====
+
+/// A 64-byte legacy transaction X: one input with an empty scriptSig, one
+/// output with a 4-byte scriptPubKey (4 + 1 + 41 + 1 + 13 + 4 = 64).
+fn transaction_of_64_bytes() -> bitcoin::Transaction {
+    use bitcoin::{
+        absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, TxIn,
+        TxOut, Txid, Witness,
+    };
+    bitcoin::Transaction {
+        version: Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x5C; 32]),
+                vout: 7,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x6a; 4]),
+        }],
+    }
+}
+
+fn display(internal: [u8; 32]) -> [u8; 32] {
+    let mut display = internal;
+    display.reverse();
+    display
+}
+
+/// The block at height 1 commits [X, t1, t2, t3]; 5 blocks bury it.
+/// Returns (chain, a, b, t1, n23, txid_x), all hashes in internal order.
+#[allow(clippy::type_complexity)]
+fn block_with_a_64_byte_tx() -> (
+    HeaderChain,
+    [u8; 32],
+    [u8; 32],
+    [u8; 32],
+    [u8; 32],
+    [u8; 32],
+) {
+    let tx = transaction_of_64_bytes();
+    let x = serialize(&tx);
+    assert_eq!(x.len(), 64, "X must serialize to exactly 64 bytes");
+    let a: [u8; 32] = x[..32].try_into().unwrap();
+    let b: [u8; 32] = x[32..].try_into().unwrap();
+    let txid_x = dsha256_pair(&a, &b);
+    assert_eq!(txid_x, tx.compute_txid().to_byte_array());
+
+    let t1 = [0x11u8; 32];
+    let t2 = [0x22u8; 32];
+    let t3 = [0x33u8; 32];
+    let n01 = dsha256_pair(&txid_x, &t1);
+    let n23 = dsha256_pair(&t2, &t3);
+    let root = dsha256_pair(&n01, &n23);
+    let header = Header {
+        version: Version::ONE,
+        prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
+        time: 1_700_000_001,
+        bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+        nonce: 0,
+    };
+    (chain_burying(header, 5), a, b, t1, n23, txid_x)
+}
+
+/// The consignment's only witness txid is b, the second half of the mined
+/// 64-byte tx X, proven with path [a, t1, n23]. The gate
+/// (`validate_source_chain`) and the consensus input (`proven_witnesses`) both
+/// refuse it, and nothing is pinned.
+#[test]
+fn burn_gate_refuses_a_half_of_a_mined_64_byte_tx() {
+    let (chain, a, b, t1, n23, _) = block_with_a_64_byte_tx();
+    let b_display = display(b);
+    let proof = MerkleProofEntry {
+        txid: b_display.to_vec(),
+        block_height: 1,
+        tx_position: 1,
+        merkle_path: vec![
+            display(a).to_vec(),
+            display(t1).to_vec(),
+            display(n23).to_vec(),
+        ],
+    };
+    let validated = ValidatedConsignment {
+        chain_net: "bcrt".into(),
+        witness_txids: vec![b_display],
+        ..Default::default()
+    };
+    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
+    let pins = ChainPins::new();
+    let err = validate_source_chain(
+        &chain,
+        Some(&validated),
+        std::slice::from_ref(&proof),
+        now,
+        &pins,
+        MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("64-byte transaction"), "{err}");
+    assert!(pins.is_empty(), "no block may be pinned on a refusal");
+
+    let err = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap_err();
+    assert!(err.to_string().contains("64-byte transaction"), "{err}");
+}
+
+/// Honest proofs in the same block (X itself at position 0, t1 at position 1)
+/// pass: the node-shape rule refuses no real node.
+#[test]
+fn burn_gate_accepts_honest_proofs_in_a_block_with_a_64_byte_tx() {
+    let (chain, _, _, t1, n23, txid_x) = block_with_a_64_byte_tx();
+    let x_display = display(txid_x);
+    let t1_display = display(t1);
+    let proof_x = MerkleProofEntry {
+        txid: x_display.to_vec(),
+        block_height: 1,
+        tx_position: 0,
+        merkle_path: vec![t1_display.to_vec(), display(n23).to_vec()],
+    };
+    let proof_t1 = MerkleProofEntry {
+        txid: t1_display.to_vec(),
+        block_height: 1,
+        tx_position: 1,
+        merkle_path: vec![x_display.to_vec(), display(n23).to_vec()],
+    };
+    validate_spv_proofs(
+        &chain,
+        &[x_display, t1_display],
+        &[proof_x, proof_t1],
+        MIN_CONFIRMATIONS,
+    )
+    .unwrap();
+}
+
+/// Position 4 folds like position 0 under a two-sibling path (the low bits
+/// agree), so the root matches; the bit left over is refused.
+#[test]
+fn burn_gate_refuses_a_position_the_path_cannot_reach() {
+    let (chain, _, _, t1, n23, txid_x) = block_with_a_64_byte_tx();
+    let x_display = display(txid_x);
+    let proof = MerkleProofEntry {
+        txid: x_display.to_vec(),
+        block_height: 1,
+        tx_position: 4,
+        merkle_path: vec![display(t1).to_vec(), display(n23).to_vec()],
+    };
+    let err = validate_spv_proofs(&chain, &[x_display], &[proof], MIN_CONFIRMATIONS).unwrap_err();
+    assert!(err.to_string().contains("out of reach"), "{err}");
+}

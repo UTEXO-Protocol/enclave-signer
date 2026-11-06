@@ -232,7 +232,9 @@ meets the reorganization limits. Signet and regtest skip proof-of-work and
 - **B3.3** The Merkle proofs must be exactly the set of witness transactions
   in the consignment. None missing. None extra. No duplicates.
 - **B3.4** Each Merkle path must be at most 32 levels. Each proof must verify
-  against the header that the enclave stores at that height.
+  against the header that the enclave stores at that height. The transaction
+  position must be consumed by the path, one bit per level. No node hashed on
+  the path may be a 64-byte transaction (CVE-2017-12842).
 - **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
   blocks deep (default 3). On the testnets min-difficulty blocks count.
 - **B3.6** The enclave records the heights, hashes and required depths it
