@@ -25,7 +25,7 @@ MEASURED_PINS = dict(
     BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
-    RGB_MAX_UNOWNED_SATS='1000', ENDPOINTS_SHA256='12' * 32,
+    ENDPOINTS_SHA256='12' * 32,
 )
 
 
@@ -113,9 +113,6 @@ class BuildArgumentsTests(unittest.TestCase):
                                      RGB_ASSET_ID='rgb:test-bfa-asset', **overrides)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 applied = dict(overrides)
-                if role == 'burn':
-                    applied.pop('RGB_MAX_UNOWNED_SATS')
-                    self.assertNotIn('RGB_MAX_UNOWNED_SATS', result.stdout)
                 self.assertCountEqual(self.captured_build_args(), [
                     'SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset',
                     *(f'{key}={value}' for key, value in applied.items()),

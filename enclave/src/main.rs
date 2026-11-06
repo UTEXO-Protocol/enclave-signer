@@ -46,12 +46,6 @@ fn main() {
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");
     }
-    // Every mint build refuses unset in S7.1 too, so this stops at boot what
-    // would otherwise strand each witness mint after its lock.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
-    if let Err(msg) = bridge_config.check_mint_witness_budget() {
-        panic!("{msg}");
-    }
     // Fail closed: a release build with too little memory for the largest
     // requests does not start. See `memory.rs`.
     if let Err(msg) = utexo_bridge_enclave::memory::check_at_boot(&build_ctx) {

@@ -348,7 +348,7 @@ Also inside: `BITCOIN_NETWORK` (`bitcoin_network`).
 
 Not inside the policy commitment: the Electrum/Esplora URL
 scheme and port, the EVM RPC TLS port, request-size caps, and the concrete
-`BTC_MAX_TOTAL_SATS`, `BTC_MAX_UNOWNED_SATS` and `RGB_MAX_UNOWNED_SATS` values
+`BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS` values
 (only the `BTC_MAX_TOTAL_SATS` on/off boolean is attested), and the mint
 signer's `MINT_WITNESS_SAT`.
 
@@ -653,15 +653,9 @@ another PSBT for the deposit after restart, expiry, eviction, or on another encl
 witness transaction can satisfy the RGB ledger exactly and still route the
 bridge's Bitcoin backing to an attacker output that carries no RGB assignment.
 The fee-rate cap does not catch it -- a diverted sat is an output, not a fee, so
-diversion *lowers* the implied rate. Outputs that do not pay back into the
-custody their inputs were in are therefore bounded by `RGB_MAX_UNOWNED_SATS`,
-fail-closed while unset. The budget is a bound rather than an identity check
-because the recipient's seal is blinded: the enclave cannot tell which output is
-the payout, only how much may leave. The mint signer checks more (M8): a
-blinded mint pays no sat out, a witness mint exactly `MINT_WITNESS_SAT` to its
-seal's output. A mint signer does not boot when `RGB_MAX_UNOWNED_SATS` is
-below `MINT_WITNESS_SAT` (unset or not a number is 0), so this budget never
-refuses a witness mint after its lock. Signing is scoped to the **colored** BIP-86
+diversion *lowers* the implied rate. A mint PSBT is therefore held to M8: a blinded mint
+pays no sat out, a witness mint exactly `MINT_WITNESS_SAT` to its seal's output.
+Signing is scoped to the **colored** BIP-86
 account, key-path spends only: the bridge wallet is singlesig, and a script-path
 input is never signed.
 
@@ -1215,9 +1209,7 @@ Known limits. Read them before deployment.
   but Docker, Buildx and BuildKit versions are not pinned.
   The supplied images leave the gas limits unset, so the gas path refuses
   until a rebuilt image sets them. The mint image bakes
-  `MINT_WITNESS_SAT=1500` and `RGB_MAX_UNOWNED_SATS=1500`; a mint signer with
-  `RGB_MAX_UNOWNED_SATS` below `MINT_WITNESS_SAT` does not boot. The other
-  images leave `RGB_MAX_UNOWNED_SATS` unset.
+  `MINT_WITNESS_SAT=1500`.
 - **Protocol integration.** The enclave derives each mint's deposit id. The
   Bridge must derive RGB deposit ids the same way. The enclave and the parent pin the same vendored schema.
   Clients must send its required fields.

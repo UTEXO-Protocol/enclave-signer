@@ -148,7 +148,6 @@ refuses it.
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
 | `MINT_WITNESS_SAT` | 1500 (default and mint image) | The exact sats a witness mint pays to its recipient's output (M8). 546 to 10 000: a value out of bounds or not a number stops the boot. Image env, so PCR0 measures it; not attested. It must equal the connector's `MINT_WITNESS_SAT`; the deploy checks that (M8). |
-| `RGB_MAX_UNOWNED_SATS` | 1500 in the mint image | Second sats gate after M8 (S7.1). A mint signer does not boot when it is below `MINT_WITNESS_SAT`; unset or not a number is 0. |
 | Replay window | 1 h, 100 000 entries | In memory, per enclave. The parent answers a retry of the same request from the reply it kept. |
 | Colored account | `m/86'/827166'/0'` (mainnet) | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
@@ -357,12 +356,7 @@ it is signed.
 
 ### Stage 7 - Sign
 
-- **S7.1** The sats that go to scripts the enclave does not own must not be
-  more than `RGB_MAX_UNOWNED_SATS`. M8 ran before it: a blinded mint pays 0,
-  a witness mint `MINT_WITNESS_SAT`. A mint signer does not boot when
-  `RGB_MAX_UNOWNED_SATS` is below `MINT_WITNESS_SAT` (unset or not a number
-  is 0), so S7.1 never refuses, after the user's lock, a witness mint that M8
-  accepted.
+- **S7.1** There is no unowned-sats budget. M8 is the only sats gate.
 - **S7.2** The mint signer signs only inputs of the colored account. It uses
   Taproot key-path signatures with BIP-86 account keys. A Tapret or script-tree
   root can be part of the tweak. It never produces script-path signatures.
