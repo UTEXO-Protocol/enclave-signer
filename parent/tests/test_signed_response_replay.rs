@@ -209,6 +209,43 @@ async fn a_retry_during_the_exchange_joins_it() {
     );
 }
 
+#[tokio::test]
+async fn a_cancelled_grpc_call_keeps_the_reply_for_a_retry() {
+    let (enclave_port, seen) = start_counting_enclave(Duration::from_millis(400));
+    let grpc_port = start_parent(enclave_port, Duration::from_secs(60)).await;
+    let mut first_client = client(grpc_port).await;
+    let mut retry_client = client(grpc_port).await;
+    let first =
+        tokio::spawn(async move { first_client.sign(rgb_sign_request(vec![0x52; 32])).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while seen.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(!first.is_finished());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        retry_client.sign(rgb_sign_request(vec![0x52; 32])),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(reply.signature, vec![0x52; 32]);
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the detached exchange must supply the retry"
+    );
+}
+
 /// Another PSBT is another request: it reaches the enclave, which applies its
 /// own replay rule. An expired reply is not served either.
 #[tokio::test]

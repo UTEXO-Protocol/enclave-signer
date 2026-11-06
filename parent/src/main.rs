@@ -70,11 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Limit active requests across all connections (F03-AF-13), requests per
     // connection, and handler duration. The enclave still authenticates clones.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
+    let connection_age = Duration::from_secs(300);
+    let request_timeout = Duration::from_secs(cfg.grpc_request_timeout_secs);
+    let connection_grace = request_timeout.saturating_add(Duration::from_secs(10));
     tracing::info!(
         %listen_addr,
         max_concurrent = cfg.grpc_max_concurrent,
         max_concurrent_per_conn = per_conn,
         request_timeout_secs = cfg.grpc_request_timeout_secs,
+        connection_age_secs = connection_age.as_secs(),
+        connection_grace_secs = connection_grace.as_secs(),
         "starting gRPC server"
     );
 
@@ -111,24 +116,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen_addr,
         security.max_connections,
     )
-    .await?;
+    .await?
+    .with_max_connection_duration(connection_age.saturating_add(connection_grace));
+
     let mut server = Server::builder();
     if let Some(tls) = security.tls {
         server = server.tls_config(tls)?;
     }
+
     let server = server
         .layer(security.access)
         .layer(GlobalConcurrencyLimitLayer::new(cfg.grpc_max_concurrent))
         .load_shed(true)
-        // Rotate connections. With a grace set, tonic 0.14 sends no GOAWAY at
-        // the age: it closes the connection at age plus grace, so rotation can
-        // cut a request still in flight. A cut EVM->RGB sign is not lost: the
-        // parent keeps its reply and answers the retry (`signed_responses`).
-        .max_connection_age(Duration::from_secs(300))
-        .max_connection_age_grace(Duration::from_secs(30))
+        // tonic 0.14.9 skips GOAWAY when both age and grace are set.
+        // LimitedSocket enforces the drain deadline.
+        .max_connection_age(connection_age)
         .concurrency_limit_per_connection(per_conn)
         .max_concurrent_streams(Some(per_conn as u32))
-        .timeout(Duration::from_secs(cfg.grpc_request_timeout_secs))
+        .timeout(request_timeout)
         // tonic refuses requests above 4 MiB by default. Accept the same
         // size as the enclave frame.
         .add_service(
@@ -136,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .max_decoding_message_size(utexo_bridge_parent::framing::MAX_MESSAGE_SIZE as usize),
         )
         .serve_with_incoming(incoming);
+
     if let Some(broker) = broker {
         tokio::select! {
             result = server => result?,

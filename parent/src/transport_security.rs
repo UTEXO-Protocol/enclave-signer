@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -388,6 +388,7 @@ where
 pub struct LimitedIncoming {
     listener: tokio::net::TcpListener,
     permits: Arc<tokio::sync::Semaphore>,
+    max_connection_duration: Option<Duration>,
 }
 impl LimitedIncoming {
     pub async fn bind(addr: std::net::SocketAddr, limit: usize) -> std::io::Result<Self> {
@@ -400,7 +401,12 @@ impl LimitedIncoming {
         Ok(Self {
             listener: tokio::net::TcpListener::bind(addr).await?,
             permits: Arc::new(tokio::sync::Semaphore::new(limit)),
+            max_connection_duration: None,
         })
+    }
+    pub fn with_max_connection_duration(mut self, duration: Duration) -> Self {
+        self.max_connection_duration = Some(duration);
+        self
     }
     pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.listener.local_addr()
@@ -414,6 +420,8 @@ impl tokio_stream::Stream for LimitedIncoming {
                 Ok(permit) => Poll::Ready(Some(Ok(LimitedSocket {
                     stream,
                     _permit: permit,
+                    max_connection_duration: self.max_connection_duration,
+                    deadline: OnceLock::new(),
                 }))),
                 Err(_) => {
                     // Drop excess sockets. Do not spawn work or log each attempt.
@@ -430,10 +438,32 @@ impl tokio_stream::Stream for LimitedIncoming {
 pub struct LimitedSocket {
     stream: tokio::net::TcpStream,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    max_connection_duration: Option<Duration>,
+    deadline: OnceLock<Pin<Box<tokio::time::Sleep>>>,
+}
+impl LimitedSocket {
+    fn poll_deadline(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
+        if self
+            .deadline
+            .get_mut()
+            .is_some_and(|deadline| deadline.as_mut().poll(cx).is_ready())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "connection drain deadline expired",
+            ));
+        }
+        Ok(())
+    }
 }
 impl tonic::transport::server::Connected for LimitedSocket {
     type ConnectInfo = TcpConnectInfo;
     fn connect_info(&self) -> Self::ConnectInfo {
+        // tonic calls this after the TLS handshake, before serving HTTP/2.
+        if let Some(duration) = self.max_connection_duration {
+            self.deadline
+                .get_or_init(|| Box::pin(tokio::time::sleep(duration)));
+        }
         self.stream.connect_info()
     }
 }
@@ -443,6 +473,7 @@ impl tokio::io::AsyncRead for LimitedSocket {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        self.poll_deadline(cx)?;
         Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
@@ -452,12 +483,15 @@ impl tokio::io::AsyncWrite for LimitedSocket {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        self.poll_deadline(cx)?;
         Pin::new(&mut self.stream).poll_write(cx, buf)
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_deadline(cx)?;
         Pin::new(&mut self.stream).poll_flush(cx)
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_deadline(cx)?;
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }

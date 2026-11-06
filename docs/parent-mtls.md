@@ -21,6 +21,23 @@ time. Source: `parent/src/transport_security.rs`.
 
 The parent refuses to start with only some of the four `GRPC_TLS_*` files.
 
+The parent uses tonic which sends HTTP/2 `GOAWAY` when a connection reaches the configured `max_connection_age` of 300 seconds.
+Accepted RPCs finish on the old connection while signer-node opens a replacement.
+Signer-node waits for the replacement handshake when needed, subject to its call
+deadlines. The parent closes the old connection when its RPCs finish or its
+connection deadline expires.
+
+The socket wrapper sets that deadline after the TLS handshake. It adds
+`GRPC_REQUEST_TIMEOUT_SECS` and 10 seconds to the connection age of 300 seconds.
+With the default request timeout of 120 seconds, the deadline is 430 seconds
+after the handshake. That leaves about 130 seconds for draining after `GOAWAY`.
+Startup logs report the connection age, drain grace, and request timeout.
+
+The parent leaves `max_connection_age_grace` unset. In tonic 0.14.9, combining it
+with `max_connection_age` skips graceful draining and force-closes the connection
+at age plus grace. The older settings of 300 seconds plus 30 seconds caused the
+330-second cycle.
+
 ## Roles
 
 | Role | RPCs |
