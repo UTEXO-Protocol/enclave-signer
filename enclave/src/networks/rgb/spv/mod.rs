@@ -3,8 +3,8 @@
 //! - `chain.rs`: in-memory header chain from a compile-time checkpoint, with
 //!   bounded reorg support.
 //! - `validation.rs`: PoW and retarget checks on mainnet and the testnets.
-//!   Signet and regtest check chain linkage and the clock bound only. BIP-325
-//!   signet signatures are not verified.
+//!   Signet and regtest check chain linkage, the clock bound and the
+//!   median-time-past rule only. BIP-325 signet signatures are not verified.
 //! - `merkle.rs`: Bitcoin Merkle inclusion proof verifier.
 //! - `checkpoint.rs`: the compile-time checkpoint constants and the dev-only
 //!   `SPV_CHECKPOINT` override.

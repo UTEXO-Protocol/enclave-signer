@@ -49,7 +49,7 @@ fn mainnet_checkpoint_is_retarget_boundary_aligned() {
 #[test]
 fn parse_spec_round_trips_the_signet_constant() {
     let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
-    let cp = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+    let cp = parse_checkpoint_spec(spec).unwrap();
     assert_eq!(cp.height, SIGNET_CHECKPOINT.height);
     assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
     assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
@@ -66,42 +66,33 @@ fn parse_spec_five_field_form_sets_chainwork() {
     let spec =
         "951552:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64:0x1702068f:\
                 1780050586:0x00000000000000000000000000000000000000012bc52b13ac6c5ed1704149f2";
-    let cp = parse_checkpoint_spec(spec, Network::Mainnet, &MAINNET_CHECKPOINT).unwrap();
+    let cp = parse_checkpoint_spec(spec).unwrap();
     assert_eq!(cp.chain_work, MAINNET_CHECKPOINT.chain_work);
     assert!(cp.chain_work.is_some());
 }
 
+/// The parser refuses the two-field form, which copied the bits and time of
+/// the compiled checkpoint. It cannot check that the given bits and time are
+/// those of the block. This test gives the real bits and time of block
+/// 951_552.
 #[test]
-fn parse_spec_two_field_form_inherits_bits_and_time() {
-    let spec = "0x334000".to_string(); // one field: rejected
-    assert!(parse_checkpoint_spec(&spec, Network::Signet, &SIGNET_CHECKPOINT).is_err());
-
-    let spec = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
-    let cp = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
-    assert_eq!(cp.height, 400_000);
-    assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits, "bits inherited");
-    assert_eq!(cp.time, SIGNET_CHECKPOINT.time, "time inherited");
+fn parse_spec_refuses_the_two_field_form() {
+    let spec = "951552:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
+    let err = parse_checkpoint_spec(spec).unwrap_err();
+    assert!(err.contains("median-time-past"), "got: {err}");
+    let cp = parse_checkpoint_spec(&format!("{spec}:0x1702068f:1780050586")).unwrap();
+    assert_eq!((cp.bits, cp.time), (0x1702_068f, 1_780_050_586));
 }
 
 #[test]
 fn parse_spec_accepts_0x_prefixed_hash() {
-    let bare = "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
-    let prefixed = "400000:0x000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66";
-    let a = parse_checkpoint_spec(bare, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
-    let b = parse_checkpoint_spec(prefixed, Network::Signet, &SIGNET_CHECKPOINT).unwrap();
+    let bare =
+        "400000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
+    let prefixed =
+        "400000:0x000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
+    let a = parse_checkpoint_spec(bare).unwrap();
+    let b = parse_checkpoint_spec(prefixed).unwrap();
     assert_eq!(a.hash, b.hash);
-}
-
-/// A PoW network must not inherit bits/time. The nBits and retarget checks
-/// use them, so wrong values would reject every real header.
-#[test]
-fn parse_spec_requires_bits_and_time_on_pow_networks() {
-    let spec = "953568:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
-    let err = parse_checkpoint_spec(spec, Network::Mainnet, &MAINNET_CHECKPOINT).unwrap_err();
-    assert!(err.contains("enforces PoW"), "got: {err}");
-    // The four-field form is accepted.
-    let full = format!("{spec}:0x1702068f:1780050586");
-    assert!(parse_checkpoint_spec(&full, Network::Mainnet, &MAINNET_CHECKPOINT).is_ok());
 }
 
 /// Esplora shows `bits` in decimal. Without the `0x` rule, `503538094` would
@@ -109,7 +100,7 @@ fn parse_spec_requires_bits_and_time_on_pow_networks() {
 #[test]
 fn parse_spec_rejects_decimal_bits() {
     let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:503538094:1780464472";
-    let err = parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).unwrap_err();
+    let err = parse_checkpoint_spec(spec).unwrap_err();
     assert!(err.contains("0x"), "got: {err}");
 }
 
@@ -118,14 +109,15 @@ fn parse_spec_rejects_malformed_specs() {
     let cases = [
         // wrong field count
         "334000",
+        "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66",
         "334000:aa:0x1e0377ae",
         // height not a number
-        "tip:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66",
+        "tip:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472",
         // hash not hex / wrong length
-        "334000:zzzz00ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66",
-        "334000:00ac5fcc",
+        "334000:zzzz00ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472",
+        "334000:00ac5fcc:0x1e0377ae:1780464472",
         // placeholder hash
-        "334000:0000000000000000000000000000000000000000000000000000000000000000",
+        "334000:0000000000000000000000000000000000000000000000000000000000000000:0x1e0377ae:1780464472",
         // bad time
         "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:soon",
         // chainwork not hex / wrong length
@@ -134,7 +126,7 @@ fn parse_spec_rejects_malformed_specs() {
     ];
     for spec in cases {
         assert!(
-            parse_checkpoint_spec(spec, Network::Signet, &SIGNET_CHECKPOINT).is_err(),
+            parse_checkpoint_spec(spec).is_err(),
             "spec {spec:?} should have been rejected"
         );
     }

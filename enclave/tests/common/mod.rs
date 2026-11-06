@@ -133,8 +133,9 @@ pub fn send_request(port: u16, req: &EnclaveRequest) -> EnclaveResponse {
 }
 
 /// Build `count` synthetic regtest headers chained from `prev_hash`. The first
-/// header has the time `prev_time + 1`. Regtest validation checks only chain
-/// linkage, so the headers need no real PoW and timestamps are free.
+/// header has the time `prev_time + 1`, and each next header is one second
+/// later. Regtest checks no proof of work, so the headers need no mining. The
+/// times are not free: the clock bound and the median-time-past rule apply.
 #[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn synth_chain_from(prev_hash: [u8; 32], prev_time: u32, count: u32) -> Vec<Vec<u8>> {

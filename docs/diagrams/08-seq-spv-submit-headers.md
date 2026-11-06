@@ -43,10 +43,12 @@ sequenceDiagram
             Chain->>Chain: bits_input: period-first block on retarget heights,<br/>period bits on testnets (staged batch → chain → checkpoint)
             Chain->>Val: expected_bits(BitsInput, network)
             Val-->>Chain: Some(bits) for mainnet/testnets (20-minute rule, BIP94 on testnet4),<br/>None for signet/regtest
-            Chain->>Val: validate_header_full(<br/>header, height, prev_hash, prev_time, expected_bits, net, now)
+            Chain->>Chain: median_time_past_below: median of the 11 times below,<br/>or of fewer on a chain from genesis (staged batch → chain → checkpoint.<br/>None within 10 of a checkpoint above genesis)
+            Chain->>Val: validate_header_full(<br/>header, height, Predecessor{hash, time}, median_time_past, expected_bits, net, now)
             Val->>Val: check_linkage (prev_blockhash equality)
             Val->>Val: check_timewarp (testnet4 boundary: ≥ parent − 600 s)
             Val->>Val: check_future_time (≤ enclave clock + 2 h, every network)
+            Val->>Val: check_time_too_old (> median time past, every network)
             Val->>Val: nBits match if Some(expected)
             Val->>Val: check_pow (skipped on signet/regtest)
             Val-->>Chain: Ok / SpvError
