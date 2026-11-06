@@ -144,6 +144,7 @@ refuses it.
 | MPC tree depth | 3 | The minimum depth rgb-lib commits with. F5 rebuilds the tree at it. |
 | Fascia size | 1 MiB (`MAX_PSBT_BYTES`) | The largest fascia F4 and PP1 decode. rgb-lib allows `U32`, above the 24 MiB frame. |
 | `MINT_INPUTS` | 1 | A mint spends its right alone. |
+| `MINT_MAX_INPUTS` / `MINT_MAX_OUTPUTS` | 16 / 16 | Most inputs and outputs of a mint tx. Checked before any fascia is decoded; F7 then needs exactly `MINT_INPUTS`. |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100 000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
@@ -181,6 +182,8 @@ Stage 6.
   This check records nothing. It runs before any network call. A retry of
   the same request normally does not reach the enclave: the parent answers
   it from the reply it kept (S7.6).
+  A byte-identical retry that does reach the enclave gets the kept reply
+  instead (S7.6).
 
 ### Stage 2 - Is this deposit real?
 
@@ -374,12 +377,9 @@ it is signed.
   that the caller received the response. The parent therefore keeps the
   reply of an EVM -> RGB sign from the moment it reads it, for one hour, and
   answers a retry of the same request itself. A retry of a request still in
-  flight waits for that exchange and gets its reply. The enclave refuses a
-  retry when the request differs, and refuses an identical retry until its
-  hour has passed when the parent has no reply for it: the parent did not
-  read the reply, the reply was above `SIGNED_RESPONSE_MAX_BYTES`, the parent
-  dropped it at `SIGNED_RESPONSE_MAX_ENTRIES` or `SIGNED_RESPONSE_MAX_BYTES`,
-  or the parent restarted.
+  flight waits for that exchange and gets its reply. The enclave keeps the signed reply for the same window (1 024 entries,
+  in memory) and returns it for a byte-identical retry that reaches it, for
+  example after a parent restart. Any other request for the deposit is refused.
 
 ## 6. Replay
 
@@ -388,8 +388,11 @@ Other replicas do not share it. The parent keeps each reply for one hour and
 answers a retry of the same request from it, so a lost response does not
 strand a deposit for the window. It is not the safety control. The parent
 proof is: every signature for one mint transition spends the UTXO that PP7
-pins, so two signed txs for one deposit spend the same outpoint and Bitcoin
-confirms at most one. The same transition committed again in a tx that spends
+pins in the parent fascia the request supplies. Two signed txs for one
+deposit that use the same parent spend the same outpoint, and Bitcoin
+confirms at most one. The enclave does not compare parents across requests.
+A different parent tx must spend the real parent's inputs again, so it
+conflicts with it on Bitcoin. The same transition committed again in a tx that spends
 another Colored UTXO is refused (PP7). A new transition for the same deposit
 is refused too: the deposit names one OpId (M6).
 

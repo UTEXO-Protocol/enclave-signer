@@ -45,6 +45,15 @@ pub(super) fn handle_sign(
 
     // Refuse known replays before network I/O. An invalid request must not
     // use guard capacity, so this only checks. The reservation is made later.
+    // A byte-identical retry of a signed mint gets the same reply back.
+    #[cfg(evm_to_rgb)]
+    let op_key = operation_key(ctx, source_ref, destination_ref);
+    #[cfg(evm_to_rgb)]
+    let request_digest = request_digest(&req);
+    #[cfg(evm_to_rgb)]
+    if let Some(cached) = op_key.and_then(|k| ctx.state.signed_results.get(&k, &request_digest)) {
+        return Ok((cached, None));
+    }
     #[cfg(evm_to_rgb)]
     precheck_operation(ctx, source_ref, destination_ref)?;
 
@@ -53,6 +62,8 @@ pub(super) fn handle_sign(
     #[cfg(evm_to_rgb)]
     let authorized_recipient =
         verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
+    #[cfg(evm_to_rgb)]
+    ensure_time_left(deadline, "the deposit check")?;
 
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
@@ -80,13 +91,15 @@ pub(super) fn handle_sign(
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    #[cfg(not(all(feature = "bfa-validation", rgb_to_evm)))]
+    // Builds without a deadline user still take the argument.
     let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
-    let mint_binder =
-        |mint: &crate::networks::rgb::psbt_validation::MintFacts| bind_mint(ctx, source_ref, mint);
+    let mint_binder = |mint: &crate::networks::rgb::psbt_validation::MintFacts| {
+        ensure_time_left(deadline, "the deposit binding")?;
+        bind_mint(ctx, source_ref, mint)
+    };
     // M8 takes the witness amount from the pinned config, never the request.
     #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
     let mint_sats =
@@ -147,6 +160,10 @@ pub(super) fn handle_sign(
     // Must run after RGB validation, which proves the seals.
     #[cfg(evm_to_rgb)]
     bind_funds_in_recipient(authorized_recipient, &destination_proof)?;
+
+    // A reply after the deadline is never read, so do not sign for it.
+    #[cfg(evm_to_rgb)]
+    ensure_time_left(deadline, "signing")?;
 
     // Soft operation-uniqueness guard. Reserve before signing. The caller
     // commits after the response write succeeds. A failed write releases the
@@ -227,6 +244,13 @@ pub(super) fn handle_sign(
         #[allow(unreachable_patterns)]
         _ => Err(wrong_signer_role("this route")),
     };
+
+    #[cfg(evm_to_rgb)]
+    if let (Some(op_key), Ok(response)) = (op_key, &result) {
+        ctx.state
+            .signed_results
+            .put(op_key, request_digest, response.clone());
+    }
 
     // On error, the reservation drops here and rolls the key back.
     result.map(|response| (response, op_reservation))
@@ -378,6 +402,19 @@ fn bind_mint(
     super::bfa::bind_mint_deposit(ctx, &evm_tx_hash(evm)?, &evm.funds_in_operation_id, mint)
 }
 
+/// Refuse once the request deadline has passed. The handler cannot be
+/// interrupted, so it checks between its slow stages.
+#[cfg(evm_to_rgb)]
+fn ensure_time_left(deadline: std::time::Instant, stage: &str) -> Result<()> {
+    if std::time::Instant::now() >= deadline {
+        return Err(EnclaveError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("request deadline passed before {stage}"),
+        )));
+    }
+    Ok(())
+}
+
 /// The deposit tx hash of an EVM source: exactly 32 bytes.
 #[cfg(all(feature = "evm-rpc", evm_to_rgb))]
 fn evm_tx_hash(source: &EvmSource) -> Result<[u8; 32]> {
@@ -519,6 +556,14 @@ fn bind_funds_in_recipient(
     Ok(())
 }
 
+/// SHA-256 of the request bytes: a cached reply is for this request only.
+#[cfg(evm_to_rgb)]
+fn request_digest(req: &SignRequest) -> [u8; 32] {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    Sha256::digest(req.encode_to_vec()).into()
+}
+
 /// Replay-guard key of an EVM->RGB bridge sign. `None` for all other routes.
 #[cfg(evm_to_rgb)]
 fn operation_key(
@@ -556,7 +601,7 @@ fn precheck_operation(
         if matches!(e, EnclaveError::NonceReplay) {
             EnclaveError::CrossCheck(
                 "duplicate bridge operation: refusing to sign a replay (soft in-memory guard; \
-                 durable guard is on-chain)"
+                 Bitcoin lets only one tx spend the right)"
                     .into(),
             )
         } else {
@@ -592,7 +637,7 @@ fn reserve_operation<'ctx>(
                 Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
                      funds_in_operation_id, rgb_asset_id) was already signed recently - refusing \
-                     to sign a replay (soft in-memory guard; durable guard is on-chain)"
+                     to sign a replay (soft in-memory guard; Bitcoin lets only one tx spend the right)"
                         .into(),
                 ))
             }
@@ -725,6 +770,64 @@ mod early_bridge_checks {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(ctx.state.op_replay_guard.seen_count(), 1);
+    }
+
+    fn committed_key(ctx: &ServerContext) -> [u8; 32] {
+        let key = crate::networks::rgb::psbt_validation::psbt_operation_key(
+            ctx.bridge_config.chain_id,
+            &ctx.bridge_config.bridge_contract,
+            &[1; 32],
+            &[2; 32],
+            "rgb:test",
+        );
+        ctx.state.op_replay_guard.reserve(key).unwrap().commit();
+        key
+    }
+
+    fn cached_reply() -> EnclaveResponse {
+        EnclaveResponse {
+            response: Some(crate::proto::enclave_response::Response::Error(
+                crate::proto::ErrorResponse {
+                    code: 0,
+                    message: "cached".into(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn a_lost_reply_retry_gets_the_cached_reply_without_rpc() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ctx = context(&calls);
+        let key = committed_key(&ctx);
+        ctx.state
+            .signed_results
+            .put(key, request_digest(&request()), cached_reply());
+        let (response, reservation) =
+            handle_sign(&ctx, request(), crate::test_support::far_deadline()).unwrap();
+        assert_eq!(response, cached_reply());
+        assert!(reservation.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_changed_request_does_not_get_the_cached_reply() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ctx = context(&calls);
+        let key = committed_key(&ctx);
+        ctx.state
+            .signed_results
+            .put(key, request_digest(&request()), cached_reply());
+        let mut changed = request();
+        changed.amount += 1;
+        let err = handle_sign(&ctx, changed, crate::test_support::far_deadline())
+            .map(|(response, _)| response)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate bridge operation"),
+            "{err}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -1129,5 +1232,25 @@ mod indexer_only_bindings {
             mutate(&mut altered);
             assert!(bind(&altered, &validated).is_err());
         }
+    }
+}
+
+#[cfg(all(test, evm_to_rgb))]
+mod deadline_tests {
+    use std::time::{Duration, Instant};
+
+    use super::ensure_time_left;
+
+    #[test]
+    fn passes_while_time_is_left() {
+        ensure_time_left(Instant::now() + Duration::from_secs(60), "x").unwrap();
+    }
+
+    #[test]
+    fn refuses_once_the_deadline_has_passed() {
+        let err = ensure_time_left(Instant::now(), "signing")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("deadline passed before signing"), "{err}");
     }
 }

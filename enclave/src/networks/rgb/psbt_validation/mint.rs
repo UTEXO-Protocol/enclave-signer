@@ -20,6 +20,30 @@ use crate::keys::KeyManager;
 /// Inputs a mint spends: its right alone, whose UTXO's sats pay the fee.
 pub const MINT_INPUTS: usize = 1;
 
+/// Most inputs and outputs a mint tx may have before any fascia is decoded.
+/// Looser than `MINT_INPUTS`, which F7 enforces exactly after the fascia rules.
+pub const MINT_MAX_INPUTS: usize = 16;
+pub const MINT_MAX_OUTPUTS: usize = 16;
+
+/// M0: the mint tx has a bounded number of inputs and outputs. Cheap, so it
+/// runs before any fascia is decoded.
+pub fn assert_mint_shape(psbt: &Psbt) -> Result<()> {
+    let tx = &psbt.unsigned_tx;
+    if tx.input.len() > MINT_MAX_INPUTS {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint PSBT has {} inputs, at most {MINT_MAX_INPUTS}",
+            tx.input.len()
+        )));
+    }
+    if tx.output.len() > MINT_MAX_OUTPUTS {
+        return Err(EnclaveError::CrossCheck(format!(
+            "mint PSBT has {} outputs, at most {MINT_MAX_OUTPUTS}",
+            tx.output.len()
+        )));
+    }
+    Ok(())
+}
+
 /// What a mint commits to: the right it consumes and the deposit it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintFacts {

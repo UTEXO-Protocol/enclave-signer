@@ -120,6 +120,7 @@ pub fn validate_destination_anchor(
     ctx: &ValidationContext<'_>,
 ) -> Result<(u64, Vec<String>)> {
     let psbt = psbt_validation::parse_psbt_shape(&destination.psbt_bytes)?;
+    psbt_validation::assert_mint_shape(&psbt)?;
     psbt_validation::assert_txid_and_sighash_fixed(&psbt)?;
     let (pin, committed) = pinned_commitment(
         &psbt,
