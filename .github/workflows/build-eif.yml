@@ -70,6 +70,7 @@ jobs:
       BUILD_PROFILE: ${{ inputs.build_profile || 'default' }}
       STAGE_RGB_ASSET_ID: ${{ vars.STAGE_RGB_ASSET_ID }}
       STAGE_TOKEN_CONTRACT: ${{ vars.STAGE_TOKEN_CONTRACT }}
+      STAGE_ENDPOINTS_SHA256: ${{ vars.STAGE_ENDPOINTS_SHA256 }}
       STAGE_GAS_TX_ALLOWED_SELECTORS: ${{ vars.STAGE_GAS_TX_ALLOWED_SELECTORS }}
     strategy:
       fail-fast: false
