@@ -129,7 +129,7 @@ os.execvp(args[0], args)
     def run_host(self, **extra):
         env = dict(
             PATH=self.env['PATH'], GIT_SHA='0' * 40, BUCKET='bucket',
-            AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base),
+            AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base), SIGNER_ROLE='mint',
             NITRO_ALLOCATOR_CONFIG=str(self.pool), NITRO_HUGEPAGES_DIR=str(self.pages),
         )
         env.update(extra)
@@ -422,7 +422,7 @@ os.execvp(args[0], args)
                 EIF='/home/ubuntu/cluster/utexo-bridge-enclave.eif', ENCLAVE_CPU_COUNT='2',
                 ENCLAVE_MEMORY='8192', NITRO_ALLOCATOR_CONFIG=str(self.pool),
                 NITRO_HUGEPAGES_DIR=str(self.pages), ENCLAVE_DEBUG_MODE='0',
-                DIR='/home/ubuntu/cluster',
+                DIR='/home/ubuntu/cluster', SIGNER_ROLE='mint',
                 **{key: '' if empty else value for key, value in optional.items()})
             subprocess.run(['bash', '-c', 'set -eu\nCIDS=(16)\ncat > "$OUT" <<EOF\n'
                             + heredoc.group(1)],

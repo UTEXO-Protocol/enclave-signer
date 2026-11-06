@@ -291,7 +291,7 @@ mod source_burn {
 // Redemption fundsOut tests: `validate_funds_out_burn_recipient`. The shape
 // and amount checks are tested with `validate_funds_out_amount` and the
 // mint-burn flow.
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(feature = "rgb-validation")]
 mod burn {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;
@@ -421,24 +421,7 @@ mod transfer {
     use crate::networks::rgb::validation::TransitionSummary;
     use crate::test_support::bfa_ids;
 
-    /// The last transition that this build's RGB flow accepts on a
-    /// `fundsOut`, with `amount` where that flow reads it: Transfer output
-    /// assignments under `rgb-swap`, the burn's `burnedAsset` global under
-    /// `rgb-mint-burn`. The shared cases below then work for both flows.
-    #[cfg(feature = "rgb-swap")]
-    fn source_transition(amount: u64) -> TransitionSummary {
-        TransitionSummary {
-            op_id: "transfer-op".into(),
-            transition_type: bfa_ids::TS_TRANSFER,
-            total_output_amount: amount,
-            asset_output_amount: amount,
-            outputs: Vec::new(),
-            burned_asset_amount: None,
-            burn_reason: None,
-        }
-    }
-
-    #[cfg(feature = "rgb-mint-burn")]
+    #[cfg(feature = "rgb-validation")]
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
@@ -482,20 +465,10 @@ mod transfer {
         );
     }
 
-    /// A Transfer total includes the sender change, so a surplus is correct
-    /// on the swap flow.
-    #[cfg(feature = "rgb-swap")]
-    #[test]
-    fn passes_when_source_amount_exceeds_calldata_amount() {
-        let cd = mock_funds_out_calldata(1000);
-        let validated = validated_with_last(source_transition(2000));
-        assert!(validate_funds_out_amount(&params_of(&cd), &validated).is_ok());
-    }
-
     /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so the
     /// release must equal the burned amount. A lower release strands the
     /// difference.
-    #[cfg(feature = "rgb-mint-burn")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_when_source_amount_exceeds_calldata_amount() {
         let cd = mock_funds_out_calldata(1000);

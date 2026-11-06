@@ -67,11 +67,7 @@ pub fn validate_source(
     };
     #[cfg(not(feature = "spv"))]
     let proven = validator.indexer_witnesses(ctx.bridge_config.spv_min_confirmations);
-    let witnesses = WitnessCheck {
-        chain: &proven,
-        allow_unbroadcast_last: false,
-        infer_spent_ancestors: false,
-    };
+    let witnesses = WitnessCheck { chain: &proven };
     let bind_asset = |contract_id: &str| {
         assert_asset_binding(
             contract_id,

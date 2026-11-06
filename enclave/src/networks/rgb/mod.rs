@@ -13,7 +13,7 @@
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.
 //! - `spv_crosscheck.rs`: anchors consignment witness txs in that chain.
 //! - `signing/`: Taproot key-path signing with BIP-86 account keys.
-//! - `flow/`: the per-flow rules (send/receive vs mint/burn).
+//! - `flow.rs`: the mint/burn flow rules.
 //! - `invoice.rs`: the send-RGB recipient bind.
 
 // The PSBT checks (`SignBtc`, the mint PSBT bind, the recipient invoice)

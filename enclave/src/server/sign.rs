@@ -54,50 +54,6 @@ pub(super) fn handle_sign(
     let authorized_recipient =
         verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
 
-    // Self-owned-outpoint oracle for the swap-flow per-output recipient bind.
-    // The key lock is held only for each lookup, not across Electrum calls.
-    //
-    // An outpoint on this PSBT is resolved from its taproot metadata.
-    // An outpoint on an earlier tx needs a fetch to read its script. rgb-lib
-    // puts RGB change on an existing UTXO when the tx has no BTC change.
-    #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
-    let self_owned_psbt_outputs = |psbt: &bitcoin::psbt::Psbt, outpoint: bitcoin::OutPoint| {
-        use crate::networks::rgb::btc_ownership;
-
-        if outpoint.txid == psbt.unsigned_tx.compute_txid() {
-            return ctx.state.with_keys(|keys| {
-                Ok(btc_ownership::self_owned_output_indices(psbt, keys).contains(&outpoint.vout))
-            });
-        }
-
-        // Fail closed: without an indexer, change and payout look the same.
-        let validator = ctx.launch()?.rgb_validator.as_ref().ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "send-RGB change seal names an outpoint outside the PSBT, but the RGB validator \
-                 is not configured - the enclave cannot resolve that outpoint's script"
-                    .into(),
-            )
-        })?;
-        // Network round-trip, so it is outside `with_keys`.
-        let tx = validator.fetch_transaction(outpoint.txid)?;
-        let Some(txout) = tx.output.get(outpoint.vout as usize) else {
-            return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB change seal names outpoint {outpoint}, but that transaction has only \
-                 {} outputs",
-                tx.output.len()
-            )));
-        };
-        let script = txout.script_pubkey.as_bytes().to_vec();
-        let owned = ctx.state.with_keys(|keys| {
-            Ok(btc_ownership::asset_change_scripts(psbt, keys).contains(&script))
-        })?;
-        // State sealed to a spent or unmined outpoint would be lost.
-        if owned {
-            validator.assert_unspent_and_mined(outpoint, &txout.script_pubkey)?;
-        }
-        Ok(owned)
-    };
-
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
         // Colored is the scope that `sign_psbt_scoped` uses on the send-RGB path.
@@ -113,18 +69,18 @@ pub(super) fn handle_sign(
     };
 
     // Binds each BFA mint anchor of a consignment to its derived lock.
-    #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+    #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
     let anchor_binder =
         |bridge: &crate::networks::rgb::validation::BfaBridge,
          anchors: &[crate::networks::rgb::validation::MintAnchor]| {
             super::bfa::derived_locks(ctx, bridge, anchors)
         };
 
-    #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+    #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    #[cfg(not(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap"))))]
+    #[cfg(not(all(feature = "bfa-validation", rgb_to_evm)))]
     let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.
@@ -154,29 +110,22 @@ pub(super) fn handle_sign(
 
     let validation_ctx = ValidationContext {
         bridge_config: &ctx.bridge_config,
-        #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         rgb_validator: ctx.launch()?.rgb_validator.as_ref(),
         #[cfg(feature = "rgb-validation")]
         header_chain: &ctx.header_chain,
         #[cfg(feature = "rgb-validation")]
         chain_pins: &chain_pins,
-        // Only the swap-flow destination bind uses it.
-        #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
-        self_owned_psbt_outputs: Some(&self_owned_psbt_outputs),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: Some(&psbt_fee_key_paths),
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_binder: Some(&mint_binder),
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_sats: Some(&mint_sats),
-        #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
         anchor_binder: Some(&anchor_binder),
-        #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
-        anchor_binder: None,
-        #[cfg(all(feature = "bfa-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
         reject_list_reader: Some(&reject_list_reader),
-        #[cfg(all(feature = "rgb-validation", not(feature = "bfa-validation")))]
-        reject_list_reader: None,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
@@ -251,7 +200,7 @@ pub(super) fn handle_sign(
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
                     &chain_pins,
-                    #[cfg(feature = "rgb-mint-burn")]
+                    #[cfg(feature = "rgb-validation")]
                     destination
                         .burn_destination
                         .as_ref()
@@ -313,7 +262,7 @@ fn apply_funds_out_binding(
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
-    #[cfg(feature = "rgb-mint-burn")] burn_destination: Option<
+    #[cfg(feature = "rgb-validation")] burn_destination: Option<
         &crate::networks::evm::burn_destination::BurnDestinationRecord,
     >,
 ) -> Result<()> {
@@ -374,8 +323,7 @@ fn apply_funds_out_binding(
         }
     }
 
-    // Consignment-bound release amount for the RGB flow of this build
-    // (`rgb-swap` = Transfer, `rgb-mint-burn` = Burn).
+    // Consignment-bound release amount: the settling transition must be a Burn.
     crosscheck::validate_funds_out_amount(release, validated)?;
 
     // Burn identity (bridge PR #152). `sourceBurnTxId` is the only `burnId`
@@ -389,7 +337,7 @@ fn apply_funds_out_binding(
     // destination chain to the 32 bytes that the burner committed to
     // (`burnReason`). `validate_funds_out_amount` already refused all
     // non-burns, so no runtime type test is necessary.
-    #[cfg(feature = "rgb-mint-burn")]
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     crosscheck::validate_funds_out_burn_recipient(release, validated, burn_destination)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
@@ -654,16 +602,6 @@ fn reserve_operation<'ctx>(
         Ok(None)
     }
 }
-
-/// A signature that the caller did not receive must not consume the replay
-/// key, so the retry is signed. Not for `bfa-validation`: it needs EVM lock events.
-#[cfg(all(
-    test,
-    feature = "evm-rpc",
-    feature = "rgb-swap",
-    not(feature = "bfa-validation")
-))]
-mod bridge_operation_retry;
 
 /// The early deposit and replay checks run before RGB work.
 #[cfg(all(test, feature = "evm-rpc", evm_to_rgb))]
@@ -1040,7 +978,7 @@ mod funds_out_depth {
             Some(&validated),
             &proofs,
             &ChainPins::new(),
-            #[cfg(feature = "rgb-mint-burn")]
+            #[cfg(feature = "rgb-validation")]
             None,
         )
         .unwrap_err()

@@ -9,7 +9,7 @@ use super::context::ServerContext;
 use crate::error::{EnclaveError, Result};
 use crate::networks::evm::events::derived_lock;
 use crate::networks::rgb::validation::VerifiedLock;
-#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+#[cfg(rgb_to_evm)]
 use crate::{
     config::BridgeConfig,
     networks::rgb::validation::{BfaBridge, BoundAnchors, MintAnchor},
@@ -17,7 +17,7 @@ use crate::{
 
 /// The asset's genesis must name the pinned Bridge on the pinned chain. Only
 /// that contract's deposits can back a mint this federation signs.
-#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+#[cfg(rgb_to_evm)]
 fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
     if bridge.chain_id != cfg.chain_id || bridge.address != cfg.funds_in_contract {
         return Err(EnclaveError::CrossCheck(format!(
@@ -33,7 +33,7 @@ fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
 }
 
 /// The derived lock of each anchor, in consignment order; no RPC read.
-#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+#[cfg(rgb_to_evm)]
 fn derive_all(cfg: &BridgeConfig, anchors: &[MintAnchor]) -> Result<Vec<VerifiedLock>> {
     anchors
         .iter()
@@ -43,7 +43,7 @@ fn derive_all(cfg: &BridgeConfig, anchors: &[MintAnchor]) -> Result<Vec<Verified
 
 /// Binds a history the enclave does not sign a mint in (a burn, a transfer):
 /// every anchor to its derived lock. The chain id is the pin; no RPC is read.
-#[cfg(any(rgb_to_evm, feature = "rgb-swap"))]
+#[cfg(rgb_to_evm)]
 pub(super) fn derived_locks(
     ctx: &ServerContext,
     bridge: &BfaBridge,

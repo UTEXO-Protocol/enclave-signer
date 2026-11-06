@@ -104,55 +104,6 @@ impl RgbValidator {
         self.timeout_secs = secs;
         self
     }
-
-    /// Fetches a raw transaction by txid from the indexer.
-    ///
-    /// The host controls the egress, so the bytes are hashed again and must
-    /// match `txid`. A lying host can only make the fetch fail. The send-RGB
-    /// change-leg proof (W-06 / #52) uses it to read the script of an outpoint
-    /// that is not in the PSBT.
-    pub fn fetch_transaction(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
-        let tx = if is_electrum_url(&self.indexer_url) {
-            self.fetch_electrum_tx(txid)?
-        } else {
-            self.fetch_esplora_tx(txid)?
-        };
-
-        let got = tx.compute_txid();
-        if got != txid {
-            return Err(EnclaveError::CrossCheck(format!(
-                "indexer returned tx {got} for a request for tx {txid} - refusing to trust its \
-                 outputs"
-            )));
-        }
-        Ok(tx)
-    }
-
-    fn fetch_esplora_tx(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
-        self.esplora_client()
-            .get_tx(&txid)
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("esplora fetch of tx {txid} failed: {e}"))
-            })?
-            .ok_or_else(|| EnclaveError::CrossCheck(format!("esplora does not know tx {txid}")))
-    }
-
-    fn fetch_electrum_tx(&self, txid: bitcoin::Txid) -> Result<bitcoin::Transaction> {
-        use electrum_client::ElectrumApi;
-        let client = self.electrum_client().map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "electrum client creation failed while resolving outpoint tx {txid}: {e}"
-            ))
-        })?;
-        let raw = client.transaction_get_raw(&txid).map_err(|e| {
-            EnclaveError::CrossCheck(format!("electrum fetch of tx {txid} failed: {e}"))
-        })?;
-        bitcoin::consensus::deserialize::<bitcoin::Transaction>(&raw).map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "electrum returned bytes for tx {txid} that do not decode: {e}"
-            ))
-        })
-    }
 }
 
 impl RgbValidator {
@@ -164,31 +115,6 @@ impl RgbValidator {
             min_confirmations,
             session: OnceCell::new(),
         }
-    }
-
-    /// Refuses `outpoint` unless the indexer shows it mined and unspent, so
-    /// state sealed there is not lost. `script` is the output's script.
-    pub fn assert_unspent_and_mined(
-        &self,
-        outpoint: bitcoin::OutPoint,
-        script: &bitcoin::Script,
-    ) -> Result<()> {
-        let live = if is_electrum_url(&self.indexer_url) {
-            self.electrum_client()
-                .and_then(|client| electrum_unspent_and_mined(&client, outpoint, script))
-        } else {
-            esplora_unspent_and_mined(&self.esplora_client(), outpoint)
-        }
-        .map_err(|e| {
-            EnclaveError::CrossCheck(format!("indexer check of outpoint {outpoint} failed: {e}"))
-        })?;
-        if !live {
-            return Err(EnclaveError::CrossCheck(format!(
-                "outpoint {outpoint} is spent or not mined, per the indexer - state sealed there \
-                 would be lost"
-            )));
-        }
-        Ok(())
     }
 
     fn esplora_client(&self) -> esplora_client::BlockingClient {
@@ -329,22 +255,6 @@ fn esplora_session(
     })
 }
 
-fn esplora_unspent_and_mined(
-    client: &esplora_client::BlockingClient,
-    outpoint: bitcoin::OutPoint,
-) -> std::result::Result<bool, String> {
-    let status = client
-        .get_tx_status(&outpoint.txid)
-        .map_err(|e| format!("esplora tx status failed: {e}"))?;
-    if !status.confirmed {
-        return Ok(false);
-    }
-    let output = client
-        .get_output_status(&outpoint.txid, u64::from(outpoint.vout))
-        .map_err(|e| format!("esplora output status failed: {e}"))?;
-    Ok(output.is_some_and(|o| !o.spent))
-}
-
 // Electrum, with non-verbose calls only: servers such as romanz/electrs do not
 // serve verbose transactions.
 
@@ -448,20 +358,6 @@ pub(super) fn assert_in_block(
         &header.merkle_root.to_byte_array(),
     )
     .map_err(|e| format!("its merkle proof does not match block {height}: {e:?}"))
-}
-
-fn electrum_unspent_and_mined(
-    client: &electrum_client::Client,
-    outpoint: bitcoin::OutPoint,
-    script: &bitcoin::Script,
-) -> std::result::Result<bool, String> {
-    use electrum_client::ElectrumApi;
-    let unspent = client
-        .script_list_unspent(script)
-        .map_err(|e| format!("electrum unspent lookup failed: {e}"))?;
-    Ok(unspent
-        .iter()
-        .any(|u| u.tx_hash == outpoint.txid && u.tx_pos == outpoint.vout as usize && u.height > 0))
 }
 
 fn is_electrum_url(url: &str) -> bool {

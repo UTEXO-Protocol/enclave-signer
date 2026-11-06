@@ -95,24 +95,21 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
     ));
     let ctx = ValidationContext {
         bridge_config: config,
-        #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         rgb_validator: None,
         #[cfg(feature = "rgb-validation")]
         header_chain: &header_chain,
         #[cfg(feature = "rgb-validation")]
         chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
-        // EVM destinations never reach the RGB PSBT binds.
-        #[cfg(all(feature = "rgb-swap", evm_to_rgb))]
-        self_owned_psbt_outputs: None,
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: None,
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_binder: None,
         #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
         mint_sats: None,
-        #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: None,
-        #[cfg(all(feature = "rgb-validation", any(rgb_to_evm, feature = "rgb-swap")))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         reject_list_reader: None,
     };
     f(&ctx)

@@ -11,7 +11,7 @@
 //! the path. A receiving consumer then validates the consignment in full.
 //! Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
-#![cfg(all(feature = "rgb-mint-burn", feature = "bfa-validation", evm_to_rgb))]
+#![cfg(all(feature = "rgb-validation", feature = "bfa-validation", evm_to_rgb))]
 
 // Shared with the unit tests; this file uses only the mint half.
 #[allow(dead_code)]
@@ -795,6 +795,56 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
         ],
     )
     .expect("consumer resolves the bound witness");
+}
+
+/// A caller that sent its request and then vanished: reads work, writes fail.
+struct DeadCaller(Cursor<Vec<u8>>);
+
+impl std::io::Read for DeadCaller {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Write for DeadCaller {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "caller is gone",
+        ))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A signature the caller never received must not use up the deposit's replay
+/// key. The retry signs. Once a response is delivered, the same deposit is
+/// refused as a duplicate.
+#[test]
+fn a_lost_response_keeps_the_deposit_retryable() {
+    let built = build(None);
+    let ctx = context(
+        bridge_config(&built.deposit.contract_id),
+        deposit_chain(&built, LOCK_BLOCK, LOCK_BLOCK, vec![]),
+    );
+
+    let mut wire = Cursor::new(Vec::new());
+    let request = EnclaveRequest {
+        request: Some(Request::Sign(sign_request(&built))),
+    };
+    framing::write_message(&mut wire, &request).unwrap();
+    wire.set_position(0);
+    server::handle_connection(DeadCaller(wire), &ctx);
+
+    signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
+        .expect("the retry signs after a lost response");
+
+    let again = refusal(&sign_over_the_wire(&ctx, sign_request(&built)));
+    assert!(
+        again.to_lowercase().contains("duplicate") || again.to_lowercase().contains("already"),
+        "expected a duplicate refusal, got: {again}"
+    );
 }
 
 /// The native deposit's refusal once `edit` changes its RGB destination.

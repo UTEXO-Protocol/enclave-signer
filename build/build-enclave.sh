@@ -8,11 +8,11 @@
 # Environment:
 #   OUT_DIR          output directory (default: build/)
 #   IMAGE_TAG        image tag (default: utexo-bridge-enclave:latest)
-#   DOCKERFILE       recipe name (default: Dockerfile.enclave)
+#   DOCKERFILE       recipe name (required)
 #   EIF_NAME         output name (default: utexo-bridge-enclave.eif)
 #   NITRO_CLI_BLOBS  optional Nitro kernel/init directory
 #   RGB_ASSET_ID     required when the recipe declares ARG RGB_ASSET_ID
-#                    (combined, rgb, mint, burn)
+#                    (mint, burn)
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
@@ -41,7 +41,7 @@
 #   OUT_DIR                output directory for artifacts (default: build/)
 #   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
 #   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
-#                          declares ARG RGB_ASSET_ID (combined, rgb, mint, burn)
+#                          declares ARG RGB_ASSET_ID (mint, burn)
 #   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
@@ -53,13 +53,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
-# Which enclave image to build. The default is the combined (rgb + rgb-swap +
-# ccd) image of the retired swap flow. Production is
+# Which enclave image to build. Required. Production is
 # DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
-# signer EIFs). Others: Dockerfile.enclave.rgb (swap, retired) and
-# Dockerfile.enclave.ccd. EIF_NAME names the output .eif and its SHA256SUMS
-# entry; the default keeps the historical artifact name.
-DOCKERFILE="${DOCKERFILE:-Dockerfile.enclave}"
+# signer EIFs). The other one is Dockerfile.enclave.ccd. EIF_NAME names the
+# output .eif and its SHA256SUMS entry; the default keeps the historical
+# artifact name.
+DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint, .burn or .ccd)}"
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
 EIF_PATH="$OUT_DIR/$EIF_NAME"
 

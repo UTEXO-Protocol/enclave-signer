@@ -46,27 +46,6 @@ compile_error!("rgb-validation without spv requires real attestation; seed impor
 ))]
 compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
 
-// Exactly one RGB flow. Each flow is its own enclave image with its own PCR0.
-// The modules in `networks/rgb/flow/` export the same item names. These guards
-// give a clear message instead of many name-resolution errors.
-#[cfg(all(feature = "rgb-swap", feature = "rgb-mint-burn"))]
-compile_error!(
-    "rgb-swap and rgb-mint-burn are mutually exclusive: the send/receive and mint/burn flows \
-     ship as separate enclave instances. Build one image per flow - the default feature set \
-     carries `rgb-swap`, so a mint/burn image needs `--no-default-features --features \
-     vsock,rgb,mint-signer` (or `burn-signer`)"
-);
-#[cfg(all(
-    feature = "rgb-validation",
-    not(feature = "rgb-swap"),
-    not(feature = "rgb-mint-burn")
-))]
-compile_error!(
-    "rgb-validation requires a flow: enable exactly one of `rgb-swap` (send/receive) or \
-     `rgb-mint-burn`. Without one the enclave has no rule for which RGB transition types it \
-     may sign, and refusing to build is safer than defaulting to either"
-);
-
 // Exactly one mint/burn signer role: each role is its own image with its own
 // seed. `build.rs` derives the direction cfgs from the same two features.
 #[cfg(all(feature = "mint-signer", feature = "burn-signer"))]
@@ -76,12 +55,12 @@ compile_error!(
      image per role"
 );
 #[cfg(all(
-    feature = "rgb-mint-burn",
+    feature = "rgb-validation",
     not(feature = "mint-signer"),
     not(feature = "burn-signer")
 ))]
 compile_error!(
-    "a mint/burn build requires a signer role: enable exactly one of `mint-signer` \
+    "an RGB build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
      vsock,rgb,mint-signer`"
 );

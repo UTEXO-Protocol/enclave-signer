@@ -307,23 +307,16 @@ cargo build --release -p utexo-bridge-enclave --no-default-features --features v
 Other builds stay in the tree. They are not the production bridge:
 
 ```bash
-# Combined (what build/Dockerfile.enclave ships). Uses the retired swap flow.
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,ccd,bfa-validation
-
-# RGB send/receive (swap) only. Retired flow.
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,rgb,rgb-swap,bfa-validation
-
 # Concordium only
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
 
 # Local TCP dev build (debug profile, seed import allowed)
-cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,rgb-swap,ccd,evm-rpc
+cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,rgb,mint-signer,ccd,evm-rpc
 ```
 
 Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
 real-attestation mint/burn builds for public Signet;
-exactly one of `rgb-swap` / `rgb-mint-burn` whenever `rgb-validation` is on;
-exactly one of `mint-signer` / `burn-signer` whenever `rgb-mint-burn` is on;
+exactly one of `mint-signer` / `burn-signer` whenever `rgb-validation` is on;
 `kms-persistence` requires `mint-signer`;
 `allow-seed-import` and `mock-attestation` do not compile in a release
 profile. CI asserts every guard fires.
@@ -344,13 +337,11 @@ them for the cargo build only. They are never in a layer, the image or PCR0.
 ```bash
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn ./build/build-enclave.sh   # burn signer
-RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh # combined
-RGB_ASSET_ID="rgb:<approved-swap-contract-id>" DOCKERFILE=Dockerfile.enclave.rgb ./build/build-enclave.sh   # swap (retired)
 DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 ```
 
 `Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` build the BFA signer images.
-Each signer role enables `bfa-mint`. This enables `rgb-mint-burn` and
+Each signer role enables `bfa-mint`. This enables `rgb` and
 `bfa-validation`. BFA validation also enables `evm-rpc`.
 
 Run the two roles as separate enclaves with independent seeds. Mint signers use
@@ -404,11 +395,6 @@ build step; they are not copied into image layers.
 # Both values must already be exported; neither is a build argument.
 docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
-  -f build/Dockerfile.enclave-dev -t utexo-bridge-enclave-dev .
-RGB_ASSET_ID="rgb:<approved-swap-contract-id>" ./build/build-enclave.sh
-
-docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
-  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
   --secret id=federated_key,src=<absolute-path> \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
@@ -444,12 +430,12 @@ The base-image update changes enclave measurements. Build new EIFs and approve
 their PCRs before updating attestation allowlists or KMS policies. Existing
 measurements do not apply to these images.
 
-`.github/workflows/build-eif.yml` builds the `combined`, `rgb`,
-`rgb-mint` and `rgb-burn` variants on a plain runner with `nitro-cli 1.4.5`
-and uploads EIF + PCRs + host binaries to `s3://<bucket>/eif/<git_sha>/`.
-`release-eif.yml` deploys the `combined` EIF only: `deploy/deploy-host.sh`
-fetches `eif/<git_sha>/utexo-bridge-enclave.eif` and runs it on every CID.
-The `rgb-mint` and `rgb-burn` EIFs have no release path yet. The `cd-*.yml` workflows push container images for
+`.github/workflows/build-eif.yml` builds the `rgb-mint` and `rgb-burn`
+variants on a plain runner with `nitro-cli 1.4.5` and uploads EIF + PCRs + host
+binaries to `s3://<bucket>/eif/<git_sha>/rgb-mint/` and `rgb-burn/`.
+`release-eif.yml` takes a `signer_role` (`mint` or `burn`): `deploy/deploy-host.sh`
+fetches `eif/<git_sha>/rgb-<role>/utexo-bridge-enclave-<role>.eif` and runs it on every CID.
+The `cd-*.yml` workflows push container images for
 the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
 and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
 `SIGNER_ROLE` build arg).
@@ -811,14 +797,16 @@ provenance. `build/smoke-test.sh` drives a live enclave through the CLI.
 
 ## Feature flags
 
+Any feature that turns on `rgb-validation` (`rgb`, `spv`, `evm-rpc`, `bfa-validation`)
+needs exactly one signer role (`mint-signer` or `burn-signer`), or the build fails.
+The default set is `ccd`.
+
 | Feature | Implies | Description |
 |---------|---------|-------------|
 | `rgb` | `spv` | RGB / Bitcoin bridge stack. |
 | `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
-| `rgb-swap` | `rgb` | Retired RGB flow: send/receive with BFA `Transfer`. In the default set. Not in production. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
-| `rgb-mint-burn` | `rgb-validation` | RGB flow: deposits mint with BFA `mint`, withdrawals `burn`. Needs `--no-default-features`. |
-| `bfa-mint` | `rgb-mint-burn`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |
+| `bfa-mint` | `rgb-validation`, `bfa-validation`, `strict_encoding` | Mint/burn flow with BFA consensus and settlement checks against verified `FundsIn` locks. The mint signer reads its mints and refills from the rgb-lib fascia of each tx. |
 | `mint-signer` | `bfa-mint`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Exactly one role per mint/burn build. |
 | `burn-signer` | `bfa-mint` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
 | `bfa-validation` | `evm-rpc` | Binds BFA mint anchors to EVM locks. Without it, any consignment with a mint in its history is refused. Implied by `bfa-mint`. |

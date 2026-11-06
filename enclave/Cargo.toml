@@ -91,20 +91,19 @@ nix = { version = "0.31.2", features = ["socket", "time"] }
 aws-nitro-enclaves-nsm-api = "0.5"
 
 [features]
-# A plain `cargo build` is the combined dev bridge: rgb + rgb-swap + ccd.
-# Production images are the mint and burn signers below, with `vsock`. RGB
+# A plain `cargo build` is the Concordium-only dev build. RGB needs a signer
+# role. Production images are the mint and burn signers below, with `vsock`. RGB
 # images get `evm-rpc` through `bfa-validation` (see build/Dockerfile.enclave*).
 #
 # Single-network EIFs, one flow each:
-#   RGB send/receive: `--no-default-features --features vsock,rgb,rgb-swap,bfa-validation` (retired)
 #   RGB mint:         `--no-default-features --features vsock,rgb,mint-signer`
 #   RGB burn:         `--no-default-features --features vsock,rgb,burn-signer`
 #   Concordium:       `--no-default-features --features vsock,ccd` (CCD -> EVM
 #                     release and SignCcd; a release build refuses EVM signing
 #                     until EVM_CHAIN_ID and the proxy address are pinned).
-# CI builds all of them. A `compile_error!` pair in lib.rs requires exactly one
-# RGB flow.
-default = ["rgb", "rgb-swap", "ccd"]
+# CI builds all of them. A `compile_error!` in lib.rs requires exactly one
+# signer role whenever `rgb-validation` is on.
+default = ["ccd"]
 
 # Network-selection umbrellas. Enable one for a single-network EIF, or both
 # for the combined build. They gate only request handling (dispatch arms,
@@ -117,23 +116,6 @@ rgb = ["spv"]
 # `ccd` = the Concordium bridge stack. No extra deps: ed25519 is always on to
 # keep key derivation and the attestation bundle the same in every build.
 ccd = []
-
-# RGB flow selection. EXACTLY ONE is required when `rgb-validation` is on.
-# A `compile_error!` pair in lib.rs enforces it. Each flow ships as its own
-# enclave image with its own PCR0, so a send/receive enclave has no mint rule.
-#
-# The default set carries `rgb-swap`, so a mint/burn image MUST use
-# `--no-default-features`.
-#
-# The per-flow rules are in `enclave/src/networks/rgb/flow/{swap,mint_burn}.rs`.
-# The rest of consignment validation is shared.
-#
-# `rgb-swap` = pools/send-receive: the bridge holds an allocation and moves it
-# with BFA `Transfer` in both directions. Retired flow: production is mint/burn.
-rgb-swap = ["rgb"]
-# `rgb-mint-burn` = the bridge owns the contract's mint right: deposits mint
-# with BFA `mint`, withdrawals destroy with BFA `burn`.
-rgb-mint-burn = ["rgb-validation"]
 
 # Seed custody is a separate capability, enabled only by the mint signer.
 kms-persistence = [
@@ -185,12 +167,9 @@ evm-rpc = ["rgb-validation", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "
 # every consignment with mint ancestry is refused.
 # Needs `evm-rpc`: the mint signer binds the anchor to its own `FundsIn` read.
 bfa-validation = ["evm-rpc"]
-# `rgb-mint-burn`, not plain `rgb`: a BFA `mint` transition is a mint, so
-# its rules belong to that flow only. lib.rs rejects both flows at once, so
-# `--features bfa-mint` on the default set does not compile.
-bfa-mint = ["rgb-mint-burn", "bfa-validation", "dep:strict_encoding"]
+bfa-mint = ["rgb-validation", "bfa-validation", "dep:strict_encoding"]
 
-# Mint/burn signer role. EXACTLY ONE is required when `rgb-mint-burn` is on
+# Mint/burn signer role. EXACTLY ONE is required when `rgb-validation` is on
 # (lib.rs `compile_error!`). Each role ships as its own image with its own PCR0
 # and seed. A mint signer has no release rule; a burn signer has no mint rule.
 # The role is attested (`SignerRole`).

@@ -31,16 +31,9 @@ impl ConfirmedWitnesses for BTreeMap<Txid, WitnessPos> {
 /// How consensus learns that the witnesses are mined.
 pub struct WitnessCheck<'a> {
     pub chain: &'a dyn ConfirmedWitnesses,
-    /// Mint path only: the last bundle's witness is the mint tx being signed,
-    /// so it may be unmined. The PSBT binding then requires it to be the PSBT.
-    pub allow_unbroadcast_last: bool,
-    /// Mint path only: a witness that a mined witness spends is mined at least
-    /// as deep, so only the witnesses no mined witness spends are looked up.
-    pub infer_spent_ancestors: bool,
 }
 
-/// A witness position, and the witness whose lookup gave it.
-type Answer = (Txid, std::result::Result<WitnessPos, String>);
+type Answer = std::result::Result<WitnessPos, String>;
 
 /// The consensus resolver. No `get_block_header`: a proof the consignment
 /// carries then falls through to `resolve_witness`, never marking a tx mined.
@@ -48,10 +41,6 @@ pub(super) struct OnChainResolver<'a> {
     txes: BTreeMap<Txid, Transaction>,
     chain_net: ChainNet,
     check: &'a WitnessCheck<'a>,
-    /// The witness that may stay unmined, if any.
-    unbroadcast: Option<Txid>,
-    /// For each witness, another witness that spends one of its outputs.
-    spender: BTreeMap<Txid, Txid>,
     /// Answers given so far, so each witness costs at most one lookup.
     answers: RefCell<BTreeMap<Txid, Answer>>,
 }
@@ -68,62 +57,22 @@ impl<'a> OnChainResolver<'a> {
             .iter()
             .map(|wb| (wb.witness_id(), wb.tx.clone()))
             .collect();
-        let unbroadcast = check
-            .allow_unbroadcast_last
-            .then(|| transfer.bundles.last().map(|wb| wb.witness_id()))
-            .flatten();
-        let spender = if check.infer_spent_ancestors {
-            spenders(&txes, unbroadcast)
-        } else {
-            BTreeMap::new()
-        };
         Self {
             txes,
             chain_net,
             check,
-            unbroadcast,
-            spender,
             answers: RefCell::new(BTreeMap::new()),
         }
     }
 
-    /// The answer of the last witness up `txid`'s spender chain, which has no
-    /// cycle. With no `safe_height`, the borrowed position only means "mined".
     fn answer(&self, txid: Txid, tx: &Transaction) -> Answer {
-        let mut path = Vec::new();
-        let mut top = (txid, tx);
-        let answer = loop {
-            if let Some(known) = self.answers.borrow().get(&top.0) {
-                break known.clone();
-            }
-            path.push(top.0);
-            let next = self.spender.get(&top.0);
-            match next.and_then(|id| self.txes.get_key_value(id)) {
-                Some((id, spender_tx)) => top = (*id, spender_tx),
-                None => break (top.0, self.check.chain.confirmed(top.1)),
-            }
-        };
-        let mut answers = self.answers.borrow_mut();
-        for id in path {
-            answers.insert(id, answer.clone());
+        if let Some(known) = self.answers.borrow().get(&txid) {
+            return known.clone();
         }
+        let answer = self.check.chain.confirmed(tx);
+        self.answers.borrow_mut().insert(txid, answer.clone());
         answer
     }
-}
-
-/// Maps each witness to a witness that spends one of its outputs. The
-/// unbroadcast one is left out: it proves no depth.
-fn spenders(txes: &BTreeMap<Txid, Transaction>, unbroadcast: Option<Txid>) -> BTreeMap<Txid, Txid> {
-    let mut spender = BTreeMap::new();
-    for (id, tx) in txes.iter().filter(|(id, _)| Some(**id) != unbroadcast) {
-        for input in &tx.input {
-            let parent = input.previous_output.txid;
-            if parent != *id && txes.contains_key(&parent) {
-                spender.entry(parent).or_insert(*id);
-            }
-        }
-    }
-    spender
 }
 
 impl ResolveWitness for OnChainResolver<'_> {
@@ -134,19 +83,10 @@ impl ResolveWitness for OnChainResolver<'_> {
         let Some(tx) = self.txes.get(&witness_id) else {
             return Ok(WitnessStatus::Unresolved);
         };
-        if self.unbroadcast == Some(witness_id) {
-            return Ok(WitnessStatus::Resolved(tx.clone(), WitnessOrd::Tentative));
-        }
-        let (source, answer) = self.answer(witness_id, tx);
-        let pos = answer.map_err(|reason| {
-            let via = if source == witness_id {
-                String::new()
-            } else {
-                format!(" (checked through {source}, which builds on it)")
-            };
+        let pos = self.answer(witness_id, tx).map_err(|reason| {
             WitnessResolverError::ResolverIssue(
                 Some(witness_id),
-                format!("witness tx is not confirmed on chain: {reason}{via}"),
+                format!("witness tx is not confirmed on chain: {reason}"),
             )
         })?;
         Ok(WitnessStatus::Resolved(tx.clone(), WitnessOrd::Mined(pos)))

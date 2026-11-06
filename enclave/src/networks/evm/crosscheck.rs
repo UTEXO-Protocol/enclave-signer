@@ -5,7 +5,7 @@
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "rgb-mint-burn")]
+#[cfg(feature = "rgb-validation")]
 use crate::networks::evm::burn_destination::{self, BurnDestinationRecord};
 use crate::networks::evm::validation::ReleaseIdentity;
 use crate::networks::rgb::spv::HeaderChain;
@@ -37,12 +37,8 @@ pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()
 /// Amount cross-check for `fundsOut`. Binds the release `amount` to the
 /// consignment asset value:
 ///
-///   1. The settling transition must be the type that this build's RGB flow
-///      accepts on a withdrawal: a BFA `Transfer` under `rgb-swap`, a BFA
-///      `Burn` under `rgb-mint-burn`.
-///   2. The amount that transition moves out of the source must cover the
-///      EVM release `amount` under `rgb-swap`, and equal it under
-///      `rgb-mint-burn`.
+///   1. The settling transition must be a BFA `Burn`.
+///   2. The amount that transition burns must equal the EVM release `amount`.
 ///
 /// Both come from [`crate::networks::rgb::flow::funds_out_source_amount`],
 /// which also builds the route proof. Thus the two agree on the transition.
@@ -68,7 +64,6 @@ pub fn validate_funds_out_amount(
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
-    // Coverage under rgb-swap, exact equality under rgb-mint-burn.
     flow::assert_funds_out_amount(source_amount, calldata_amount)
 }
 
@@ -82,9 +77,9 @@ pub fn validate_funds_out_amount(
 /// release.
 ///
 /// The schema does not require `burnReason`, so this is its only guard. The
-/// caller must run [`validate_funds_out_amount`] first. Under `rgb-mint-burn`,
-/// it rejects anything that is not a burn of exactly the released amount.
-#[cfg(feature = "rgb-mint-burn")]
+/// caller must run [`validate_funds_out_amount`] first. It rejects anything
+/// that is not a burn of exactly the released amount.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,

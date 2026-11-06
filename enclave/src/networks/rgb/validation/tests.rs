@@ -115,11 +115,7 @@ fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<Valida
 
 /// The burn path's check: no witness may be unmined.
 fn on_chain(chain: &dyn ConfirmedWitnesses) -> WitnessCheck<'_> {
-    WitnessCheck {
-        chain,
-        allow_unbroadcast_last: false,
-        infer_spent_ancestors: false,
-    }
+    WitnessCheck { chain }
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
@@ -1646,7 +1642,7 @@ fn mint_transitions_are_the_only_mint_shape() {
     assert!(!is_mint_transition(8010));
     assert_eq!(
         super::super::flow::is_signing_transition(8013),
-        cfg!(feature = "rgb-mint-burn")
+        cfg!(feature = "rgb-validation")
     );
 }
 
@@ -1719,14 +1715,18 @@ fn stalled_host() -> std::net::SocketAddr {
 }
 
 #[test]
-fn stalled_electrum_fetch_times_out_instead_of_hanging() {
+fn stalled_electrum_session_times_out_instead_of_hanging() {
     let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "bitcoin")
         .unwrap()
         .with_timeout(2);
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
     let start = std::time::Instant::now();
-    let err = validator
-        .fetch_transaction(gen::outpoint(1, 0).txid)
-        .unwrap_err();
+    let err = validator.indexer_witnesses(1).confirmed(&tx).unwrap_err();
     assert!(
         start.elapsed() < std::time::Duration::from_secs(60),
         "stalled Electrum must be bounded by the socket timeout: {err}"
@@ -1734,14 +1734,18 @@ fn stalled_electrum_fetch_times_out_instead_of_hanging() {
 }
 
 #[test]
-fn stalled_esplora_fetch_times_out_instead_of_hanging() {
+fn stalled_esplora_session_times_out_instead_of_hanging() {
     let validator = RgbValidator::new(format!("http://{}", stalled_host()), "bitcoin")
         .unwrap()
         .with_timeout(2);
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
     let start = std::time::Instant::now();
-    let err = validator
-        .fetch_transaction(gen::outpoint(1, 0).txid)
-        .unwrap_err();
+    let err = validator.indexer_witnesses(1).confirmed(&tx).unwrap_err();
     assert!(
         start.elapsed() < std::time::Duration::from_secs(60),
         "stalled Esplora must be bounded by the HTTP timeout: {err}"
@@ -1969,22 +1973,14 @@ fn mint_after_a_rights_send() -> Vec<u8> {
     history.consignment()
 }
 
-/// Every witness but `unmined` mined, checked with `allow_unbroadcast_last`.
-fn validate_without(
-    bytes: &[u8],
-    unmined: bitcoin::Txid,
-    allow_unbroadcast_last: bool,
-) -> Result<ValidatedConsignment> {
+/// Every witness but `unmined` mined.
+fn validate_without(bytes: &[u8], unmined: bitcoin::Txid) -> Result<ValidatedConsignment> {
     let mut chain = mined(&witness_ids(bytes));
     chain.remove(&unmined);
-    let check = WitnessCheck {
-        chain: &chain,
-        allow_unbroadcast_last,
-        infer_spent_ancestors: allow_unbroadcast_last,
-    };
-    validator().validate_consignment(bytes, Some(&bind_all), &check, &open_lists())
+    validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &open_lists())
 }
 
+#[cfg(rgb_to_evm)]
 fn display_bytes(txid: bitcoin::Txid) -> [u8; 32] {
     let mut bytes = bitcoin::hashes::Hash::to_byte_array(txid);
     bytes.reverse();
@@ -2005,17 +2001,9 @@ fn a_fully_mined_history_passes() {
 fn burn_path_refuses_an_unmined_transfer_in_the_history() {
     let bytes = burn_after_transfer();
     let transfer = witness_ids(&bytes)[1];
-    let err = error_of(validate_without(&bytes, transfer, false));
+    let err = error_of(validate_without(&bytes, transfer));
     assert!(err.contains("not confirmed on chain"), "{err}");
     assert!(err.contains(&transfer.to_string()), "{err}");
-}
-
-#[test]
-fn mint_path_refuses_an_unmined_transfer_in_the_history() {
-    let bytes = burn_after_transfer();
-    let transfer = witness_ids(&bytes)[1];
-    let err = error_of(validate_without(&bytes, transfer, true));
-    assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
 /// The send is history, and the mint consumes the right it made.
@@ -2026,20 +2014,12 @@ fn accepts_a_mint_on_a_right_from_a_rights_send() {
     assert_eq!(validated.mint_locks.len(), 1);
 }
 
-#[test]
-fn mint_path_refuses_an_unmined_rights_send() {
-    let bytes = mint_after_a_rights_send();
-    let send = witness_ids(&bytes)[0];
-    let err = error_of(validate_without(&bytes, send, true));
-    assert!(err.contains("not confirmed on chain"), "{err}");
-}
-
 /// The burn itself needs its proof too: the burn path allows no unmined tx.
 #[test]
 fn burn_path_refuses_an_unmined_last_witness() {
     let bytes = burn_bytes();
     let burn = *witness_ids(&bytes).last().unwrap();
-    let err = error_of(validate_without(&bytes, burn, false));
+    let err = error_of(validate_without(&bytes, burn));
     assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
@@ -2061,7 +2041,7 @@ fn a_consignment_spv_proof_does_not_prove_a_witness() {
     }
     let bytes = history.consignment();
     let burn = *witness_ids(&bytes).last().unwrap();
-    let err = error_of(validate_without(&bytes, burn, false));
+    let err = error_of(validate_without(&bytes, burn));
     assert!(err.contains("not confirmed on chain"), "{err}");
     assert!(err.contains(&burn.to_string()), "{err}");
     // No header, so rgb-consensus never checks the carried proof itself.
@@ -2108,59 +2088,6 @@ fn a_failing_resolver_refuses_with_its_own_error() {
     assert_own_error(reader_down.expect_err("the reader is down"), "reader");
 }
 
-/// The mint tx being signed is the one witness that may be unbroadcast, and
-/// the result names it so the PSBT bind can check it.
-#[test]
-fn mint_path_allows_only_the_last_witness_unmined() {
-    let bytes = mint_after_a_rights_send();
-    let last = *witness_ids(&bytes).last().unwrap();
-    let validated = validate_without(&bytes, last, true).expect("the mint tx may be unbroadcast");
-    assert_eq!(validated.last_witness_txid, Some(last));
-    assert_eq!(validated.non_mined_witness_txids, vec![display_bytes(last)]);
-}
-
-/// A dead indexer refuses the mint history instead of passing it.
-#[test]
-fn mint_path_refuses_history_an_unreachable_indexer_cannot_confirm() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = closed.local_addr().unwrap();
-    drop(closed);
-    let validator = RgbValidator::new(format!("tcp://{addr}"), "regtest").unwrap();
-    let indexer = validator.indexer_witnesses(1);
-    let check = WitnessCheck {
-        chain: &indexer,
-        allow_unbroadcast_last: true,
-        infer_spent_ancestors: true,
-    };
-    let err = error_of(validator.validate_consignment(
-        &mint_after_a_rights_send(),
-        Some(&bind_all),
-        &check,
-        &open_lists(),
-    ));
-    assert!(err.contains("not confirmed on chain"), "{err}");
-}
-
-/// The mint of a fresh right has no history, so it needs no indexer.
-#[test]
-fn a_first_mint_needs_no_indexer() {
-    let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "regtest")
-        .unwrap()
-        .with_timeout(30);
-    let indexer = validator.indexer_witnesses(6);
-    let check = WitnessCheck {
-        chain: &indexer,
-        allow_unbroadcast_last: true,
-        infer_spent_ancestors: true,
-    };
-    let bytes = mint_spending(issue().genesis_right(0, right_utxo()), vec![]).consignment();
-    let start = std::time::Instant::now();
-    validator
-        .validate_consignment(&bytes, Some(&bind_all), &check, &open_lists())
-        .unwrap();
-    assert!(start.elapsed() < std::time::Duration::from_secs(20));
-}
-
 /// Two rights sends, the second spending a right of the first, then a mint
 /// on a right of the second.
 fn mint_after_two_rights_sends() -> Vec<u8> {
@@ -2183,44 +2110,6 @@ impl ConfirmedWitnesses for Recording<'_> {
         self.asked.borrow_mut().push(tx.compute_txid());
         self.chain.confirmed(tx)
     }
-}
-
-/// Validates `bytes` on the mint path's terms against `chain`, and returns
-/// the witnesses the source was asked about.
-fn mint_path_asks(
-    bytes: &[u8],
-    chain: &BTreeMap<bitcoin::Txid, WitnessPos>,
-) -> (Result<ValidatedConsignment>, Vec<bitcoin::Txid>) {
-    let source = Recording {
-        chain,
-        asked: RefCell::new(Vec::new()),
-    };
-    let check = WitnessCheck {
-        chain: &source,
-        allow_unbroadcast_last: true,
-        infer_spent_ancestors: true,
-    };
-    let result = validator().validate_consignment(bytes, Some(&bind_all), &check, &open_lists());
-    (result, source.asked.into_inner())
-}
-
-/// The mint tx's parent is mined, so every older send it builds on is too.
-#[test]
-fn mint_path_asks_the_indexer_only_about_the_parent_of_the_mint_tx() {
-    let bytes = mint_after_two_rights_sends();
-    let ids = witness_ids(&bytes);
-    let (result, asked) = mint_path_asks(&bytes, &mined(&ids[1..2]));
-    result.expect("the older send is as deep as the mined parent");
-    assert_eq!(asked, vec![ids[1]]);
-}
-
-#[test]
-fn mint_path_refuses_an_unmined_parent_even_over_a_mined_older_send() {
-    let bytes = mint_after_two_rights_sends();
-    let ids = witness_ids(&bytes);
-    let (result, _) = mint_path_asks(&bytes, &mined(&ids[..1]));
-    let err = error_of(result);
-    assert!(err.contains("not confirmed on chain"), "{err}");
 }
 
 /// The burn path proves each witness itself: its proofs are checked anyway.
@@ -2433,33 +2322,6 @@ mod electrum_indexer {
             .confirmed(&tx)
             .unwrap_err();
         assert!(err.contains("does not serve"), "{err}");
-    }
-
-    fn check_outpoint(server: Server) -> Result<()> {
-        let outpoint = bitcoin::OutPoint::new(server.tx.compute_txid(), 0);
-        let script = server.tx.output[0].script_pubkey.clone();
-        validator_for(server, "regtest").assert_unspent_and_mined(outpoint, &script)
-    }
-
-    #[test]
-    fn accepts_a_mined_unspent_outpoint() {
-        check_outpoint(server()).unwrap();
-    }
-
-    #[test]
-    fn refuses_a_spent_or_unmined_outpoint() {
-        for unspent_height in [None, Some(0)] {
-            let err = check_outpoint(Server {
-                unspent_height,
-                ..server()
-            })
-            .unwrap_err()
-            .to_string();
-            assert!(
-                err.contains("spent or not mined"),
-                "{unspent_height:?}: {err}"
-            );
-        }
     }
 }
 

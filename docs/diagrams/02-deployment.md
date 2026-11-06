@@ -61,8 +61,7 @@ flowchart TB
 
 - Built as an **EIF** via `nitro-cli build-enclave`. Production images:
   `build/Dockerfile.enclave.mint` (mint signer) and `.burn` (burn signer).
-  Other images: `Dockerfile.enclave` (rgb-swap + ccd) and `.rgb` (rgb-swap),
-  both the retired swap flow, and `.ccd`. The EIF build reports PCR0/1/2.
+  The other image is `.ccd`. The EIF build reports PCR0/1/2.
   Verifiers must pin approved values. Image changes can require new measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
