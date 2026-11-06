@@ -48,6 +48,10 @@ utexo-bridge-parent-cli set-endpoints --print-sha256
 This command does not contact an enclave. KMS inputs are excluded from the digest.
 Both images can share the digest only when their chain endpoint inputs match.
 
+PCR0 measures this digest, so each endpoint set needs its own EIF. This breaks
+the common EIF rule in `AGENTS.md` until runtime endpoint settings replace the
+digest.
+
 Provide the existing `RGB_LIB_BFA_DEPLOY_KEY` and
 `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets and the new
 `RGB_PRIVATE_DEPS_TOKEN` secret. Keep credentials out of build arguments.
