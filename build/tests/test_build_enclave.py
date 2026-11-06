@@ -24,7 +24,12 @@ MEASURED_PINS = dict(
     BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
-    ENDPOINTS_SHA256='12' * 32,
+)
+MEMBER_INPUT_NAMES = (
+    'ENDPOINTS_SHA256', 'ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_PORT',
+    'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_TLS_CA_DER_HEX', 'EVM_RPC_URL',
+    'EVM_RPC_PATH', 'EVM_RPC_API_KEY',
+    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
 )
 
 
@@ -58,8 +63,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
                     'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
                     'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
-                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
-                    'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS):
+                    'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS, *MEMBER_INPUT_NAMES):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -168,6 +172,49 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(
                     'KMS_ALLOWED_ACCOUNT_IDS=123456789012' in self.captured_build_args(),
                     forwarded)
+
+    def test_member_settings_do_not_change_role_build_arguments(self):
+        # Capture the real wrapper's full Docker command for both feature profiles.
+        # No Docker/Nitro build runs here; ImageInputsTests separately checks that
+        # the recipes cannot bake these member settings into ARG or ENV.
+        for role in ('mint', 'burn'):
+            for spv in (True, False):
+                with self.subTest(role=role, spv=spv):
+                    recipe = f'Dockerfile.enclave.{role}'
+                    pins = dict(
+                        RGB_ASSET_ID='rgb:test-bfa-asset',
+                        ENCLAVE_FEATURES=f'vsock,{"rgb," if spv else ""}{role}-signer',
+                        BITCOIN_NETWORK='bitcoin' if spv else 'signet',
+                        BTC_RELAY_MODE='required' if spv else 'none',
+                    )
+                    baseline = self.invoke(recipe, **pins)
+                    self.assertEqual(baseline.returncode, 42, baseline.stderr)
+                    baseline_argv = json.loads(self.argv.read_text())
+                    for member in ('a', 'b'):
+                        # These include ignored legacy/unsupported inputs. Neither
+                        # credentials nor an old digest may enter a measured build.
+                        settings = dict(
+                            ENDPOINTS_SHA256=('12' if member == 'a' else '34') * 32,
+                            ELECTRUM_URL=f'ssl://electrum-{member}.test:50002',
+                            EVM_RPC_HOST=f'rpc-{member}.test',
+                            EVM_RPC_TLS_PORT='443' if member == 'a' else '8443',
+                            EVM_RPC_TLS_CA_DER_FILE=f'/member-{member}/ca.der',
+                            EVM_RPC_TLS_CA_DER_HEX='aa' if member == 'a' else 'bb',
+                            EVM_RPC_URL=f'https://rpc-{member}.test/v2/secret-{member}',
+                            EVM_RPC_PATH=f'/v2/secret-{member}',
+                            EVM_RPC_API_KEY=f'secret-{member}',
+                            **dict(KMS_PINS, KMS_SEED_ID=f'member-{member}',
+                                   KMS_EXPECTED_EVM_ADDRESS='0x' + ('11' if member == 'a' else '22') * 20),
+                        )
+                        self.assertCountEqual(settings, MEMBER_INPUT_NAMES)
+                        result = self.invoke(recipe, **pins, **settings)
+                        self.assertEqual(result.returncode, 42, result.stderr)
+                        self.assertEqual(json.loads(self.argv.read_text()), baseline_argv)
+                        self.assertEqual(result.stdout, baseline.stdout)
+                        self.assertEqual(result.stderr, baseline.stderr)
+                        build_arg_names = {arg.split('=', 1)[0]
+                                           for arg in self.captured_build_args()}
+                        self.assertTrue(build_arg_names.isdisjoint(MEMBER_INPUT_NAMES))
 
     def test_optional_overrides_do_not_leak_into_legacy_or_ccd_recipes(self):
         for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb', 'Dockerfile.enclave.ccd',
@@ -482,10 +529,24 @@ class ImageInputsTests(unittest.TestCase):
                   ROOT / 'Makefile']
         for path in files:
             text = path.read_text()
-            for name in ('ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_CA', 'EVM_RPC_URL',
-                         'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
+            for name in (*MEMBER_INPUT_NAMES, 'EVM_RPC_TLS_CA', 'EVM_RPC_CA'):
                 with self.subTest(file=path.name, name=name):
                     self.assertNotIn(name, text)
+
+    def test_no_member_setting_in_measured_image_environment(self):
+        # Inspect real ENV declarations, including multiline ones, in all EIF
+        # recipes. A wrapper-only test misses values baked directly in a recipe.
+        for recipe in self.RECIPES:
+            text = (ROOT / 'build' / recipe).read_text().replace('\\\n', ' ')
+            for line in text.splitlines():
+                if not line.startswith('ENV '):
+                    continue
+                for assignment in shlex.split(line[4:]):
+                    name = assignment.split('=', 1)[0]
+                    with self.subTest(recipe=recipe, name=name):
+                        self.assertNotEqual(name, 'ENDPOINTS_SHA256')
+                        self.assertFalse(name.startswith(('ELECTRUM_', 'ESPLORA_',
+                                                          'EVM_RPC_', 'KMS_')))
 
 
 if __name__ == '__main__':

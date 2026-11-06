@@ -138,10 +138,6 @@ enum Command {
     /// Set the chain endpoints and the KMS values once, after launch. The
     /// enclave rejects a second call.
     SetEndpoints {
-        /// Print the chain-endpoint SHA-256 (excluding KMS fields) without contacting
-        /// an enclave. Uses the same flags, environment and CA file as launch.
-        #[arg(long)]
-        print_sha256: bool,
         #[command(flatten)]
         endpoints: EndpointArgs,
     },
@@ -313,32 +309,6 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         // This enclave does not read it: it requests the EVM RPC at `/`.
         evm_rpc_path: String::new(),
     }
-}
-
-/// Keep in sync with `enclave/src/config.rs::chain_endpoints_sha256`.
-fn endpoints_sha256(request: &SetEndpointsRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    let mut network = request.clone();
-    // New schema fields must be explicitly classified as hashed or excluded.
-    let SetEndpointsRequest {
-        electrum_url: _,
-        evm_rpc_host: _,
-        evm_rpc_ca_der: _,
-        evm_rpc_tls_port: _,
-        // Hashed: the enclave requests `/` and never reads it, so only the empty
-        // path this CLI sends matches the pin.
-        evm_rpc_path: _,
-        kms_key_arn,
-        kms_region,
-        kms_seed_id,
-        kms_expected_evm_address,
-    } = &mut network;
-    kms_key_arn.clear();
-    kms_region.clear();
-    kms_seed_id.clear();
-    kms_expected_evm_address.clear();
-    Sha256::digest(network.encode_to_vec()).into()
 }
 
 fn print_init_response(r: &InitializeKeyResponse) {
@@ -733,15 +703,8 @@ fn main() {
                 process::exit(1);
             }
         },
-        Command::SetEndpoints {
-            print_sha256,
-            endpoints,
-        } => {
+        Command::SetEndpoints { endpoints } => {
             let request = endpoints_request(endpoints);
-            if print_sha256 {
-                println!("{}", hex::encode(endpoints_sha256(&request)));
-                return;
-            }
             match client.set_endpoints(request) {
                 Ok(()) => println!("Endpoints set"),
                 Err(e) => fail(e.to_string()),
@@ -1100,54 +1063,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoints_digest_matches_the_enclave_golden_vector() {
-        let cli = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::SetEndpoints {
-                print_sha256: true,
-                ..
-            }
-        ));
-        // The enclave uses its vendored protobuf schema; the parent uses the
-        // upstream crate. This shared vector detects schema/encoding drift.
-        let mut request = SetEndpointsRequest {
-            electrum_url: "ssl://electrum.test:50002".into(),
-            evm_rpc_host: "rpc.test".into(),
-            evm_rpc_ca_der: vec![1, 2, 3],
-            evm_rpc_tls_port: 443,
-            kms_key_arn: "key".into(),
-            kms_region: "region".into(),
-            kms_seed_id: "seed".into(),
-            kms_expected_evm_address: "address".into(),
-            evm_rpc_path: String::new(),
-        };
-        assert_eq!(
-            hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
-        );
-        // The EVM RPC path is a network input: another path misses the pin.
-        let other_path = SetEndpointsRequest {
-            evm_rpc_path: "/v2/key".into(),
-            ..request.clone()
-        };
-        assert_ne!(
-            hex::encode(endpoints_sha256(&other_path)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
-        );
-        // KMS bootstrap/recovery inputs are deliberately outside the chain pin.
-        for field in [
-            &mut request.kms_key_arn,
-            &mut request.kms_region,
-            &mut request.kms_seed_id,
-            &mut request.kms_expected_evm_address,
-        ] {
-            field.clear();
+    fn runtime_endpoint_arguments_reach_the_launch_request() {
+        // Different members use the same CLI binary with their own endpoint
+        // and CA inputs. No image digest is supplied or computed by this path.
+        let cases = [
+            (
+                "Rpc.One.test",
+                "8443",
+                include_str!("../../../enclave/tests/fixtures/evm_rpc_tls/ca_a.der.hex"),
+            ),
+            (
+                "Rpc.Two.test",
+                "9443",
+                include_str!("../../../enclave/tests/fixtures/evm_rpc_tls/ca_b.der.hex"),
+            ),
+        ];
+        for (host, port, ca_hex) in cases {
+            let ca = hex::decode(ca_hex.trim()).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "utexo-runtime-ca-{}-{:016x}.der",
+                process::id(),
+                rand::random::<u64>(),
+            ));
+            std::fs::write(&path, &ca).unwrap();
+            let cli = Cli::try_parse_from([
+                "cli",
+                "set-endpoints",
+                "--electrum-url",
+                "ssl://Indexer.test:50002/",
+                "--evm-rpc-host",
+                host,
+                "--evm-rpc-tls-port",
+                port,
+                "--evm-rpc-ca-der-file",
+                path.to_str().unwrap(),
+                "--kms-key-arn",
+                "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+                "--kms-region",
+                "eu-west-1",
+                "--kms-seed-id",
+                "member-seed",
+                "--kms-expected-evm-address",
+                "0x1122334455667788990011223344556677889900",
+            ])
+            .unwrap();
+            let Command::SetEndpoints { endpoints } = cli.command else {
+                panic!("expected set-endpoints");
+            };
+            let request = endpoints_request(endpoints);
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(
+                request,
+                SetEndpointsRequest {
+                    electrum_url: "ssl://Indexer.test:50002/".into(),
+                    evm_rpc_host: host.into(),
+                    evm_rpc_ca_der: ca,
+                    evm_rpc_tls_port: port.parse().unwrap(),
+                    kms_key_arn: "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012".into(),
+                    kms_region: "eu-west-1".into(),
+                    kms_seed_id: "member-seed".into(),
+                    kms_expected_evm_address: "0x1122334455667788990011223344556677889900".into(),
+                    evm_rpc_path: String::new(),
+                }
+            );
         }
-        assert_eq!(
-            hex::encode(endpoints_sha256(&request)),
-            "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9"
-        );
+    }
+
+    #[test]
+    fn set_endpoints_rejects_the_removed_build_digest_option() {
+        let err = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"])
+            .err()
+            .expect("the build-digest option must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("--print-sha256"));
     }
 
     #[test]

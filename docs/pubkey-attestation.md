@@ -230,14 +230,17 @@ and `attest-verify` has no flag for them. `BTC_MAX_TOTAL_SATS` shows only as
 `allow_vanilla_psbt`: a non-zero value allows plain-BTC signing, except on a
 burn signer.
 
-Image-baked values remain measured in the EIF. The endpoints are not in the
-image; the operator sets them and the KMS values once at launch
-(`SetEndpoints`). The policy commits only the fields listed above. Until
+Image-baked values remain measured in the EIF. For both SPV and no-SPV builds,
+the endpoints and any digest of them are outside the image; the operator sets
+them and the KMS values once at launch (`SetEndpoints`). Changing launch hosts,
+ports or the RPC CA does not change PCR0/1/2 of the same EIF. The policy commits
+only the fields listed above. Until
 the set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
 that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
-A production enclave commits the full production tuple. A dev/mock enclave
-commits only `[version, 0x00]`, without individual policy settings. The response
+A production enclave commits the full production tuple. A dev/mock enclave,
+and the real-attestation no-SPV / IndexerTrusted profile, commit only
+`[version, 0x00]`, without individual policy settings. The response
 contains this encoding in `attested_policy`. The verifier authenticates and
 decodes those bytes.
 It then constructs the expected policy from its own settings and the authenticated
@@ -266,6 +269,20 @@ its expected values from a trusted source outside that response.
 PCR0 measures the image. PCR1 measures the kernel and bootstrap. PCR2 measures
 the application. Rebuild the EIF to determine whether a change affects them.
 A file checksum and a PCR measurement are different values.
+
+Reproducing the image measurements requires the release's source, toolchain
+and public build inputs, not a member's endpoint hosts, ports or RPC CA.
+This applies to both SPV and no-SPV profiles. Source/dependency access is
+still required as described in the README. The former `ENDPOINTS_SHA256`
+image setting is removed; approve the corrected release's measurements once.
+Later endpoint changes reuse that image and its PCR allowlist.
+
+Checking image identity and approving runtime policy are separate checks.
+The full production verifier still compares independently approved endpoint
+hosts and CA hashes with the signed policy in `user_data`; these values do
+not enter image PCRs. A no-SPV Development commitment contains no such
+settings. Its real attestation can authenticate the image and key, but cannot
+authenticate or approve the operator's endpoint configuration.
 
 This repository publishes measurements with EIF artifacts. Verify those
 artifacts before you use their PCRs. A trusted configuration or registry can
@@ -397,8 +414,8 @@ Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
 `deploy/deploy-host.sh` runs `utexo-bridge-parent-cli verify-launch` on each
 enclave after `set-endpoints`. The script deploys only the combined image
 (`utexo-bridge-enclave.eif`) and passes `SIGNER_ROLE=combined`. For a mint or
-burn signer, run `set-endpoints` and `verify-launch --signer-role mint` (or
-`burn`) yourself. `verify-launch` verifies the document for a fresh nonce
+burn signer with Production policy, run `set-endpoints` and
+`verify-launch --signer-role mint` (or `burn`) yourself. `verify-launch` verifies the document for a fresh nonce
 against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,
@@ -406,6 +423,12 @@ the expected value and the attested value. The enclave is then terminated,
 all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
 inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
 verified document, as described above.
+
+These production-policy checks do not accept the no-SPV Development posture.
+The existing `export-attestation --allow-development-policy` option for real
+burn/combined exports verifies approved nonzero image PCRs, not individual
+endpoint settings. Approve those launch inputs separately; the enclave does
+not receive an authorization from this host-side verification command.
 
 `ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
 

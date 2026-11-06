@@ -215,14 +215,24 @@ every enclave of the host.
 **Launch endpoints.** The operator sends these once after launch in
 `SetEndpoints`: the Electrum URL, the EVM RPC host, the EVM RPC CA (DER), the
 EVM RPC TLS port and, in a mint build, the KMS key ARN, region, seed id and
-expected EVM address. Production images keep these values outside the image
-and commit them through the attested policy. Without SPV, `ENDPOINTS_SHA256`
-binds network inputs to the image; KMS fields remain runtime inputs.
+expected EVM address. Every build keeps these values and any endpoint-derived
+digest outside the image. SPV and no-SPV members with the same role, release
+and build profile can use the same EIF with different endpoints. Image PCR
+reproduction and comparison do not require endpoint information.
+A Production policy separately commits the endpoint and KMS fields listed in
+Sec 4 in attestation `user_data`; the Development policy does not.
+Endpoint approval is external deployment configuration, not an approval
+signature checked by the enclave. In no-SPV / IndexerTrusted mode a host can
+choose a different well-formed TLS endpoint at launch, and the Development
+attestation does not reveal or approve that choice. TLS authenticates that
+selected endpoint; it does not establish that the operator approved it.
 The burn signer requires the indexer URL; without SPV, it queries the indexer
 for confirmations.
 The enclave refuses a second set; changing launch values needs a restart,
 which clears the in-memory keys. Mint recovers its saved KMS identity; burn
-recovery requires a live approved donor with matching PCRs. Until the set, the
+recovery requires a live approved donor with matching PCRs and policy. Changing
+an attested host or CA can therefore prevent cloning from an old-policy donor,
+even when the image PCRs are unchanged. Until the set, the
 enclave refuses `Sign`,
 `SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
@@ -244,14 +254,16 @@ Each loopback forwarder of a TLS endpoint (an `ssl://` or `https://` indexer,
 the EVM RPC, KMS) sends on only a connection that starts with a TLS handshake
 record (`enclave/src/egress.rs`). The enclave has no other network path, so no
 client can send plaintext to the host for such an endpoint, not even after an
-HTTPS -> HTTP redirect. `esplora-client` (`minreq`) and the EVM RPC client
-(`reqwest`) follow redirects, and their APIs here cannot turn that off. A
-redirect to a port with no forwarder, or to another host, has no route out.
+HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) disables redirects.
+`esplora-client` (`minreq`) can follow redirects; a redirect to a port with no
+forwarder, or to another host, has no route out.
 The parent -> enclave channel (vsock port 5000) is a separate inbound listener
 and is not affected. The EVM RPC forwarder listens on the
 EVM RPC TLS port, and the client connects to `https://<host>:<port>/` through
 it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
+`SetEndpoints.evm_rpc_path` must be empty. A nonempty path is rejected without
+echoing it; this release does not support provider paths or API keys.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
 Each socket read or write has a 10-second idle timeout. A 90-second socket
@@ -312,9 +324,11 @@ SecurityPolicy = Production {
   dev feature is a `compile_error!` in any shipped release binary (non-test
   build with debug assertions off); `rgb-validation` without `spv` requires
   a mint/burn role, real attestation, `BITCOIN_NETWORK=signet` and
-  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields;
-  `SetEndpoints` enforces the measured network digest, and operators approve
-  KMS inputs separately.
+  `BTC_RELAY_MODE=none`. Its Development policy does not commit launch fields.
+  Both profiles validate runtime endpoint syntax and enforce TLS in release;
+  neither embeds endpoint settings or their digest in the EIF. Operators
+  approve launch endpoints and KMS inputs separately. The enclave does not
+  verify an operator signature on those inputs.
   A build fails with both signer roles or with neither.
 - **Attestation:** `user_data = sha256(canonical_pubkey_bundle ||
   policy_commitment)`. The commitment encoding is versioned and shared
@@ -1219,6 +1233,12 @@ Known limits. Read them before deployment.
 - **Policy coverage.** The commitment does not hold all enforced settings
   (Sec 4). The attestation CLI authenticates the chain, contract and asset
   pins. The caller must compare them with the intended deployment.
+  No-SPV / IndexerTrusted uses the generic Development commitment, which
+  contains no endpoint or KMS settings. Its image PCRs prove code identity,
+  not approval of its runtime providers. A compromised host can substitute
+  its own valid TLS endpoint at launch; no in-enclave operator approval gate
+  prevents that. Treat the approved launch configuration and provider data
+  as additional trust assumptions for this profile.
 - **Build reproducibility.** rgb-lib comes from the private
   `UTEXO-Protocol/rgb-lib-bfa` mirror at a pinned rev, and the RGB protocol
   crates it pins from the root `[patch.crates-io]`: public `rgb-protocol`

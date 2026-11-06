@@ -28,13 +28,6 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
-    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
-    if ctx.bridge_config.endpoints_sha256 != Some(crate::config::chain_endpoints_sha256(&req)) {
-        return Err(EnclaveError::InvalidRequest(
-            "SetEndpoints does not match the measured ENDPOINTS_SHA256 pin".into(),
-        ));
-    }
-
     #[cfg(feature = "kms-persistence")]
     let kms_accounts = ctx.bridge_config.kms_allowed_accounts.as_slice();
     // This build takes no KMS key, so it has no account list.
@@ -568,6 +561,31 @@ mod tests {
             assert!(err.to_string().contains("already set"), "{err}");
         }
         assert_eq!(ctx.launch().unwrap().endpoints, first);
+    }
+
+    #[cfg(all(feature = "spv", feature = "evm-rpc"))]
+    #[test]
+    fn the_same_spv_build_accepts_different_runtime_hosts_ports_and_ca() {
+        let first = valid(1);
+        let second = SetEndpointsRequest {
+            electrum_url: "ssl://member-two-indexer.test:50003".into(),
+            evm_rpc_host: "member-two-rpc.test".into(),
+            evm_rpc_ca_der: hex::decode(
+                include_str!("../../tests/fixtures/evm_rpc_tls/ca_b.der.hex").trim(),
+            )
+            .unwrap(),
+            evm_rpc_tls_port: 8443,
+            ..first.clone()
+        };
+        let build = BuildContext::current();
+        for request in [&first, &second] {
+            let ctx = awaiting(build);
+            handle_set_endpoints(&ctx, request.clone()).unwrap();
+            let launch = ctx.launch().unwrap();
+            assert_eq!(launch.endpoints, Endpoints::parse(request).unwrap());
+            assert!(launch.rgb_validator.is_some());
+            assert!(launch.evm_rpc_client.is_some());
+        }
     }
 
     #[test]

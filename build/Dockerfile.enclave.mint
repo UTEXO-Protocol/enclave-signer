@@ -86,7 +86,7 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 
 # Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
 # (chain_id 42161), SPV and Production policy. Without SPV, Development policy
-# requires BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none and ENDPOINTS_SHA256.
+# requires BITCOIN_NETWORK=signet and BTC_RELAY_MODE=none.
 # Electrum is set at launch. The enclave pins its host to 127.0.0.1 and reaches
 # it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
@@ -103,7 +103,6 @@ ARG FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951
 ARG TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
 ARG BITCOIN_NETWORK=bitcoin
 ARG BTC_RELAY_MODE=required
-ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
 # The AWS accounts the seed KMS key may live in (comma-separated 12-digit ids).
@@ -112,7 +111,6 @@ RUN test -n "$RGB_ASSET_ID"
 ARG KMS_ALLOWED_ACCOUNT_IDS=""
 RUN test -n "$KMS_ALLOWED_ACCOUNT_IDS"
 ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
-    ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
     EVM_CHAIN_ID=${EVM_CHAIN_ID} \
     EVM_PROXY_CONTRACT_ADDRESS=${EVM_PROXY_CONTRACT_ADDRESS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
@@ -133,8 +131,8 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
-# Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
-# pin binds them instead.
+# They remain outside the image with or without SPV. Production policy commits
+# the Electrum/EVM hosts and EVM CA; Development policy does not commit them.
 # SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
 # Here it only decides when the health check reports the SPV header chain

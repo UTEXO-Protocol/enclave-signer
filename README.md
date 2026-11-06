@@ -703,14 +703,34 @@ after the selected head covers it. Production verification requires
 `--expect-evm-finality-tag` to match the approved image value.
 
 Chain endpoints and KMS values, set once at launch with `cli set-endpoints`
-(`SetEndpoints`), never in the image. A Production policy commits the Electrum
-host, the EVM RPC host, the SHA-256 of the CA and the four KMS values.
-Development policy does not commit these fields. Without SPV, the image pins
-network inputs through `ENDPOINTS_SHA256`; operators approve KMS inputs separately.
-The digest implementations in `enclave/src/config.rs` (`chain_endpoints_sha256`)
-and `parent/src/bin/cli.rs` (`endpoints_sha256`) must stay in sync. Both exclude
-runtime KMS fields; a shared golden vector and exhaustive field matching guard
-against encoding drift and unreviewed schema additions.
+(`SetEndpoints`), are outside the image in both SPV and no-SPV builds. Hosts,
+ports and the RPC CA, including any digest of them, are not EIF build inputs.
+Members using the same role, release and build profile can use the same EIF
+with different launch endpoints. Rebuilding that image and comparing PCR0/1/2
+does not require the members' endpoint configuration. The public build inputs
+and private dependency access described under Building are still required.
+
+A Production policy separately commits the Electrum host, the EVM RPC host,
+the SHA-256 of the CA and the four KMS values in attestation `user_data`.
+Full production-policy verification still needs independently approved values
+for those fields; it is more than checking image PCRs. Development policy,
+including no-SPV / IndexerTrusted, does not commit these fields. Operators must
+approve its launch endpoints and KMS inputs externally. Release enclaves validate
+their format and use TLS to authenticate the selected endpoints, but do not
+authenticate an operator approval or prove the provider's data is correct.
+
+Endpoint changes take effect on a new enclave launch; an active enclave refuses
+a second `SetEndpoints`. Reuse the same EIF and image PCR allowlist for endpoint
+changes. Key recovery and clone policy matching still apply: a burn donor with
+a different attested endpoint policy cannot clone into the new launch.
+
+Migration from releases using `ENDPOINTS_SHA256`: remove the old build setting
+and the `set-endpoints --print-sha256` step. The setting is no longer consumed,
+and the CLI flag has been removed. Build and approve the corrected image once,
+including any required KMS PCR allowlist update; subsequent endpoint changes
+do not require another image build. This change does not add RPC path or API-key
+support; the EVM RPC client still requests `/`. Direct wire callers must leave
+`evm_rpc_path` empty; a nonempty value is rejected rather than ignored.
 A build requires the values it uses and refuses the others:
 
 | Value (CLI flag / env) | Build | Description |
