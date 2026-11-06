@@ -18,7 +18,7 @@ use std::time::Duration;
 
 /// Time a client has to send the first three bytes. A TLS client sends its
 /// ClientHello at once.
-const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
+pub const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// True for the header of a TLS handshake record: content type 22, protocol
 /// major version 3. A ClientHello record uses minor version 1 to 3, and TLS
@@ -35,7 +35,8 @@ pub fn is_tls_handshake(header: &[u8; 3]) -> bool {
 /// Errors: a timeout, a short read, or a non-TLS start (`InvalidData`). The
 /// caller then closes the connection, and no byte reaches the host.
 pub fn read_tls_record_header(stream: &mut TcpStream) -> io::Result<[u8; 3]> {
-    stream.set_read_timeout(Some(FIRST_BYTES_TIMEOUT))?;
+    let timeout = Duration::from_secs(crate::limits::get().first_bytes_timeout_secs);
+    stream.set_read_timeout(Some(timeout))?;
     let mut header = [0u8; 3];
     stream.read_exact(&mut header)?;
     stream.set_read_timeout(None)?;

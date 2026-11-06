@@ -39,9 +39,11 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
 /// Maximum `call_data` length: the Bridge's 90_000-byte settlement cap
-/// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. PCR-attested.
+/// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. This is the
+/// value of the image. The operator can change it ([`crate::limits`]).
 #[cfg(rgb_to_evm)]
-pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize = 96 * 1024;
+pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize =
+    crate::limits::Limits::DEFAULTS.max_funds_out_call_data_bytes as usize;
 
 /// Latest `deadline` the enclave signs, in seconds after now. Same value as
 /// `MultisigProxy.MAX_TEE_DEADLINE`, which the contract checks only at
@@ -298,11 +300,11 @@ pub fn validate_destination(
         )));
     }
     // Reject oversize calldata before any decode or signing.
-    if destination.call_data.len() > MAX_FUNDS_OUT_CALL_DATA_LEN {
+    let max = crate::limits::get().max_funds_out_call_data_bytes;
+    if destination.call_data.len() as u64 > max {
         return Err(EnclaveError::CrossCheck(format!(
-            "call_data too large: {} bytes (max {})",
-            destination.call_data.len(),
-            MAX_FUNDS_OUT_CALL_DATA_LEN
+            "call_data too large: {} bytes (max {max})",
+            destination.call_data.len()
         )));
     }
 

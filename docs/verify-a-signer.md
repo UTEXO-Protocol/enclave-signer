@@ -10,6 +10,10 @@ enclave has its key and the operator supplies the complete approved identity
 map. An attestation failure returns nonzero; other CIDs may already have exported
 bundles. Do not treat individual files as approval of the whole deployment.
 
+The attestation does not cover the time, memory and size limits. The operator can
+change them, and they do not change what the enclave signs
+([Runtime limits](runtime-limits.md)).
+
 ## Operator: approve every signer before routing
 
 Obtain the expected main EVM address for **every CID** from the approved deployment

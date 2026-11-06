@@ -71,8 +71,8 @@ when a request message gets a new `repeated` field that the wire shape check in
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0` (branch `feat/mint-fascia`, "feat(proto): carry the rgb-lib fascia for the mint signer") |
-| Commit date | 2026-10-29T14:18:44Z |
+| Commit | `ce2353e7be0ea168ba0c1b91148be3f445cc0071` (branch `feat/enclave-limits`, "feat(proto): add the limits of the mint reply cache and the mint tx") |
+| Commit date | 2026-11-06T09:38:50Z |
 
 This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
 both crates compile against one schema version. Keep them in lockstep.
@@ -86,7 +86,7 @@ both crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0
+REV=ce2353e7be0ea168ba0c1b91148be3f445cc0071
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -101,8 +101,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `fbcc6b2ba09ef66a4c65c012134276d903f834cc` |
-| `proto/enclave/enclave.proto` | `3b9f5f5109147013777eb6d21f516b26e44695f3` |
+| `rust-gen/src/enclave/enclave.rs` | `c2d64a4f99c8d73d20711ac8134218e4446b68b4` |
+| `proto/enclave/enclave.proto` | `9fba180b9afc0468194d526af992c3f8caa73dd3` |
 
 ## Why only `prost`
 

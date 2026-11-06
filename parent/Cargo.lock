@@ -2872,7 +2872,7 @@ dependencies = [
 [[package]]
 name = "federated-signer-proto"
 version = "0.1.0"
-source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0#6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0"
+source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=ce2353e7be0ea168ba0c1b91148be3f445cc0071#ce2353e7be0ea168ba0c1b91148be3f445cc0071"
 dependencies = [
  "bytes",
  "prost",
@@ -4518,7 +4518,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

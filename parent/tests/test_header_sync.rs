@@ -338,8 +338,11 @@ fn enclave_tip(port: u16) -> (u32, Vec<u8>) {
 
 // Sync
 
+/// A short deadline, because `bad_reply_rereads_tip` waits out a call that the
+/// enclave never answers.
 fn service(port: u16) -> ParentAdapterService {
     ParentAdapterService::new(EnclaveTarget::Tcp(format!("127.0.0.1:{port}")))
+        .with_enclave_deadline_secs(30)
 }
 
 fn start_sync(

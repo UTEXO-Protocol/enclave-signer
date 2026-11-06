@@ -123,11 +123,11 @@ fn lock_chain<'a>(
 /// `label` names the direction in the rejection, for example `"RGB source"`
 /// or `"send-RGB"`. Both directions share it, so the message is the same.
 pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &str) -> Result<()> {
-    if consignment.len() > cfg.max_consignment_bytes {
+    let max = crate::limits::in_force(cfg).max_consignment_bytes;
+    if consignment.len() as u64 > max {
         return Err(EnclaveError::CrossCheck(format!(
-            "{label} consignment too large: {} bytes (max {})",
-            consignment.len(),
-            cfg.max_consignment_bytes
+            "{label} consignment too large: {} bytes (max {max})",
+            consignment.len()
         )));
     }
     Ok(())
@@ -142,11 +142,12 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
         ));
     }
     assert_consignment_size(&source.consignment, cfg, "RGB source")?;
-    if source.merkle_proofs.len() > cfg.max_merkle_proofs {
+    let limits = crate::limits::in_force(cfg);
+    if source.merkle_proofs.len() as u64 > limits.max_merkle_proofs {
         return Err(EnclaveError::CrossCheck(format!(
             "RGB source carries too many merkle proofs: {} (max {})",
             source.merkle_proofs.len(),
-            cfg.max_merkle_proofs
+            limits.max_merkle_proofs
         )));
     }
     let total_proof_bytes: usize = source
@@ -154,10 +155,10 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
         .iter()
         .map(|p| p.txid.len() + p.merkle_path.iter().map(|s| s.len()).sum::<usize>())
         .sum();
-    if total_proof_bytes > cfg.max_total_proof_bytes {
+    if total_proof_bytes as u64 > limits.max_total_proof_bytes {
         return Err(EnclaveError::CrossCheck(format!(
             "RGB source merkle proofs too large in aggregate: {total_proof_bytes} bytes (max {})",
-            cfg.max_total_proof_bytes
+            limits.max_total_proof_bytes
         )));
     }
     // Integrity, NOT authorization. The listener controls both `consignment`

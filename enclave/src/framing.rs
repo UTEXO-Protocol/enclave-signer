@@ -6,7 +6,8 @@ use std::io::{Read, Write};
 use crate::error::{EnclaveError, Result};
 use crate::proto::EnclaveRequest;
 
-/// Maximum size of one framed message. A request is one message, so it holds
+/// Maximum size of one framed message in the image. The operator can change
+/// it ([`crate::limits`]). A request is one message, so it holds
 /// the consignment, the Merkle proofs and the calldata.
 ///
 /// Sized for the default request limits in [`crate::config`]: a 10 MiB
@@ -14,7 +15,8 @@ use crate::proto::EnclaveRequest;
 /// entries. The parent has the same constant.
 pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
-/// Maximum protobuf field occurrences in one request. The shape check counts
+/// Maximum protobuf field occurrences in one request in the image. The
+/// operator can change it ([`crate::limits`]). The shape check counts
 /// them on the wire before the decode. A decoded element costs far more
 /// memory than its wire form. A field occurrence can be 2 bytes on the wire
 /// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
@@ -36,10 +38,10 @@ fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
     if len == 0 {
         return Err(EnclaveError::Framing("zero-length message".into()));
     }
-    if len > MAX_MESSAGE_SIZE {
+    let max = crate::limits::get().max_message_bytes;
+    if u64::from(len) > max {
         return Err(EnclaveError::Framing(format!(
-            "message too large: {} bytes (max {})",
-            len, MAX_MESSAGE_SIZE
+            "message too large: {len} bytes (max {max})"
         )));
     }
 
@@ -108,9 +110,10 @@ pub fn check_request_shape(frame: &[u8]) -> Result<()> {
 /// The field occurrences of a request frame, or the refusal of
 /// [`check_request_shape`]. The memory tests use the count.
 pub(crate) fn count_request_elements(frame: &[u8]) -> Result<usize> {
-    let mut left = MAX_WIRE_ELEMENTS;
+    let max = crate::limits::get().max_wire_elements as usize;
+    let mut left = max;
     walk(frame, Schema::Request, &mut left)?;
-    Ok(MAX_WIRE_ELEMENTS - left)
+    Ok(max - left)
 }
 
 fn shape_error(e: prost::DecodeError) -> EnclaveError {
@@ -122,7 +125,8 @@ fn walk(mut buf: &[u8], schema: Schema, left: &mut usize) -> Result<()> {
         let (tag, wire_type) = decode_key(&mut buf).map_err(shape_error)?;
         *left = left.checked_sub(1).ok_or_else(|| {
             EnclaveError::Framing(format!(
-                "request has more than {MAX_WIRE_ELEMENTS} elements"
+                "request has more than {} elements",
+                crate::limits::get().max_wire_elements
             ))
         })?;
         let child = schema.child(tag);

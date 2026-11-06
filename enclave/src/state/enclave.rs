@@ -16,7 +16,7 @@ use crate::error::{EnclaveError, Result};
 use crate::keys::{KeyInfo, KeyManager};
 
 use super::cloning_session::CloningSession;
-use super::replay_guard::{NonceReplayGuard, DEFAULT_OP_DEDUP_MAX, DEFAULT_OP_DEDUP_TTL};
+use super::replay_guard::NonceReplayGuard;
 
 /// Environment variable for the export warning threshold. (F03-AF-10)
 /// An unset, zero, or invalid value disables the threshold.
@@ -93,11 +93,14 @@ pub struct EnclaveState {
     /// when the cache reaches its capacity. Each key field is also checked
     /// by the request validators. A different cache key alone does not
     /// authorize a request. Durable uniqueness needs a separate control.
+    /// Safety does not rest on it: every signed mint spends the pinned right
+    /// output (mint-flow.md section 6). So the operator can set its time and
+    /// count limits (`mint_replay_ttl_secs`, `mint_replay_max_entries`).
     pub op_replay_guard: NonceReplayGuard,
 
     /// Signed mint replies by operation key. A byte-identical retry after a
     /// lost reply gets the same bytes, not a replay refusal. In memory, per
-    /// instance, same window as `op_replay_guard`.
+    /// instance (`mint_reply_ttl_secs`, `mint_reply_max_entries`).
     #[cfg(evm_to_rgb)]
     pub signed_results: super::SignedResultCache,
 
@@ -162,10 +165,7 @@ impl EnclaveState {
             seed_source: std::sync::OnceLock::new(),
             donor_cloning_secret: Mutex::new(None),
             replay_guard: NonceReplayGuard::default(),
-            op_replay_guard: NonceReplayGuard::with_capacity(
-                DEFAULT_OP_DEDUP_MAX,
-                DEFAULT_OP_DEDUP_TTL,
-            ),
+            op_replay_guard: NonceReplayGuard::for_mint_operations(),
             #[cfg(evm_to_rgb)]
             signed_results: super::SignedResultCache::default(),
             #[cfg(all(feature = "bfa-mint", evm_to_rgb))]

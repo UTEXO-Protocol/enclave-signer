@@ -218,6 +218,34 @@ enum Command {
     },
     /// Enter interactive REPL mode
     Interactive,
+    /// Read or change the time, memory and size limits of a running enclave.
+    /// A change needs no new image. It holds until the enclave restarts, and
+    /// the attestation does not cover it.
+    Limits {
+        #[command(subcommand)]
+        action: LimitsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum LimitsAction {
+    /// Print each limit: its current value and the value of the image
+    Show,
+    /// Change limits. Limits that are not named keep their values
+    Set {
+        /// NAME=VALUE pairs, for example max_rgb_lib_ms=24000. `limits show`
+        /// lists the names.
+        pairs: Vec<String>,
+        /// Read NAME=VALUE lines from this file. A pair on the command line
+        /// overrides a line of the file.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Go back to the image values first
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Go back to the image values
+    Reset,
 }
 
 /// Endpoint and KMS values. Each flag falls back to its environment variable.
@@ -659,6 +687,31 @@ fn main() {
                 process::exit(1);
             }
         },
+        Command::Limits { action } => {
+            let response = match action {
+                LimitsAction::Show => client.get_limits(),
+                LimitsAction::Reset => client.set_limits(Default::default(), true),
+                LimitsAction::Set { pairs, file, reset } => {
+                    let text = file.map(|path| {
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
+                    });
+                    let values = utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
+                        .unwrap_or_else(|e| fail(e));
+                    client.set_limits(values, reset)
+                }
+            };
+            match response {
+                Ok(r) => print!(
+                    "{}",
+                    utexo_bridge_parent::limits::table(
+                        &r.current.unwrap_or_default(),
+                        &r.image.unwrap_or_default()
+                    )
+                ),
+                Err(e) => fail(e.to_string()),
+            }
+        }
         Command::Health => match client.health() {
             Ok(r) => {
                 println!("Ready:            {}", r.ready);

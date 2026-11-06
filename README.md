@@ -219,8 +219,9 @@ See [`docs/pubkey-attestation.md`](docs/pubkey-attestation.md).
   header sync writes headers through the direct enclave protocol. Other direct
   enclave clients can also submit headers. The sync reads headers from
   `HEADER_ELECTRUM_URL` and sends them to its enclave.
-- The parent opens one new TCP or vsock connection per enclave RPC, with a
-  40 s timeout.
+- The parent opens one new TCP or vsock connection per enclave RPC. It reads the
+  request deadline of the enclave and waits 10 s longer, so the enclave gives up
+  first ([`docs/runtime-limits.md`](docs/runtime-limits.md)).
 - `Clone` and `AttestedPublicKey` each have a per-minute budget shared by all
   clients. A call over the budget gets `RESOURCE_EXHAUSTED` before it reaches
   the enclave.
@@ -236,6 +237,7 @@ request per connection. Frame limit 24 MiB. Schema:
 | Request | Phase | Signer | Description |
 |---------|-------|--------|-------------|
 | `SetEndpoints` | any | all | Sets the chain endpoints (and the KMS values on mint). Once per boot. |
+| `SetLimits`, `GetLimits` | any | all | Change or read the time, memory and size limits ([`docs/runtime-limits.md`](docs/runtime-limits.md)). |
 | `InitializeKey` | Initial | all | Mint: recover or create the KMS seed. Burn: make a seed from OS entropy, with an optional donor `cloning_secret`. |
 | `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, CCD key, boot pins. |
 | `GetAttestedPublicKey` | any, after `SetEndpoints` | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. Before keys exist it attests the policy only. |
@@ -595,6 +597,13 @@ A restart removes the in-memory keys. Initialize or clone each enclave again.
 Mint signers recover their saved KMS seed through `InitializeKey`. They require
 the verified address pin and do not support peer cloning.
 
+### Runtime limits
+
+The operator can change the time, memory and size limits of a running enclave
+with `utexo-bridge-parent-cli limits`. A change needs no new image, so the PCR
+values and the keys do not change. The attestation does not cover these values.
+[`docs/runtime-limits.md`](docs/runtime-limits.md) has the commands and the rules.
+
 ### Lost `SetEndpoints` reply
 
 `deploy/systemd/utexo-enclave-ctl.sh start` terminates the enclave it
@@ -732,12 +741,13 @@ Limits and dev knobs:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRPC_HOST` | `127.0.0.1` | Bind address. The deploy script defaults to the private EC2 address. |
+| `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC call. Keep it above the request deadline of the enclave plus 10 s. |
 | `GRPC_PORT` | `5000` | gRPC port. Deployments use 50051-50053. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` / `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
-| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for one hour, so keep the two aligned. |
+| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM->RGB bridge sign and answers a retry of the same request from it. The enclave refuses such a retry for `mint_replay_ttl_secs`, by default one hour, so keep the two aligned. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host for `GET /health`. Keep on loopback - unlike `GRPC_HOST`, do not set to `0.0.0.0` |

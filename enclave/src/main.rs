@@ -99,10 +99,8 @@ where
 {
     use std::sync::mpsc::{sync_channel, TrySendError};
     use std::sync::{Arc, Mutex};
-    use utexo_bridge_enclave::conn::{
-        DeadlineStream, IO_IDLE_TIMEOUT, MAX_QUEUED_CONNECTIONS, TOTAL_REQUEST_TIMEOUT,
-        WORKER_THREADS,
-    };
+    use utexo_bridge_enclave::conn::{DeadlineStream, MAX_QUEUED_CONNECTIONS, WORKER_THREADS};
+    use utexo_bridge_enclave::limits;
 
     let ctx = Arc::new(ctx);
     // The bounded queue is also the connection cap.
@@ -127,7 +125,8 @@ where
             match next {
                 Ok((stream, deadline)) => {
                     // Keep the accept-time budget for framing, dispatch and seed init.
-                    let stream = DeadlineStream::with_deadline(stream, deadline, IO_IDLE_TIMEOUT);
+                    let idle = limits::get().io_idle_timeout();
+                    let stream = DeadlineStream::with_deadline(stream, deadline, idle);
                     server::handle_connection_until(stream, &ctx, deadline);
                 }
                 // All senders dropped: the listener is gone.
@@ -141,7 +140,8 @@ where
             // Queue wait counts in the budget, so no work starts after the
             // parent timed out.
             Ok(stream) => {
-                match tx.try_send((stream, std::time::Instant::now() + TOTAL_REQUEST_TIMEOUT)) {
+                let deadline = std::time::Instant::now() + limits::get().total_request_timeout();
+                match tx.try_send((stream, deadline)) {
                     Ok(()) => tracing::debug!("connection queued"),
                     Err(TrySendError::Full(_)) => tracing::warn!(
                         cap = MAX_QUEUED_CONNECTIONS,

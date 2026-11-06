@@ -56,9 +56,10 @@ pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
 /// Refuses `bytes` over [`MAX_PSBT_BYTES`] before any parse. `what` names the
 /// field in the error.
 pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
-    if bytes.len() > MAX_PSBT_BYTES {
+    let max = crate::limits::get().max_psbt_bytes;
+    if bytes.len() as u64 > max {
         return Err(crate::error::EnclaveError::CrossCheck(format!(
-            "{what} is {} bytes; the limit is {MAX_PSBT_BYTES}",
+            "{what} is {} bytes; the limit is {max}",
             bytes.len()
         )));
     }
@@ -173,11 +174,14 @@ pub struct BridgeConfig {
     pub endpoints_sha256: Option<[u8; 32]>,
     /// The AWS accounts a KMS key may live in (`KMS_ALLOWED_ACCOUNT_IDS`). Image
     /// env, so PCR0 measures it. Empty when unset; a release mint image then
-    /// refuses every key in `SetEndpoints`.
+    /// refuses every key in `SetEndpoints`. A build with no KMS key, such as
+    /// burn, has no list and does not read the env var.
+    #[cfg(feature = "kms-persistence")]
     pub kms_allowed_accounts: Vec<String>,
 }
 
 /// Image env var: the AWS accounts a KMS key may live in.
+#[cfg(feature = "kms-persistence")]
 pub const KMS_ALLOWED_ACCOUNTS_ENV: &str = "KMS_ALLOWED_ACCOUNT_IDS";
 
 /// Env var selecting [`BtcRelayMode`].
@@ -251,6 +255,7 @@ impl Default for BridgeConfig {
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
             mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
             endpoints_sha256: None,
+            #[cfg(feature = "kms-persistence")]
             kms_allowed_accounts: Vec::new(),
         }
     }
@@ -438,6 +443,7 @@ impl BridgeConfig {
                 std::env::var("ENDPOINTS_SHA256").ok().as_deref(),
             )
             .unwrap_or_else(|e| panic!("{e}")),
+            #[cfg(feature = "kms-persistence")]
             kms_allowed_accounts: parse_kms_allowed_accounts(
                 std::env::var(KMS_ALLOWED_ACCOUNTS_ENV).ok().as_deref(),
             )
@@ -507,6 +513,7 @@ pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u
 /// Parses `KMS_ALLOWED_ACCOUNT_IDS`: comma-separated 12-digit AWS account ids.
 /// Unset or blank gives an empty list. A malformed entry is an error, so a bad
 /// image does not boot with a partial list.
+#[cfg(feature = "kms-persistence")]
 pub fn parse_kms_allowed_accounts(value: Option<&str>) -> std::result::Result<Vec<String>, String> {
     let ids: Vec<String> = value
         .unwrap_or_default()
@@ -646,7 +653,7 @@ impl Endpoints {
 
     /// Check the values this build uses. A value the build does not use
     /// must be empty. `kms_accounts` is the image's account list
-    /// ([`BridgeConfig::kms_allowed_accounts`]). With no list, `allow_unpinned`
+    /// (`KMS_ALLOWED_ACCOUNT_IDS`). With no list, `allow_unpinned`
     /// (a dev or test build) skips the account check and a release build refuses.
     pub fn parse(
         req: &crate::proto::SetEndpointsRequest,
@@ -1256,6 +1263,7 @@ mod tests {
         Endpoints::parse(&req, &[], true)
     }
 
+    #[cfg(feature = "kms-persistence")]
     #[test]
     fn the_account_list_parses_ids_and_refuses_a_malformed_entry() {
         assert_eq!(parse_kms_allowed_accounts(None), Ok(vec![]));

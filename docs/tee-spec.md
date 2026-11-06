@@ -151,12 +151,19 @@ enables `kms-persistence`. Production images are built with
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
 decode, `check_request_shape` counts the field occurrences on the wire and
-refuses a request with more than 2^19 (`MAX_WIRE_ELEMENTS`). The walk enters
+refuses a request with more than 2^19 (`max_wire_elements`). The walk enters
 only the messages that `framing::Schema` names. A test reads `enclave.proto`
 and fails when a request message gets a repeated field outside them. The
 Bitcoin indexer and the EVM RPC are reached through in-enclave loopback
 forwarders. They bridge over vsock to host-side `vsock-proxy` instances
 (vsock ports 8001 and 8002). The enclave has no direct network stack.
+
+**Runtime limits** (`limits.rs`). The operator can change the time, memory and
+size limits of a running enclave. A change needs no new image, so the PCR values
+do not change. The attestation does not cover these values. Each limit only sets
+when the enclave refuses a request or how long it waits. Safety rules stay in the
+image. `docs/runtime-limits.md` has the list. The numbers in this document are the
+image values.
 
 **Request memory model** (`memory.rs`). The enclave has a fixed amount of
 memory and no swap. So the heap one request can use has a bound that depends
@@ -247,9 +254,10 @@ it, so TLS ends inside the enclave; it trusts only the CA of the set, in every
 build. The host runs `vsock-proxy 8002 <EVM_RPC_HOST> <EVM_RPC_TLS_PORT>`.
 
 **Connection limits:** 4 worker threads and a queue of 16 connections.
-Each socket read or write has a 10-second idle timeout. A 30-second socket
+Each socket read or write has a 10-second idle timeout. A 90-second socket
 deadline starts when the connection is accepted, including time in the queue.
-Each connection carries one request. These limits are compile-time constants.
+Each connection carries one request. The workers and the queue are compile-time
+constants. The operator can change the two timeouts (`docs/runtime-limits.md`).
 
 The socket deadline does not cancel validation or network work inside a
 handler. KMS initialization checks the shared deadline before it activates
@@ -634,7 +642,7 @@ and head correctness: the checks above cannot reject a self-consistent false
 history solely because the approved provider invented it (Sec 2). The source, hostname
 and CA SHA-256 are committed into the attested policy (Sec 4).
 
-An in-memory replay cache (1-hour TTL, 100,000-entry cap) checks requests keyed by
+An in-memory replay cache (by default a 1-hour TTL and a 100,000-entry cap) checks requests keyed by
 `(chain_id, bridge_contract, evm_tx_hash, funds_in_operation_id, rgb_asset_id)`
 and is committed only after the enclave writes the response; a failed write
 releases it. A successful write does not prove receipt by the caller. A lost
@@ -704,7 +712,7 @@ unsigned transaction preimage; the enclave strictly RLP-decodes it (EIP-1559 or
 legacy EIP-155), requires `chain_id` == pinned `EVM_CHAIN_ID`, `to` == pinned
 `GAS_TX_ALLOWED_TO` (fail-closed when unset), `value == 0`, no contract
 creation -- and computes the digest itself. The preimage is at most 1 MiB
-(`MAX_GAS_TX_BYTES`). It decodes to at most 1024 RLP items (`MAX_RLP_ITEMS`)
+(`max_gas_tx_bytes`). It decodes to at most 1024 RLP items (`max_rlp_items`)
 with a nesting depth of at most 8. So the input bounds the decoder's heap.
 
 Two further bounds, each fail-closed when unset:
@@ -828,7 +836,7 @@ work in rgb-lib would pass one of three caps (`validation/cost.rs`, burn-flow
 B2.2 and section 10): the checks of each transition against its bundle's
 whole witness tx, anchor and input map, which rgb-lib runs for every BFA
 before it checks any witness, and, for a listed asset, its reject walk; or
-whose modeled rgb-lib time would pass 18 s (`MAX_RGB_LIB_NS`): for
+whose modeled rgb-lib time would pass 30 s (`max_rgb_lib_ms`): for
 validation its file bytes, opouts, genesis hashes (every genesis global and
 assignment, once per operation) and those three costs, and for the
 inspection that reads the summary after it its file bytes, opouts,
@@ -1138,8 +1146,10 @@ Known limits. Read them before deployment.
   invents entries or fails refuses releases. A
   rejected release stays refused until an allow is finalized, and its units
   are already burned. The list appender can halt every release; the owner
-  rotates it. The list is read in full on each request, at most 20,000
-  entries (about 25 RPC calls). The read also stops before the 30 s request
+  rotates it. The list is read in full on each request, at most
+  `max_reject_list_entries` entries, by default 20,000 (about 25 RPC calls). The
+  list is append-only, so a list over that value refuses every release until the
+  operator raises it. The read also stops before the request
   deadline; a list the RPC cannot serve in time refuses every request of the
   asset with "exceeded the request budget".
 - **Linear work in rgb-lib.** The work caps bound only the parts of rgb-lib's
@@ -1151,18 +1161,22 @@ Known limits. Read them before deployment.
   summary once validation passed costs about as much again per opout: about
   0.5 us per byte, 46 to 60 us per opout and up to about 130 us per
   operation. So a file alone models at 1.75 us per byte, and the budget
-  refuses any file past about 10.3 MB, below the 12 MiB default. On the
+  refuses any file past about 17 MB, above the 10 MiB limit. On the
   pinned asset's genesis of 10 mint rights an honest 2810-mint burn takes
   2.7 to 2.8 s to validate and 1.9 to 2.2 s to inspect, 5.0 to 6.3 s end to
   end; with 3 transfers a line it takes 15.9 to 16.2 s end to end and models
-  at 17.9 s, so a longer history is refused. The genesis part depends on the
+  at 17.9 s. A history of 10,000 transfers with an SPV proof on each models at
+  19.95 s. The budget refuses a history past about 10 MB of plain transfers,
+  about the size limit. The
+  genesis part depends on the
   pinned asset: on a genesis of 255 mint rights an operation costs rgb-lib
-  3.6 ms, so the budget admits about 4,000 operations; the 2810-mint burn
+  3.6 ms, so the budget admits about 5,900 operations; the 2810-mint burn
   there models at 16.5 s and takes 15.3 to 16.2 s end to end. A forged
   chain of propagates, 14 bytes an opout, at the size cap took 44 s to
   validate and 51 s to inspect: the budget counts its opouts and refuses it.
-  The caps' parts add up with it, so `MAX_RGB_LIB_NS` holds the modeled sum
-  to 18 s, against a 30 s deadline that does not stop a worker (4 workers).
+  The caps' parts add up with it, so `max_rgb_lib_ms` holds the modeled sum
+  to 30 s, against a 90 s deadline that does not stop a worker (4 workers).
+  `docs/runtime-limits.md` has the times measured on a real enclave.
   The budget is rgb-lib's alone: the enclave's own parse, gate and reads of
   the validated transfer take the rest of the deadline, 1.1 to 1.6 s more end
   to end on the 2810-mint burn with 3 transfers a line (2.3 s at a load of 5.6).
@@ -1175,10 +1189,12 @@ Known limits. Read them before deployment.
   to `MAX_CONSIGNMENT_BYTES` per request, and removed once rgb-lib
   validated and inspected it, or refused it.
 - **Mint replay.** The EVM -> RGB cache is per enclave, in memory, and expires
-  after one hour. The 100,000-entry cap can remove entries earlier. A successful
+  after one hour by default. The 100,000-entry cap can remove entries earlier.
+  The operator can change both values, because the cache is not the safety
+  control (`docs/runtime-limits.md`). A successful
   response write can commit an entry even when the caller receives no response;
   the parent's kept reply answers a retry of the same request. The enclave also
-  keeps the signed reply for the same window and returns it for a
+  keeps the signed reply for 24 h by default and returns it for a
   byte-identical retry. The parent proof is the real bound: signatures
   for one mint that share a supplied parent spend the same UTXO, so Bitcoin
   confirms at most one. A different parent conflicts with the real one on

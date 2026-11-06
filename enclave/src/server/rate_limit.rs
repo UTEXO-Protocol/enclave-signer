@@ -5,7 +5,7 @@
 use crate::error::{EnclaveError, Result};
 
 /// Fixed-window rate limit for `SubmitHeaders`. It admits at most
-/// [`MAX_HEADERS_PER_RATE_WINDOW`] headers, valid or not, in each
+/// `max_headers_per_minute` headers ([`crate::limits`]), valid or not, in each
 /// [`RATE_LIMIT_WINDOW`]. This is enough for a cold-start sync, and it stops
 /// a flood of bad headers from keeping the enclave busy.
 #[derive(Default)]
@@ -16,7 +16,8 @@ pub struct SubmitRateLimiter {
 
 /// Maximum headers in each [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
 /// mainnet checkpoint to the tip grows by approx 4,300 blocks each month.
-const MAX_HEADERS_PER_RATE_WINDOW: u64 = 100_000;
+#[cfg(test)]
+const MAX_HEADERS_PER_RATE_WINDOW: u64 = crate::limits::Limits::DEFAULTS.max_headers_per_minute;
 /// Length of the rate-limit window.
 const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -36,12 +37,12 @@ impl SubmitRateLimiter {
             self.headers_in_window = 0;
         }
         self.headers_in_window = self.headers_in_window.saturating_add(count);
-        if self.headers_in_window > MAX_HEADERS_PER_RATE_WINDOW {
+        let max = crate::limits::get().max_headers_per_minute;
+        if self.headers_in_window > max {
             return Err(EnclaveError::Spv(format!(
-                "SubmitHeaders rate limit exceeded: {} headers within {}s (max {})",
+                "SubmitHeaders rate limit exceeded: {} headers within {}s (max {max})",
                 self.headers_in_window,
                 RATE_LIMIT_WINDOW.as_secs(),
-                MAX_HEADERS_PER_RATE_WINDOW,
             )));
         }
         Ok(())

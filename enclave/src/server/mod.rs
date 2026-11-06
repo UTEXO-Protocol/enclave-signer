@@ -13,6 +13,7 @@ mod dispatch;
 mod endpoints;
 mod health;
 mod keys;
+mod limits;
 #[cfg(feature = "rgb-validation")]
 mod rate_limit;
 // Only a build that validates consignments reads the reject list.

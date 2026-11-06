@@ -8,6 +8,7 @@ use super::context::ServerContext;
 use super::endpoints::handle_set_endpoints;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
+use super::limits::{handle_get_limits, handle_set_limits};
 #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
 use super::rights_refill::handle_sign_rights_refill;
 use super::sign::handle_sign;
@@ -208,6 +209,14 @@ pub(super) fn dispatch(
         Some(Request::SetEndpoints(req)) => {
             tracing::info!("request: SetEndpoints");
             handle_set_endpoints(ctx, req)
+        }
+        Some(Request::SetLimits(req)) => {
+            tracing::info!("request: SetLimits");
+            handle_set_limits(ctx, req)
+        }
+        Some(Request::GetLimits(_)) => {
+            tracing::info!("request: GetLimits");
+            handle_get_limits(ctx)
         }
         // All builds must answer the readiness probe.
         Some(Request::Health(_)) => {

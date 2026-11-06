@@ -64,6 +64,7 @@ so the host cannot name a key in its own account.
 - With no list, a release image refuses every key. A dev or test build skips the
   check.
 - A new list needs a new PCR0, which the key policy must approve.
+- A burn build has no KMS key, so it has no list and does not read this variable.
 - The check pins the account, not the key. It does not replace
   `attest-verify --expect-kms-key-arn`.
 
