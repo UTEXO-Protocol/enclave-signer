@@ -67,7 +67,7 @@ image values, and the launch continues.
 | `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. |
 | `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
-| `max_rgb_lib_ms` | 21000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
+| `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
 | `max_bundle_id_cost` | 262144 | 1024 | 2^50 | Steps to hash bundle ids. |
 | `max_reject_walk_cost` | 67108864 | 1048576 | 2^50 | Steps of the reject-list walk. |
@@ -161,9 +161,12 @@ model gives it 19.95 s.
 
 The default launch has 2 vCPUs, and these are two threads of one core. So four
 requests take 3.7 times as long as one. On every shape measured, the time of one
-request was at or below the model. At 21 s of `max_rgb_lib_ms`, four of the slowest
-requests at once take about 78 s on 2 vCPUs. On 4 vCPUs they take about 40 s. So the
-deadline of the image is 90 s.
+request was at or below the model.
+
+An honest history at the 10 MiB limit models at about 23 s. Four of them at once take
+about 65 s on 2 vCPUs, so they fit the deadline of the image, 90 s. A forged request
+can model at the 30 s of `max_rgb_lib_ms`. Four of these at once can take about 110 s
+on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
 
 ## What the attestation shows
 

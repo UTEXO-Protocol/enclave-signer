@@ -593,6 +593,8 @@ fn the_genesis_hash_cost_is_every_genesis_leaf_once_per_operation() {
 /// and 2.4 s from a one-right genesis.
 #[test]
 fn a_chain_from_a_255_right_genesis_is_refused_where_a_one_right_genesis_passes() {
+    // Below the 25.3 s of this chain, and far above the chain of one right.
+    crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 21_000);
     gate(&propagate_chain(issue_of(1, false), 1, 5_000), false).unwrap();
     let wide = propagate_chain(issue_of(255, false), 1, 5_000);
     assert_capped(&wide, "rgb-lib time");
@@ -652,9 +654,10 @@ fn the_burn_of_2810_mints_passes_every_cap() {
 }
 
 /// A forged burn of 65,535 rights passes every cap and its validation models at
-/// 16.3 s; with its inspection it is refused before rgb-lib.
+/// 16.3 s. The budget also counts its inspection, which takes it to 29.9 s.
 #[test]
-fn a_forged_burn_of_65535_rights_is_refused_before_rgb_lib() {
+fn the_time_budget_counts_the_inspection_of_a_forged_burn() {
+    crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 29_000);
     let bytes = rights_burn(issue(), u16::MAX);
     let transfer = load(&bytes);
     let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];
@@ -669,6 +672,8 @@ fn a_forged_burn_of_65535_rights_is_refused_before_rgb_lib() {
 #[test]
 #[ignore = "builds a 6 MB history; run it in release on request"]
 fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
+    // Between the merge without its walk and the 23.5 s with it.
+    crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 21_000);
     let bytes = merged_chain(listed(), 1_400, 11_500);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
     let walk = reject_walk_cost(&load(&bytes), MAX_REJECT_WALK_COST);
