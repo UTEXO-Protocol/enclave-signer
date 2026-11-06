@@ -54,10 +54,6 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.chmod(0o700)
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
-                    'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
-                    'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
-                    'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
                     'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
                     'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS):
             self.env.pop(key, None)
@@ -71,6 +67,11 @@ class BuildArgumentsTests(unittest.TestCase):
             TEST_DOCKER_ARGV=str(self.argv),
             TEST_DOCKER_ENV=str(self.docker_env),
         )
+        for key in ('BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
+                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
+                    'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
+                    'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS'):
+            self.env.pop(key, None)
 
     def invoke(self, recipe, **extra):
         self.argv.unlink(missing_ok=True)
@@ -365,12 +366,11 @@ class BuildArgumentsTests(unittest.TestCase):
     def stage_inputs(self):
         return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:new-signet-asset',
                     STAGE_TOKEN_CONTRACT='0x' + '33' * 20,
-                    STAGE_ENDPOINTS_SHA256='12' * 32,
                     STAGE_GAS_TX_ALLOWED_SELECTORS='0x12345678,0xabcdef01')
 
     def test_stage_profile_requires_dedicated_pins_before_docker(self):
         for key in ('STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS'):
+                    'STAGE_GAS_TX_ALLOWED_SELECTORS'):
             with self.subTest(key=key):
                 inputs = self.stage_inputs()
                 inputs[key] = ''
@@ -383,8 +383,6 @@ class BuildArgumentsTests(unittest.TestCase):
     def test_stage_profile_rejects_bad_pins_and_debug_features(self):
         for key, value in (('STAGE_TOKEN_CONTRACT', '0x' + '00' * 20),
                            ('STAGE_TOKEN_CONTRACT', 'not-an-address'),
-                           ('STAGE_ENDPOINTS_SHA256', '00' * 32),
-                           ('STAGE_ENDPOINTS_SHA256', 'bad-digest'),
                            ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
                            ('ENCLAVE_DEBUG_FEATURES', 'allow-debug-pcrs')):
             with self.subTest(key=key, value=value):
@@ -408,7 +406,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
                 self.assertEqual(args['RGB_ASSET_ID'], inputs['STAGE_RGB_ASSET_ID'])
                 self.assertEqual(args['TOKEN_CONTRACT'], inputs['STAGE_TOKEN_CONTRACT'])
-                self.assertEqual(args['ENDPOINTS_SHA256'], inputs['STAGE_ENDPOINTS_SHA256'])
+                self.assertNotIn('ENDPOINTS_SHA256', args)
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug')
@@ -431,6 +429,21 @@ class BuildArgumentsTests(unittest.TestCase):
                 result = self.invoke(recipe, BUILD_PROFILE=profile)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.argv.exists())
+
+    def test_stage_profile_ignores_the_retired_stage_endpoint_digest(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                inputs = self.stage_inputs()
+                baseline = self.invoke(f'Dockerfile.enclave.{role}', **inputs)
+                self.assertEqual(baseline.returncode, 42, baseline.stderr)
+                baseline_args = self.captured_build_args()
+                for old_value in ('12' * 32, 'not-a-digest'):
+                    result = self.invoke(f'Dockerfile.enclave.{role}',
+                                         STAGE_ENDPOINTS_SHA256=old_value, **inputs)
+                    self.assertEqual(result.returncode, 42, result.stderr)
+                    self.assertEqual(self.captured_build_args(), baseline_args)
+                    self.assertEqual(result.stdout, baseline.stdout)
+                    self.assertEqual(result.stderr, baseline.stderr)
 
 
 class ImageInputsTests(unittest.TestCase):
