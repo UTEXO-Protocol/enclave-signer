@@ -446,7 +446,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 if role == 'mint':
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
-                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
+                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,spv',
                                      RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())

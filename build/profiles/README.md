@@ -65,7 +65,7 @@ BUILD_PROFILE=stage-signet DOCKERFILE=Dockerfile.enclave.burn \
 
 The profile sets `BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none`,
 `EVM_CHAIN_ID=42161`, `RUST_LOG=debug,alloy_transport_http=off`, the stage
-contract addresses and the role-specific feature list without `rgb`/`spv`.
+contract addresses and the role-specific feature list without `spv`.
 The log filter keeps debug logs but disables Alloy HTTP transport logs, which
 can include private RPC paths or response bodies. It does not enable Nitro
 debug mode, mock attestation or seed import.
