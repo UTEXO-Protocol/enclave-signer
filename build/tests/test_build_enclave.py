@@ -411,7 +411,9 @@ class ImageInputsTests(unittest.TestCase):
             for stage in stages:
                 with self.subTest(recipe=recipe, stage=stage.splitlines()[0]):
                     updates = [line for line in stage.splitlines()
-                               if line.startswith('RUN ') and 'apt-get update' in line]
+                               if line.startswith('RUN ') and (
+                                   'apt-get update' in line or
+                                   'sh /usr/local/bin/apt-snapshot-install.sh' in line)]
                     self.assertTrue(updates, 'Stage must configure snapshot sources')
                     for update in updates:
                         tokens = shlex.split(update)
@@ -425,11 +427,14 @@ class ImageInputsTests(unittest.TestCase):
                                 r'debian(?:-security)?/[0-9]{8}T[0-9]{6}Z/?$',
                             )
                         self.assertIn('> /etc/apt/sources.list', update)
+                        install = ('sh /usr/local/bin/apt-snapshot-install.sh'
+                                   if 'apt-snapshot-install.sh' in update
+                                   else 'apt-get update')
                         self.assertLess(update.index('> /etc/apt/sources.list'),
-                                        update.index('apt-get update'))
+                                        update.index(install))
                         self.assertIn('rm -f /etc/apt/sources.list.d/*', update)
                         self.assertLess(update.index('rm -f /etc/apt/sources.list.d/*'),
-                                        update.index('apt-get update'))
+                                        update.index(install))
 
     def test_no_build_input_names_an_endpoint(self):
         files = [ROOT / 'build' / r for r in self.RECIPES]
