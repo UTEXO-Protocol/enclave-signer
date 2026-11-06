@@ -118,7 +118,7 @@ fn live_deposit_rejects_wrong_operation_id() {
     )
     .unwrap_err()
     .to_string();
-    assert!(e.contains("operationId mismatch"), "got: {e}");
+    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
 /// The amount comes from a different word offset in the same log. A wrong
