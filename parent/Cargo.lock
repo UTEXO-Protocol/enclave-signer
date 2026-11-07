@@ -6456,7 +6456,6 @@ dependencies = [
  "rgb-lib",
  "rgb-ops",
  "rgb-schemas",
- "rgb-strict-encoding",
  "rustls-pki-types",
  "rustls-webpki 0.103.15",
  "secrecy",
