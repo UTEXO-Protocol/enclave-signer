@@ -337,8 +337,9 @@ Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
 real-attestation mint/burn builds for public Signet;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-validation` is on;
 `kms-persistence` requires `mint-signer`;
-`allow-seed-import` and `mock-attestation` do not compile in a release
-profile. CI asserts every guard fires.
+`allow-seed-import`, `mock-attestation` and `allow-debug-pcrs` do not compile in
+a release profile, and neither does `ccd` with `mint-signer` or `burn-signer`.
+CI asserts every guard fires.
 
 ### Enclave image (EIF)
 
@@ -940,7 +941,7 @@ The default set is `ccd`.
 
 | Feature | Implies | Description |
 |---------|---------|-------------|
-| `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). |
+| `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). Does not compile in release with `mint-signer` or `burn-signer`. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `mint-signer` | `rgb-validation`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Reads its mints and refills from the rgb-lib fascia of each tx, which needs the `strict_encoding` dependency. Exactly one role per mint/burn build. |
 | `burn-signer` | `rgb-validation` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
@@ -949,6 +950,7 @@ The default set is `ccd`.
 | `vsock` | - | vsock listener and forwarders (Linux). |
 | `allow-seed-import` | - | Mnemonic / raw-seed import. Dev only, does not compile in release. |
 | `mock-attestation` | - | Raw-CBOR attestation with zero PCRs. Dev only, does not compile in release. |
+| `allow-debug-pcrs` | - | Removes the all-zero PCR rejection from the attestation verifier. Dev only, does not compile in release. |
 
 ## Proto source
 

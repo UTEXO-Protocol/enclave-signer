@@ -282,6 +282,8 @@ jobs:
             target: -p utexo-bridge-enclave
           - feature: mock-attestation
             target: -p utexo-bridge-enclave
+          - feature: allow-debug-pcrs
+            target: -p utexo-bridge-enclave
           - feature: insecure-dev
             target: --manifest-path parent/Cargo.toml
 
@@ -402,6 +404,23 @@ jobs:
                 exit 1
               fi
             done
+          done
+
+      # A signer image must not also serve the CCD paths. The dev image builds
+      # this combination in debug mode, so the same set must compile there.
+      - name: Assert ccd with a signer role is rejected in a release build only
+        run: |
+          for role in mint-signer burn-signer; do
+            if cargo check --locked --release -p utexo-bridge-enclave --no-default-features --features "vsock,spv,ccd,$role" 2>build.log; then
+              echo "::error::release build unexpectedly compiled with ccd and $role"
+              exit 1
+            fi
+            if ! grep -q "must not be enabled with a signer role in a release build" build.log; then
+              echo "::error::release build failed, but not via the expected compile_error guard for ccd and $role"
+              cat build.log
+              exit 1
+            fi
+            cargo check --locked -p utexo-bridge-enclave --no-default-features --features "allow-seed-import,mock-attestation,spv,ccd,$role"
           done
 
       - name: Assert bare rgb-validation without a signer role is rejected

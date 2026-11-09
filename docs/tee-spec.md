@@ -146,7 +146,8 @@ Four crates plus the infrastructure they touch:
 or `burn-signer` (RGB -> EVM), each implying `rgb-validation`. `mint-signer` also
 enables `kms-persistence`. Production images are built with
 `--no-default-features` and an explicit set (README, Building). Dev-only features
-(`mock-attestation`, `allow-seed-import`) are `compile_error!` in release.
+(`mock-attestation`, `allow-seed-import`, `allow-debug-pcrs`) are
+`compile_error!` in release. So is `ccd` with a signer role (Sec 7.9).
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
@@ -321,8 +322,7 @@ SecurityPolicy = Production {
 } | Development { reason }
 ```
 
-- **Resolution** (`policy.rs`): any dev feature
-  (`mock-attestation`, `allow-seed-import`), a
+- **Resolution** (`policy.rs`): `mock-attestation`, `allow-seed-import`, a
   debug/test build, a build without `spv`, a non-bridge
   build, or a missing pin resolves to `Development`. Only a release
   `spv` build with `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS`, and
@@ -848,6 +848,15 @@ the node derives what is signed:
   validation inside the enclave.
 
 Both are trust exceptions to Sec 2, summarized in Sec 13.
+
+The only release image permitted to carry these paths is
+`build/Dockerfile.enclave.ccd`, built with
+`--no-default-features --features vsock,ccd`. It has no signer role. A release
+build with `ccd` and `mint-signer` or `burn-signer` does not compile
+(`enclave/src/lib.rs`). Without that guard, such an image would attest Mint or
+Burn and also sign these requests.
+`build/Dockerfile.enclave-dev.bfa` enables `ccd` with a signer role in a debug
+build, which resolves to `Development` (Sec 4).
 
 ## 8. RGB / Bitcoin / SPV verification
 

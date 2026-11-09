@@ -101,7 +101,8 @@ aws-nitro-enclaves-nsm-api = "0.5"
 #                     release and SignCcd; a release build refuses EVM signing
 #                     until EVM_CHAIN_ID and the proxy address are pinned).
 # CI builds all of them. A `compile_error!` in lib.rs requires exactly one
-# signer role whenever `rgb-validation` is on.
+# signer role whenever `rgb-validation` is on. Another refuses `ccd` with a
+# signer role in a release build.
 default = ["ccd"]
 
 # Network selection gates only request handling (dispatch arms, validators,
@@ -109,7 +110,8 @@ default = ["ccd"]
 # build, so the parent verifier does not change.
 #
 # A signer role turns on the RGB/BTC bridge stack (`rgb-validation`). `spv` adds
-# the SPV header chain to it.
+# the SPV header chain to it. Only a debug build, such as the dev image, can
+# enable `ccd` together with a signer role.
 #
 # `ccd` = the Concordium bridge stack. No extra deps: ed25519 is always on to
 # keep key derivation and the attestation bundle the same in every build.
@@ -159,7 +161,7 @@ spv = ["rgb-validation"]
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
 # Accept all-zero peer PCRs for debug clone tests (F03-AF-12).
-# Never enable in production builds.
+# Never enable in production builds. Does not compile in a release build.
 allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 
 # Mint/burn signer role. EXACTLY ONE is required when `rgb-validation` is on

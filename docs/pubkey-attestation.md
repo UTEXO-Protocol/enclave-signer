@@ -317,6 +317,7 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
    §8.1 the COSE signature is raw `r||s` (96 bytes for P-384), not DER.
 5. Reject all-zero PCR0/1/2. Compare each PCR with its expected value, byte for byte.
    The unsafe `allow-debug-pcrs` feature disables only the all-zero rejection.
+   A release build with this feature does not compile.
 6. Nonce check: `doc.nonce == nonce_sent`.
 7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
 8. Commitment check: confirm
