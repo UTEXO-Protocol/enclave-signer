@@ -130,9 +130,10 @@ refuses the request and changes nothing.
   limits, a consignment scratch file for each request, and the baseline. rgb-lib
   reads a consignment only from a file, and the enclave keeps that file in RAM. A
   file takes up to `max_consignment_bytes`, and never more than
-  `max_message_bytes`. At the image values, this is 3112 MiB: the 3072 MiB that the
-  boot check requires, and 40 MiB for the files. A larger frame or consignment
-  limit can need a larger `run-enclave --memory` value, which needs a new launch.
+  `max_message_bytes`. The boot check does not count the files. This check counts
+  them, also for a change that keeps the image values. A refusal states how many
+  MiB the new limits need. A larger frame or consignment limit can need a larger
+  `run-enclave --memory` value, which needs a new launch.
 
 ## The reject list
 

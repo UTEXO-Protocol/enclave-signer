@@ -38,9 +38,10 @@ pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 #[cfg(rgb_to_evm)]
 pub const LZ_FUNDS_OUT_SELECTOR: [u8; 4] = lzFundsOutCall::SELECTOR;
 
-/// Maximum `call_data` length: the Bridge's 90_000-byte settlement cap
-/// (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) plus under 1 KiB of fields. This is the
-/// value of the image. The operator can change it ([`crate::limits`]).
+/// Maximum `call_data` length: the image value of the runtime limit
+/// `max_funds_out_call_data_bytes`. It leaves room for the Bridge's 90_000-byte
+/// settlement cap (`MAX_SETTLEMENT_DATA_OUT_LENGTH`) and the other fields. The
+/// operator can change the limit ([`crate::limits`]).
 #[cfg(rgb_to_evm)]
 pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize =
     crate::limits::Limits::DEFAULTS.max_funds_out_call_data_bytes as usize;

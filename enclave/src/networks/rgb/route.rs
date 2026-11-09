@@ -172,8 +172,8 @@ fn pinned_commitment(
     Ok((pin, committed))
 }
 
-/// F7: the mint spends one input, a Colored key-path input of this enclave.
-/// Returns it, for the fee bound.
+/// F7: the mint spends its right alone ([`psbt_validation::MINT_INPUTS`]), a
+/// Colored key-path input of this enclave. Returns it, for the fee bound.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Result<Vec<usize>> {
     use crate::error::EnclaveError;

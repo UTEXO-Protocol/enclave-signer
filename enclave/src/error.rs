@@ -57,7 +57,8 @@ pub enum EnclaveError {
     CrossCheck(String),
 
     /// A deposit may be signed only after the selected finality head covers it.
-    /// Wire code 8, not this diagnostic wording, identifies the retryable state.
+    /// Its wire code ([`EnclaveError::error_code`]), not this diagnostic
+    /// wording, identifies the retryable state.
     #[error("FundsIn receipt block {receipt_block} is above RPC {tag} block {finality_block} - refusing to sign")]
     EvmFinalityPending {
         receipt_block: u64,

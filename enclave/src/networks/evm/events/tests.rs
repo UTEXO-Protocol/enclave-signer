@@ -1197,8 +1197,8 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     assert!(e.contains("no FundsIn log"), "got: {e}");
 }
 
-/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166). The id is a
-/// pure function of the 32-byte word, so it holds for a lockId word too.
+/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID`. The id is a pure
+/// function of the 32-byte word, so it holds for a lockId word too.
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
     let mut cfg = crate::config::BridgeConfig::default();
@@ -1225,7 +1225,7 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
 }
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `rgbNetwork` = 827166. The contract test still pins the 96 form.
+/// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test still pins the 96 form.
 #[test]
 fn rgb_mint_deposit_id_matches_the_contract_vector() {
     let cfg = crate::config::BridgeConfig {

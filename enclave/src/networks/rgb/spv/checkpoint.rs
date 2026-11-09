@@ -6,18 +6,19 @@
 //! header must chain to `block_hash`. The checkpoints are compiled in, so they
 //! are in PCR0. A change needs new attestation.
 //!
-//! - Mainnet: block 951_552 (2026-05-29), aligned to a retarget boundary
-//!   (951_552 = 472 x 2016). The retarget lookup for the first boundary needs
-//!   the block at `height - 2016`.
-//! - Signet: UTEXO custom signet block 334_000 (2026-06-02). Local/dev builds
-//!   can move it forward at boot with `SPV_CHECKPOINT` (see
+//! - Mainnet: [`MAINNET_CHECKPOINT`], aligned to a retarget boundary. The
+//!   retarget lookup for the first boundary needs the block at
+//!   `height - 2016`.
+//! - Signet: [`SIGNET_CHECKPOINT`], a block of the UTEXO custom signet.
+//!   Local/dev builds can move it forward at boot with `SPV_CHECKPOINT` (see
 //!   [`resolve_checkpoint`]). Production-shaped builds do not start when it is
 //!   set.
 //! - Signet challenge, magic, block time: real UTEXO custom signet values
-//!   (3-of-3 multisig, 30s blocks). They are in PCR0, but BIP-325 signatures
-//!   are not verified.
-//! - Testnet4: block 155_232 (2026-10-05), a retarget boundary
-//!   (155_232 = 77 x 2016). Chainwork is not set yet.
+//!   ([`UTEXO_SIGNET_CHALLENGE`], [`UTEXO_SIGNET_MAGIC`],
+//!   [`UTEXO_SIGNET_BLOCK_TIME_SECS`]). They are in PCR0, but BIP-325
+//!   signatures are not verified.
+//! - Testnet4: [`TESTNET4_CHECKPOINT`], a retarget boundary. Chainwork is not
+//!   set yet.
 //! - Regtest: standard regtest constants.
 
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
@@ -101,7 +102,7 @@ pub const TESTNET3_CHECKPOINT: Checkpoint = Checkpoint {
 
 /// Testnet4 checkpoint: block 155_232 (2026-10-05), on a retarget boundary
 /// (`155_232 = 77 x 2016`). Height, hash, bits and time come from a public
-/// explorer; the tests replay the next 30 real headers on top of it.
+/// explorer; the tests replay the real headers that follow it.
 /// hash (display): 0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b
 pub const TESTNET4_CHECKPOINT: Checkpoint = Checkpoint {
     height: 155_232,

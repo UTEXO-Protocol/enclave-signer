@@ -292,8 +292,9 @@ mod error_text_tests {
 
         for filler in ["a", "\u{00e9}", "\u{1f600}"] {
             let declared = filler.repeat(4 * 1024 * 1024 / filler.len());
-            // The text before the filler is 41 bytes. So byte 1024 is inside a
-            // character of each multibyte filler, and the cut must move back.
+            // The text before the filler puts byte `MAX_ERROR_TEXT_BYTES`
+            // inside a character of each multibyte filler, so the cut must
+            // move back. The assert below checks this.
             let e = EnclaveError::CrossCheck(format!("RGB source declares x{declared}"));
             if filler.len() > 1 {
                 assert!(!e.to_string().is_char_boundary(MAX_ERROR_TEXT_BYTES));

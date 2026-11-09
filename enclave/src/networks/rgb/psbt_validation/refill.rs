@@ -1,8 +1,8 @@
 //! The PSBT rules of a rights refill (`SignRightsRefill`): one `mintRight` in,
-//! 2..=255 rights out to the enclave's own Colored outputs, no units moved.
-//! The rules read the committed transition from the fascia, with no
-//! consignment. The rule ids (G1, RR*) are those of `docs/mint-flow.md`
-//! section 8.
+//! [`MIN_REFILL_RIGHTS`]..=[`MAX_REFILL_RIGHTS`] rights out to the enclave's
+//! own Colored outputs, no units moved. The rules read the committed
+//! transition from the fascia, with no consignment. The rule ids (G1, RR*) are
+//! those of `docs/mint-flow.md` section 8.
 
 use std::collections::BTreeSet;
 

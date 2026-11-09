@@ -60,8 +60,8 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
         u64::from(MAX_MESSAGE_SIZE)
     );
 
-    // A refused change keeps the values. 68 s of rgb-lib does not fit the 90 s
-    // deadline of the image.
+    // A refused change keeps the values. 68 s of rgb-lib is over three quarters
+    // of the image value of `total_request_timeout_secs`.
     let refused = set(
         port,
         WireLimits {

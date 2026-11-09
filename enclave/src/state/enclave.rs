@@ -98,7 +98,7 @@ pub struct EnclaveState {
     /// count limits (`mint_replay_ttl_secs`, `mint_replay_max_entries`).
     pub op_replay_guard: NonceReplayGuard,
 
-    /// RR15: rights refills admitted past the cheap gate in the last hour.
+    /// RR15: the rate limit on rights refills admitted past the cheap gate.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub refill_rate: super::RefillRateLimit,
 

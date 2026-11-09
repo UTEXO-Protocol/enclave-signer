@@ -21,7 +21,8 @@ use utexo_bridge_enclave::proto::*;
 // Known BIP-39 test vector. It gives a stable seed that is not secret.
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-// Use at least 32 bytes and eight distinct values. (F03-AF-26)
+// Keep at least `cloning::MIN_CLONING_SECRET_BYTES` bytes and
+// `cloning::MIN_CLONING_SECRET_DISTINCT_BYTES` distinct values. (F03-AF-26)
 const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {

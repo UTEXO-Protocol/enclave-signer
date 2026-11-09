@@ -1162,7 +1162,7 @@ fn refuses_a_witness_mint_against_a_legacy_blinded_invoice() {
 }
 
 /// M8 takes W from the pinned config: an enclave pinned to 1000 refuses a mint
-/// whose PSBT pays the default 1500 to the user.
+/// whose PSBT pays the default [`DEFAULT_MINT_WITNESS_SAT`] to the user.
 #[test]
 fn refuses_a_witness_mint_paying_other_than_the_pinned_mint_witness_sat() {
     let witness = build_on(None, None, false, Payee::Witness);

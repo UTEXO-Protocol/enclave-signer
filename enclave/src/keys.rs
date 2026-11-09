@@ -118,7 +118,8 @@ pub struct KeyManager {
     account_xpub_colored: Xpub,
     // Vanilla coin type: 0 mainnet, 1 other networks.
     vanilla_coin_type: u32,
-    // Colored coin type: 827166 mainnet, 827167 other networks.
+    // Colored coin type: `RGB_COIN_TYPE_MAINNET` on mainnet,
+    // `RGB_COIN_TYPE_TESTNET` on other networks.
     colored_coin_type: u32,
     // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
     concordium_secret: SecretBox<[u8; 32]>,

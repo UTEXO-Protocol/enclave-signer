@@ -103,7 +103,8 @@ fn placeholder_consignment_hash() -> Vec<u8> {
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
-/// One hour from now: inside the enclave's 1-day deadline cap.
+/// One hour from now: inside the enclave's deadline cap,
+/// [`utexo_bridge_enclave::networks::evm::validation::MAX_TEE_DEADLINE_SECS`].
 #[cfg(rgb_to_evm)]
 fn test_deadline() -> u64 {
     std::time::SystemTime::now()

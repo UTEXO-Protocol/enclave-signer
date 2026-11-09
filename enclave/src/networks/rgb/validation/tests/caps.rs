@@ -593,7 +593,8 @@ fn the_genesis_hash_cost_is_every_genesis_leaf_once_per_operation() {
 /// and 2.4 s from a one-right genesis.
 #[test]
 fn a_chain_from_a_255_right_genesis_is_refused_where_a_one_right_genesis_passes() {
-    // Below the 25.3 s of this chain, and far above the chain of one right.
+    // Below the modeled time of this chain, and far above the modeled time of
+    // the chain of one right.
     crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 21_000);
     gate(&propagate_chain(issue_of(1, false), 1, 5_000), false).unwrap();
     let wide = propagate_chain(issue_of(255, false), 1, 5_000);
@@ -653,8 +654,9 @@ fn the_burn_of_2810_mints_passes_every_cap() {
     assert!(model <= MAX_RGB_LIB_NS / 2, "{model}");
 }
 
-/// A forged burn of 65,535 rights passes every cap and its validation models at
-/// 16.3 s. The budget also counts its inspection, which takes it to 29.9 s.
+/// A forged burn of 65,535 rights passes every cap. Its validation alone
+/// models within the time budget that the test sets. The budget also counts
+/// its inspection, which takes the burn over the budget.
 #[test]
 fn the_time_budget_counts_the_inspection_of_a_forged_burn() {
     crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 29_000);
@@ -672,7 +674,7 @@ fn the_time_budget_counts_the_inspection_of_a_forged_burn() {
 #[test]
 #[ignore = "builds a 6 MB history; run it in release on request"]
 fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
-    // Between the 17.2 s of the merge without its walk and the 19.7 s with it.
+    // Between the modeled time of the merge without its walk and with it.
     crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 18_000);
     let bytes = merged_chain(listed(), 1_400, 11_500);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);

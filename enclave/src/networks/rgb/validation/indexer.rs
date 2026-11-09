@@ -30,7 +30,7 @@ use rgbstd::ChainNet;
 
 /// Validates RGB consignments using rgbstd, and fetches transactions.
 ///
-/// Production uses Electrum at `ssl://...:50002` through the vsock forwarder.
+/// Production uses Electrum at an `ssl://` URL through the vsock forwarder.
 /// TLS ends inside the enclave against the real server cert, so the host
 /// relays only ciphertext. Dev signet uses Esplora at an `https://` URL.
 #[derive(Debug)]

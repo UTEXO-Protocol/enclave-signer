@@ -10,9 +10,11 @@ use crate::proto::EnclaveRequest;
 /// it ([`crate::limits`]). A request is one message, so it holds
 /// the consignment, the Merkle proofs and the calldata.
 ///
-/// Sized for the default request limits in [`crate::config`]: a 10 MiB
-/// consignment, 8 MiB of proof bytes, and protobuf overhead for 16_384 proof
-/// entries. The parent has the same constant.
+/// Sized for the default request limits in [`crate::config`]: a consignment
+/// of [`crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES`], proof bytes of
+/// [`crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES`], and protobuf overhead
+/// for [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proof entries. The parent
+/// has the same constant.
 pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
 /// Maximum protobuf field occurrences in one request in the image. The
@@ -21,9 +23,10 @@ pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 /// memory than its wire form. A field occurrence can be 2 bytes on the wire
 /// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
 /// element is 4 bytes and two occurrences. So a 24 MiB frame of them decoded
-/// into more than 1 GiB. The largest real request is a burn with 16 384
-/// proofs of 13 path elements each. It has about 280 000 occurrences. The
-/// memory model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
+/// into more than 1 GiB. The largest real request at the image limits is a
+/// burn with [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proofs of 13 path
+/// elements each. A test shows that it passes the shape check. The memory
+/// model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
 /// A packed repeated scalar would be one occurrence for many values. The
 /// request proto has none, and a test refuses one until the model covers it.
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
@@ -100,9 +103,9 @@ impl Schema {
 }
 
 /// Counts the field occurrences of a request frame and refuses more than
-/// [`MAX_WIRE_ELEMENTS`]. Every occurrence counts, at every depth the schema
-/// knows. The shape check or the decode refuses a frame that is not valid
-/// protobuf.
+/// `max_wire_elements`, the limit in force. Every occurrence counts, at every
+/// depth the schema knows. The shape check or the decode refuses a frame that
+/// is not valid protobuf.
 pub fn check_request_shape(frame: &[u8]) -> Result<()> {
     count_request_elements(frame).map(|_| ())
 }

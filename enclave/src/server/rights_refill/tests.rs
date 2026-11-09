@@ -251,8 +251,10 @@ fn signs_one_right_sent_to_two_and_to_three() {
     signs(Shape::rights(3));
 }
 
-/// The largest refill carries the largest fascia the mint signer reads. Its
-/// 255 outputs are about 11 100 vB, so it pays 12 000 sat for 1 sat/vB.
+/// The largest refill carries the largest fascia the mint signer reads. It has
+/// [`psbt_validation::MAX_REFILL_RIGHTS`] outputs, and its fee of 12 000 sat
+/// pays for its size at the lowest fee rate the gate accepts
+/// (`MIN_FEE_RATE_SAT_VB`).
 #[test]
 fn signs_a_refill_of_max_refill_rights() {
     signs(Shape {

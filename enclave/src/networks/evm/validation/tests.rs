@@ -831,7 +831,7 @@ fn burn_id_ignores_settlement_data() {
     );
 }
 
-/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID` (827166).
+/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID`.
 #[test]
 fn burn_id_matches_the_shared_vector() {
     let mut cfg = BridgeConfig {
@@ -864,7 +864,7 @@ fn burn_id_matches_the_shared_vector() {
 }
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `sourceChainId` = 827166. The contract test still pins the 96 form.
+/// `sourceChainId` = `RGB_CHAIN_ID`. The contract test still pins the 96 form.
 #[test]
 fn burn_id_matches_the_contract_vector() {
     let cfg = BridgeConfig {

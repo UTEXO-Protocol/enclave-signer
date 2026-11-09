@@ -802,7 +802,7 @@ fn eip1559_with_empty_access_list_entries(n: usize) -> Vec<u8> {
     tx
 }
 
-/// The item limit is exact: 1024 items decode, 1025 do not.
+/// The item limit is exact: [`MAX_RLP_ITEMS`] items decode, one more does not.
 #[test]
 fn rlp_item_limit_is_exact() {
     let at_limit = eip1559_with_empty_access_list_entries(MAX_RLP_ITEMS - 10);
@@ -818,7 +818,8 @@ fn rlp_item_limit_is_exact() {
 
 /// The largest unsigned_tx the byte limit allows, filled with one-byte empty
 /// lists, is refused by the item limit before the decoder builds its tree.
-/// Without the limit it decoded into a tree of more than a GiB and was signed.
+/// Without the item limit, such a request decodes into a tree of more than a
+/// GiB.
 #[test]
 fn a_byte_limit_size_access_list_is_refused() {
     let tx = eip1559_with_empty_access_list_entries(MAX_GAS_TX_BYTES - 64);
@@ -885,8 +886,8 @@ fn gas_tx_decoding_stays_within_the_request_memory_factor() {
     let frame = crate::framing::MAX_MESSAGE_SIZE as usize - 64;
     let shapes: [(&str, Vec<u8>); 4] = [
         // The byte limit refuses this one before any decode. The item limit
-        // refuses the next two after 1024 items. Only the calldata shape
-        // decodes in full.
+        // refuses the next two after `MAX_RLP_ITEMS` items. Only the calldata
+        // shape decodes in full.
         (
             "frame of empty lists",
             eip1559_with_empty_access_list_entries(frame),

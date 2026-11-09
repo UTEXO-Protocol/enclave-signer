@@ -287,7 +287,7 @@ fn unpinned_cap_is_allowed_by_the_unit_test_fallback() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // 200 sat pays for approx 111 signed vB at the 1 sat/vB floor.
+        // 200 sat pays for approx 111 signed vB at `MIN_FEE_RATE_SAT_VB`.
         psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 800)]),
     };
     validate_btc_request(&req, &BridgeConfig::default(), &keys).unwrap();
@@ -397,7 +397,7 @@ fn rejects_a_fee_below_the_signed_size_floor() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // 50 sat cannot pay for approx 111 signed vB at 1 sat/vB.
+        // 50 sat cannot pay for approx 111 signed vB at `MIN_FEE_RATE_SAT_VB`.
         psbt_bytes: psbt_from_our_address(&keys, &[10_000], &[(ours.spk, 9_950)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();

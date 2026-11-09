@@ -172,10 +172,9 @@ pub const MAX_FEE_RATE_SAT_VB: u64 = 200;
 /// It bounds the fee of one request at any transaction size.
 ///
 /// At the maximum rate, this cap applies first above
-/// [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned vB (one key-path input and approx ten
-/// P2TR outputs). A wider `create_utxos` batch at a high rate must be split.
-/// The error names the crossover, so the operator can tell a size problem from
-/// a rate problem.
+/// [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned vB. A `create_utxos` batch above that
+/// size at a high rate must be split. The error names the crossover, so the
+/// operator can tell a size problem from a rate problem.
 pub const MAX_FEE_SATS: u64 = 100_000;
 
 /// Unsigned vsize above which [`MAX_FEE_SATS`] applies before

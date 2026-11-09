@@ -477,10 +477,10 @@ struct ConsignmentAnchor {
 /// is at that height, the enclave is behind, so it refuses.
 ///
 /// The proof is verified again here. The earlier `validate_source_chain` pass
-/// held a different header-chain lock. A concurrent `SubmitHeaders` reorg (up
-/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS`) can
-/// replace the header between the two. Inclusion and header hash must come
-/// from one view.
+/// held a different header-chain lock. A concurrent `SubmitHeaders` reorg can
+/// replace the header between the two: it goes up to `MAX_REORG_DEPTH`
+/// blocks, which can be more than `SPV_MIN_CONFIRMATIONS`. Inclusion and
+/// header hash must come from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
@@ -574,9 +574,9 @@ const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 /// Without a bound, a listener can send a very old block, and the freshness
 /// check proves nothing.
 ///
-/// Equal to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet). This is more
-/// than the relay posting interval, and the enclave does not reorg deeper.
-/// It is an alias, so the two values cannot drift. The host cannot change it.
+/// Equal to `MAX_REORG_DEPTH`. This is more than the relay posting interval,
+/// and the enclave does not reorg deeper. It is an alias, so the two values
+/// cannot drift. The host cannot change it.
 const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REORG_DEPTH;
 
 /// Decodes the `fundsOut` `proof` slot into its `(source, latest)` block pair.

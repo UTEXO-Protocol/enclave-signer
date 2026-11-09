@@ -20,23 +20,24 @@
 //! frame, `request_bound(MAX_MESSAGE_SIZE)`. That is the heap each worker
 //! holds:
 //!
-//! - PSBTs, at most `MAX_PSBT_BYTES` (1 MiB): about 102 times for one input
-//!   and outputs that each carry two empty records. A request holds one
-//!   parsed PSBT at a time. A mint also parses its two fascias, under the
-//!   same limit, and each parse stays within the factor.
-//! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`
-//!   (64 KiB): about 48 times for a document of CBOR nulls.
-//! - Consignments, at most `max_consignment_bytes` (10 MiB): about 53 times
-//!   for transfers that turn one mint right into tens of thousands. The
-//!   sender sets part of the rate through the order of the OpIds, which sets
-//!   how full RGB validation keeps its B-trees. A whole burn request with
-//!   such a consignment at the limit takes about 632 MiB by the test's count.
-//!   That is less than the 640 MiB each worker holds. The real peak is lower,
-//!   because the cost gate of validation refuses a chain this dense above
-//!   about 2 MiB. A smaller frame with such a consignment can take more than
-//!   its own request bound. Validation clones the decoded consignment, so
-//!   each decoded list keeps only its length. `MAX_CONSIGNMENT_BYTES` can lower
-//!   the image value, and `SetLimits` can raise it only with a frame that fits it.
+//! - PSBTs, at most `max_psbt_bytes`: about 102 times for one input and
+//!   outputs that each carry two empty records. A request holds one parsed
+//!   PSBT at a time. A mint also parses its two fascias, under the same
+//!   limit, and each parse stays within the factor.
+//! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`:
+//!   about 48 times for a document of CBOR nulls.
+//! - Consignments, at most `max_consignment_bytes`: about 53 times for
+//!   transfers that turn one mint right into tens of thousands. The sender
+//!   sets part of the rate through the order of the OpIds, which sets how
+//!   full RGB validation keeps its B-trees. By the count of the test, a whole
+//!   burn request with such a consignment fits the heap each worker holds at
+//!   the image limits, with little room left. The real peak is lower,
+//!   because at the image values the cost gate of validation refuses a chain
+//!   this dense well below `max_consignment_bytes`. A smaller frame with such
+//!   a consignment can take more than its own request bound. Validation
+//!   clones the decoded consignment, so each decoded list keeps only its
+//!   length. `MAX_CONSIGNMENT_BYTES` can lower the image value, and
+//!   `SetLimits` can raise it only with a frame that fits it.
 //!
 //! [`crate::conn::WORKER_THREADS`] requests run at once, each at most
 //! [`crate::framing::MAX_MESSAGE_SIZE`] bytes. Add the memory the enclave uses
@@ -79,9 +80,9 @@
 //! `EvmSource.token` or `EvmSource.recipient`, and the mint signer does not
 //! read the destination consignment or its hash. They take memory only in
 //! the decode, which the frame term covers. An error text can quote request
-//! data, so dispatch cuts it to 1 KiB before it logs or returns it. The log
-//! formatter keeps a buffer as large as the longest line it wrote on each
-//! thread.
+//! data, so dispatch cuts it at `MAX_ERROR_TEXT_BYTES` before it logs or
+//! returns it. The log formatter keeps a buffer as large as the longest line
+//! it wrote on each thread.
 //!
 //! The tests measure the frame, consignment, PSBT, fascia, gas transaction
 //! and attestation document parsers on the densest shapes measured. The other
@@ -108,11 +109,11 @@
 //! file takes up to `max_consignment_bytes` of RAM for each request, and never
 //! more than the frame. The heap meter does not count it. The file exists
 //! while the enclave keeps its decoded copy and rgb-lib decodes a second one,
-//! so it adds to the request peak. At the image values, four files take at
-//! most 40 MiB. The boot check does not count them: they come from the memory
-//! that [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the minimum. A change of limits
-//! counts them: [`check_limits`] adds one file for each worker. So at the
-//! image values, a change needs 40 MiB of usable memory above the minimum.
+//! so it adds to the request peak. The boot check does not count these files:
+//! they come from the memory that [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the
+//! minimum. A change of limits counts them: [`check_limits`] adds one file for
+//! each worker. So a change needs usable memory for these files above the
+//! minimum, even at the image values.
 
 use crate::conn::WORKER_THREADS;
 use crate::framing::{MAX_MESSAGE_SIZE, MAX_WIRE_ELEMENTS};
@@ -137,7 +138,7 @@ pub const REQUEST_MEMORY_FACTOR: usize = 24;
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
 /// covers the struct in its vector, a vector header, and the copy a growing
 /// vector holds during a move. The measured value is about 80 bytes per
-/// occurrence at the element limit
+/// occurrence, in a frame of [`MAX_WIRE_ELEMENTS`] occurrences
 /// (`framing::tests::the_wire_element_limit_is_exact`).
 pub const WIRE_ELEMENT_BYTES: usize = 128;
 
@@ -165,8 +166,8 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// The least `nitro-cli run-enclave --memory` value, in MiB. `MemTotal` in
 /// `/proc/meminfo` leaves out the memory the kernel keeps for itself, and the
 /// root file system of the image sits in RAM too. So the launch value is
-/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 1024 MiB to spare. The 40 MiB of
-/// consignment scratch files at the image values come from this part too.
+/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with a margin for them. The consignment
+/// scratch files at the image values also come from this margin.
 ///
 /// The value is a whole number of GiB. nitro-cli gives an enclave whole
 /// hugepages, 1 GiB pages first, and the allocator reserves its pool the same
@@ -193,8 +194,9 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 pub const RUN_ENCLAVE_MEMORY_MIB: usize = 4096;
 
 // The largest four requests fit in the part above the baseline. After the
-// scratch files of four requests at the image consignment limit, the kernel
-// and the root file system get at least 512 MiB of the launch value.
+// scratch files of `WORKER_THREADS` requests at the image consignment limit,
+// the kernel and the root file system get at least 512 MiB of the launch
+// value.
 const _: () = assert!(
     MIN_ENCLAVE_MEMORY_BYTES - BASELINE_BYTES == 4 * (24 * 1024 * 1024 * 24 + 64 * 1024 * 1024)
 );
@@ -458,7 +460,7 @@ mod tests {
         assert!(err.contains("total memory unknown"), "{err}");
     }
 
-    /// The scratch files of four requests at the image values: 40 MiB.
+    /// The scratch files of [`WORKER_THREADS`] requests at the image values.
     fn image_scratch_files() -> usize {
         WORKER_THREADS * Limits::DEFAULTS.scratch_file_bytes() as usize
     }
@@ -483,7 +485,7 @@ mod tests {
     /// Each worker can hold a scratch file of `max_consignment_bytes` beside
     /// its heap, and never more than its frame. The boot check leaves the
     /// files of the image values to the launch margin, so a change needs
-    /// 40 MiB above the minimum.
+    /// memory for them above the minimum.
     #[test]
     fn a_change_of_limits_counts_a_scratch_file_for_each_worker() {
         const MIB: usize = 1024 * 1024;

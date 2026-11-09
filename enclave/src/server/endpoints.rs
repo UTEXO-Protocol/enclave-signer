@@ -68,7 +68,7 @@ pub(super) fn handle_set_endpoints(
         .transpose()?;
 
     // Unit tests cannot do the loopback binds and the /etc/hosts pin
-    // (port 443, root). Thus `cfg(test)` skips them.
+    // (privileged ports, root). Thus `cfg(test)` skips them.
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     let listeners = bind_all(&forwarder_plan(&endpoints))?;
 
@@ -154,7 +154,8 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32, bool)> {
             true,
         ));
     }
-    // KMS and EVM RPC both use port 443, so KMS takes its own address.
+    // The EVM RPC can use the KMS port (`crate::kms::KMS_PORT`), so KMS takes
+    // its own loopback address.
     #[cfg(feature = "kms-persistence")]
     if endpoints.kms.is_some() {
         plan.push((

@@ -33,7 +33,8 @@ pub const BROKER_VSOCK_PORT: u32 = 8004;
 // reply. A shorter request deadline still wins.
 pub const RECOVERY_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) const RESPONSE_RESERVE: Duration = Duration::from_secs(2);
-// The broker's own 7 s operation deadline expires first.
+// The broker's own operation deadline (`OPERATION_TIMEOUT` in the parent's
+// `seed_persistence.rs`) is shorter, so it expires first.
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn failure(message: &str) -> EnclaveError {

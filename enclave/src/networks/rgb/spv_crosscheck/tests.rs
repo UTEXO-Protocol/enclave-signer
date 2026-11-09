@@ -509,7 +509,7 @@ fn unix(secs: u64) -> SystemTime {
 #[test]
 fn staleness_fresh_tip_passes() {
     let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + 30 minutes. Well within 2h.
+    // Now = tip + 30 minutes. Well within `SPV_MAX_TIP_AGE_SECS`.
     assert_chain_not_stale(
         &chain,
         unix(1_700_000_000 + 30 * 60),
@@ -535,7 +535,7 @@ fn staleness_tip_at_exact_max_age_passes() {
 #[test]
 fn staleness_old_tip_rejects() {
     let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + 3 hours. Past the 2-hour bound.
+    // Now = tip + 3 hours. Past `SPV_MAX_TIP_AGE_SECS`.
     let err = assert_chain_not_stale(
         &chain,
         unix(1_700_000_000 + 3 * 60 * 60),
@@ -549,7 +549,7 @@ fn staleness_old_tip_rejects() {
 #[test]
 fn staleness_far_future_tip_rejects() {
     let chain = chain_with_tip_time(1_700_000_000 + 4 * 60 * 60);
-    // Tip is 4h ahead of now. The limit is 2h of future skew.
+    // Tip is 4h ahead of now, past `SPV_MAX_TIP_FUTURE_SECS` of future skew.
     let err = assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),
@@ -563,7 +563,7 @@ fn staleness_far_future_tip_rejects() {
 #[test]
 fn staleness_near_future_tip_passes() {
     let chain = chain_with_tip_time(1_700_000_000 + 30 * 60);
-    // Tip is 30 min ahead of now: in the 2h consensus margin.
+    // Tip is 30 min ahead of now: within `SPV_MAX_TIP_FUTURE_SECS`.
     assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),

@@ -23,7 +23,7 @@ fn roundtrip_encode_decode() {
 
 #[test]
 fn reject_oversized_message() {
-    // 25 MiB > 24 MiB limit
+    // 25 MiB is over the image value of `max_message_bytes`.
     let len: u32 = 25 * 1024 * 1024;
     let buf = len.to_le_bytes().to_vec();
     let mut cursor = Cursor::new(buf);

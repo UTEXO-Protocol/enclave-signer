@@ -98,7 +98,8 @@ macro_rules! limits {
 limits! {
     /// Socket deadline of one request, from accept
     /// ([`crate::conn::TOTAL_REQUEST_TIMEOUT`]). The parent reads the value in
-    /// force and waits 10 s longer, so the enclave still gives up first.
+    /// force and waits longer by its margin (`ENCLAVE_WAIT_MARGIN_SECS` in
+    /// `parent/src/grpc_server.rs`), so the enclave still gives up first.
     total_request_timeout_secs: TOTAL_REQUEST_TIMEOUT.as_secs(), 10, 86_400;
     /// The longest time one socket read or write can block.
     io_idle_timeout_secs: IO_IDLE_TIMEOUT.as_secs(), 2, 3_600;
@@ -120,20 +121,21 @@ limits! {
     /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
     /// to validate alone, and the caps add up. The rgb-lib work runs on one
     /// worker, and the deadline does not stop it. The value of the image passes
-    /// a history of 10 000 transfers with an SPV proof on each, which models at
-    /// 19.95 s. On a real enclave, no shape took longer than the model
+    /// a history of 10 000 transfers with an SPV proof on each, with room left
+    /// in the model. On a real enclave, no shape took longer than the model
     /// (`docs/runtime-limits.md`).
     max_rgb_lib_ms: 30_000, 1_000, 86_400_000;
     /// Steps to check transitions against their witness txs. Forged bundles at
     /// the value of the image take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
-    /// costs 8.5M (`validation/tests/caps.rs`, docs/burn-flow.md).
+    /// costs far less (`validation/tests/caps.rs`, docs/burn-flow.md).
     max_witness_check_cost: 128 * MIB, MIB, 1 << 50;
-    /// Steps to hash bundle ids. 512 transitions in one bundle (one over) take
-    /// rgb-lib 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs 11k.
+    /// Steps to hash bundle ids. 512 transitions in one bundle take rgb-lib
+    /// 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs far less.
     max_bundle_id_cost: 256 * KIB, KIB, 1 << 50;
-    /// Steps of the reject-list walk, counted per origin. The value of the image
-    /// is about 5 s of the per-origin walk at 45 to 73 ns per step, measured on
-    /// rgb-lib 1ae1c160. The burn of 2810 mints costs 14k.
+    /// Steps of the reject-list walk, counted per origin. One step of the
+    /// per-origin walk takes 45 to 73 ns, measured on rgb-lib 1ae1c160. The
+    /// value of the image keeps that walk to a few seconds. The burn of 2810
+    /// mints costs far less.
     max_reject_walk_cost: 64 * MIB, MIB, 1 << 50;
     /// Entries of a reject list. Over this value the enclave refuses each
     /// request that reads the list. The list is append-only, so it cannot get
@@ -564,7 +566,7 @@ mod tests {
         }
     }
 
-    /// The image timeouts also hold the deadline up: below the 30 s of
+    /// The image timeouts also hold the deadline up: below the image value of
     /// `esplora_timeout_secs`, a shorter deadline needs a shorter timeout.
     #[test]
     fn a_shorter_deadline_needs_shorter_per_call_timeouts() {
@@ -644,9 +646,9 @@ mod tests {
         let _ = sizes.check();
     }
 
-    /// `SetLimits` is 250 bytes at most, so the lowest values still let the
-    /// operator reach the enclave and raise them again. The lowest deadline
-    /// takes per-call timeouts within it.
+    /// A `SetLimits` request is far below the lowest frame and element limits,
+    /// so the lowest values still let the operator reach the enclave and raise
+    /// them again. The lowest deadline takes per-call timeouts within it.
     #[test]
     fn the_lowest_values_keep_the_enclave_reachable() {
         let lowest = changes(|l| {

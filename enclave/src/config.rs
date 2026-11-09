@@ -36,15 +36,16 @@ pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// Default cap on total proof bytes, txids and Merkle siblings, in all proofs
 /// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work. A proof in
-/// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
-/// fits: 16_384 x 448 bytes = 7.3 MB.
+/// a full mainnet block has 13 siblings (448 bytes), and this cap fits
+/// [`DEFAULT_MAX_MERKLE_PROOFS`] such proofs.
 pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
-/// The most bytes a PSBT may have, on every path that parses one. A decoded
-/// input or output takes far more memory than its bytes. The densest shape
-/// measured parses at about 102 times its bytes: one input, and outputs that
-/// each carry two empty records. At this limit, the two PSBTs a request can
-/// hold parsed at once fit the heap each worker holds (`memory.rs`).
+/// The most bytes a PSBT may have in the image, on every path that parses
+/// one. The operator can change it (`max_psbt_bytes`). A decoded input or
+/// output takes far more memory than its bytes. The densest shape measured
+/// parses at about 102 times its bytes: one input, and outputs that each
+/// carry two empty records. At this limit, the two PSBTs a request can hold
+/// parsed at once fit the heap each worker holds (`memory.rs`).
 ///
 /// The tested flows are far smaller: a mint is about 1 KiB, and a rights
 /// refill of 255 outputs measured about 40 KiB. rgb-lib puts the whole
@@ -53,8 +54,8 @@ pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 /// that spends very many outputs of large transactions must be split.
 pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
 
-/// Refuses `bytes` over [`MAX_PSBT_BYTES`] before any parse. `what` names the
-/// field in the error.
+/// Refuses `bytes` over `max_psbt_bytes`, the limit in force, before any
+/// parse. `what` names the field in the error.
 pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
     let max = crate::limits::get().max_psbt_bytes;
     if bytes.len() as u64 > max {
@@ -132,8 +133,8 @@ pub struct BridgeConfig {
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
-    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
-    /// each, 5 by default). `0` = unset: production refuses plain-BTC signing.
+    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers the dust outputs of
+    /// `create_utxo`. `0` = unset: production refuses plain-BTC signing.
     pub btc_max_unowned_sats: u64,
     /// Emitter of `FundsIn`/`BridgeFundsIn` (`FUNDS_IN_CONTRACT`), default
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
@@ -163,10 +164,12 @@ pub struct BridgeConfig {
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
-    /// 3, at least 1). Image env, so PCR0 measures it, and attested.
+    /// [`DEFAULT_SPV_MIN_CONFIRMATIONS`], at least 1). Image env, so PCR0
+    /// measures it, and attested.
     pub spv_min_confirmations: u32,
     /// Exact sats a witness mint pays to its recipient's output
-    /// (`MINT_WITNESS_SAT`, default 1500, 546 to 10_000). It must equal the
+    /// (`MINT_WITNESS_SAT`, default [`DEFAULT_MINT_WITNESS_SAT`], from
+    /// [`MIN_MINT_WITNESS_SAT`] to [`MAX_MINT_WITNESS_SAT`]). It must equal the
     /// connector's value. Image env, so PCR0 measures it; not attested.
     pub mint_witness_sat: u64,
     /// The AWS accounts a KMS key may live in (`KMS_ALLOWED_ACCOUNT_IDS`). Image

@@ -1,6 +1,8 @@
-//! `SignRightsRefill`: the mint wallet sends one of its mint rights to 2..=255
-//! of its own outputs. No source and no deposit back it, so the rule is shape
-//! only: the rights and every sat stay ours, and no units move.
+//! `SignRightsRefill`: the mint wallet sends one of its mint rights to its own
+//! outputs, from [`psbt_validation::MIN_REFILL_RIGHTS`] to
+//! [`psbt_validation::MAX_REFILL_RIGHTS`] of them. No source and no deposit
+//! back it, so the rule is shape only: the rights and every sat stay ours, and
+//! no units move.
 //!
 //! Cheapest first, since the listener gRPC has no auth: a PSBT-only gate and
 //! the rate limit, then the committed transition and its parent proof, then

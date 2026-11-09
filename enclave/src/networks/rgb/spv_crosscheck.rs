@@ -53,8 +53,9 @@ use super::validation::ValidatedConsignment;
 /// enclave does not sign. This stops a host that sends real but old headers
 /// and never reaches the real chain head.
 ///
-/// 2 hours is a wide margin. The parent syncs every 10s by default, and mainnet
-/// blocks come approx every 10 minutes.
+/// 2 hours is a wide margin. The parent syncs headers at the interval of its
+/// `HEADER_SYNC_INTERVAL_SECS` setting, and mainnet blocks come approx every
+/// 10 minutes.
 pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 
 /// Bitcoin consensus allows a block `time` up to approx 2 hours ahead of

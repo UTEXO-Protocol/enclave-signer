@@ -8,19 +8,19 @@ use std::time::{Duration, Instant};
 
 use crate::error::{EnclaveError, Result};
 
-/// Refills admitted past the cheap gate in any sliding hour.
+/// Refills admitted past the cheap gate in any sliding `WINDOW`.
 pub const MAX_REFILLS_PER_HOUR: usize = 12;
 
 const WINDOW: Duration = Duration::from_secs(60 * 60);
 
-/// Sliding one-hour window of admitted refills.
+/// Sliding window of admitted refills. `WINDOW` sets its length.
 #[derive(Default)]
 pub struct RefillRateLimit {
     admitted: Mutex<VecDeque<Instant>>,
 }
 
 impl RefillRateLimit {
-    /// Admits one refill at `now`, or refuses it once the last hour holds
+    /// Admits one refill at `now`, or refuses it once the last `WINDOW` holds
     /// [`MAX_REFILLS_PER_HOUR`]. A refused request does not count.
     pub fn admit(&self, now: Instant) -> Result<()> {
         let mut admitted = self
@@ -69,7 +69,7 @@ mod tests {
         for _ in 0..3 {
             assert!(limit.admit(t0 + Duration::from_secs(1)).is_err());
         }
-        // Only the twelve admitted ones age out, so the next hour is full again.
+        // Only the admitted ones age out, so the next window is full again.
         for _ in 0..MAX_REFILLS_PER_HOUR {
             limit.admit(t0 + WINDOW).unwrap();
         }
