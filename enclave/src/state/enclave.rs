@@ -463,12 +463,9 @@ impl EnclaveState {
             evm_uncompressed_pub: *km.evm_uncompressed_pub(),
             evm_gas_tx_address: *km.evm_gas_tx_address(),
             evm_gas_tx_uncompressed_pub: *km.evm_gas_tx_uncompressed_pub(),
-            btc_compressed_pubkey: *km.btc_compressed_pubkey(),
-            btc_xpub: km.btc_xpub().to_string(),
             master_fingerprint: km.master_fingerprint().to_bytes(),
             account_xpub_vanilla: km.account_xpub_vanilla().to_string(),
             account_xpub_colored: km.account_xpub_colored().to_string(),
-            ccd_ed25519_pub: *km.ccd_ed25519_pub(),
         }
     }
 

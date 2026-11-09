@@ -100,9 +100,7 @@ async fn e2e_attest_verify_succeeds_against_live_stack() {
     // Check the structure only. The test does not hardcode key bytes.
     assert_eq!(result.response.evm_address.len(), 20);
     assert_eq!(result.response.evm_uncompressed_pub.len(), 64);
-    assert_eq!(result.response.btc_compressed_pub.len(), 33);
     assert_eq!(result.response.master_fingerprint.len(), 4);
-    assert!(result.response.btc_xpub.starts_with("xpub"));
     assert!(!result.response.account_xpub_vanilla.is_empty());
     assert!(!result.response.account_xpub_colored.is_empty());
 
@@ -428,7 +426,7 @@ async fn exported_bundle_round_trips_through_the_binaries() {
         "{out:?}"
     );
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(bundle).unwrap()).unwrap();
-    assert_eq!(json["format"], "utexo-signer-attestation/2");
+    assert_eq!(json["format"], "utexo-signer-attestation/3");
     assert_eq!(json["verification_mode"], "mock");
 
     // No parent runs yet, so the check is offline.

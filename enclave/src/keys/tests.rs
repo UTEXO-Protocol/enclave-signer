@@ -10,8 +10,10 @@ fn deterministic_derivation() {
     let km2 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
     assert_eq!(km1.evm_address(), km2.evm_address());
-    assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
-    assert_eq!(km1.btc_xpub().to_string(), km2.btc_xpub().to_string());
+    assert_eq!(
+        km1.account_xpub_vanilla().to_string(),
+        km2.account_xpub_vanilla().to_string()
+    );
 }
 
 #[test]
@@ -21,8 +23,10 @@ fn from_mnemonic_deterministic() {
     let km2 = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
 
     assert_eq!(km1.evm_address(), km2.evm_address());
-    assert_eq!(km1.btc_compressed_pubkey(), km2.btc_compressed_pubkey());
-    assert_eq!(km1.btc_xpub().to_string(), km2.btc_xpub().to_string());
+    assert_eq!(
+        km1.account_xpub_vanilla().to_string(),
+        km2.account_xpub_vanilla().to_string()
+    );
 }
 
 #[test]
@@ -36,8 +40,8 @@ fn from_mnemonic_matches_seed_derivation() {
 
     assert_eq!(km_mnemonic.evm_address(), km_seed.evm_address());
     assert_eq!(
-        km_mnemonic.btc_compressed_pubkey(),
-        km_seed.btc_compressed_pubkey()
+        km_mnemonic.account_xpub_vanilla().to_string(),
+        km_seed.account_xpub_vanilla().to_string()
     );
 }
 
@@ -250,13 +254,8 @@ fn key_formats() {
     let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
 
     assert_eq!(km.evm_address().len(), 20);
-    assert_eq!(km.btc_compressed_pubkey().len(), 33);
     assert!(
-        km.btc_compressed_pubkey()[0] == 0x02 || km.btc_compressed_pubkey()[0] == 0x03,
-        "compressed pubkey must start with 0x02 or 0x03"
-    );
-    assert!(
-        km.btc_xpub().to_string().starts_with("xpub"),
+        km.account_xpub_vanilla().to_string().starts_with("xpub"),
         "xpub must start with 'xpub'"
     );
 }
@@ -326,33 +325,26 @@ fn test_sign_evm_recoverable() {
     assert_eq!(&recovered_address, km.evm_address());
 }
 
-#[test]
-fn test_concordium_pubkey_deterministic() {
-    let seed = [0x42u8; 64];
-    let km1 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let km2 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    assert_eq!(km1.ccd_ed25519_pub(), km2.ccd_ed25519_pub());
-    assert_eq!(km1.ccd_ed25519_pub().len(), 32);
-}
-
-#[test]
-fn test_concordium_different_seeds_differ() {
-    let a = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
-    let b = KeyManager::from_seed([0x99u8; 64], Network::Bitcoin).unwrap();
-    assert_ne!(a.ccd_ed25519_pub(), b.ccd_ed25519_pub());
-}
-
 /// There is no segwit v0 P2WSH signer: a valid 2-of-3 P2WSH input with our
-/// BIP-84 key in its witness script is not signed.
+/// vanilla account key in its witness script is not signed.
 #[test]
-fn p2wsh_input_naming_our_bip84_key_is_never_signed() {
+fn p2wsh_input_naming_our_account_key_is_never_signed() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKMULTISIG;
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
 
     let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
     let secp = Secp256k1::new();
-    let ours = bitcoin::PublicKey::from_slice(km.btc_compressed_pubkey()).unwrap();
+    let ours_secret = km
+        .derive_btc_child(
+            AccountType::Vanilla,
+            &[
+                ChildNumber::from_normal_idx(0).unwrap(),
+                ChildNumber::from_normal_idx(0).unwrap(),
+            ],
+        )
+        .unwrap();
+    let ours = bitcoin::PublicKey::new(ours_secret.public_key(&secp));
     let other =
         |b: u8| bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp));
     let mut pubkeys = [ours, other(0x02), other(0x03)];

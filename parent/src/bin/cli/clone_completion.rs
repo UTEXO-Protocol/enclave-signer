@@ -133,8 +133,6 @@ pub fn identity_field_mismatches(
     compare!(
         evm_address,
         evm_uncompressed_pub,
-        btc_compressed_pub,
-        btc_xpub,
         master_fingerprint,
         account_xpub_vanilla,
         account_xpub_colored,
@@ -142,8 +140,7 @@ pub fn identity_field_mismatches(
         bridge_contract,
         rgb_asset_id,
         evm_gas_tx_uncompressed_pub,
-        evm_gas_tx_address,
-        ccd_ed25519_pub
+        evm_gas_tx_address
     );
     diff
 }

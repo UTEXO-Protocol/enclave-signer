@@ -112,9 +112,9 @@ fn indexer_only_generates_distinct_keys_and_refuses_reinitialization() {
     let a = initialize(first);
     let b = initialize(start());
     assert_ne!(a.evm_address, b.evm_address);
-    assert_ne!(a.btc_compressed_pub, b.btc_compressed_pub);
+    assert_ne!(a.account_xpub_vanilla, b.account_xpub_vanilla);
     assert_eq!(a.evm_address.len(), 20);
-    assert!(a.btc_xpub.starts_with("tpub"));
+    assert!(a.account_xpub_vanilla.starts_with("tpub"));
     assert!(matches!(
         send(
             first,

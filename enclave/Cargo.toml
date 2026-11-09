@@ -15,7 +15,6 @@ path = "src/main.rs"
 bip39 = { version = "3", features = ["zeroize"] }
 bitcoin = { version = "0.32", features = ["std"] }
 chacha20poly1305 = "0.11"
-ed25519-dalek = { version = "3", features = ["zeroize"] }
 enclave-proto = { path = "../enclave-proto" }
 getrandom = "0.4.2"
 hkdf = "0.13"
@@ -107,8 +106,7 @@ default = []
 # build, so the parent verifier does not change.
 #
 # A signer role turns on the RGB/BTC bridge stack (`rgb-validation`). `spv` adds
-# the SPV header chain to it. ed25519 is always on to keep key derivation and
-# the attestation bundle the same in every build.
+# the SPV header chain to it.
 
 # Seed custody is a separate capability, enabled only by the mint signer.
 kms-persistence = [

@@ -352,17 +352,11 @@ fn apply_funds_out_binding(
     Ok(())
 }
 
-/// The commission the source network declares, per compiled build.
-///
-/// Only an EVM or RGB source has a commission. `validate_source` already
-/// refused any other source, so the fallback arm only has to type-check.
+/// The commission the source network declares.
 fn source_commission(source: &SourceNetwork) -> Result<u64> {
     match source {
         SourceNetwork::EvmSource(source) => Ok(source.commission),
         SourceNetwork::RgbSource(source) => Ok(source.commission),
-        _ => Err(EnclaveError::InvalidRequest(
-            "source network not supported by this enclave".into(),
-        )),
     }
 }
 

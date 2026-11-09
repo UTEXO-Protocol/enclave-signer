@@ -45,8 +45,6 @@ fn start_mock_enclave() -> u16 {
                     response: Some(enclave_response::Response::PublicKeys(
                         enclave_proto::PublicKeysResponse {
                             evm_address: vec![0xAA; 20],
-                            btc_compressed_pub: vec![0xBB; 33],
-                            btc_xpub: "xpub-test".into(),
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
@@ -56,7 +54,6 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
-                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -122,8 +119,6 @@ fn start_mock_enclave() -> u16 {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
                             evm_address: vec![0xAA; 20],
-                            btc_compressed_pub: vec![0xBB; 33],
-                            btc_xpub: "xpub-test".into(),
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
@@ -133,7 +128,6 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
-                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -159,8 +153,6 @@ fn start_mock_enclave() -> u16 {
                     use sha2::Digest;
                     let public_keys = enclave_proto::PublicKeysResponse {
                         evm_address: vec![0xAA; 20],
-                        btc_compressed_pub: vec![0xBB; 33],
-                        btc_xpub: "xpub-test".into(),
                         master_fingerprint: vec![0xDD; 4],
                         account_xpub_vanilla: "tpub-vanilla-test".into(),
                         account_xpub_colored: "tpub-colored-test".into(),
@@ -170,14 +162,11 @@ fn start_mock_enclave() -> u16 {
                         rgb_asset_id: String::new(),
                         evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                         evm_gas_tx_address: vec![0xCC; 20],
-                        ccd_ed25519_pub: vec![0x99; 32],
                     };
                     let mut bundle: Vec<u8> = Vec::new();
                     let chain_id_bytes = public_keys.chain_id.to_be_bytes();
-                    let parts: [&[u8]; 13] = [
+                    let parts: [&[u8]; 10] = [
                         &public_keys.evm_address,
-                        &public_keys.btc_compressed_pub,
-                        public_keys.btc_xpub.as_bytes(),
                         &public_keys.master_fingerprint,
                         public_keys.account_xpub_vanilla.as_bytes(),
                         public_keys.account_xpub_colored.as_bytes(),
@@ -187,7 +176,6 @@ fn start_mock_enclave() -> u16 {
                         public_keys.rgb_asset_id.as_bytes(),
                         &public_keys.evm_gas_tx_uncompressed_pub,
                         &public_keys.evm_gas_tx_address,
-                        &public_keys.ccd_ed25519_pub,
                     ];
                     for p in parts {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -378,7 +366,8 @@ async fn grpc_public_key_evm_gas_tx() {
 }
 
 #[tokio::test]
-async fn grpc_public_key_transaction_type() {
+async fn grpc_public_key_refuses_transaction_type() {
+    // The BTC key is retired, so TRANSACTION has no public key.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -386,21 +375,15 @@ async fn grpc_public_key_transaction_type() {
         .await
         .unwrap();
 
-    let resp = client
+    let err = client
         .public_key(PublicKeyRequest {
             network_id: 0,
             data_type: DataType::Transaction as i32,
         })
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap_err();
 
-    assert_eq!(
-        resp.public_key.len(),
-        33,
-        "Transaction type returns BTC compressed pubkey"
-    );
-    assert_eq!(resp.public_key, vec![0xBB; 33]);
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -1168,10 +1151,9 @@ async fn grpc_initialize_roundtrip() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(
-        resp.public_key.len(),
-        33,
-        "public_key should be BTC compressed pubkey"
+    assert!(
+        resp.public_key.is_empty(),
+        "the BTC key is retired, so no public key returns"
     );
 }
 
@@ -1257,10 +1239,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
     use sha2::Digest;
     let mut bundle: Vec<u8> = Vec::new();
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 13] = [
+    let parts: [&[u8]; 10] = [
         &resp.evm_address,
-        &resp.btc_compressed_pub,
-        resp.btc_xpub.as_bytes(),
         &resp.master_fingerprint,
         resp.account_xpub_vanilla.as_bytes(),
         resp.account_xpub_colored.as_bytes(),
@@ -1270,7 +1250,6 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         resp.rgb_asset_id.as_bytes(),
         &resp.evm_gas_tx_uncompressed_pub,
         &resp.evm_gas_tx_address,
-        &resp.ccd_ed25519_pub,
     ];
     for p in parts {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());

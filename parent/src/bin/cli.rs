@@ -354,11 +354,6 @@ fn print_init_response(r: &InitializeKeyResponse) {
     println!("Keys initialized:");
     println!("  EVM address:         0x{}", hex::encode(&r.evm_address));
     println!(
-        "  BTC pubkey:          {}",
-        hex::encode(&r.btc_compressed_pub)
-    );
-    println!("  BTC xpub:            {}", r.btc_xpub);
-    println!(
         "  Master fingerprint:  {}",
         hex::encode(&r.master_fingerprint)
     );
@@ -372,18 +367,12 @@ fn print_init_response(r: &InitializeKeyResponse) {
         "  EVM gas TX pubkey:   {}",
         hex::encode(&r.evm_gas_tx_uncompressed_pub)
     );
-    println!("  CCD Ed25519 pubkey:  {}", hex::encode(&r.ccd_ed25519_pub));
     print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
 }
 
 fn print_keys_response(r: &PublicKeysResponse) {
     println!("  EVM address:         0x{}", hex::encode(&r.evm_address));
     println!(
-        "  BTC pubkey:          {}",
-        hex::encode(&r.btc_compressed_pub)
-    );
-    println!("  BTC xpub:            {}", r.btc_xpub);
-    println!(
         "  Master fingerprint:  {}",
         hex::encode(&r.master_fingerprint)
     );
@@ -397,7 +386,6 @@ fn print_keys_response(r: &PublicKeysResponse) {
         "  EVM gas TX pubkey:   {}",
         hex::encode(&r.evm_gas_tx_uncompressed_pub)
     );
-    println!("  CCD Ed25519 pubkey:  {}", hex::encode(&r.ccd_ed25519_pub));
     print_bridge_config(r.chain_id, &r.bridge_contract, &r.rgb_asset_id);
 }
 

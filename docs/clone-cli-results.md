@@ -8,7 +8,7 @@ read the result line, not the exit code alone. Source:
 
 | Result | Meaning | Exit code |
 | --- | --- | --- |
-| `success` | `SetClone` was acknowledged. The new enclave has the donor's EVM address and all 13 identity fields. | 0 |
+| `success` | `SetClone` was acknowledged. The new enclave has the donor's EVM address and all 10 identity fields. | 0 |
 | `recovered_success` | The `SetClone` reply was an error, lost or late. The read-back shows the donor's identity. | 0 |
 | `identity_mismatch` | The new enclave has keys, but they differ from the donor's. | 1 |
 | `not_initialized` | `SetClone` returned an error and the new enclave has no keys at the read-back. This is not a final state. Do not retry `SetClone` blindly. | 1 |

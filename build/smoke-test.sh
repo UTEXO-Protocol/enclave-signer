@@ -63,14 +63,12 @@ read_health() {
 # Validate the core identity fields, then retain every printed public key for
 # the before/after comparison. Init and GetPublicKey print the same fields.
 identity() {
-    local evm btc xpub
+    local evm xpub
     evm=$(sed -n 's/^  EVM address: *//p' <<<"$1")
-    btc=$(sed -n 's/^  BTC pubkey: *//p' <<<"$1")
-    xpub=$(sed -n 's/^  BTC xpub: *//p' <<<"$1")
+    xpub=$(sed -n 's/^  Account xpub vanilla: *//p' <<<"$1")
     [[ "$evm" =~ ^0x[[:xdigit:]]{40}$ ]] \
-        && [[ "$btc" =~ ^(02|03)[[:xdigit:]]{64}$ ]] \
         && [[ "$xpub" =~ ^[xt]pub[1-9A-HJ-NP-Za-km-z]{107}$ ]] || return 1
-    grep -E '^  (EVM address|BTC pubkey|BTC xpub|Master fingerprint|Account xpub vanilla|Account xpub colored|EVM gas TX address|EVM gas TX pubkey|CCD Ed25519 pubkey):' <<<"$1"
+    grep -E '^  (EVM address|Master fingerprint|Account xpub vanilla|Account xpub colored|EVM gas TX address|EVM gas TX pubkey):' <<<"$1"
 }
 
 echo "============================================="

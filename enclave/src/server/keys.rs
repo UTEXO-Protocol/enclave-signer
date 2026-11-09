@@ -114,8 +114,6 @@ pub(super) fn handle_initialize(
     tracing::info!(
         evm_address = %hex::encode(keys.evm_address),
         evm_gas_tx_address = %hex::encode(keys.evm_gas_tx_address),
-        btc_compressed_pub = %hex::encode(keys.btc_compressed_pubkey),
-        ccd_ed25519_pub = %hex::encode(keys.ccd_ed25519_pub),
         master_fingerprint = %hex::encode(keys.master_fingerprint),
         account_xpub_vanilla = %keys.account_xpub_vanilla,
         account_xpub_colored = %keys.account_xpub_colored,
@@ -124,8 +122,6 @@ pub(super) fn handle_initialize(
     Ok(EnclaveResponse {
         response: Some(Response::InitializeKey(InitializeKeyResponse {
             evm_address: keys.evm_address.to_vec(),
-            btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
-            btc_xpub: keys.btc_xpub,
             master_fingerprint: keys.master_fingerprint.to_vec(),
             account_xpub_vanilla: keys.account_xpub_vanilla,
             account_xpub_colored: keys.account_xpub_colored,
@@ -135,7 +131,6 @@ pub(super) fn handle_initialize(
             rgb_asset_id: ctx.bridge_config.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
             evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
-            ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
         })),
     })
 }
@@ -167,8 +162,6 @@ pub(super) fn build_public_keys_response(
 ) -> PublicKeysResponse {
     PublicKeysResponse {
         evm_address: keys.evm_address.to_vec(),
-        btc_compressed_pub: keys.btc_compressed_pubkey.to_vec(),
-        btc_xpub: keys.btc_xpub,
         master_fingerprint: keys.master_fingerprint.to_vec(),
         account_xpub_vanilla: keys.account_xpub_vanilla,
         account_xpub_colored: keys.account_xpub_colored,
@@ -178,7 +171,6 @@ pub(super) fn build_public_keys_response(
         rgb_asset_id: cfg.rgb_asset_id.clone(),
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub.to_vec(),
         evm_gas_tx_address: keys.evm_gas_tx_address.to_vec(),
-        ccd_ed25519_pub: keys.ccd_ed25519_pub.to_vec(),
     }
 }
 
@@ -191,10 +183,8 @@ pub(super) fn build_public_keys_response(
 /// `docs/pubkey-attestation.md` and `parent/src/attest_verify.rs::canonical_bundle`.
 fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 13] = [
+    let parts: [&[u8]; 10] = [
         &keys.evm_address,
-        &keys.btc_compressed_pub,
-        keys.btc_xpub.as_bytes(),
         &keys.master_fingerprint,
         keys.account_xpub_vanilla.as_bytes(),
         keys.account_xpub_colored.as_bytes(),
@@ -204,7 +194,6 @@ fn canonical_pubkey_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
-        &keys.ccd_ed25519_pub,
     ];
     let total: usize = parts.iter().map(|p| 4 + p.len()).sum();
     let mut out = Vec::with_capacity(total);

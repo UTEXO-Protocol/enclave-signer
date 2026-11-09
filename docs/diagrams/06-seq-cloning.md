@@ -68,7 +68,7 @@ sequenceDiagram
     Req->>Req: commit nonce
     Req-->>Cli: SetCloneResponse{} (empty)
     Cli->>Req: GetPublicKey
-    Cli->>Cli: all 13 identity fields == donor bundle
+    Cli->>Cli: all 10 identity fields == donor bundle
     Cli-->>Op: CLONE_RESULT_V1=success
 
     Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. It also retains<br/>the verified session secret and can become a donor.<br/>Seed and donor secret remain in SecretBox, and temporary plaintext buffers are zeroized.<br/>Ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor || requester.

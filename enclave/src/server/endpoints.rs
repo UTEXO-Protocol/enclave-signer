@@ -289,7 +289,6 @@ mod tests {
             Request::SignBtc(SignBtcRequest::default()),
             Request::SignRightsRefill(SignRightsRefillRequest::default()),
             Request::SignRawDigest(SignRawDigestRequest::default()),
-            Request::SignCcd(SignCcdRequest::default()),
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
         ] {
             // A request that this build does not serve has its own refusal.

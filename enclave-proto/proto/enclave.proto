@@ -9,8 +9,8 @@ package enclave;
 option go_package = "github.com/UTEXO-Protocol/federated-signer-proto/go-gen/enclave;enclavepb";
 
 message EnclaveRequest {
-  reserved 4, 6;
-  reserved "proxy_federation";
+  reserved 4, 6, 15;
+  reserved "proxy_federation", "sign_ccd";
 
   oneof request {
     InitializeKeyRequest initialize_key = 1;
@@ -25,7 +25,6 @@ message EnclaveRequest {
     GetLastSavedBlockRequest get_last_saved_block = 12;
     GetAttestedPublicKeyRequest get_attested_public_key = 13;
     SignBtcRequest sign_btc = 14;
-    SignCcdRequest sign_ccd = 15;
     HealthRequest health = 16;
     SetEndpointsRequest set_endpoints = 17;
     SignRightsRefillRequest sign_rights_refill = 18;
@@ -35,8 +34,8 @@ message EnclaveRequest {
 }
 
 message EnclaveResponse {
-  reserved 6;
-  reserved "federation_sig";
+  reserved 6, 14;
+  reserved "federation_sig", "ccd_signature";
 
   oneof response {
     InitializeKeyResponse initialize_key = 1;
@@ -51,7 +50,6 @@ message EnclaveResponse {
     SubmitHeadersResponse submit_headers = 11;
     GetLastSavedBlockResponse get_last_saved_block = 12;
     GetAttestedPublicKeyResponse get_attested_public_key = 13;
-    CcdSignatureResponse ccd_signature = 14;
     ErrorResponse error = 15;
     HealthResponse health = 16;
     SetEndpointsResponse set_endpoints = 17;
@@ -73,9 +71,13 @@ message InitializeKeyRequest {
 }
 
 message InitializeKeyResponse {
+  // 2 and 3 were the retired BTC key (m/84'/0'/0'/0/0) and its xpub, and 13
+  // was the retired Concordium key. They signed nothing and are gone from the
+  // key bundle.
+  reserved 2, 3, 13;
+  reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
+
   bytes evm_address = 1; // 20 bytes: keccak256(uncompressed_pubkey[1..])[12..].
-  bytes btc_compressed_pub = 2; // 33-byte compressed secp256k1 public key.
-  string btc_xpub = 3; // Base58 BIP-32 extended public key.
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
   string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
@@ -85,7 +87,6 @@ message InitializeKeyResponse {
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
-  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
 }
 
 message GetPublicKeyRequest {
@@ -93,9 +94,11 @@ message GetPublicKeyRequest {
 }
 
 message PublicKeysResponse {
+  // 2, 3 and 13: see InitializeKeyResponse.
+  reserved 2, 3, 13;
+  reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
+
   bytes evm_address = 1; // 20-byte Ethereum address of the primary signing key.
-  bytes btc_compressed_pub = 2; // 33-byte compressed Bitcoin public key.
-  string btc_xpub = 3; // Base58 BIP-32 extended public key.
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
   string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
@@ -105,7 +108,6 @@ message PublicKeysResponse {
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
-  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
 }
 
 message GetAttestedPublicKeyRequest {
@@ -119,12 +121,15 @@ message GetAttestedPublicKeyResponse {
 }
 
 message SignRequest {
+  // 6 was ccd_source: Concordium sources are gone.
+  reserved 6;
+  reserved "ccd_source";
+
   uint64 amount = 1;
 
   oneof source_network {
     EvmSource evm_source = 2;
     RgbSource rgb_source = 3;
-    CcdSource ccd_source = 6;
   }
 
   oneof destination_network {
@@ -156,15 +161,6 @@ message RgbSource {
   // 8 was mint_ancestors, dropped: deposit ids are derived from the mint.
   reserved 8;
   reserved "mint_ancestors";
-}
-
-// CcdSource is the validated Concordium source of a fundsIn operation (the
-// finalized user->governance transfer or governance burn). The listener has
-// already validated finality and structure; the enclave trusts it and only
-// cross-checks the release amount (SignRequest.amount) against the destination.
-message CcdSource {
-  bytes tx_hash = 1; // Concordium source transaction hash (32 bytes).
-  uint64 commission = 2; // Commission reported by the source operation.
 }
 
 message EvmDestination {
@@ -301,23 +297,6 @@ message RawDigestSignatureResponse {
   bytes signature = 1; // 65-byte signature produced by the gas transaction key.
 }
 
-// SignCcdRequest asks the enclave to Ed25519-sign a Concordium account-transaction
-// hash with the governance key. The listener has already re-derived the hash and
-// verified the transaction structure/amounts; the enclave signs the hash directly.
-message SignCcdRequest {
-  bytes hash = 1; // Exactly 32 bytes, signed without additional hashing.
-}
-
-message CcdSignatureResponse {
-  bytes signature = 1; // 64-byte Concordium Ed25519 signature.
-  // 32-byte Ed25519 public key that produced `signature`. Ed25519 signatures are
-  // not recoverable, so the consumer cannot derive the signer the way it does on
-  // EVM; it needs the key to look the signature's credential and key index up in
-  // the governance account. Derived in the same operation as the signature, so
-  // the two cannot disagree.
-  bytes public_key = 2;
-}
-
 message InitiateCloningRequest {
   string cloning_secret = 1; // Pre-shared operator secret, never sent to the donor.
   bytes cluster_public_key = 2; // 20-byte EVM address of the intended donor.
@@ -410,6 +389,10 @@ message HealthResponse {
 // a request or how long it waits. The attestation does not cover these values.
 // docs/runtime-limits.md has the rules.
 message Limits {
+  // 26 and 27 were the limits of the mint reply cache, which is gone.
+  reserved 26, 27;
+  reserved "mint_reply_ttl_secs", "mint_reply_max_entries";
+
   uint64 total_request_timeout_secs = 1;
   uint64 io_idle_timeout_secs = 2;
   uint64 first_bytes_timeout_secs = 3;

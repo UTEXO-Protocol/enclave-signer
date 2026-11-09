@@ -91,7 +91,12 @@ pub fn validate_source(
         // closed.
         #[cfg(rgb_to_evm)]
         SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
-        _ => Err(EnclaveError::InvalidRequest(
+        #[cfg(not(evm_to_rgb))]
+        SourceNetwork::EvmSource(_) => Err(EnclaveError::InvalidRequest(
+            "source network not supported by this enclave".into(),
+        )),
+        #[cfg(not(rgb_to_evm))]
+        SourceNetwork::RgbSource(_) => Err(EnclaveError::InvalidRequest(
             "source network not supported by this enclave".into(),
         )),
     }

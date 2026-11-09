@@ -408,15 +408,13 @@ own keys.
   - EVM bridge key (authorization): `m/44'/60'/0'/0/0`;
     `evm_address = keccak256(uncompressed_pub[1..])[12..]`.
   - EVM gas-tx key (outer tx signing, `SignRawDigest`): `m/44'/60'/0'/0/1`.
-  - BTC BIP-84 key: `m/84'/0'/0'/0/0`. Only its public key is published; the
-    enclave signs nothing with it.
   - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
     (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
     `rgb-lib` uses, so the host's colored addresses resolve).
-  - Concordium key (retired): Ed25519 via SLIP-0010, all-hardened
-    `m/44'/919'/0'/0'/0'`. Only its public key is published; the enclave signs
-    nothing with it. It is still derived, so the attested key bundle has the
-    same shape in every build.
+  - Retired keys: the BTC key `m/84'/0'/0'/0/0` and the Concordium key
+    `m/44'/919'/0'/0'/0'` are no longer derived. Both signed nothing. The
+    attested key bundle dropped their public keys. The seed and every other
+    key are unchanged.
 - The **EVM address is the cluster identity**: a cloned enclave installs the
   same seed and signs as the same address; `complete_cloning` asserts the
   derived address equals the target cluster key before going `Active`.
@@ -453,8 +451,9 @@ Mnemonic and seed import require `allow-seed-import`, which release builds rejec
 All bridge signing goes through one `Sign` request carrying a source network
 (EVM or RGB) and a destination network (EVM or RGB). Accepted routes are
 RGB -> EVM and EVM -> RGB; any other pair is refused. A `CcdSource` or a
-`SignCcd` request is refused: Concordium support was removed, and its wire
-fields stay in the schema until an upstream change drops them. Plain-BTC
+`SignCcd` request is refused: Concordium support was removed. The enclave
+schema reserves its field numbers. The parent gRPC schema still has the
+retired Concordium types, and the parent refuses them. Plain-BTC
 signing is a separate `SignBtc` request (Sec 7.3).
 
 ### 7.1 RGB burn -> EVM unlock (`fundsOut`)
@@ -827,10 +826,10 @@ not establish whether keys were installed.
 ### 7.9 Concordium (removed)
 
 The Concordium source route, `SignCcd` and the `ccd` feature were removed.
-The enclave refuses `SignCcd` and any `CcdSource`. The key at
-`m/44'/919'/0'/0'/0'` is still derived and its public key stays in the
-attested key bundle, so the bundle format does not change. The key signs
-nothing.
+The enclave schema reserves the old field numbers, so a `SignCcd` request or
+a `CcdSource` decodes as no request and no source, and the enclave refuses it.
+The Concordium key is no longer derived, and its public key left the
+attested key bundle.
 
 ## 8. RGB / Bitcoin / SPV verification
 

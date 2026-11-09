@@ -90,7 +90,7 @@ populates them as:
 A lightweight verifier can stop at `public_key` (e.g. an EVM contract that
 only cares about the signing address). A thorough verifier rebuilds the
 canonical bundle **and the expected security policy** and checks `user_data` to
-confirm the BTC keys, xpubs, and fingerprint were not swapped by the parent host
+confirm the account xpubs and fingerprint were not swapped by the parent host
 process *and* that the enclave's posture matches what was expected.
 
 ### Canonical bundle encoding
@@ -102,8 +102,6 @@ Prefix each field with its length as a big-endian u32. Encode strings as UTF-8.
 ```
 canonical_bundle =
     u32_be(len(evm_address))                 || evm_address
-    u32_be(len(btc_compressed_pub))          || btc_compressed_pub
-    u32_be(len(btc_xpub))                    || btc_xpub_utf8
     u32_be(len(master_fingerprint))          || master_fingerprint
     u32_be(len(account_xpub_vanilla))        || account_xpub_vanilla_utf8
     u32_be(len(account_xpub_colored))        || account_xpub_colored_utf8
@@ -113,10 +111,9 @@ canonical_bundle =
     u32_be(len(rgb_asset_id))                || rgb_asset_id_utf8
     u32_be(len(evm_gas_tx_uncompressed_pub)) || evm_gas_tx_uncompressed_pub   // 64 bytes
     u32_be(len(evm_gas_tx_address))          || evm_gas_tx_address            // 20 bytes
-    u32_be(len(ccd_ed25519_pub))             || ccd_ed25519_pub               // 32 bytes, retired key, public key only
 ```
 
-Thirteen fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
+Ten fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
 config pinned at enclave boot from env (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the enclave to a
 specific chain / contract / asset triple — a misconfigured or
@@ -125,8 +122,11 @@ attestation-bundle/proto field `bridge_contract` holds the MultisigProxy
 address from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
-`rgb_asset_id=""`. The gas-tx key and the retired Concordium key are derived in every
-build, so the bundle has the same shape regardless of features.
+`rgb_asset_id=""`. The gas-tx key is derived in every
+build, so the bundle has the same shape regardless of features. The bundle
+dropped the retired BTC key and the retired Concordium key: this is a new
+layout (offline bundle format `utexo-signer-attestation/3`), and the image
+measurements change with it.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
 response. These values are always authenticated (they are inside the signed
@@ -453,7 +453,7 @@ Defended:
 - **Replay** — the verifier-supplied nonce is signed into the doc and checked
   for equality on response. An old doc is rejected.
 - **Pubkey swap by parent** — `public_key` is inside the signed payload.
-- **BTC key / xpub swap** — `user_data` commits to the full bundle. A parent
+- **Account xpub swap** — `user_data` commits to the full bundle. A parent
   cannot change one field of `PublicKeysResponse` without breaking the
   commitment match.
 - **Posture downgrade** — `user_data` also commits to the resolved

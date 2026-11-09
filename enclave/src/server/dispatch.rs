@@ -122,13 +122,6 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("EVM gas transactions"))
             }
         }
-        Some(Request::SignCcd(req)) => {
-            tracing::info!("request: SignCcd - removed, refusing");
-            let _ = req;
-            Err(EnclaveError::InvalidRequest(
-                "SignCcd was removed: this enclave does not sign Concordium requests".into(),
-            ))
-        }
         Some(Request::SignRightsRefill(req)) => {
             tracing::info!("request: SignRightsRefill");
             // Only the mint signer holds mint rights. Like every signing

@@ -826,7 +826,6 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
-                    DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(
                             "PublicKey not supported for data_type {:?}",
@@ -872,10 +871,11 @@ impl ParentService for ParentAdapterService {
         let resp = self.send_to_enclave(enclave_req).await?;
 
         match resp.response {
-            Some(enclave_response::Response::InitializeKey(r)) => {
+            Some(enclave_response::Response::InitializeKey(_)) => {
                 Ok(Response::new(InitializeResponse {
                     attestation: vec![], // Initialize returns no attestation
-                    public_key: r.btc_compressed_pub,
+                    // The BTC key is retired, so no public key is returned.
+                    public_key: Vec::new(),
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),

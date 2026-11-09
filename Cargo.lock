@@ -2138,7 +2138,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "curve25519-dalek-derive",
- "digest 0.11.3",
  "fiat-crypto",
  "rustc_version 0.4.1",
  "subtle",
@@ -2480,28 +2479,6 @@ dependencies = [
  "rfc6979 0.6.0",
  "signature 3.0.0",
  "spki 0.8.0",
- "zeroize",
-]
-
-[[package]]
-name = "ed25519"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
-dependencies = [
- "signature 3.0.0",
-]
-
-[[package]]
-name = "ed25519-dalek"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
-dependencies = [
- "curve25519-dalek",
- "ed25519",
- "sha2 0.11.0",
- "subtle",
  "zeroize",
 ]
 
@@ -6191,7 +6168,6 @@ dependencies = [
  "cbc",
  "chacha20poly1305",
  "cms",
- "ed25519-dalek",
  "enclave-proto",
  "getrandom 0.4.3",
  "hex",

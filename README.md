@@ -183,10 +183,8 @@ Key paths:
 |-----|------|-----|
 | EVM bridge key | `m/44'/60'/0'/0/0` | Signs `fundsOut` (burn). Its address is the cluster identity. |
 | EVM gas-tx key | `m/44'/60'/0'/0/1` | Signs the outer gas transaction (burn). |
-| BIP-84 BTC key | `m/84'/0'/0'/0/0` | Public key only. Signs nothing. |
 | Vanilla taproot account | `m/86'/<coin>'/0'` (coin 0 mainnet, 1 other) | Plain-BTC `SignBtc` only. |
 | Colored taproot account | `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 other) | Mint PSBTs only. |
-| Concordium key (retired) | `m/44'/919'/0'/0'/0'` (Ed25519, SLIP-0010) | Public key only. Signs nothing. |
 
 The enclave returns the master fingerprint and both account xpubs. The bridge
 wallet uses them for its watch-only descriptors. A cloned enclave must derive
@@ -247,7 +245,7 @@ request per connection. Frame limit 24 MiB. Schema:
 | `SetEndpoints` | any | all | Sets the chain endpoints (and the KMS values on mint). Once per boot. |
 | `SetLimits`, `GetLimits` | any | all | Change or read the time, memory and size limits ([`docs/runtime-limits.md`](docs/runtime-limits.md)). |
 | `InitializeKey` | Initial | all | Mint: recover or create the KMS seed. Burn: make a seed from OS entropy, with an optional donor `cloning_secret`. |
-| `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, retired Concordium public key, boot pins. |
+| `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, account xpubs, fingerprint, boot pins. |
 | `GetAttestedPublicKey` | any, after `SetEndpoints` | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. Before keys exist it attests the policy only. |
 | `Sign` | Active | mint, burn | Bridge signing. Mint signer: EVM -> RGB only. Burn signer: RGB -> EVM only. |
 | `SignBtc` | Active | mint | Plain-BTC PSBT on the vanilla account. Off unless the attested policy turns it on. |

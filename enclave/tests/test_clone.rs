@@ -39,8 +39,6 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
     match resp.response {
         Some(Resp::InitializeKey(r)) => PublicKeysResponse {
             evm_address: r.evm_address,
-            btc_compressed_pub: r.btc_compressed_pub,
-            btc_xpub: r.btc_xpub,
             master_fingerprint: r.master_fingerprint,
             account_xpub_vanilla: r.account_xpub_vanilla,
             account_xpub_colored: r.account_xpub_colored,
@@ -50,7 +48,6 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
             rgb_asset_id: r.rgb_asset_id,
             evm_gas_tx_uncompressed_pub: r.evm_gas_tx_uncompressed_pub,
             evm_gas_tx_address: r.evm_gas_tx_address,
-            ccd_ed25519_pub: r.ccd_ed25519_pub,
         },
         other => panic!("expected InitializeKey response, got {:?}", other),
     }
@@ -167,10 +164,9 @@ fn clone_happy_path_copies_donor_identity_to_requester() {
     let requester_keys = get_public_keys(requester_port);
     assert_eq!(requester_keys.evm_address, donor_keys.evm_address);
     assert_eq!(
-        requester_keys.btc_compressed_pub,
-        donor_keys.btc_compressed_pub
+        requester_keys.account_xpub_vanilla,
+        donor_keys.account_xpub_vanilla
     );
-    assert_eq!(requester_keys.btc_xpub, donor_keys.btc_xpub);
     assert_eq!(
         requester_keys.master_fingerprint,
         donor_keys.master_fingerprint
@@ -311,7 +307,10 @@ fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
 
     let requester_keys = get_public_keys(requester_port);
     assert_eq!(requester_keys.evm_address, donor_keys.evm_address);
-    assert_eq!(requester_keys.btc_xpub, donor_keys.btc_xpub);
+    assert_eq!(
+        requester_keys.account_xpub_colored,
+        donor_keys.account_xpub_colored
+    );
 }
 
 #[test]

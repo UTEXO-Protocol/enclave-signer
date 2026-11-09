@@ -28,14 +28,11 @@ sys.exit(replies[n][1])
 def keys(tag='ab'):
     return '\n'.join([
         '  EVM address:         0x' + tag * 20,
-        '  BTC pubkey:          02' + 'cd' * 32,
-        '  BTC xpub:            tpub' + 'A' * 107,
         '  Master fingerprint:  12345678',
         '  Account xpub vanilla: tpub' + 'B' * 107,
         '  Account xpub colored: tpub' + 'C' * 107,
         '  EVM gas TX address:  0x' + 'de' * 20,
         '  EVM gas TX pubkey:   04' + 'ef' * 64,
-        '  CCD Ed25519 pubkey:  ' + '12' * 32,
     ])
 
 
@@ -127,7 +124,7 @@ class SmokeTestTests(unittest.TestCase):
                 self.assert_failed(self.run_script(replies), 'Double init')
 
     def test_refusal_does_not_hide_changed_keys(self):
-        for changed in (keys('bc'), keys().replace('CCD Ed25519 pubkey:  12', 'CCD Ed25519 pubkey:  34')):
+        for changed in (keys('bc'), keys().replace('Account xpub colored: tpubC', 'Account xpub colored: tpubD')):
             with self.subTest(changed=changed):
                 replies = running()
                 replies[3] = ['get-keys', 0, changed]

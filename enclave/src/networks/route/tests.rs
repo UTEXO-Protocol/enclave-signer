@@ -1,5 +1,5 @@
 use super::*;
-use crate::proto::{CcdSource, EvmDestination, EvmSource, RgbDestination, RgbSource};
+use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
 
 fn evm_source(commission: u64) -> SourceNetwork {
     SourceNetwork::EvmSource(EvmSource {
@@ -37,13 +37,6 @@ fn rgb_source() -> SourceNetwork {
     })
 }
 
-fn ccd_source(commission: u64) -> SourceNetwork {
-    SourceNetwork::CcdSource(CcdSource {
-        tx_hash: vec![0xCC; 32],
-        commission,
-    })
-}
-
 fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwork {
     DestinationNetwork::EvmDestination(EvmDestination {
         call_data: vec![0x00; 4],
@@ -74,17 +67,6 @@ fn route_proofs_accept_exact_match_to_rgb_destination() {
         &proof(90, None),
     )
     .is_ok());
-}
-
-#[test]
-fn route_proofs_refuse_a_concordium_source() {
-    let err = validate_route_proofs(
-        &ccd_source(10),
-        &evm_destination(990, 10),
-        &proof(990, None),
-        &proof(990, None),
-    );
-    assert!(err.is_err());
 }
 
 #[test]

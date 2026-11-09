@@ -12,10 +12,8 @@ pub fn commitment(
     ciphertext: &[u8],
 ) -> Vec<u8> {
     let chain = k.chain_id.to_be_bytes();
-    let fields: [&[u8]; 13] = [
+    let fields: [&[u8]; 10] = [
         &k.evm_address,
-        &k.btc_compressed_pub,
-        k.btc_xpub.as_bytes(),
         &k.master_fingerprint,
         k.account_xpub_vanilla.as_bytes(),
         k.account_xpub_colored.as_bytes(),
@@ -25,7 +23,6 @@ pub fn commitment(
         k.rgb_asset_id.as_bytes(),
         &k.evm_gas_tx_uncompressed_pub,
         &k.evm_gas_tx_address,
-        &k.ccd_ed25519_pub,
     ];
     let mut bundle = Vec::new();
     for field in fields {
@@ -61,8 +58,6 @@ pub fn bundle_cases(keys: &PublicKeysResponse) -> Vec<(&'static str, PublicKeysR
         }};
     }
     bytes!(evm_address);
-    bytes!(btc_compressed_pub);
-    string!(btc_xpub);
     bytes!(master_fingerprint);
     string!(account_xpub_vanilla);
     string!(account_xpub_colored);
@@ -74,7 +69,6 @@ pub fn bundle_cases(keys: &PublicKeysResponse) -> Vec<(&'static str, PublicKeysR
     string!(rgb_asset_id);
     bytes!(evm_gas_tx_uncompressed_pub);
     bytes!(evm_gas_tx_address);
-    bytes!(ccd_ed25519_pub);
     cases
 }
 
