@@ -21,68 +21,29 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
 
+  # The jobs below run side by side. Together they hold the checks that one
+  # long job held before. The last job, `ci`, keeps the old check name for
+  # branch protection and passes only when every job passed.
+
+  # Python script tests, format, the default workspace and the minimal builds.
+  workspace:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: rustfmt, clippy
+          cache-name: workspace
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
+          federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Test build and deployment scripts
         run: |
           python3 -m unittest discover -s build/tests -v
           python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
-
-      - name: Install Rust 1.96.1
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.96.1"
-          components: rustfmt, clippy
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
-      # rgb-lib comes from a private mirror and the RGB crates it pins from public
-      # repos. Cargo loads every git source of the lock, so every build here fetches them.
-      - name: Set up access to the rgb-lib mirror
-        env:
-          RGB_LIB_BFA_DEPLOY_KEY: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
-          RGB_PRIVATE_DEPS_TOKEN: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
-        run: sh build/ci-rgb-lib-access.sh
-
-      # The parent's private proto dep uses the SSH Host alias
-      # github-federated-signer. The alias maps to github.com with IdentityFile
-      # + IdentitiesOnly yes, so SSH offers exactly ONE key per connection.
-      - name: Set up SSH for private deps
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
-          printf '%s\n' "${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}" > ~/.ssh/key_federated
-          chmod 600 ~/.ssh/key_*
-          cat >> ~/.ssh/config << 'SSHCONF'
-          Host github-federated-signer
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/key_federated
-            IdentitiesOnly yes
-          SSHCONF
-          chmod 600 ~/.ssh/config
-
-      # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
-      # would pack an excluded subdirectory of a listed one. No target dirs: they
-      # hold the compiled private RGB crates.
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git/*/*
-            !~/.cargo/git/*/rgb-lib-bfa-*
-            !~/.cargo/git/*/rgb-consensus-*
-            !~/.cargo/git/*/rgb-ops-*
-            !~/.cargo/git/*/rgb-api-*
-            !~/.cargo/git/*/rgb-schemas-*
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
 
       # A [patch.crates-io] entry that does not match its requirement is dropped
       # with only a warning; one off rgb-lib's revs builds against other RGB crates.
@@ -113,12 +74,11 @@ jobs:
 
       # NOTE: `parent/` is a SEPARATE cargo workspace (see the root Cargo.toml
       # comment), so `--workspace` here covers only enclave / enclave-proto /
-      # attestation-verify. Parent gets its own steps below; keep them in sync
-      # when adding checks.
+      # attestation-verify. The `parent` job has the parent checks.
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Defaults have no features. RGB builds need a signer role (lanes below).
+      # Defaults have no features. RGB builds need a signer role (jobs below).
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -133,7 +93,45 @@ jobs:
       - name: Test (attestation verifier, mock documents)
         run: cargo test --locked -p attestation-verify --features mock
 
-      # --- parent workspace (separate lockfile, separate target dir) ---------
+      # Minimal build: no features at all (`--no-default-features`). Exercises the guard that a build without
+      # `rgb-validation` refuses an RGB source
+      # (a_build_without_rgb_validation_refuses_rgb_sources).
+      # Compiles no RGB dep. The no-SPV steps in the `no-spv` job compile the no-SPV path.
+      - name: Build (minimal — no default features)
+        run: cargo build -p utexo-bridge-enclave --no-default-features
+
+      - name: Clippy (minimal — no default features)
+        run: cargo clippy -p utexo-bridge-enclave --no-default-features --all-targets -- -D warnings
+
+      - name: Test (minimal — no default features)
+        run: cargo test -p utexo-bridge-enclave --no-default-features
+
+      # Mock-attestation integration suite. The cloning handshake and attested
+      # public-key tests (enclave/tests/test_clone.rs, test_attested_pubkey.rs)
+      # are file-gated on `mock-attestation` + `allow-seed-import` — the mock
+      # path skips NSM/COSE/cert-chain but still enforces the pubkey, digest,
+      # nonce, and PCR bindings those tests assert. Without this step those
+      # suites (donor PCR-mismatch / wire-pubkey binding, attested-bundle
+      # parity) compile to nothing and never run. Debug profile only: the
+      # release compile_error guard for these dev features is asserted
+      # separately by the `release-guards` job.
+      - name: Test (mock-attestation integration — cloning + attestation)
+        run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
+
+  # The parent workspace has its own lockfile and target dir.
+  parent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: rustfmt, clippy
+          cache-name: parent
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
+          federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
+
       - name: Check formatting (parent)
         run: cargo fmt --all --manifest-path parent/Cargo.toml -- --check
 
@@ -159,13 +157,25 @@ jobs:
       - name: Test (parent, insecure-dev)
         run: cargo test --manifest-path parent/Cargo.toml --features insecure-dev --test test_insecure_dev
 
-      # BFA mint/burn EIF profiles - the shipped production images. The flow
-      # ships as two signer roles, two enclaves: the mint signer (EVM -> RGB,
-      # Dockerfile.enclave.mint) and the burn signer (RGB -> EVM,
-      # Dockerfile.enclave.burn). Each role implies `rgb-validation`. Each lane
-      # compiles and tests only its own direction, and checks it refuses the other one
-      # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
-      # uses the entropy/cloning lifecycle.
+  # BFA mint/burn EIF profiles - the shipped production images. The flow
+  # ships as two signer roles, two enclaves: the mint signer (EVM -> RGB,
+  # Dockerfile.enclave.mint) and the burn signer (RGB -> EVM,
+  # Dockerfile.enclave.burn). Each role implies `rgb-validation`. Each job
+  # compiles and tests only its own direction, and checks it refuses the other one
+  # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
+  # uses the entropy/cloning lifecycle.
+  mint-signer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: clippy
+          cache-name: mint-signer
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
+
       - name: Build (rgb mint signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer
       - name: Clippy (rgb mint signer)
@@ -176,18 +186,63 @@ jobs:
       - name: Test (mint custody VSOCK deadline)
         run: cargo test --locked -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer --lib seed_persistence::tests::vsock_connect_rejects_expired_deadline_before_opening_a_socket -- --exact
 
+  burn-signer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: clippy
+          cache-name: burn-signer
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
+
       - name: Build (rgb burn signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer
       - name: Clippy (rgb burn signer)
         run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer --all-targets -- -D warnings
       - name: Test (rgb burn signer)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import
-      # Three tests use a history of 10 000 transfers: the consignment memory
-      # test, the whole burn request through dispatch, and the default request
-      # limits. They are slow in a debug build and ignored by default. The
-      # name filter runs only them.
+
+      # Keep expensive correctness regressions and timing measurements out
+      # of ordinary PR counts, but give every ignored RGB test an explicit job.
+      - name: Test (RGB release stress, on request)
+        if: github.event_name == 'workflow_dispatch' && inputs.run_stress
+        timeout-minutes: 30
+        run: cargo test --locked --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+
+  # Three tests use a history of 10 000 transfers: the consignment memory
+  # test, the whole burn request through dispatch, and the default request
+  # limits. They are slow in a debug build and ignored by default. The
+  # name filter runs only them. A separate job keeps them off the critical path.
+  burn-signer-10000-transfers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: 
+          cache-name: burn-signer
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
+
       - name: Test (rgb burn signer, 10 000-transfer tests)
         run: cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import --lib -- --ignored 10_000
+
+  # Builds without SPV: the public-signet indexer profile.
+  no-spv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the Rust build
+        uses: ./.github/actions/setup
+        with:
+          components: clippy
+          cache-name: no-spv
+          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
+          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
 
       - name: Check release (without SPV, mint and burn)
         run: |
@@ -210,37 +265,29 @@ jobs:
             cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path -- -D warnings
           done
 
-      # Minimal build: no features at all (`--no-default-features`). Exercises the guard that a build without
-      # `rgb-validation` refuses an RGB source
-      # (a_build_without_rgb_validation_refuses_rgb_sources).
-      # Compiles no RGB dep. The no-SPV lanes above compile the no-SPV path.
-      - name: Build (minimal — no default features)
-        run: cargo build -p utexo-bridge-enclave --no-default-features
-
-      - name: Clippy (minimal — no default features)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --all-targets -- -D warnings
-
-      - name: Test (minimal — no default features)
-        run: cargo test -p utexo-bridge-enclave --no-default-features
-
-      # Mock-attestation integration suite. The cloning handshake and attested
-      # public-key tests (enclave/tests/test_clone.rs, test_attested_pubkey.rs)
-      # are file-gated on `mock-attestation` + `allow-seed-import` — the mock
-      # path skips NSM/COSE/cert-chain but still enforces the pubkey, digest,
-      # nonce, and PCR bindings those tests assert. Without this step those
-      # suites (donor PCR-mismatch / wire-pubkey binding, attested-bundle
-      # parity) compile to nothing and never run. Debug profile only: the
-      # release compile_error guard for these dev features is asserted
-      # separately by the `release-guards` job.
-      - name: Test (mock-attestation integration — cloning + attestation)
-        run: cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
-
-      # Keep expensive correctness regressions and timing measurements out
-      # of ordinary PR counts, but give every ignored RGB test an explicit job.
-      - name: Test (RGB release stress, on request)
-        if: github.event_name == 'workflow_dispatch' && inputs.run_stress
-        timeout-minutes: 30
-        run: cargo test --locked --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+  # The one check name that branch protection watches. It passes only when
+  # every job above passed, and it fails when one was skipped or cancelled.
+  ci:
+    if: always()
+    needs:
+      - workspace
+      - parent
+      - mint-signer
+      - burn-signer
+      - burn-signer-10000-transfers
+      - no-spv
+      - release-guards
+      - feature-guards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = success ] || { echo "::error::a CI job did not succeed: $result"; exit 1; }
+          done
 
   # Assert the dev-only features `compile_error!` in a release build, so a
   # misconfigured Dockerfile / CI matrix can never ship one. Each feature is
