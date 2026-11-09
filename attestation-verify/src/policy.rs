@@ -59,7 +59,7 @@ pub enum EvmDataSource {
     /// Plaintext JSON-RPC over the host relay. The host can forge the
     /// responses. Dev and test builds only.
     RawRpc = 1,
-    // 2 is retired. Do not reuse it.
+    // 2 is reserved. Do not use it.
     /// JSON-RPC over TLS that ends inside the enclave. The host relays only
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
@@ -991,7 +991,7 @@ mod tests {
         let mut network = good.clone();
         network[15] = 6;
         bad.push(network);
-        // EVM source 2 (retired) is no longer valid.
+        // EVM source 2 is not a valid source.
         let mut evm = good.clone();
         evm[5] = 2;
         bad.push(evm);
