@@ -169,7 +169,10 @@ async fn enclave_without_health_support_returns_503() {
     let port = serve_with(None).await;
 
     let (status, body) = get(port, "/health");
-    assert_eq!(status, 503, "an older enclave must read as not-ready");
+    assert_eq!(
+        status, 503,
+        "an enclave without Health must read as not-ready"
+    );
     assert!(body.contains("\"ready\":false"), "body: {body}");
 }
 

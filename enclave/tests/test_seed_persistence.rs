@@ -93,7 +93,7 @@ fn persistence_initialize_rejects_cloning_secret_before_activating() {
         port,
         &EnclaveRequest {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
-                cloning_secret: "obsolete-secret".into(),
+                cloning_secret: "any-cloning-secret".into(),
                 ..Default::default()
             })),
         },

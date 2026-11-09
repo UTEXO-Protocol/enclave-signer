@@ -82,9 +82,9 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     let mut cases = vec![("variant", AttestedPolicy::Development.to_bytes())];
     // A peer must not attest these fields under a version other than
     // `POLICY_COMMITMENT_V1`.
-    let mut old_version = policy.to_bytes();
-    old_version[0] = 8;
-    cases.push(("version", old_version));
+    let mut other_version = policy.to_bytes();
+    other_version[0] = 8;
+    cases.push(("version", other_version));
     macro_rules! alter {
         ($field:ident, $value:expr) => {{
             let mut p = policy.clone();

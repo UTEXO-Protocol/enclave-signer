@@ -371,7 +371,7 @@ fn test_sign_ccd_deterministic() {
 /// There is no segwit v0 P2WSH signer: a valid 2-of-3 P2WSH input with our
 /// BIP-84 key in its witness script is not signed.
 #[test]
-fn p2wsh_input_naming_our_legacy_key_is_never_signed() {
+fn p2wsh_input_naming_our_bip84_key_is_never_signed() {
     use bitcoin::blockdata::opcodes::all::OP_CHECKMULTISIG;
     use bitcoin::blockdata::script::Builder as ScriptBuilder;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};

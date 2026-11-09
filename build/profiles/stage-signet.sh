@@ -7,7 +7,7 @@ case "$DOCKERFILE" in
 esac
 
 # Dedicated inputs prevent reuse of an asset or token from another profile.
-: "${STAGE_RGB_ASSET_ID:?Set STAGE_RGB_ASSET_ID to the new public-Signet BFA asset}"
+: "${STAGE_RGB_ASSET_ID:?Set STAGE_RGB_ASSET_ID to the public-Signet BFA asset}"
 : "${STAGE_TOKEN_CONTRACT:?Set STAGE_TOKEN_CONTRACT to the approved ERC-20 address}"
 [[ "$STAGE_RGB_ASSET_ID" == rgb:?* ]] || { echo 'Error: invalid STAGE_RGB_ASSET_ID' >&2; exit 1; }
 [[ "$STAGE_TOKEN_CONTRACT" =~ ^0x[0-9a-fA-F]{40}$ && "$STAGE_TOKEN_CONTRACT" != 0x0000000000000000000000000000000000000000 ]] || {
@@ -23,9 +23,9 @@ TOKEN_CONTRACT="$STAGE_TOKEN_CONTRACT"
 RGB_ASSET_ID="$STAGE_RGB_ASSET_ID"
 RUST_LOG=debug,alloy_transport_http=off
 
-# MINT_WITNESS_SAT is 1500 in the mint recipe; the connector must match it.
+# The connector's MINT_WITNESS_SAT must equal the mint recipe's MINT_WITNESS_SAT.
 if [ "$DOCKERFILE" = Dockerfile.enclave.burn ]; then
-    : "${STAGE_GAS_TX_ALLOWED_SELECTORS:?Confirm the selectors against the new Multisig ABI}"
+    : "${STAGE_GAS_TX_ALLOWED_SELECTORS:?Confirm the selectors against the deployed Multisig ABI}"
     [[ "$STAGE_GAS_TX_ALLOWED_SELECTORS" =~ ^0x[0-9a-fA-F]{8}(,0x[0-9a-fA-F]{8})*$ ]] || {
         echo 'Error: STAGE_GAS_TX_ALLOWED_SELECTORS must be comma-separated 4-byte hex selectors' >&2; exit 1
     }

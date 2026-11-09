@@ -217,9 +217,8 @@ class BuildArgumentsTests(unittest.TestCase):
                                            for arg in self.captured_build_args()}
                         self.assertTrue(build_arg_names.isdisjoint(MEMBER_INPUT_NAMES))
 
-    def test_optional_overrides_do_not_leak_into_legacy_or_ccd_recipes(self):
-        for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb', 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
+    def test_optional_overrides_do_not_leak_into_other_recipes(self):
+        for recipe in ('Dockerfile.enclave.ccd', 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
                                      ENCLAVE_FEATURES='vsock,mint-signer', **MEASURED_PINS)
@@ -322,7 +321,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertIn('KMS_ALLOWED_ACCOUNT_IDS required', result.stderr)
         self.assertFalse(self.argv.exists())
 
-    def test_make_old_targets_have_no_kms_dependency_or_arguments(self):
+    def test_make_ccd_target_has_no_kms_dependency_or_arguments(self):
         for target in ('build_enclave_ccd',):
             with self.subTest(target=target):
                 result = self.invoke_make(target)
@@ -411,7 +410,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
 
     def stage_inputs(self):
-        return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:new-signet-asset',
+        return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:stage-signet-asset',
                     STAGE_TOKEN_CONTRACT='0x' + '33' * 20,
                     STAGE_GAS_TX_ALLOWED_SELECTORS='0x12345678,0xabcdef01')
 
@@ -422,7 +421,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 inputs = self.stage_inputs()
                 inputs[key] = ''
                 result = self.invoke('Dockerfile.enclave.burn',
-                                     RGB_ASSET_ID='rgb:old-asset', **inputs)
+                                     RGB_ASSET_ID='rgb:other-asset', **inputs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(key, result.stderr)
                 self.assertFalse(self.argv.exists())
@@ -446,7 +445,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
                                      BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,spv',
-                                     RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
+                                     RGB_ASSET_ID='rgb:other-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
                 self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
@@ -467,8 +466,8 @@ class BuildArgumentsTests(unittest.TestCase):
                 else:
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
 
-    def test_stage_profile_refuses_legacy_recipe_and_unknown_profile(self):
-        for recipe, profile in (('Dockerfile.enclave', 'stage-signet'),
+    def test_stage_profile_refuses_other_recipes_and_unknown_profile(self):
+        for recipe, profile in (('Dockerfile.enclave.ccd', 'stage-signet'),
                                 ('Dockerfile.enclave.burn', 'typo')):
             with self.subTest(recipe=recipe, profile=profile):
                 result = self.invoke(recipe, BUILD_PROFILE=profile)

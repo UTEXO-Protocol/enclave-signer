@@ -28,12 +28,13 @@ use crate::state::ReplayReservation;
 
 /// Error for a request whose network is not compiled into this build.
 /// Single-network EIFs (RGB-only / CCD-only) return it, so callers see the
-/// refusal. It is not a silent no-op.
+/// refusal. It is not a silent no-op. `features` names the build features
+/// that add the network.
 #[allow(dead_code)]
-pub(super) fn unsupported_build(network: &str) -> EnclaveError {
+pub(super) fn unsupported_build(network: &str, features: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!(
-        "enclave was not built with `{network}` support: this binary does not handle {network} \
-         requests (rebuild with `--features {network}`)"
+        "enclave was not built with {network} support: this binary does not handle {network} \
+         requests (rebuild with {features})"
     ))
 }
 
@@ -105,9 +106,9 @@ pub(super) fn dispatch(
         // bytes with the main bridge key. No feature or policy gate limits such
         // a signature. The proto has the variant, so refuse it explicitly.
         Some(Request::SignRawMessage(_)) => {
-            tracing::warn!("request: SignRawMessage - removed, refusing");
+            tracing::warn!("request: SignRawMessage - not supported, refusing");
             Err(EnclaveError::InvalidRequest(
-                "SignRawMessage is removed; no replacement".into(),
+                "SignRawMessage is not supported".into(),
             ))
         }
         Some(Request::SignRawDigest(req)) => {
@@ -132,7 +133,7 @@ pub(super) fn dispatch(
             #[cfg(not(feature = "ccd"))]
             {
                 let _ = req;
-                Err(unsupported_build("ccd"))
+                Err(unsupported_build("ccd", "`--features ccd`"))
             }
         }
         Some(Request::SignRightsRefill(req)) => {
@@ -187,7 +188,10 @@ pub(super) fn dispatch(
             #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
-                Err(unsupported_build("rgb"))
+                Err(unsupported_build(
+                    "rgb",
+                    "`--features mint-signer` or `--features burn-signer`",
+                ))
             }
         }
         Some(Request::GetLastSavedBlock(req)) => {
@@ -199,7 +203,10 @@ pub(super) fn dispatch(
             #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
-                Err(unsupported_build("rgb"))
+                Err(unsupported_build(
+                    "rgb",
+                    "`--features mint-signer` or `--features burn-signer`",
+                ))
             }
         }
         Some(Request::GetAttestedPublicKey(req)) => {

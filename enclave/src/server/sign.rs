@@ -367,7 +367,7 @@ fn source_commission(source: &SourceNetwork) -> Result<u64> {
         #[cfg(feature = "ccd")]
         SourceNetwork::CcdSource(source) => Ok(source.commission),
         #[allow(unreachable_patterns)]
-        _ => Err(unsupported_build("ccd")),
+        _ => Err(unsupported_build("ccd", "`--features ccd`")),
     }
 }
 
@@ -508,7 +508,7 @@ fn refuse_unverifiable_funds_in(
         return Err(EnclaveError::CrossCheck(
             "enclave was not built with --features mint-signer: refusing to sign a bridge-mode PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
-             event_valid/event_finalized booleans are no longer trusted). \
+             event_valid/event_finalized booleans are not trusted). \
              Rebuild with `--features mint-signer`."
                 .into(),
         ));

@@ -22,7 +22,7 @@ class VerifySignerTests(unittest.TestCase):
                           'else echo "[${SIGNERS:-}]"; fi')
         self.stub('attest-verify', f'printf "%s\\n" "$@" > {self.argv}\n'
                                    '[ "${VERIFY_OK:-1}" = 1 ] || exit 1\n'
-                                   f'echo OK; if [ -n "${{LEGACY:-}}" ]; then echo "  EVM address           : {SIGNER}"; '
+                                   f'echo OK; if [ -n "${{ADDRESS_LINE:-}}" ]; then echo "  EVM address           : {SIGNER}"; '
                                    f'else echo "  public_keys.evm_address: {SIGNER}"; fi\n'
                                    '[ -z "${EXTRA:-}" ] || echo "  EVM address : $EXTRA"')
         pcrs = self.base / 'PCR.json'
@@ -53,8 +53,8 @@ class VerifySignerTests(unittest.TestCase):
         self.assertIn('--pcr0 ' + '11' * 48, joined)
         self.assertIn('--expect-signer-role burn', joined)
 
-    def test_the_older_attest_verify_output_still_passes(self):
-        result = self.run_script(LEGACY='1')
+    def test_an_evm_address_line_also_passes(self):
+        result = self.run_script(ADDRESS_LINE='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f'OK: {SIGNER}', result.stdout)
 

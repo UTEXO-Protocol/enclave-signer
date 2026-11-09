@@ -426,7 +426,7 @@ fn retains_full_history_from_checkpoint() {
     let deep = 1000u32;
     assert!(
         (count - deep) > 2122,
-        "precondition: deep anchor is below the old window"
+        "precondition: deep anchor is more than 2122 blocks below the tip"
     );
     assert!(
         chain.header_at(deep).is_some(),

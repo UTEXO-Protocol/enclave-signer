@@ -769,7 +769,7 @@ fn replay_guard_never_wedges_under_flood() {
     for i in 0..(max as u32 * 10) {
         assert!(
             g.check_and_record_at(nonce(i), t0).is_ok(),
-            "record {i} should succeed (no reject-when-full)"
+            "record {i} should succeed (a full guard evicts its oldest entry)"
         );
     }
     assert_eq!(g.seen_count(), max);

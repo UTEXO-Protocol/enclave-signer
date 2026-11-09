@@ -18,7 +18,7 @@ export PRIVATE_DEPS_DIR
     exit 1
 }
 [ -s "$PRIVATE_DEPS_DIR/rgb_deps_token" ] || {
-    echo "Missing private dependency secret: rgb_deps_token (the build scripts still require it, although it maps no URL; RGB_PRIVATE_DEPS_TOKEN in CI)" >&2
+    echo "Missing private dependency secret: rgb_deps_token (the build scripts require it, although it maps no URL; RGB_PRIVATE_DEPS_TOKEN in CI)" >&2
     exit 1
 }
 umask 077

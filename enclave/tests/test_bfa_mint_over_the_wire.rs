@@ -1151,7 +1151,7 @@ fn signs_a_witness_mint_paying_exactly_mint_witness_sat() {
 /// The enclave refuses a witness mint against a deposit that names a blinded
 /// invoice: the mint has no seal to match.
 #[test]
-fn refuses_a_witness_mint_against_a_legacy_blinded_invoice() {
+fn refuses_a_witness_mint_against_a_blinded_invoice() {
     let mut witness = build_on(None, None, false, Payee::Witness);
     let secret = GraphSeal::with_blinding(witness.deposit.user_funding.compute_txid(), 0u32, 7)
         .to_secret_seal();

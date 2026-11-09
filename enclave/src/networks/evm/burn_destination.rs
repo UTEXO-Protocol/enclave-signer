@@ -93,7 +93,7 @@ pub fn resolve(
     if reason[..HASH_LEN - ADDRESS_LEN] == [0u8; HASH_LEN - ADDRESS_LEN] {
         if record.is_some() {
             return Err(EnclaveError::CrossCheck(
-                "burn_destination sent for a legacy (V0) burn".into(),
+                "burn_destination sent for a V0 burn".into(),
             ));
         }
         return Ok(BurnTarget {

@@ -924,7 +924,7 @@ impl ParentService for ParentAdapterService {
         match resp.response {
             Some(enclave_response::Response::InitializeKey(r)) => {
                 Ok(Response::new(InitializeResponse {
-                    attestation: vec![], // Attestation not yet implemented
+                    attestation: vec![], // Initialize returns no attestation
                     public_key: r.btc_compressed_pub,
                 }))
             }

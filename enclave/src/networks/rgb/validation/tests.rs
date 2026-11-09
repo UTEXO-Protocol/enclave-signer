@@ -155,7 +155,7 @@ fn rejects_invalid_bytes() {
 /// A V0 BFA burn does not deserialize, so the enclave refuses it.
 #[test]
 fn rejects_a_v0_consignment() {
-    let v0 = include_bytes!("../../../../tests/fixtures/legacy_v0_bfa_burn.rgbc");
+    let v0 = include_bytes!("../../../../tests/fixtures/v0_bfa_burn.rgbc");
     let err = error_of(validate(v0));
     assert!(err.contains("deserialization failed"), "{err}");
 }
@@ -163,9 +163,9 @@ fn rejects_a_v0_consignment() {
 /// A V1 file that carries a terminals map does not load: the format has no
 /// terminals map.
 #[test]
-fn rejects_a_consignment_with_the_old_terminals_layout() {
-    let old = include_bytes!("../../../../tests/fixtures/legacy_terminals_bfa_transfer.rgb");
-    let err = error_of(validate(old));
+fn rejects_a_consignment_with_a_terminals_map() {
+    let terminals = include_bytes!("../../../../tests/fixtures/terminals_map_bfa_transfer.rgb");
+    let err = error_of(validate(terminals));
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
@@ -1167,7 +1167,7 @@ fn reads_a_mint_and_its_anchor() {
 }
 
 /// A mint that also passes its right on to vout 1. Returns that right.
-fn old_form_mint() -> (History, Utxo) {
+fn mint_keeping_its_right() -> (History, Utxo) {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 7));
@@ -1186,7 +1186,7 @@ fn old_form_mint() -> (History, Utxo) {
 /// keeps its right; the PSBT bind (M3) refuses it on its own too.
 #[test]
 fn refuses_a_mint_keeping_its_right() {
-    let (history, _) = old_form_mint();
+    let (history, _) = mint_keeping_its_right();
     let err = error_of(validate(&history.consignment()));
     assert!(err.contains("validation failed"), "{err}");
 }

@@ -896,7 +896,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
+fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     // The deposit stub lets the run pass the FundsIn gate and reach the
     // consignment bind.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
@@ -1525,7 +1525,7 @@ fn test_sign_raw_message_is_refused() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert!(
-                e.message.contains("SignRawMessage is removed"),
+                e.message.contains("SignRawMessage is not supported"),
                 "unexpected error message: {}",
                 e.message
             );

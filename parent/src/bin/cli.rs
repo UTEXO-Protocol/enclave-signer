@@ -797,8 +797,8 @@ fn main() {
                     println!("CLONE_RESULT_V1=preflight_error");
                     eprintln!(
                         "Error: a cloning secret is required for clone — pass \
-                         --cloning-secret-file, set UTEXO_CLONING_SECRET, or (deprecated) \
-                         --cloning-secret"
+                         --cloning-secret-file, set UTEXO_CLONING_SECRET, or pass \
+                         --cloning-secret, which `ps` shows"
                     );
                     process::exit(1);
                 }
@@ -1250,10 +1250,10 @@ mod tests {
     }
 
     #[test]
-    fn set_endpoints_rejects_the_removed_build_digest_option() {
+    fn set_endpoints_has_no_print_sha256_option() {
         let err = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"])
             .err()
-            .expect("the build-digest option must not parse");
+            .expect("--print-sha256 must not parse");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         assert!(err.to_string().contains("--print-sha256"));
     }

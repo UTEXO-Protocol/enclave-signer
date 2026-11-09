@@ -66,11 +66,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_frame_larger_than_the_old_4_mib_limit() {
+    fn reads_an_8_mib_frame() {
         let request = large_request(8 * 1024 * 1024);
         let mut buf = Vec::new();
         write_message(&mut buf, &request).unwrap();
-        assert!(buf.len() > 4 * 1024 * 1024);
+        assert!(buf.len() > 8 * 1024 * 1024);
         let decoded: EnclaveRequest = read_message(&mut Cursor::new(buf)).unwrap();
         assert_eq!(decoded, request);
     }

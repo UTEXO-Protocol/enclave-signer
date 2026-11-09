@@ -168,15 +168,15 @@ fn topic0_vectors_are_pinned() {
 /// `BridgeFundsIn` signatures. If `BRIDGE_FUNDS_IN_SIG` is either one, this
 /// test fails, so the error is not a later "no deposit found".
 #[test]
-fn legacy_topic0_is_not_in_use() {
+fn bridge_funds_in_topic0_is_not_the_9_or_11_field_signature() {
     let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
     assert_ne!(
         current, "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
-        "still filtering on the 9-field BridgeFundsIn signature"
+        "BRIDGE_FUNDS_IN_SIG is the 9-field BridgeFundsIn signature"
     );
     assert_ne!(
         current, "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
-        "still filtering on the pre-#152 BridgeFundsIn signature (no settlementData)"
+        "BRIDGE_FUNDS_IN_SIG is the 11-field BridgeFundsIn signature (no settlementData)"
     );
 }
 
@@ -935,7 +935,7 @@ fn issue_51_no_receipt_means_no_authorization() {
 // ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
 
 #[test]
-fn rejects_old_funds_in_signature() {
+fn rejects_another_funds_in_signature() {
     let mut log = rgb_companion_log(0xab, 100);
     log.topics[0] = event_topic0("FundsIn(address,uint256,uint256)");
     assert!(decode_funds_in(&log, &word(0xab)).is_err());
@@ -1003,12 +1003,12 @@ fn rejects_funds_in_with_unexpected_layout() {
     // A layout with the id in data, not indexed.
     let mut data = word(0xab).to_vec();
     data.extend_from_slice(&word(100));
-    let old = LogEntry {
+    let id_in_data = LogEntry {
         address: BRIDGE,
         topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
         data,
     };
-    assert!(decode_funds_in(&old, &word(0xab)).is_err());
+    assert!(decode_funds_in(&id_in_data, &word(0xab)).is_err());
 
     let mut extra = rgb_companion_log(0xab, 100);
     extra.topics.push(word(0xab));

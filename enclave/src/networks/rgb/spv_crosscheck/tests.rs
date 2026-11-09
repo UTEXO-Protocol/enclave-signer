@@ -156,20 +156,19 @@ fn happy_path_single_tx_block_with_six_confirmations() {
 /// An anchor more than 2122 blocks below the tip verifies. Full retention
 /// keeps its header, so the proof does not fail with "no header at height H".
 #[test]
-fn deep_anchor_below_old_window_still_verifies() {
+fn deep_anchor_verifies_with_full_retention() {
     let target = synth_headers(1).into_iter().next().unwrap();
     // Make the proof before the target moves into the chain.
     let (txid_display, proof) = single_tx_proof(&target, 1);
-    // A window pruning to floor_2016(tip - 2122) drops height 1 when
-    // tip >= 4138. 4200 is past that, so pruning code fails this test.
+    // Pruning to floor_2016(tip - 2122) would drop height 1 when
+    // tip >= 4138. 4200 is past that, so a pruning chain fails this test.
     let chain = chain_burying(target, 4200);
     let tip = chain.tip_height();
-    let old_window = 100 + 2016 + 6; // pruning window size
-    let old_pruned_base = (tip.saturating_sub(old_window) / 2016) * 2016;
+    let depth = 100 + 2016 + 6;
+    let floor = (tip.saturating_sub(depth) / 2016) * 2016;
     assert!(
-        old_pruned_base >= 1,
-        "precondition: the old window would have pruned the anchor at height 1 \
-         (tip={tip}, old_pruned_base={old_pruned_base})"
+        floor >= 1,
+        "precondition: pruning to {floor} would drop the anchor at height 1 (tip={tip})"
     );
 
     validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();

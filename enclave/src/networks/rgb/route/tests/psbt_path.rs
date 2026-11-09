@@ -338,9 +338,9 @@ fn refuses_a_mint_whose_right_a_mint_made() {
     let (mut history, _, rights) = seeded(&keys);
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 7));
     let outputs = vec![ours(&keys, 3, RIGHT_SATS), ours(&keys, 4, 1_000)];
-    let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
+    let (first_mint, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
     let mint = mint_on(&mut history, kept, &keys);
-    let err = mint_refusal(&destination(&history, &mint, &old), &history);
+    let err = mint_refusal(&destination(&history, &mint, &first_mint), &history);
     assert!(err.contains("not a propagate"), "{err}");
 }
 
@@ -859,8 +859,8 @@ fn refuses_a_refill_whose_right_a_mint_made() {
     let (mut history, _, rights) = seeded(&keys);
     let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 7));
     let outputs = vec![ours(&keys, 3, RIGHT_SATS), ours(&keys, 4, 1_000)];
-    let (old, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
-    let (refill, request) = refill_request(&mut history, kept, &old);
+    let (first_mint, kept) = history.mint_keeping_right(rights[0], 5, 80, to, vec![], outputs);
+    let (refill, request) = refill_request(&mut history, kept, &first_mint);
     let err = run_refill(&refill, &request, &history).unwrap_err();
     assert!(err.to_string().contains("not a propagate"), "{err}");
 }

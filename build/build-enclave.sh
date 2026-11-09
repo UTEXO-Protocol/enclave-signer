@@ -157,7 +157,7 @@ elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ] && [ -n "${RGB_PRIVATE_DEPS_TOKEN:-}" 
     )
 else
     echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa" >&2
-    echo "       and the token that the build scripts still require, although it maps no URL." >&2
+    echo "       and the token that the build scripts require, although it maps no URL." >&2
     echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
     echo "       lib_key and rgb_deps_token files." >&2
     exit 1

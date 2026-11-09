@@ -893,7 +893,7 @@ mod tests {
     use crate::proto::SetEndpointsRequest;
 
     #[test]
-    fn retired_endpoint_digest_env_does_not_affect_bridge_configuration() {
+    fn endpoints_sha256_env_does_not_affect_bridge_configuration() {
         const CHILD: &str = "UTEXO_TEST_ENDPOINTS_ENV_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let config = BridgeConfig::from_env();
@@ -912,7 +912,7 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "config::tests::retired_endpoint_digest_env_does_not_affect_bridge_configuration",
+                    "config::tests::endpoints_sha256_env_does_not_affect_bridge_configuration",
                     "--nocapture",
                 ])
                 .env_clear()

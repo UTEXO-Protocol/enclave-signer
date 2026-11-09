@@ -163,7 +163,7 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
             } else {
                 tracing::warn!(
                     "donor cloning secret configured from UTEXO_CLONING_SECRET env \
-                 (legacy fallback; prefer the InitializeKey cloning_secret field)"
+                 (dev fallback; prefer the InitializeKey cloning_secret field)"
                 );
             }
         }

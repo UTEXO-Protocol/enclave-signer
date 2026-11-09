@@ -117,48 +117,48 @@ fn mock_calldata_decodes_back_to_its_fields() {
 /// leading zero word is a tuple head pointer of 0, so all fields align. Only
 /// the canonical re-encode check in [`decode_funds_out_params`] rejects it. A
 /// non-zero recipient fails the decode alone, so this tests the harder case.
-fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
-    let mut legacy = Vec::with_capacity(4 + 9 * 32);
-    legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-    legacy.extend_from_slice(&recipient);
+fn flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
+    let mut flat = Vec::with_capacity(4 + 9 * 32);
+    flat.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+    flat.extend_from_slice(&recipient);
     let mut amt = [0u8; 32];
     amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
-    legacy.extend_from_slice(&amt); // amount, at flat offset 36
-    legacy.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
-    legacy
+    flat.extend_from_slice(&amt); // amount, at flat offset 36
+    flat.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
+    flat
 }
 
 #[test]
-fn rejects_legacy_flat_encoding_zero_recipient() {
+fn rejects_flat_encoding_zero_recipient() {
     assert!(
-        decode_funds_out_params(&legacy_flat_calldata([0u8; 32])).is_err(),
+        decode_funds_out_params(&flat_calldata([0u8; 32])).is_err(),
         "a flat-encoded body must fail closed, not alias onto the tuple layout"
     );
 }
 
 #[test]
-fn rejects_legacy_flat_encoding_real_recipient() {
+fn rejects_flat_encoding_real_recipient() {
     let mut recipient = [0u8; 32];
     recipient[12..].copy_from_slice(&[0x22; 20]);
-    assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
+    assert!(decode_funds_out_params(&flat_calldata(recipient)).is_err());
 }
 
-/// A calldata without `sourceBurnTxId` (selector `0xdc771390`) must fail
-/// closed. `MultisigProxy` cannot verify that intent.
+/// Calldata under the `fundsOut` selector without `sourceBurnTxId`
+/// (`0xdc771390`) must fail closed. `MultisigProxy` cannot verify that intent.
 #[test]
-fn rejects_pre_source_burn_tx_id_calldata() {
-    let current = mock_funds_out_calldata(1_000);
-    // Remove the last static word. The tuple then has eight fields, so each
-    // dynamic tail offset is one word too large.
-    let mut legacy = current.clone();
-    legacy[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
+fn rejects_the_selector_without_source_burn_tx_id() {
+    let calldata = mock_funds_out_calldata(1_000);
+    // Only the selector changes. The body keeps the tuple that the fixture
+    // builder emits.
+    let mut other = calldata.clone();
+    other[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
     assert!(
-        decode_funds_out_params(&legacy).is_err(),
-        "old selector must not decode"
+        decode_funds_out_params(&other).is_err(),
+        "the selector without sourceBurnTxId must not decode"
     );
     assert!(
-        decode_funds_out_params(&current).is_ok(),
-        "the current shape is what the fixture builder emits"
+        decode_funds_out_params(&calldata).is_ok(),
+        "the fixture builder's calldata must decode"
     );
 }
 
@@ -686,13 +686,13 @@ mod settlement {
     /// The `(bytes32[] ids, uint256[] amounts)` layout is refused: the module
     /// reads no amounts, and the bytes must be canonical.
     #[test]
-    fn rejects_the_old_ids_and_amounts_layout() {
-        let old = (vec![B256::from([0xA1; 32])], vec![U256::from(950u64)]);
+    fn rejects_the_ids_and_amounts_layout() {
+        let ids_and_amounts = (vec![B256::from([0xA1; 32])], vec![U256::from(950u64)]);
         let cd = mock_funds_out_calldata_full(
             Address::ZERO,
             1000,
             Bytes::new(),
-            Bytes::from(old.abi_encode_params()),
+            Bytes::from(ids_and_amounts.abi_encode_params()),
         );
         assert!(validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).is_err());
     }
@@ -811,7 +811,7 @@ mod lz_route {
 
     /// A V0 burn names no chain, so it cannot leave via LayerZero.
     #[test]
-    fn rejects_a_legacy_burn_on_the_lz_route() {
+    fn rejects_a_v0_burn_on_the_lz_route() {
         let r = release(honest());
         let validated = burn_with_reason(padded_recipient());
         let err = validate_funds_out_burn_recipient(&r, &validated, None).unwrap_err();
@@ -1421,12 +1421,12 @@ mod btc_relay {
     /// A two-field proof, one 64-byte `(blockHeight, commitmentHash)` pair,
     /// verifies the source block but not relay freshness, so it is refused.
     #[test]
-    fn rejects_legacy_two_field_proof() {
+    fn rejects_a_two_field_proof() {
         let (chain, hashes) = chain();
-        let mut legacy = Vec::with_capacity(64);
-        legacy.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
-        legacy.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
+        let mut two_fields = Vec::with_capacity(64);
+        two_fields.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
+        two_fields.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(two_fields));
         let err = check(&cd, &chain).unwrap_err();
         assert!(err.to_string().contains("128 bytes"), "got: {err}");
     }
