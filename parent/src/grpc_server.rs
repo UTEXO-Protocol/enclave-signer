@@ -13,16 +13,16 @@ use crate::framing;
 
 use crate::signed_responses::{Claim, Lead, SignedResponses};
 
-/// How much longer the parent waits for a reply than the socket deadline of the
-/// enclave. The enclave must give up first: its failed write then rolls its
-/// replay key back, while a parent that gives up first leaves a committed key
-/// and a response nobody read. The deadline starts at accept, while the wait of
-/// the parent starts before the worker is queued.
-const ENCLAVE_WAIT_MARGIN_SECS: u64 = 10;
+/// How much longer the parent and the CLI wait for a reply than the socket
+/// deadline of the enclave. The enclave must give up first: its failed write
+/// then rolls its replay key back, while a parent that gives up first leaves a
+/// committed key and a response nobody read. The deadline starts at accept,
+/// while the wait of the parent starts before the worker is queued.
+pub(crate) const ENCLAVE_WAIT_MARGIN_SECS: u64 = 10;
 
 /// The socket deadline of the image. The parent uses it until it has read the
-/// deadline in force.
-const IMAGE_DEADLINE_SECS: u64 = 90;
+/// deadline in force, and the CLI uses it when the enclave does not say it.
+pub(crate) const IMAGE_DEADLINE_SECS: u64 = 90;
 
 /// How often the parent reads the deadline in force. The operator changes it
 /// with the CLI, which goes straight to the enclave.
@@ -131,7 +131,7 @@ fn timed_out() -> Status {
     Status::deadline_exceeded("enclave request timed out")
 }
 
-fn is_timeout(e: &io::Error) -> bool {
+pub(crate) fn is_timeout(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock

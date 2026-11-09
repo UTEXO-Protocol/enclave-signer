@@ -221,6 +221,15 @@ rolls the replay key back. A parent that gives up first leaves a committed key a
 response that nobody read. So a change of the deadline needs no change on the
 parent. For up to 5 s after a change, the parent can use the old value.
 
+The CLI follows the deadline too. Before each request other than `GetLimits`, it
+reads `total_request_timeout_secs` with `GetLimits`. Each socket read and write of
+the request can then block for that deadline plus `ENCLAVE_WAIT_MARGIN_SECS`
+(`parent/src/grpc_server.rs`), so the enclave gives up before the CLI, as it does
+before the parent. If `GetLimits` gets no answer within `LIMITS_IO_TIMEOUT`
+(`parent/src/client.rs`), the command ends with that error. If the enclave answers
+`GetLimits` with an error, or closes the connection, the CLI starts from the image
+deadline.
+
 Two timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS`
 on the parent (default 120 s), and the timeout of the backend (2 minutes). A deadline
 above 110 s also needs a change of these two values.
