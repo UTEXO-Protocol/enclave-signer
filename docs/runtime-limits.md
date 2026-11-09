@@ -36,8 +36,9 @@ utexo-bridge-parent-cli --addr vsock://16:5000 limits reset
 values. `limits set --reset` goes back to the image values first. `limits reset`
 goes back to the image values. Each command prints the table of `limits show`.
 
-The next request uses the new values. A request that is in progress keeps the
-values that it read.
+The next request uses the new values. A request that is in progress reads each
+limit when it needs it, so a change can reach it between two steps. Change the
+limits when the enclave is idle.
 
 ## After a restart
 
@@ -243,3 +244,5 @@ above 110 s also needs a change of these two values.
 
 The parent has its own frame limit (`parent/src/framing.rs`). A value of
 `max_message_bytes` above 24 MiB has no effect until the parent limit also changes.
+The same holds for `max_wire_elements` above 2^19: the parent keeps a fixed
+limit (`parent/src/request_shape.rs`).

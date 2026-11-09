@@ -574,6 +574,11 @@ if [ -n "$EVM_RPC_PATH_FILE" ] && [ "$EVM_RPC_PATH_FILE" != /etc/utexo/evm-rpc-p
   install -m 0600 -o ubuntu -g ubuntu "$EVM_RPC_PATH_FILE" /etc/utexo/evm-rpc-path
 fi
 if [ -e /etc/utexo/evm-rpc-path ]; then
+  if [ -z "$EVM_RPC_PATH_FILE" ]; then
+    echo "NOTICE: reusing /etc/utexo/evm-rpc-path from an earlier deploy." >&2
+    echo "  If the RPC provider changed, pass EVM_RPC_PATH_FILE, or delete that file" >&2
+    echo "  to use the path /. Else the old provider key goes to the new provider." >&2
+  fi
   EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path
 fi
 cat > /etc/utexo/enclave.env <<EOF

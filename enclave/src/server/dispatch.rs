@@ -222,7 +222,7 @@ pub(super) fn dispatch(
             handle_set_limits(ctx, req)
         }
         Some(Request::GetLimits(_)) => {
-            tracing::info!("request: GetLimits");
+            tracing::debug!("request: GetLimits");
             handle_get_limits(ctx)
         }
         // All builds must answer the readiness probe.

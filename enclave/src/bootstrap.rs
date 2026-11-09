@@ -16,11 +16,36 @@ use crate::policy::SecurityPolicy;
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
-/// Install the tracing subscriber. `RUST_LOG` picks the filter.
+/// Install the tracing subscriber. `RUST_LOG` picks the filter, but Alloy HTTP
+/// logs stay off at any level: they can carry the RPC URL, and its path is a
+/// secret.
 pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let filter = alloy_http_off(tracing_subscriber::EnvFilter::from_default_env());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// `filter` with Alloy HTTP logging forced off.
+fn alloy_http_off(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    filter.add_directive(
+        "alloy_transport_http=off"
+            .parse()
+            .expect("a fixed, valid directive"),
+    )
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::alloy_http_off;
+    use tracing_subscriber::EnvFilter;
+
+    #[test]
+    fn a_trace_filter_still_turns_alloy_http_off() {
+        for level in ["trace", "debug", "alloy_transport_http=trace"] {
+            let filter = alloy_http_off(EnvFilter::new(level)).to_string();
+            assert!(filter.contains("alloy_transport_http=off"), "{filter}");
+            assert!(!filter.contains("alloy_transport_http=trace"), "{filter}");
+        }
+    }
 }
 
 /// Add each missing `addr host` line to the hosts file at `path`, so the

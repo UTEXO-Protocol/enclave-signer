@@ -272,10 +272,9 @@ An empty wire `evm_rpc_path` uses `/`. The CLI reads a nonempty private path fro
 absolute ASCII path of at most 2048 bytes. They reject authorities, queries,
 fragments, percent escapes and dot segments without echoing the value. Only
 ASCII letters, digits and `/-._~` are accepted. RPC transport errors and endpoint
-debug output omit the path. The dev images use
-`RUST_LOG=debug,alloy_transport_http=off` to disable Alloy HTTP logs, which can
-include the full URL and provider responses. Custom debug or trace filters
-must keep `alloy_transport_http=off`. The client does not override the log filter.
+debug output omit the path. `init_tracing` adds `alloy_transport_http=off` to
+every `RUST_LOG` filter, because Alloy HTTP logs can include the full URL and
+provider responses.
 Builds without `rgb-validation` reject a nonempty path.
 
 A provider key in the path is runtime-only. Neither attestation policy nor KMS

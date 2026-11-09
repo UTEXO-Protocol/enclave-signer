@@ -2,7 +2,7 @@
 //!
 //! It serves the on-chain status of the consignment witnesses
 //! ([`IndexerWitnesses`]) to a burn signer built without `spv`. An `spv` build
-//! reads witness status from SPV proofs instead, and no indexer to sign.
+//! reads witness status from SPV proofs instead, and needs no indexer to sign.
 //! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora
 //! (`https://`, `http://`), through the host vsock forwarder. Each call
 //! crosses the trust boundary and has a timeout. Electrum calls are

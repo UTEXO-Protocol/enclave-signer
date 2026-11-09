@@ -745,9 +745,8 @@ authorities, queries, fragments, percent escapes or dot segments. Omit the file
 to request `/`; an empty supplied file is rejected. The CLI accepts a trailing
 line ending. The client sends the path over TLS to the configured host and CA,
 and does not follow redirects. RPC transport errors and endpoint debug output
-omit the path. The dev images use `RUST_LOG=debug,alloy_transport_http=off`.
-Keep `alloy_transport_http=off` in custom debug or trace filters: Alloy HTTP
-logs can include the full URL and provider responses.
+omit the path. The enclave turns `alloy_transport_http` logging off at any `RUST_LOG`
+level: Alloy HTTP logs can include the full URL and provider responses.
 
 The path and API key are absent from the EIF, image metadata, public attestation
 and KMS context. A verifier needs no provider credential. To rotate a key,

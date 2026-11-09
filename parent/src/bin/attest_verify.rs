@@ -6,7 +6,8 @@
 //! and bundle commitment.
 //!
 //! Usage: production verification takes the PCRs and the `--expect-*` flags.
-//! Without them, argument parsing exits 2. See `docs/verify-a-signer.md` and
+//! Missing PCRs or `--expect-*` values exit 1 after parsing; a missing
+//! `--expect-evm-finality-tag` exits 2. See `docs/verify-a-signer.md` and
 //! `docs/pubkey-attestation.md` for the full commands.
 //!
 //! `--from-file <bundle.json>` runs the same checks offline on a bundle that

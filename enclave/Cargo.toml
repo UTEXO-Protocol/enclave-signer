@@ -160,7 +160,7 @@ spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
-# Accept all-zero peer PCRs for debug clone tests (F03-AF-12).
+# Accept all-zero peer PCRs for debug clone tests. A release build refuses it.
 # Never enable in production builds. Does not compile in a release build.
 allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 
