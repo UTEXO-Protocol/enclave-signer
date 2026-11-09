@@ -14,6 +14,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the older run of that pull request.
+# Runs on main and dev, and manual runs, always finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # parent/Cargo.toml uses an ssh:// URL for its private dep; force Cargo to use
