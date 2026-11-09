@@ -25,8 +25,7 @@ pub const MAX_REFILL_FEE_INPUTS: usize = 1;
 /// hostile fee input.
 pub const MIN_REFILL_RIGHTS: usize = 2;
 
-/// Our own cap: rgb-lib has no limit since ae85958. RR9, RR12 and RR13 carry
-/// the security.
+/// Our own cap: rgb-lib sets no limit. RR9, RR12 and RR13 carry the security.
 pub const MAX_REFILL_RIGHTS: usize = 255;
 
 /// The gate (G1, RR10, RR12, RR13): PSBT and keys only, so it runs before the

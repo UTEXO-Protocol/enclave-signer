@@ -101,9 +101,9 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("plain-BTC PSBTs"))
             }
         }
-        // The EIP-191 `personal_sign` path had no feature or policy gate. It
-        // signed any caller bytes with the main bridge key. The proto still has
-        // the variant, so refuse it explicitly.
+        // `SignRawMessage` asks for an EIP-191 `personal_sign` of any caller
+        // bytes with the main bridge key. No feature or policy gate limits such
+        // a signature. The proto has the variant, so refuse it explicitly.
         Some(Request::SignRawMessage(_)) => {
             tracing::warn!("request: SignRawMessage - removed, refusing");
             Err(EnclaveError::InvalidRequest(

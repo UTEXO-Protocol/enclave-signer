@@ -217,8 +217,8 @@ fn chain(history: &History) -> (HeaderChain, Vec<MerkleProofEntry>, Bytes) {
 }
 
 /// Empty, deployed reject list. Any unexpected receipt/network call is a
-/// fixture failure: burn ancestry derives settlement IDs, it does not fetch
-/// a deposit receipt in the current protocol.
+/// fixture failure: burn ancestry derives settlement IDs; it does not fetch
+/// a deposit receipt.
 struct EmptyRejectList(Arc<AtomicUsize>);
 impl EvmReceiptProvider for EmptyRejectList {
     fn get_transaction_receipt(&self, _: &[u8; 32]) -> Result<Option<ReceiptData>> {
@@ -250,7 +250,7 @@ impl EvmReceiptProvider for EmptyRejectList {
     }
 }
 
-// The contract keeps the `rgbOpId` typehash label, but that word is the
+// The contract's typehash names this word `rgbOpId`, but it holds the
 // LockId of the mint transition in its exact Bitcoin witness transaction.
 fn mint_deposit_id(lock_id: [u8; 32]) -> B256 {
     keccak256((

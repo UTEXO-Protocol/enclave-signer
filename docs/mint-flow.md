@@ -1,7 +1,8 @@
 # Mint flow (EVM -> RGB)
 
 **Signer image:** `mint-signer` (`--no-default-features --features vsock,spv,mint-signer`).
-**Checked against repository code:** 2026-11-04 (rgb-lib bfa.6 66bae096 move: locks keyed by lockId; plan B: the mint signer reads the rgb-lib fascia; witness mints).
+**Checked against repository code:** 2026-11-04, rgb-lib-bfa 5010eefa
+(RGB-Tools bfa 66bae096).
 Deployment was not checked.
 
 This document tells how the mint signer checks and signs a mint. The
@@ -68,7 +69,7 @@ spend:
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipts, canonical blocks and selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
-| Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy | Nothing | Not read by a mint or a refill. The launch still pins `ELECTRUM_URL` until the mint image drops the indexer. |
+| Bitcoin indexer (Electrum or Esplora) | Pinned URL through the vsock proxy | Nothing | Not read by a mint or a refill, but the launch pins `ELECTRUM_URL`. |
 
 The mint signer ignores `event_valid` and `event_finalized` from the listener.
 It checks deposits through the pinned EVM RPC. It trusts that provider for
@@ -83,8 +84,8 @@ diagnostic text is not used to identify this state. The enclave and listener
 log this wait at debug level. Other validation failures keep code 3; a receipt
 above the `latest` head also remains a validation failure.
 
-The mint signer validates no RGB consignment. Since f3975623, rgb-lib (pinned:
-rgb-lib-bfa 5010eefa, RGB-Tools bfa 66bae096) commits the PSBT and then
+The mint signer validates no RGB consignment. The pinned rgb-lib
+(rgb-lib-bfa 5010eefa, RGB-Tools bfa 66bae096) commits the PSBT and then
 strips its RGB, MPC, OPRET and TAPRET proprietary keys. It keeps
 the RGB data in the tx's fascia (`transfers/<txid>/fascia`): the unsigned tx,
 every bundle the tx commits and the MPC merkle block with its entropy,
@@ -115,7 +116,7 @@ the mint invalid for everyone. It moves no other state of ours and inflates
 nothing. The enclave checks no history, genesis, ancestor anchor, reject list
 or witness depth. Each of these is liveness only (section 11).
 
-The mint image still bakes `SPV_MIN_CONFIRMATIONS` (3) into the attested
+The mint image bakes `SPV_MIN_CONFIRMATIONS` (3) into the attested
 policy, but no mint check reads it. The connector should still mint only on a
 right whose send is that deep: a mint on a parent that leaves the chain is
 invalid until the parent is mined again.
@@ -148,9 +149,9 @@ sequenceDiagram
 ```
 
 The RGB fields of a mint and a refill on each hop. Each fascia is the
-strict-encoded file rgb-lib writes, sent as raw bytes. The old `parent_psbt`
-numbers are reserved: a hop that still sends it sends no fascia, and F4
-refuses it.
+strict-encoded file rgb-lib writes, sent as raw bytes. The Reserved column
+gives the numbers of the reserved `parent_psbt` field; do not reuse them. A
+request with a value at that number and no fascia fails F4.
 
 | Hop | Message | PSBT | Its fascia | Parent fascia | Reserved |
 |-----|---------|------|------------|---------------|----------|
@@ -302,8 +303,7 @@ market fee before the user locks tokens.
 
 ### Stage 4 - Is it a mint of exactly the deposit?
 
-These redo what the VM checks (`sas`, `plc`) and what the former consignment
-binds checked, on the committed transition.
+These redo the VM checks (`sas`, `plc`) on the committed transition.
 
 - **M1** The transition type must be `TS_MINT`.
 - **M2** It must close exactly one input, an `OS_MINT`.
@@ -385,7 +385,7 @@ it is signed.
 - **S6.1** The amount must cover the minted units plus the commission.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal.
-  A witness mint has no blinded seal, so a legacy deposit refuses it
+  A witness mint has no blinded seal, so a deposit with an invoice refuses it
   ("pays 0 confidential recipient legs"). A `wvout` invoice is refused too.
 - **S6.3** If the `destinationAddress` is empty (the v2 Bridge), the deposit
   binds the user through the mint's lockId (M6). The mint transition commits
@@ -490,9 +490,9 @@ The listener gRPC has no auth, so the cheap checks run first.
 - **RR11** PP1 - PP7 on the right it closes: exactly one input spends the
   right's UTXO. The other input, if any, is the fee input (G1).
 
-There is no consignment, so the former RR1 (size and hash), RR2 (consensus
-and the mint-anchor refusal) and RR4 (reject list) are gone. PP4 replaces the
-anchor refusal (section 11).
+A refill carries no consignment, so no size, hash, consensus or reject-list
+check runs on it, and the rule numbers RR1, RR2 and RR4 are not used. PP4
+keeps every mint out of the history of the right it closes (section 11).
 
 **Keys:**
 
@@ -511,9 +511,9 @@ begin returns. For a right a refill made, the parent fascia is that refill's.
 For a right the issuer seeded, the issuer's `rights.fascia` (saved by
 `bfa_issuer` at `send-rights-begin`) is placed once, at seeding, as
 `<connector data dir>/rights_seeds/<txid>.fascia`. It must be strict-encoded,
-as rgb-lib writes it since f3975623 (pinned: rgb-lib-bfa 5010eefa, RGB-Tools
-bfa 66bae096). An older rgb-lib wrote JSON, which PP1 refuses. Only opening
-that wallet on f3975623 or later re-saves it.
+as the pinned rgb-lib (rgb-lib-bfa 5010eefa, RGB-Tools bfa 66bae096) writes
+it. PP1 refuses a JSON fascia. Opening the issuer wallet on rgb-lib f3975623
+or later re-saves a JSON fascia strict-encoded.
 
 What is not checked, and why that is safe:
 
@@ -535,7 +535,7 @@ What is not checked, and why that is safe:
 - Each signature can burn at most the Stage 3 fee. RR15 bounds how many.
 
 The limits are compiled in, so they are part of PCR0: at least 2 rights, at
-most 255 (our own cap; rgb-lib has no limit since ae85958), at most 1 fee
+most 255 (our own cap; the pinned rgb-lib has no limit), at most 1 fee
 input, at most 12 refills per hour.
 
 ## 9. What the mint signer refuses
@@ -545,7 +545,7 @@ input, at most 12 refills per hour.
 | `Sign` with an RGB source or an EVM destination (burn) | Refused: wrong signer role. |
 | `SignRawDigest` (gas transaction) | Refused: wrong signer role. |
 | `InitiateCloning`, `GetClone`, `SetClone` | Refused: the seed comes from KMS. |
-| `Sign` without `fascia` | Refused (F4). rgb-lib strips the PSBT (since f3975623; pinned 5010eefa, RGB-Tools bfa 66bae096), so there is nothing else to read. An old listener that sends `parent_psbt` (now reserved) and no fascia fails closed here. |
+| `Sign` without `fascia` | Refused (F4). The pinned rgb-lib (5010eefa, RGB-Tools bfa 66bae096) strips the PSBT, so there is nothing else to read. A request that sets the reserved `parent_psbt` number and no fascia fails closed here. |
 | `Sign` without `parent_fascia` | Refused (PP1). |
 | `SignRightsRefill` without `fascia` or `parent_fascia` | Refused (F4, PP1). |
 | `SignRightsRefill` that breaks a rule of section 8 | Refused. Past the gate it still counts against the hourly limit. |
@@ -567,17 +567,16 @@ signer checks the amount three times, from the fascia and the deposit:
 2. The deposit: its `FundsIn` names this mint's lockId, and the deposit id the
    mint derives carries `issuedSupply` (M6). The units equal
    `amount - commission` (M5).
-3. The recipient: the one leg (M7) is the depositor's blinded seal when a
-   legacy deposit names one (S6.2). Otherwise the lockId binds it (S6.3): a
+3. The recipient: the one leg (M7) is the depositor's blinded seal when the
+   deposit carries an invoice (S6.2). Otherwise the lockId binds it (S6.3): a
    blinded seal in full, a witness seal by its vout and its tx (below).
 
 A propagate parent (PP4) keeps every mint out of a mint's history, by
 induction: rights reach the mint wallet only by issuer sends or refills,
-every refill passed PP4 (or, before plan B, the consensus refusal of mint
-anchors), and M3 stops a mint passing a right on. Since rgb-lib f3975623 the
-BFA schema refuses a mint that assigns a right too, so receivers refuse it
-as well. Rollout needs the mint wallet to hold no right whose parent is a
-mint or the genesis.
+every refill passes PP4, and M3 stops a mint passing a right on. The BFA
+schema of the pinned rgb-lib refuses a mint that assigns a right too, so
+receivers refuse it as well. The mint wallet must hold no right whose parent
+is a mint or the genesis.
 
 Known limits. Each is liveness only: a receiver validates the full history
 when it accepts the mint, and refuses a bad one.
@@ -630,16 +629,15 @@ nothing, so a caller should lock only once `ReceivedMint.lock_id` equals the
 returned lockId. A witness mint pays a new output of the mint tx, which starts
 with no allocations, so these limits apply mainly to blinded mints.
 
-**Witness mint output script: bound by the lockId** (was the accepted V1
-risk, CTO 2026-10-30). A witness seal names a vout of the mint tx, and the
-OpId commits that vout, not the script on it. The lockId the deposit names
-also commits the mint txid, so the same mint in a tx that pays that vout to
-another script names another lock, and M6 refuses it (route test
-`witness_mint_lock_id_binds_the_recipient_script`). The user still locks the
-lockId the bridge hands out, so the bridge must name the tx that pays the
-user. M8 keeps the units off the enclave's own outputs and bounds the sats
-that leave to `MINT_WITNESS_SAT`. There is no amount cap on a witness mint
-yet (to be added later).
+**Witness mint output script: bound by the lockId.** A witness seal names a
+vout of the mint tx, and the OpId commits that vout, not the script on it. The
+lockId the deposit names also commits the mint txid, so the same mint in a tx
+that pays that vout to another script names another lock, and M6 refuses it
+(route test `witness_mint_lock_id_binds_the_recipient_script`). The user still
+locks the lockId the bridge hands out, so the bridge must name the tx that pays
+the user. M8 keeps the units off the enclave's own outputs and bounds the sats
+that leave to `MINT_WITNESS_SAT`. There is no amount cap on a witness mint yet
+(to be added later).
 
 The fascia is read in the strict encoding of rgb-ops 00f8d62 (the pinned
 `rgb-ops` rev). A change of that encoding fails F4 and PP1 closed: every mint

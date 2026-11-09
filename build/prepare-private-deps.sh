@@ -1,7 +1,7 @@
 #!/bin/sh
 # Materialize CI secrets outside the Docker context. Never print their values.
 # lib_key reads the rgb-lib mirror (UTEXO-Protocol/rgb-lib-bfa); rgb_deps_token
-# maps no URL, but the build scripts still require it (map-rgb-mirrors.sh);
+# maps no URL, but the build scripts require it (map-rgb-mirrors.sh);
 # federated_key reads the parent's proto.
 set -eu
 : "${PRIVATE_DEPS_DIR:?Set PRIVATE_DEPS_DIR to a directory outside the checkout}"

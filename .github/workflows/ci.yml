@@ -84,7 +84,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # A [patch.crates-io] entry no longer matching its requirement is dropped
+      # A [patch.crates-io] entry that does not match its requirement is dropped
       # with only a warning; one off rgb-lib's revs builds against other RGB crates.
       - name: Every RGB crate patch is used and copies rgb-lib's
         run: |
@@ -165,7 +165,7 @@ jobs:
       # Dockerfile.enclave.burn). Each role implies `rgb-validation`. Each lane
       # compiles and tests only its own direction, and checks it refuses the other one
       # (tests/test_signer_role.rs). Mint also exercises KMS persistence; burn
-      # retains the existing entropy/cloning lifecycle.
+      # uses the entropy/cloning lifecycle.
       - name: Build (rgb mint signer)
         run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer
       - name: Clippy (rgb mint signer)

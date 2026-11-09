@@ -96,7 +96,7 @@ fn refuses_missing_parent_fascia() {
     assert!(err.to_string().contains("parent_fascia required"), "{err}");
 }
 
-/// Junk, and the parent PSBT an old connector sends.
+/// Junk, and a parent PSBT in place of its fascia.
 #[test]
 fn refuses_a_parent_that_is_not_a_fascia() {
     let (mut history, seed, rights) = seeded();
@@ -151,8 +151,8 @@ fn refuses_parent_that_does_not_commit_the_input_op() {
     assert!(err.contains("did not make the mintRight"), "{err}");
 }
 
-/// An old-form mint passed its right on. The right's child names the mint
-/// as its parent.
+/// A mint that passes its right on, which the schema refuses. The right's
+/// child names the mint as its parent.
 #[test]
 fn refuses_mint_parent() {
     let (mut history, _, rights) = seeded();
@@ -214,7 +214,7 @@ fn accepts_a_propagate_parent() {
     assert_eq!(proof(&child, &parent, right, &history).unwrap(), 0);
 }
 
-/// Before rgb-lib f3975623 rights moved by transfer; the schema now refuses it.
+/// The schema refuses a transfer that moves rights.
 #[test]
 fn refuses_a_transfer_parent() {
     let (mut history, parent, right) = parent_made_by("transfer", &[0xA0], two_rights());

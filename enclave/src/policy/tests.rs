@@ -714,8 +714,8 @@ fn with_kms_is_committed_in_production_only() {
     assert_eq!(dev.clone().with_kms(pin), dev);
 }
 
-/// Issue #270: a cloning role (burn, combined) launches only on an instance
-/// with an IAM role. An all-zero or unread PCR3 refuses `SetEndpoints`.
+/// A cloning role (burn, combined) launches only on an instance with an IAM
+/// role. An all-zero or unread PCR3 refuses `SetEndpoints`.
 #[test]
 fn a_cloning_role_needs_a_non_zero_pcr3_to_launch() {
     for signer_role in [SignerRole::Burn, SignerRole::Combined] {

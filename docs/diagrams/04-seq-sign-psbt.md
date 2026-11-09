@@ -67,7 +67,7 @@ sequenceDiagram
 
     Note over Srv,Inv: 5 — route and recipient
     Srv->>Srv: amount ≥ minted units + commission
-    alt destinationAddress not empty (legacy deposit)
+    alt destinationAddress not empty (deposit with an RGB invoice)
         Srv->>Inv: RGB invoice, blinded seal only
         Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
     else empty (v2 Bridge)

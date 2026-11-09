@@ -17,8 +17,8 @@
 //! The parent is untrusted; this is a delivery aid, not a security control. A
 //! wrong stored reply fails in the node or in rgb-lib, as any wrong parent
 //! output does. The enclave's own guard still refuses a second PSBT for the
-//! same deposit. Bounded by count, bytes and age; a restart clears it, and the
-//! enclave's window then applies as before.
+//! same deposit. Bounded by count, bytes and age; a restart clears it, and
+//! then only the enclave's window applies.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};

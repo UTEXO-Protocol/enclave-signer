@@ -789,7 +789,7 @@ mod tests {
         );
     }
 
-    /// Issue #270: a cloning role must attest its document PCR3.
+    /// A cloning role must attest its document PCR3.
     #[test]
     fn clone_peer_pcr3_absent_aborts() {
         assert_mismatch(

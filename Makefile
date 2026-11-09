@@ -5,7 +5,7 @@ include config.mk
 export DOCKER_BUILDKIT=1
 
 # Private dependency of both workspaces (the rgb-lib-bfa mirror) and the token
-# the build scripts still require: both stay in BuildKit secrets.
+# the build scripts require: both stay in BuildKit secrets.
 DOCKER_AUTH_ARGS ?= --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN
 
 # Pass public values through Docker's environment form, not shell interpolation.

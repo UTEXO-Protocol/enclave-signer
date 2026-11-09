@@ -111,9 +111,8 @@ Before it signs, the mint signer:
    ([mint flow](docs/mint-flow.md) section 1).
 6. Binds the recipient. The v2 Bridge deposit names the mint's lockId, which
    commits to the user's seal and, for a witness seal, to the script of the
-   user's output. A legacy deposit has an RGB invoice. Then the mint's one
-   blinded seal must equal that invoice ([mint flow](docs/mint-flow.md)
-   section 11).
+   user's output. If a deposit has an RGB invoice, the mint's one blinded
+   seal must equal that invoice ([mint flow](docs/mint-flow.md) section 11).
 7. Checks the Bitcoin fee and the sats paid out: none for a blinded mint,
    exactly `MINT_WITNESS_SAT` to the user's output for a witness mint.
 8. Signs Taproot key-path inputs with keys from the colored BIP-86 account.
@@ -184,7 +183,7 @@ Key paths:
 |-----|------|-----|
 | EVM bridge key | `m/44'/60'/0'/0/0` | Signs `fundsOut` (burn). Its address is the cluster identity. |
 | EVM gas-tx key | `m/44'/60'/0'/0/1` | Signs the outer gas transaction (burn). |
-| BTC legacy key | `m/84'/0'/0'/0/0` | Public key only. Signs nothing. |
+| BIP-84 BTC key | `m/84'/0'/0'/0/0` | Public key only. Signs nothing. |
 | Vanilla taproot account | `m/86'/<coin>'/0'` (coin 0 mainnet, 1 other) | Plain-BTC `SignBtc` only. |
 | Colored taproot account | `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 other) | Mint PSBTs only. |
 | Concordium key | `m/44'/919'/0'/0'/0'` (Ed25519, SLIP-0010) | `SignCcd`. |
@@ -260,7 +259,7 @@ request per connection. Frame limit 24 MiB. Schema:
 | `InitiateCloning` | Initial or expired Cloning | burn | Starts a requester session or replaces an expired session. |
 | `GetClone` | Active | burn | Donor side. Verifies the requester attestation and seals the seed. |
 | `SetClone` | Cloning | burn | Requester installs the sealed seed and goes `Active`. |
-| `SignRawMessage` | - | - | Removed. Always refused. |
+| `SignRawMessage` | - | - | Refused in every build. |
 | `Health` | any | all | Readiness: endpoints set and key loaded. Builds with the RGB -> EVM path also require a ready header chain. |
 
 The "Signer" column is for the mint/burn images. Other builds (combined,
@@ -286,18 +285,16 @@ Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
   matters for reproducible PCR0.
 - **Read access to the private RGB repos.** rgb-lib comes from our private
   mirror of the RGB-Tools release, `UTEXO-Protocol/rgb-lib-bfa`, through the
-  `github-rgb-lib` SSH alias (deploy key `lib_key`). The RGB protocol crates
-  it pins come from the `[patch.crates-io]` of `Cargo.toml` and
+  `github-rgb-lib` SSH alias (deploy key `lib_key`). The RGB protocol crates it
+  pins come from the `[patch.crates-io]` of `Cargo.toml` and
   `parent/Cargo.toml`: public `https://github.com/rgb-protocol/<repo>` at the
-  full revs of rgb-lib's own `[patch]`. The build scripts still require the
-  `rgb_deps_token` secret (`build/map-rgb-mirrors.sh`), which no longer maps
-  any URL. The parent
-  also needs read access to `federated-signer-proto` through the
-  `github-federated-signer` SSH alias. CI wires them in
+  full revs of rgb-lib's own `[patch]`. The build scripts require the
+  `rgb_deps_token` secret (`build/map-rgb-mirrors.sh`), although it maps no
+  URL. The parent also needs read access to `federated-signer-proto` through
+  the `github-federated-signer` SSH alias. CI wires them in
   `.github/workflows/ci.yml` (secrets `RGB_LIB_BFA_DEPLOY_KEY`,
-  `RGB_PRIVATE_DEPS_TOKEN` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
-  Repository access alone does not prove that a build reproduces the
-  approved PCR0.
+  `RGB_PRIVATE_DEPS_TOKEN` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). Repository
+  access alone does not prove that a build reproduces the approved PCR0.
 - **Docker + `nitro-cli`** for the EIF. Any x86_64 Linux host with Docker can
   build an EIF and read its PCRs; Nitro hardware is needed only to run it.
 
@@ -323,7 +320,7 @@ cargo build --release -p utexo-bridge-enclave --no-default-features --features v
 cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer
 ```
 
-Other builds stay in the tree. They are not the production bridge:
+The tree has other builds too. They are not the production bridge:
 
 ```bash
 # Concordium only
@@ -349,8 +346,8 @@ mint enclave gets the other KMS values at launch. See
 
 Every enclave image needs, at build time, the deploy key of
 `UTEXO-Protocol/rgb-lib-bfa` (`RGB_LIB_BFA_DEPLOY_KEY`) and the
-`RGB_PRIVATE_DEPS_TOKEN` token, which the scripts still require although the
-RGB protocol crates are now public, or `lib_key` and `rgb_deps_token` files in
+`RGB_PRIVATE_DEPS_TOKEN` token, which the scripts require although the
+RGB protocol crates are public, or `lib_key` and `rgb_deps_token` files in
 `PRIVATE_DEPS_DIR`. `build-enclave.sh` passes them as the BuildKit secrets
 `lib_key` and `rgb_deps_token`, and `build/with-private-deps.sh enclave` reads
 them for the cargo build only. They are never in a layer, the image or PCR0.
@@ -388,21 +385,18 @@ and the mint build fails when that variable is unset.
 It records the asset pin from the built image as `rgb_asset_id` in `metadata.json`.
 This file accompanies the EIF in the Actions artifact and S3 bundle.
 
-This release needs a new asset. rgb-schemas b3f88f2 (rgb-lib bfa.6) changes
-the BFA schema id from
-`rgb:sch:HbLJ6SjvzVw~XTu6e~Iau6wIcxYsVTlSM7dRUn0DDo4#brave-type-culture`
-to `rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album`,
-and `assert_bfa_genesis` refuses any other id. Mint locks are keyed by
-lockId, not OpId, so mints locked by OpId do not validate either. The old
-asset is not carried over: its units cannot move to the new asset.
-
-1. Reissue the BFA on the new schema.
-2. Set `RGB_ASSET_ID` (and the repository variable `BFA_RGB_ASSET_ID`) to the
-   new contract id for both the mint and the burn image, and rebuild both.
+The BFA schema id is
+`rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album`
+(rgb-schemas b3f88f2, rgb-lib bfa.6). `assert_bfa_genesis` refuses any other
+id, so an asset issued on another schema does not validate, and its units
+cannot move to an asset on this schema. Mint locks are keyed by lockId, not
+OpId: a mint locked by OpId does not validate. Set `RGB_ASSET_ID` (and the
+repository variable `BFA_RGB_ASSET_ID`) to the id of a BFA contract issued on
+this schema, for both the mint and the burn image.
 
 To reproduce a published EIF, use its recorded asset id, not the current
-repository variable. Older bundles may lack this field; obtain the original
-build value from the release owner. Include `metadata.json` when distributing
+repository variable. If a bundle lacks this field, get the build value from
+the release owner. Include `metadata.json` when distributing
 a release. An internal S3 upload alone does not make these inputs public.
 
 Before deploying, record the image/EIF checksum, approved asset, measured PCRs,
@@ -410,11 +404,10 @@ registered key, and Parent endpoint together. Verify a genuine BFA request
 succeeds and an opposite-flow request is rejected.
 
 Every image resolves the private rgb-lib mirror: supply the `lib_key`
-secret. The scripts also still require `rgb_deps_token`, though the protocol
-crates now come from public repos and the mapping below matches no URL.
-`build/with-private-deps.sh` refuses to start cargo without either. Its
-`rgb-tools-devs` to `-s-bfa` mirror mapping is unused now: every `[patch]`
-entry points at a public `rgb-protocol` repo.
+secret. The scripts also require `rgb_deps_token`, though the protocol crates
+come from public repos. `build/with-private-deps.sh` refuses to start cargo
+without either. Its `rgb-tools-devs` to `-s-bfa` mirror mapping matches no
+URL: every `[patch]` entry points at a public `rgb-protocol` repo.
 `Dockerfile.parent` also resolves `federated-signer-proto`: its deploy key as
 `federated_key`. Credentials are mounted as BuildKit secrets during Cargo's
 build step; they are not copied into image layers.
@@ -447,16 +440,15 @@ Both stages install packages from the signed Debian snapshot
 `20261007T000000Z` over HTTPS. APT checks repository signatures.
 The expiry check is disabled because a fixed snapshot must remain usable after
 its Release metadata expires. CMake comes from this snapshot instead of PyPI.
-Only the parent and dev image recipes still use live APT repositories.
+Only the parent and dev image recipes use live APT repositories.
 CI pins `nitro-cli` and its kernel/init blobs to `1.4.5`. Docker, Buildx and
 BuildKit versions are not pinned in CI, so PCR reproducibility still requires
 verification.
 
 Each runtime checks the binary with its dynamic loader before EIF conversion.
 This rejects missing libraries and incompatible symbol versions.
-The base-image update changes enclave measurements. Build new EIFs and approve
-their PCRs before updating attestation allowlists or KMS policies. Existing
-measurements do not apply to these images.
+A change of a base image changes the enclave measurements. Build new EIFs and
+approve their PCRs before you update attestation allowlists or KMS policies.
 
 `.github/workflows/build-eif.yml` builds the `rgb-mint` and `rgb-burn`
 variants on a plain runner with `nitro-cli 1.4.5` and uploads EIF + PCRs + host
@@ -695,7 +687,7 @@ Data sources and transport:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom`, `regtest`. Selects the SPV rules and checkpoint, the RGB chain-network, coin types and xpub prefix. An unknown value stops the boot. Baked into the image. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
-| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only a burn signer built without `spv` reads it. The mint and burn images still pin the URL and start its forwarder. |
+| `ESPLORA_VSOCK_PORT` | `8001` | Host vsock-proxy port for the Electrum or Esplora indexer. Only a burn signer built without `spv` reads it, but the mint and burn images pin the URL and start its forwarder. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host vsock-proxy port for the EVM RPC. |
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host vsock-proxy port for AWS KMS. |
 | `EVM_FINALITY_TAG` | `finalized` | Attested receipt acceptance tag: `latest`, `safe`, or `finalized`. Invalid values reject startup. A production policy also refuses `latest`. Every image sets `finalized`. |
@@ -746,13 +738,6 @@ a second `SetEndpoints`. Reuse the same EIF and image PCR allowlist for endpoint
 changes. Key recovery and clone policy matching still apply: a burn donor with
 a different attested endpoint policy cannot clone into the new launch.
 
-Migration from releases using `ENDPOINTS_SHA256`: remove the old build setting
-and the `set-endpoints --print-sha256` step. The setting is no longer consumed,
-and the CLI flag has been removed. Build and approve the corrected image once,
-including any required KMS PCR allowlist update; subsequent endpoint changes
-do not require another image build. The attestation encoding and KMS encryption
-context are unchanged; no ciphertext-context migration is needed.
-
 For a provider such as Alchemy or Infura, put the absolute RPC path (for example
 `/v2/<key>`) in a restricted file and pass `EVM_RPC_PATH_FILE` at launch. The
 CLI and enclave accept only absolute ASCII paths up to 2048 bytes, without
@@ -800,7 +785,7 @@ Limits and dev knobs:
 | `MAX_MERKLE_PROOFS` | `16384` | Proof-count limit per request. A burn needs one proof for each witness tx in its history. |
 | `MAX_TOTAL_PROOF_BYTES` | 8 MiB | Aggregate proof-bytes limit per request. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash:bits:time[:chainwork]` moves the SPV anchor forward. `bits` and `time` are those of that block. The median-time-past rule reads `time`, and on mainnet and the testnets the `nBits` checks read both. Without `chainwork` (Core's `getblockheader` value), the enclave refuses every RGB-source release under `BTC_RELAY_MODE=required`. `none` needs no chainwork. A production-shaped build refuses to boot when set. |
-| `UTEXO_CLONING_SECRET` | unset | Legacy donor secret; ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
+| `UTEXO_CLONING_SECRET` | unset | Dev fallback for the donor cloning secret, read from the image env at boot. Ignored with `kms-persistence`, which rejects cloning. Otherwise prefer `init --cloning-secret-file` at runtime. |
 | `CLONE_EXPORT_SOFT_CAP` | unset | Seed exports per enclave process before a warning. It does not block exports. Unset or zero turns it off. |
 | `CLONE_EXPORT_HARD_CAP` | unset | Seed exports per enclave process. A restart resets the count. Unset or zero means no cap. No supplied image sets it. |
 
@@ -930,8 +915,8 @@ cargo test --release -p utexo-bridge-enclave --no-default-features --features sp
 Live EVM event checks are explicitly ignored because they require an RPC and a
 known deposit. Configure the variables documented in
 `enclave/tests/test_evm_event_live.rs`, then run the command there with
-`-- --ignored`. An explicit live run fails if its configuration is missing;
-an unconfigured ordinary CI run no longer reports these tests as passed.
+`-- --ignored`. An explicit live run fails if its configuration is missing.
+An ordinary CI run reports these tests as ignored, not as passed.
 
 ## Feature flags
 
@@ -974,7 +959,7 @@ Re-syncing changes PCR0. Procedure in
 ## Security model
 
 - **Untrusted host.** Requests from the parent, listener and backend are checked
-  inside the enclave. Concordium source validation still trusts the listener;
+  inside the enclave. Concordium source validation trusts the listener;
   see the spec for network-specific limits.
 - **On-chain RGB witnesses.** RGB consensus counts a witness tx as valid only
   if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain

@@ -116,11 +116,10 @@ mod tests {
         assert!(!is_tls_handshake(b"POS"));
     }
 
-    /// The downgrade from the review of #300: `esplora-client` follows an
-    /// HTTPS -> HTTP redirect, and its next request is plaintext. Here the
-    /// client sends that plaintext request to a gated forwarder port. The
-    /// gate refuses it before any byte goes on, and the client gets an error,
-    /// not an answer.
+    /// A redirect downgrade: `esplora-client` follows an HTTPS -> HTTP
+    /// redirect, and its next request is plaintext. Here the client sends
+    /// that plaintext request to a gated forwarder port. The gate refuses it
+    /// before any byte goes on, and the client gets an error, not an answer.
     #[cfg(feature = "rgb-validation")]
     #[test]
     fn a_downgraded_esplora_request_does_not_leave_the_enclave() {

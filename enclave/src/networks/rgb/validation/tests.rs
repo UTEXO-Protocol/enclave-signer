@@ -152,7 +152,7 @@ fn rejects_invalid_bytes() {
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
-/// The V0 BFA burn of the old stack: a hard cutover refuses it.
+/// A V0 BFA burn does not deserialize, so the enclave refuses it.
 #[test]
 fn rejects_a_v0_consignment() {
     let v0 = include_bytes!("../../../../tests/fixtures/legacy_v0_bfa_burn.rgbc");
@@ -160,8 +160,8 @@ fn rejects_a_v0_consignment() {
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
-/// A V1 file from before rgb-ops 596d3cb still carries the terminals map,
-/// which the format no longer has: it does not load.
+/// A V1 file that carries a terminals map does not load: the format has no
+/// terminals map.
 #[test]
 fn rejects_a_consignment_with_the_old_terminals_layout() {
     let old = include_bytes!("../../../../tests/fixtures/legacy_terminals_bfa_transfer.rgb");
@@ -924,7 +924,7 @@ fn a_burn_without_burn_reason_validates_with_no_reason() {
     assert_eq!(last.burned_asset_amount, Some(MINTED));
 }
 
-/// The ae85958 burn kept its change; the schema now gives a burn no outputs.
+/// The schema gives a burn no outputs, so a burn that keeps change is refused.
 #[test]
 fn refuses_a_burn_that_assigns_change() {
     let (mut history, units) = minted();
@@ -1166,8 +1166,7 @@ fn reads_a_mint_and_its_anchor() {
     ));
 }
 
-/// A mint in the old form, which passes its right on to vout 1. Returns that
-/// right.
+/// A mint that also passes its right on to vout 1. Returns that right.
 fn old_form_mint() -> (History, Utxo) {
     let mut history = issue();
     let right = history.genesis_right(0, right_utxo());
@@ -1183,8 +1182,8 @@ fn old_form_mint() -> (History, Utxo) {
     (history, kept)
 }
 
-/// The schema lets a mint assign units only, so consensus refuses the old
-/// form; the PSBT bind (M3) refuses it on its own too.
+/// The schema lets a mint assign units only, so consensus refuses a mint that
+/// keeps its right; the PSBT bind (M3) refuses it on its own too.
 #[test]
 fn refuses_a_mint_keeping_its_right() {
     let (history, _) = old_form_mint();
@@ -3142,7 +3141,7 @@ fn opid_in(send: &mut rgbstd::Transition, first: std::ops::Range<u8>) -> rgbstd:
 ///   64 KiB of a decoded list, which is 1 365 assignments, and then doubles
 ///   the list. So a decoded list of 1 366, 21 841 or 43 681 rights takes
 ///   twice its length. Validation clones the decoded consignment, so this
-///   layout no longer adds heap at the peak.
+///   layout does not add heap at the peak.
 /// - The OpIds. Each transfer has an OpId below the transfer before it.
 ///   So its opouts go in front of exactly five opouts in a leaf of the two
 ///   B-trees that RGB validation fills. Then each leaf that they fill keeps

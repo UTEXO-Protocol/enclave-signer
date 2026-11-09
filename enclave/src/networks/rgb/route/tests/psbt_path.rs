@@ -273,7 +273,7 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     );
 }
 
-/// rgb-lib f3975623 strips the PSBT, so a mint without its fascia shows nothing.
+/// rgb-lib strips the PSBT, so a mint without its fascia shows nothing.
 #[test]
 fn refuses_a_mint_without_its_fascia() {
     let (history, seed, mint) = valid_mint();
@@ -330,8 +330,8 @@ fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     assert!(err.contains("discloses 2 transitions"), "{err}");
 }
 
-/// An old-form mint passed its right on. A mint from that right names a mint
-/// as its parent: PP4.
+/// A mint that passes its right on. A mint from that right names a mint as its
+/// parent, which PP4 refuses.
 #[test]
 fn refuses_a_mint_whose_right_a_mint_made() {
     let keys = fx::km();

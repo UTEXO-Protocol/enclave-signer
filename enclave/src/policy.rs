@@ -418,7 +418,7 @@ impl ProductionPolicy {
                     .into(),
             );
         }
-        // `latest` is the L2 tip, the zero-confirmation rule that production refused before.
+        // `latest` is the L2 tip, a zero-confirmation rule, so production refuses it.
         if self.evm_finality_tag == EvmFinalityTag::Latest {
             return Err(
                 "production policy must not accept EVM_FINALITY_TAG=latest; use safe or finalized"

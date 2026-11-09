@@ -40,7 +40,7 @@ requests and relays bytes; it is outside the enclave trust boundary.
 
 The root Cargo workspace contains the enclave, vendored enclave protocol and
 shared attestation verifier. `parent/` is a separate workspace with its own
-manifest and lockfile. Do not put the parent back into the enclave workspace:
+manifest and lockfile. Do not add the parent to the enclave workspace:
 that would pull the parent's dependency graph into enclave build resolution.
 
 ## Keep code, specs, docs and comments in sync
@@ -106,10 +106,9 @@ A behavior change is incomplete until its affected descriptions agree with it.
 - Do not make key derivation or the shape of the attested key bundle depend on
   a feature or role. Gate the request path instead.
 - Check the actual feature graph and release recipes. The default development
-  feature set is not the production configuration. Retired swap flows and
-  historical Helios or IFA designs are not templates for new production work.
-  Keep the attested role and the direction cfgs set by `enclave/build.rs`
-  consistent; reject a build that claims one role but enables another's path.
+  feature set is not the production configuration. Keep the attested role and
+  the direction cfgs set by `enclave/build.rs` consistent; reject a build that
+  claims one role but enables another's path.
 - Keep dev-only seed import, mock attestation, all-zero peer PCR allowances
   and insecure transport out of release enclave binaries. Preserve
   compile-time rejection tests, including role-specific and no-SPV combinations.
@@ -236,11 +235,11 @@ report that conflict and keep it visible until the implementation is fixed.
   Use the shared destination vectors across components; do not reconstruct a
   length-sensitive record from padded calldata.
 - A burn on RGB is permanent. Never change a published burn destination version
-  or remove the enclave's check for it, even a legacy one. A new format needs a
-  new version.
+  or remove the enclave's check for it, V0 included. A new format needs a new
+  version.
 - Treat gas transaction signing as its own restricted capability. Validate the
   unsigned transaction, digest, destination, selector, value, gas and fee
-  limits. Never reintroduce arbitrary EVM digest or raw-message signing.
+  limits. Never add arbitrary EVM digest or raw-message signing.
   Keep CCD's documented caller-supplied hash model explicit and isolated to
   its permitted role and route.
 - Preserve the difference between an EIP-712 release and its outer gas
@@ -285,8 +284,8 @@ report that conflict and keep it visible until the implementation is fixed.
 - Derive fees and output budgets from the transaction actually signed.
   Signature merging must not change ownership classification or bypass
   caps, sighash rules or output-key checks.
-  Keep market-fee selection separate from deterministic signing limits; do
-  not reintroduce live fee estimates that can strand an already funded request.
+  Keep market-fee selection separate from deterministic signing limits. Do
+  not use live fee estimates: they can strand an already funded request.
 - For SPV builds, verify Merkle inclusion and position, enforce path-depth
   limits and refuse a path node that is a 64-byte transaction. Check header
   ancestry, network rules, difficulty, chainwork, timestamps, confirmations and

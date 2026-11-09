@@ -54,8 +54,8 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// `IBridge.sol`. A stale signature matches zero logs, and each deposit then
 /// reports "no FundsIn log in tx".
 ///
-/// The enclave does not decode `bytes settlementData` (bridge PR #152), but it
-/// is part of the signature and thus of `topic0`.
+/// The enclave does not decode `bytes settlementData`, but it is part of the
+/// signature and thus of `topic0`.
 pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
     "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
      uint256,uint256,uint256,uint256,uint256,string,bytes)";
@@ -68,8 +68,8 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 /// nativeCommission, sourceChainId, destinationChainId, <string offset>,
 /// <settlementData offset>.
 ///
-/// An older event layout also decodes plausible amounts at these offsets. A
-/// test pins topic0 for this reason.
+/// Another `BridgeFundsIn` signature also decodes plausible amounts at these
+/// offsets, so a test pins topic0.
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
@@ -568,7 +568,7 @@ fn check_finality_snapshot(
     Ok(())
 }
 
-/// `FundsIn` topic that holds the indexed lockId (the contract keeps the `rgbOpId` name).
+/// `FundsIn` topic that holds the indexed lockId (the contract names it `rgbOpId`).
 const FUNDS_IN_LOCK_ID_TOPIC: usize = 2;
 
 /// Decodes a `FundsIn` log, binds it to `expected_lock_id`, and returns the amount.
@@ -599,7 +599,7 @@ fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
 }
 
 /// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
-/// The contract kept the `rgbOpId` label; the word it names is the lockId.
+/// The contract names this word `rgbOpId`; it holds the lockId.
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
 

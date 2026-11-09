@@ -438,7 +438,7 @@ fn test_sign_evm_before_init() {
 
 // EVM enriched cross-check tests
 
-/// P0 regression: the host `consignment_valid` flag must not bypass validation.
+/// The host `consignment_valid` flag must not bypass validation.
 /// The enclave rejects empty consignment bytes, whatever the flag says.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
@@ -518,11 +518,11 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-/// Regression (CcdSource -> EvmDestination fundsOut): a Concordium-sourced
-/// release must sign. A CCD source has no RGB consignment, so the RGB->EVM
-/// fundsOut binding does not apply. This covers the full `handle_sign` path with
-/// the real selector, which `route_proofs_accept_ccd_source_to_evm_destination`
-/// does not reach.
+/// A Concordium-sourced release (CcdSource -> EvmDestination fundsOut) must
+/// sign. A CCD source has no RGB consignment, so the RGB->EVM fundsOut binding
+/// does not apply. This covers the full `handle_sign` path with the real
+/// selector, which `route_proofs_accept_ccd_source_to_evm_destination` does
+/// not reach.
 #[cfg(all(feature = "rgb-validation", feature = "ccd", rgb_to_evm))]
 #[test]
 fn test_sign_evm_accepts_ccd_source_funds_out() {
@@ -849,8 +849,7 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
 const RGB_BIND_REFUSAL: &str = "witness_utxo";
 
 // An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
-// An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
-// bridge checks.
+// An empty `evm_tx_hash` does not skip the bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
@@ -891,7 +890,7 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
-// A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
+// A length-valid, all-zero evm_tx_hash does not skip the bridge checks.
 // An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
 // consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
@@ -1497,7 +1496,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
 
 // Raw message signing
 
-/// The proto still has `SignRawMessage`. Signing it would put the bridge key on
+/// The proto has `SignRawMessage`. Signing it would put the bridge key on
 /// caller bytes under EIP-191 with no policy, so the enclave must refuse it.
 #[test]
 fn test_sign_raw_message_is_refused() {

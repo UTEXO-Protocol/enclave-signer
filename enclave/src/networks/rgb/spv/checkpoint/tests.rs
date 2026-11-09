@@ -62,10 +62,9 @@ fn parse_spec_five_field_form_sets_chainwork() {
     assert!(cp.chain_work.is_some());
 }
 
-/// The parser refuses the two-field form, which copied the bits and time of
-/// the compiled checkpoint. It cannot check that the given bits and time are
-/// those of the block. This test gives the real bits and time of block
-/// 951_552.
+/// The parser refuses the two-field form: a spec must give the bits and time
+/// of its own block. The parser cannot check that they are those of the
+/// block, so this test gives the real bits and time of block 951_552.
 #[test]
 fn parse_spec_refuses_the_two_field_form() {
     let spec = "951552:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";

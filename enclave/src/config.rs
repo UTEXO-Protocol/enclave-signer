@@ -906,8 +906,8 @@ mod tests {
             return;
         }
 
-        // Old host configuration must not pin endpoints or prevent startup,
-        // even if its retired value is malformed. Isolate env changes.
+        // An `ENDPOINTS_SHA256` env value must not pin endpoints or stop
+        // startup, even when it is malformed. A child process isolates the env.
         for value in [String::new(), "ab".repeat(32), "not-a-digest".into()] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([

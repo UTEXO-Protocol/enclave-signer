@@ -310,8 +310,8 @@ fn reorg_atomic_on_validation_failure() {
 
 #[test]
 fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
-    // Regression: on a non-PoW network, an epoch start below the checkpoint
-    // must not give HeaderNotFound. Checkpoint 4000, retarget 4032, start 2016.
+    // On a non-PoW network, an epoch start below the checkpoint must not give
+    // HeaderNotFound. Checkpoint 4000, retarget 4032, start 2016.
     let cp_hash = {
         let mut h = [0u8; 32];
         h[0] = 0xBB;
@@ -422,7 +422,7 @@ fn retains_full_history_from_checkpoint() {
     assert_eq!(chain.hash_at(0), Some(chain.base_hash));
     assert!(chain.header_at(1).is_some(), "oldest header retained");
 
-    // An anchor at approx tip - 3200 is still present.
+    // An anchor at approx tip - 3200 is present.
     let deep = 1000u32;
     assert!(
         (count - deep) > 2122,

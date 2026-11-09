@@ -1,7 +1,7 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
 //! genesis, then mints, transfers of units, propagates of rights and burns,
 //! each in a witness tx that commits its bundle in an OP_RETURN output. Each one is
-//! committed as rgb-lib f3975623 does it, through psbtu's `rgb_commit`, which
+//! committed as the pinned rgb-lib does it, through psbtu's `rgb_commit`, which
 //! gives the fascia, then the RGB keys stripped, so its PSBT and fascia are the
 //! ones a signer gets. Tests need no stored V1 fixture. Deterministic: fixed
 //! times, nonces, blinding and entropy.
@@ -368,8 +368,8 @@ impl History {
         self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
     }
 
-    /// [`Self::mint`] in the old form, which passes a new right on to vout 1.
-    /// The schema refuses it now; a refusal fixture only.
+    /// A [`Self::mint`] that also passes a new right on to vout 1. The schema
+    /// refuses it; a refusal fixture only.
     pub fn mint_keeping_right(
         &mut self,
         right: Utxo,
@@ -666,7 +666,7 @@ pub fn witness_psbt(inputs: Vec<OutPoint>, outputs: Vec<TxOut>) -> Psbt {
     Psbt::from_unsigned_tx(witness_tx(inputs, outputs)).unwrap()
 }
 
-/// Commits `psbt` as rgb-lib f3975623 does: opret host `host` with `entropy`,
+/// Commits `psbt` as the pinned rgb-lib does: opret host `host` with `entropy`,
 /// psbtu's `rgb_commit`, then the RGB keys stripped. Returns the fascia.
 pub fn rgb_commit(psbt: &mut Psbt, host: usize, entropy: u64) -> Fascia {
     let output = &mut psbt.outputs[host];

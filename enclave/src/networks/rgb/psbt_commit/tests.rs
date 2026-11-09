@@ -101,7 +101,7 @@ fn reads_the_one_propagate_a_rights_send_commits() {
     assert_eq!(committed.transition.transition_type, schemata::TS_PROPAGATE);
 }
 
-/// rgb-lib f3975623 strips every RGB key; the fascia alone carries the mint.
+/// rgb-lib strips every RGB key; the fascia alone carries the mint.
 #[test]
 fn reads_a_mint_from_a_psbt_stripped_of_rgb_keys() {
     let (mut history, rights) = issued(0xB1, &[0xA0]);
@@ -138,7 +138,7 @@ fn refuses_an_empty_fascia() {
     assert!(err.contains("fascia required"), "{err}");
 }
 
-/// Junk, and the PSBT an old listener would put in the field.
+/// Junk, and a PSBT in place of the fascia.
 #[test]
 fn refuses_a_fascia_that_does_not_decode() {
     let (_, sent) = rights_send();

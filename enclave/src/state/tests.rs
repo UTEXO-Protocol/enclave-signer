@@ -757,8 +757,8 @@ fn reservation_rejects_concurrent_duplicate_before_commit() {
     held.commit();
 }
 
-/// A flood of unique nonces above `max` must not block the guard.
-/// Regression test for the reject-when-full DoS.
+/// A flood of unique nonces above `max` must not block the guard. A full
+/// guard evicts its oldest entry; it does not refuse a new nonce.
 #[test]
 fn replay_guard_never_wedges_under_flood() {
     let max = 8;

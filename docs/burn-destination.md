@@ -18,7 +18,7 @@ check it: hash the record and compare.
 
 | Version | What the 32 bytes hold | Routes |
 |---|---|---|
-| V0 (legacy) | 12 zero bytes + 20-byte EVM address | Direct `fundsOut` only |
+| V0 | 12 zero bytes + 20-byte EVM address | Direct `fundsOut` only |
 | V1 | `hash_v1(record)` | Direct `fundsOut` or `lzFundsOut` |
 
 How to tell them apart: if the high 12 bytes are zero, it is V0. Otherwise it

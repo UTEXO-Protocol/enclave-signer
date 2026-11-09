@@ -305,7 +305,7 @@ fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
     }
 }
 
-/// PP4: a right an old-form mint passed on has a mint for its parent.
+/// PP4: a right that a mint kept and passed on has a mint for its parent.
 #[test]
 fn refuses_a_right_a_mint_passed_on() {
     let keys = fx::km();

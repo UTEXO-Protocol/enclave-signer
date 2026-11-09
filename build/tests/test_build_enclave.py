@@ -191,8 +191,8 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertEqual(baseline.returncode, 42, baseline.stderr)
                     baseline_argv = json.loads(self.argv.read_text())
                     for member in ('a', 'b'):
-                        # These include ignored legacy/unsupported inputs. Neither
-                        # credentials nor an old digest may enter a measured build.
+                        # Some of these inputs are not read anywhere. Neither
+                        # credentials nor an endpoint digest may enter a measured build.
                         settings = dict(
                             ENDPOINTS_SHA256=('12' if member == 'a' else '34') * 32,
                             ELECTRUM_URL=f'ssl://electrum-{member}.test:50002',

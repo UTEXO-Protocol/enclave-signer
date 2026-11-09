@@ -6,7 +6,7 @@ case "$DOCKERFILE" in
     *) echo 'Error: stage-signet supports only mint and burn recipes' >&2; exit 1 ;;
 esac
 
-# Dedicated inputs prevent reuse of an old asset or token from another profile.
+# Dedicated inputs prevent reuse of an asset or token from another profile.
 : "${STAGE_RGB_ASSET_ID:?Set STAGE_RGB_ASSET_ID to the new public-Signet BFA asset}"
 : "${STAGE_TOKEN_CONTRACT:?Set STAGE_TOKEN_CONTRACT to the approved ERC-20 address}"
 [[ "$STAGE_RGB_ASSET_ID" == rgb:?* ]] || { echo 'Error: invalid STAGE_RGB_ASSET_ID' >&2; exit 1; }

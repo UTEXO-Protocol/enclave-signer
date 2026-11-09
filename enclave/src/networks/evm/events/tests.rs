@@ -164,9 +164,9 @@ fn topic0_vectors_are_pinned() {
     );
 }
 
-/// Pins the older topic0s. A revert to the 9-field or 11-field
-/// (pre-`settlementData`, bridge PR #152) signature then fails here, not as
-/// "no deposit found".
+/// Pins the topic0s of the 9-field and the 11-field (no `settlementData`)
+/// `BridgeFundsIn` signatures. If `BRIDGE_FUNDS_IN_SIG` is either one, this
+/// test fails, so the error is not a later "no deposit found".
 #[test]
 fn legacy_topic0_is_not_in_use() {
     let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
@@ -447,7 +447,7 @@ fn binds_full_width_operation_id() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
-/// Regression guard: an absent id must refuse, not skip the bind.
+/// An absent id must refuse, not skip the bind.
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_when_operation_id_not_supplied() {
@@ -918,7 +918,7 @@ fn rpc_block_requires_hash_and_number() {
     }
 }
 
-// ---- regression: listener flags cannot authorize ----
+// ---- listener flags cannot authorize ----
 
 #[cfg(evm_to_rgb)]
 #[test]
@@ -1000,7 +1000,7 @@ fn rejects_funds_in_amount_above_u64() {
 
 #[test]
 fn rejects_funds_in_with_unexpected_layout() {
-    // The old layout: the id in data, not indexed.
+    // A layout with the id in data, not indexed.
     let mut data = word(0xab).to_vec();
     data.extend_from_slice(&word(100));
     let old = LogEntry {
@@ -1092,7 +1092,7 @@ fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
     .is_ok());
 }
 
-/// rgb-lib f3975623 has no scan window: a lock far below `beforeBlock` still counts.
+/// rgb-lib has no scan window: a lock far below `beforeBlock` still counts.
 #[test]
 fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
     let p = lock_provider();
@@ -1225,7 +1225,7 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
 }
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test still pins the 96 form.
+/// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
 fn rgb_mint_deposit_id_matches_the_contract_vector() {
     let cfg = crate::config::BridgeConfig {

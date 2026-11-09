@@ -341,7 +341,7 @@ fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
     assert!(refusal_of(send).contains("two rights on vout 1"));
 }
 
-/// Rights move only by propagate: TS_TRANSFER takes units only now.
+/// Rights move only by propagate: TS_TRANSFER moves units only.
 #[test]
 fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
     for transition_type in [schemata::TS_TRANSFER, schemata::TS_MINT, schemata::TS_BURN] {

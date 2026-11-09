@@ -1,4 +1,4 @@
-# Invariant 3 of the BFA port: a BFA consignment is validated only through
+# Invariant 3: a BFA consignment is validated only through
 # rgb-lib's validate_consignment_with_resolver, which confirms a mint claim
 # only through our resolver of bound locks.
 disallowed-methods = [

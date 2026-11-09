@@ -185,7 +185,7 @@ struct Deposit {
 /// Where a mint puts its units.
 #[derive(Clone, Copy)]
 enum Payee {
-    /// The user's blinded seal; the legacy deposit names its invoice.
+    /// The user's blinded seal; the deposit names its invoice.
     Blinded,
     /// The user's output on vout 1 of the mint tx; the v2 deposit names none.
     Witness,
@@ -239,8 +239,8 @@ fn pay(
 /// Issues a BFA asset, with `reject_list` if any. The issuer seeds its right
 /// to the bridge's key-path output (`bridge_spk`, vout 1 of the seed). A
 /// `mint` gives `issued` units to `payee`. Its witness tx spends the right and
-/// `aux` (if any). The mint consumes the right, or in the old form
-/// (`keeps_right`) passes it on to the bridge change.
+/// `aux` (if any). The mint consumes the right, or with `keeps_right` passes
+/// it on to the bridge change.
 fn issue_and_mint(
     bridge_spk: &ScriptBuf,
     aux: Option<&Aux>,
@@ -589,7 +589,7 @@ fn sign_request(built: &Built) -> SignRequest {
             psbt_bytes: built.psbt.serialize(),
             psbt_output_amount: 0,
             asset_id: built.deposit.contract_id.to_string(),
-            // An old bridge still sends the consignment; the mint signer reads
+            // The request carries the consignment too; the mint signer reads
             // only the PSBT, its fascia and its parent's.
             consignment: built.deposit.consignment.clone(),
             consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
@@ -988,7 +988,8 @@ fn refusal_of_edited(edit: impl FnOnce(&mut RgbDestination)) -> String {
     refusal(&sign_over_the_wire(&ctx, request))
 }
 
-/// Plan B needs the fascia of the tx that made the right: it pins the right's UTXO.
+/// The mint signer needs the fascia of the tx that made the right: it pins the
+/// right's UTXO.
 #[test]
 fn refuses_a_mint_without_its_parent_fascia() {
     let refusal = refusal_of_edited(|destination| destination.parent_fascia.clear());
@@ -1098,7 +1099,7 @@ fn refuses_a_lock_at_or_after_before_block() {
     }
 }
 
-/// The old mint form passes its right on to the bridge change, an output the
+/// A mint that passes its right on to the bridge change, an output the
 /// enclave owns. The mint signer refuses it all the same.
 #[test]
 fn refuses_a_mint_that_passes_its_right_on() {
@@ -1147,7 +1148,8 @@ fn signs_a_witness_mint_paying_exactly_mint_witness_sat() {
     .expect("consumer resolves the bound witness");
 }
 
-/// A legacy deposit names a blinded invoice; a witness mint has no seal to match.
+/// The enclave refuses a witness mint against a deposit that names a blinded
+/// invoice: the mint has no seal to match.
 #[test]
 fn refuses_a_witness_mint_against_a_legacy_blinded_invoice() {
     let mut witness = build_on(None, None, false, Payee::Witness);

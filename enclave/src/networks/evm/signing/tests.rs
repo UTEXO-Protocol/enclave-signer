@@ -84,8 +84,8 @@ fn test_tee_funds_out_typehash_matches_contract() {
         hex::encode(type_hash),
         "7b1c067721d3d07e40255c970c458626d43b425ca4bb0449b42baa0766cdae45"
     );
-    // The pre-#152 string (no `sourceBurnTxId`) must not match: the proxy does
-    // not verify that struct.
+    // The string without `sourceBurnTxId` must not match: the proxy does not
+    // verify that struct.
     assert_ne!(
         hex::encode(type_hash),
         "e84f4b6ff956c2d754ac4310166ee6df5e488aa5a36cd65cf367cf80aff7c608"
@@ -135,8 +135,8 @@ fn test_undecodable_call_data_rejected() {
 ///
 /// The alloy EIP-712 encoder over `TeeFundsOut` (an independent
 /// implementation) made the pinned digest. [`test_digest_matches_alloy_eip712`]
-/// derives it again at test time. TODO: pin a post-#152 Foundry vector when the
-/// contracts repo publishes one.
+/// derives it again at test time. TODO: pin a Foundry vector with
+/// `sourceBurnTxId` when the contracts repo publishes one.
 #[test]
 fn test_digest_matches_reference_vector() {
     let digest =

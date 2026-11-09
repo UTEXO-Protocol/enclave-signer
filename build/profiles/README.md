@@ -3,7 +3,7 @@
 Use `BUILD_PROFILE=stage-signet` with `build/build-enclave.sh`, or select
 `stage-signet` in the **Build EIF** workflow's `build_profile` input.
 The profile builds Mint and Burn only. Tag builds and the `default` profile
-continue to use the recipe defaults.
+use the recipe defaults.
 
 Both recipes fix `SPV_MIN_CONFIRMATIONS=3` and `EVM_FINALITY_TAG=finalized`, so
 the profile does not set them and the caller's environment cannot change them.
@@ -25,13 +25,13 @@ recover an out-of-memory failure on the build runner.
 Set these GitHub Actions repository variables, or export them locally:
 
 ```sh
-export STAGE_RGB_ASSET_ID='rgb:<new-public-signet-BFA-asset>'
+export STAGE_RGB_ASSET_ID='rgb:<public-signet-BFA-asset>'
 export STAGE_TOKEN_CONTRACT='0x<approved-ERC20-address>'
 export STAGE_GAS_TX_ALLOWED_SELECTORS='0x<selector>,0x<selector>'
 ```
 
 Use an asset issued on the BFA schema supported by this revision. Do not reuse
-the old `BFA_RGB_ASSET_ID` variable for this profile. Verify the selectors against
+the `BFA_RGB_ASSET_ID` variable of the `default` profile. Verify the selectors against
 the deployed Multisig ABI. `STAGE_GAS_TX_ALLOWED_SELECTORS` is required only for Burn.
 
 Mint also needs `KMS_ALLOWED_ACCOUNT_IDS`, as every mint image does. The workflow
@@ -43,9 +43,8 @@ release. Supply the approved values through `cli set-endpoints` after launch,
 keeping each provider's API-key path in a restricted `EVM_RPC_PATH_FILE`.
 Rotating that file requires a new launch, not a new image.
 
-Provide the existing `RGB_LIB_BFA_DEPLOY_KEY` and
-`FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secrets and the new
-`RGB_PRIVATE_DEPS_TOKEN` secret. Keep credentials out of build arguments.
+Provide the `RGB_LIB_BFA_DEPLOY_KEY`, `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` and
+`RGB_PRIVATE_DEPS_TOKEN` secrets. Keep credentials out of build arguments.
 
 ## Build
 
@@ -92,9 +91,9 @@ repository variables at the same commit can produce a different measured image.
 The upload workflow does not enforce write-once S3 storage.
 
 The build profile does not configure deployment or KMS policies. In particular,
-the current standard `verify-launch` expects a Production/SPV policy and must
-be adapted before deploying an IndexerTrusted image through that launcher.
-The no-SPV policy remains Development: its real attestation identifies the
+the standard `verify-launch` expects a Production/SPV policy and must be
+adapted before deploying an IndexerTrusted image through that launcher.
+The no-SPV policy is Development: its real attestation identifies the
 image and key, but does not attest endpoint or KMS launch settings. Operators
 approve those settings externally. Runtime TLS authenticates the configured
 provider; it does not enforce that external approval or prove its answers.

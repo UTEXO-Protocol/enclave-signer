@@ -52,7 +52,7 @@ mod tests {
     };
     use std::io::Cursor;
 
-    /// A request with a consignment larger than the old 4 MiB frame limit.
+    /// A `Sign` request with a consignment of `consignment_bytes` bytes.
     fn large_request(consignment_bytes: usize) -> EnclaveRequest {
         EnclaveRequest {
             request: Some(Request::Sign(SignRequest {

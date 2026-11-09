@@ -23,7 +23,7 @@ name: "Build EIF"
 #   secrets.RGB_LIB_BFA_DEPLOY_KEY             deploy key for UTEXO-Protocol/rgb-lib-bfa
 #                                              (the rgb-lib mirror of the EIF and parent
 #                                               builds; passed as a BuildKit secret, not in PCR0)
-#   secrets.RGB_PRIVATE_DEPS_TOKEN             token the build scripts still require; it maps
+#   secrets.RGB_PRIVATE_DEPS_TOKEN             token the build scripts require; it maps
 #                                              no URL, the RGB protocol crates are public
 #                                              (BuildKit secret rgb_deps_token, not in PCR0)
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload

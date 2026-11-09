@@ -153,9 +153,8 @@ fn happy_path_single_tx_block_with_six_confirmations() {
     validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();
 }
 
-/// Regression: an anchor more than 2122 blocks below the tip still verifies.
-/// Full retention keeps its header, so the proof does not fail with "no
-/// header at height H".
+/// An anchor more than 2122 blocks below the tip verifies. Full retention
+/// keeps its header, so the proof does not fail with "no header at height H".
 #[test]
 fn deep_anchor_below_old_window_still_verifies() {
     let target = synth_headers(1).into_iter().next().unwrap();
@@ -470,8 +469,8 @@ fn assert_chain_net_rejects_mismatch() {
     let err = assert_chain_net("bc", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 
-    // Regression: consignments carry `"sb"` (`genesis.chain_net.prefix()`),
-    // not "bc:signet"-style notation.
+    // Consignments carry `"sb"` (`genesis.chain_net.prefix()`), not
+    // "bc:signet"-style notation.
     let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 }

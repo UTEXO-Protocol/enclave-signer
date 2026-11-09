@@ -57,12 +57,13 @@ bash deploy/verify-identity.sh --liveness
 
 This explicit mode needs no identity map or release PCRs, exports no bundles,
 and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
-routing. Omitting the map in the default mode no longer falls back to liveness.
+routing. In the default mode, a missing or partial map is a configuration
+error; the mode does not fall back to liveness.
 
 The bundle format is `utexo-signer-attestation/2`. The `verification_mode`
 field tells how the exporter checked the document (`real` or `mock`).
-`attest-verify` refuses a bundle whose mode is not its own, and refuses an
-older format.
+`attest-verify` refuses a bundle whose mode is not its own, and a bundle of
+any other format.
 
 ## What one bundle proves
 

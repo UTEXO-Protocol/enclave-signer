@@ -3,7 +3,7 @@
 //! A decoded protobuf element costs far more memory than its wire form. An
 //! empty `MerkleProofEntry` is 2 bytes on the wire and a 56-byte struct after
 //! the decode, and its list can double while it grows. So a 24 MiB `Sign`
-//! request of them took 1.5 GiB of heap in the parent, and the parent serves
+//! request of them needs 1.5 GiB of heap to decode, and the parent serves
 //! several requests at once. [`ShapeLayer`] reads the whole request body first.
 //! It counts the field occurrences on the wire, at every depth that the
 //! schema knows, and refuses more than [`MAX_WIRE_ELEMENTS`]. Only then does

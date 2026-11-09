@@ -9,8 +9,8 @@ const DOMAIN_TYPE_HASH_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
 /// EIP-712 type string for `MultisigProxy.fundsOutCall`.
-/// The digest commits to each release field. `sourceBurnTxId` (bridge PR #152)
-/// follows `settlementData`.
+/// The digest commits to each release field. `sourceBurnTxId` follows
+/// `settlementData`.
 ///
 /// A wrong struct recovers a different address. On chain, this shows only as
 /// an unregistered-signer rejection.
@@ -111,7 +111,7 @@ pub fn funds_out_digest(
 }
 
 /// EIP-712 type string for `MultisigProxy.lzFundsOutCall`.
-/// Fourteen fields. `sourceBurnTxId` (bridge PR #152) follows `extraOptions`.
+/// Fourteen fields. `sourceBurnTxId` follows `extraOptions`.
 const TEE_LZ_FUNDS_OUT_TYPE_HASH_STR: &str = "TeeLzFundsOut(uint256 amount,uint256 burnId,\
      uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,\
      bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,\

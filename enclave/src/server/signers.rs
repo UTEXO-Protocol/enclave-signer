@@ -170,7 +170,8 @@ fn signed_psbt_response((signed_psbt, inputs_signed): (Vec<u8>, usize)) -> Resul
 /// the pinned fee policy passes, and the operator amount cap holds
 /// ([`crate::networks::rgb::btc_crosscheck`]).
 /// A production build refuses to sign when the cap is not set.
-/// The separate request type is the structural part of the vanilla-bypass fix.
+/// Only this request type signs Vanilla inputs. The other PSBT paths sign
+/// only Colored inputs.
 #[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
     // In production, the plain-BTC path runs only if the attested policy

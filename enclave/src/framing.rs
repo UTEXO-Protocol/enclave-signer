@@ -22,7 +22,7 @@ pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 /// them on the wire before the decode. A decoded element costs far more
 /// memory than its wire form. A field occurrence can be 2 bytes on the wire
 /// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
-/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decoded
+/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decodes
 /// into more than 1 GiB. The largest real request at the image limits is a
 /// burn with [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proofs of 13 path
 /// elements each. A test shows that it passes the shape check. The memory
@@ -294,7 +294,7 @@ mod tests {
 
     /// The request memory model (`memory.rs`): the shape check refuses a frame
     /// of repeated empty entries before the decode. Without the check, the
-    /// frame decoded into 45 times its size.
+    /// frame would decode into 45 times its size.
     #[test]
     fn a_frame_of_empty_proof_entries_is_refused_within_the_request_memory_factor() {
         use crate::memory::peak;
@@ -597,7 +597,7 @@ mod tests {
     /// field that holds a repeated field at any depth leads to the schema the
     /// walk enters, and every other message field is a leaf. A new repeated
     /// field in a message the walk does not enter fails this test until
-    /// `Schema::child` names its path. Without that, the decode could again
+    /// `Schema::child` names its path. Without that, the decode could
     /// expand a small frame into many elements.
     #[test]
     fn the_shape_walk_knows_every_repeated_field_of_the_proto() {

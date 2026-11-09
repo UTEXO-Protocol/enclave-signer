@@ -35,8 +35,7 @@ Startup logs report the connection age, drain grace, and request timeout.
 
 The parent leaves `max_connection_age_grace` unset. In tonic 0.14.9, combining it
 with `max_connection_age` skips graceful draining and force-closes the connection
-at age plus grace. The older settings of 300 seconds plus 30 seconds caused the
-330-second cycle.
+at age plus grace.
 
 ## Roles
 

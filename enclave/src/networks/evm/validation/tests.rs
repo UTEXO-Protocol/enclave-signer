@@ -326,8 +326,9 @@ fn rejects_entrypoint_route_to_pinned_chain() {
     });
 }
 
-/// An `lzFundsOut` destination with the given floor and options. `lz_release`
-/// follows the floor, so only the new checks can refuse it.
+/// An `lzFundsOut` destination with the given floor and options. Its
+/// `lz_release` follows the floor, so only the floor and `extraOptions` checks
+/// can refuse it.
 fn lz_destination_with(min_amount_ld: u64, extra_options: Vec<u8>) -> EvmDestination {
     let mut call = lz_funds_out_call(1000, 137);
     call.minAmountLD = U256::from(min_amount_ld);
@@ -864,7 +865,7 @@ fn burn_id_matches_the_shared_vector() {
 }
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `sourceChainId` = `RGB_CHAIN_ID`. The contract test still pins the 96 form.
+/// `sourceChainId` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
 fn burn_id_matches_the_contract_vector() {
     let cfg = BridgeConfig {

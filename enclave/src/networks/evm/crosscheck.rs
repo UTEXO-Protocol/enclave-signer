@@ -100,7 +100,7 @@ pub fn validate_funds_out_burn_recipient(
     })?;
     let target = burn_destination::resolve(&reason, record)?;
 
-    // `None` = direct fundsOut. A legacy (V0) burn names no chain, so it is
+    // `None` = direct fundsOut. A V0 burn names no chain, so it is
     // direct only.
     if target.dst_eid != release.dst_eid {
         return Err(EnclaveError::CrossCheck(format!(
@@ -126,7 +126,7 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
-/// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
+/// Source-burn bind: `sourceBurnTxId` must be the RGB OpId of
 /// the settling transition, which [`validate_funds_out_amount`] reads.
 ///
 /// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
@@ -260,8 +260,8 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay agreement and consignment source-block bind (spec section 13,
-/// #57/#122). Before a `fundsOut` is signed:
+/// BtcRelay agreement and consignment source-block bind (spec section 13).
+/// Before a `fundsOut` is signed:
 ///
 /// 1. Find the block of the last witness tx from its SPV Merkle proof, not
 ///    from the calldata.

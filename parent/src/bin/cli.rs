@@ -34,8 +34,8 @@ enum Command {
     /// Initialize keys (generate new mnemonic in the enclave)
     Init {
         /// Donor cloning secret, sent at runtime (not in the EIF). Set it only on
-        /// enclaves that serve clone requests. Deprecated on the command line:
-        /// `ps`, shell history and SSM logs show it (F03-AF-06). Use
+        /// enclaves that serve clone requests. Avoid this flag: `ps`, shell
+        /// history and SSM logs show it (F03-AF-06). Use
         /// --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
@@ -196,8 +196,8 @@ enum Command {
     ///      matches the donor.
     Clone {
         /// Pre-shared operator cloning secret. Must match the donor enclave
-        /// cloning secret. Deprecated on the command line: `ps`, shell history
-        /// and SSM logs show it (F03-AF-06). Use --cloning-secret-file or
+        /// cloning secret. Avoid this flag: `ps`, shell history and SSM logs
+        /// show it (F03-AF-06). Use --cloning-secret-file or
         /// UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
@@ -964,7 +964,7 @@ fn export_attestation(
     Ok(())
 }
 
-/// Read the secret from the file, the environment, or the deprecated argument,
+/// Read the secret from the file, the environment, or the command-line argument,
 /// in that order. Arguments can show the secret in process lists and logs.
 /// (F03-AF-06) Return `None` if no source is set; Init without a donor secret
 /// accepts that.
@@ -1316,7 +1316,7 @@ mod tests {
         assert!(Cli::try_parse_from(args("mint")).is_err());
     }
 
-    /// rgb-lib f3975623 strips the PSBT, so the parent's PSBT gave way to two fascias.
+    /// rgb-lib strips the PSBT, so `sign-psbt` takes two fascias, not a parent PSBT.
     #[test]
     fn sign_psbt_takes_the_fascia_and_the_parent_fascia() {
         let sign_psbt = |flag: &'static str| {

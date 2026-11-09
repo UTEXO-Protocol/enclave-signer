@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # there can change the BFA schema id. Exact pins keep a newer prerelease out.
 rgb-ops = { version = "=0.11.2-rc.1", default-features = false, features = ["esplora_blocking", "electrum_blocking"], optional = true }
 rgb-schemas = { version = "=0.11.2-rc.1", default-features = false, optional = true }
-# Invoice parsing for the legacy send-RGB recipient bind.
+# Invoice parsing for the recipient bind of a deposit that names an RGB invoice.
 rgb-invoicing = { version = "=0.11.2-rc.1", default-features = false, optional = true }
 # Not used directly: pins the consensus and VM crates that rgb-ops pulls with a
 # caret requirement.

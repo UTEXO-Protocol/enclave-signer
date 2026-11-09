@@ -80,7 +80,8 @@ pub fn bundle_cases(keys: &PublicKeysResponse) -> Vec<(&'static str, PublicKeysR
 
 pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     let mut cases = vec![("variant", AttestedPolicy::Development.to_bytes())];
-    // A peer must not attest these fields under the old depth-only version.
+    // A peer must not attest these fields under a version other than
+    // `POLICY_COMMITMENT_V1`.
     let mut old_version = policy.to_bytes();
     old_version[0] = 8;
     cases.push(("version", old_version));
@@ -181,7 +182,7 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
             expected_evm_address: None,
         })
     );
-    // Issue #270: a donor under another IAM role commits another PCR3.
+    // A donor under another IAM role commits another PCR3.
     alter!(
         clone_peer_pcr3,
         Some(match clone_peer_pcr3 {

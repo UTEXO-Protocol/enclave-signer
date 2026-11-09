@@ -3,14 +3,14 @@
 The `mint-signer` feature enables `kms-persistence`, using AWS KMS to generate a
 64-byte seed and S3 to persist its encrypted `CiphertextBlob`. On initialization
 the enclave loads the saved blob, decrypts it with KMS recipient attestation,
-and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
-KMS Sign.
+and derives its keys from that seed, as every build does. Signing stays inside
+the enclave; it does not use KMS Sign.
 
 The measured mint image compiles in `CUSTODY_FLOW`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
-rejected at compile time. Burn signers retain their existing OS-entropy and
-cloning lifecycle.
+rejected at compile time. Burn signers use the OS-entropy and cloning
+lifecycle.
 
 The address pin selects one of two initialization modes:
 
@@ -79,7 +79,7 @@ For Production policy, a verifier checks them with `attest-verify --expect-kms-k
 
 ## Parent integration
 
-The existing [Rust parent](../parent/src/seed_persistence.rs) returns AWS
+The [Rust parent](../parent/src/seed_persistence.rs) returns AWS
 credentials and reads/conditionally creates one S3 object. It never receives
 the plaintext seed. Configure persistence on the parent process that serves
 this mint signer:
@@ -222,7 +222,7 @@ recovery before funding the signer.
    Supply no seed or cloning secret.
    Verify the public identity and attestation.
    Independently back up the saved S3 ciphertext.
-   This procedure does not import a legacy seed.
+   This procedure imports no seed.
 3. Set `KMS_EXPECTED_EVM_ADDRESS` to the verified address at the next launch.
    Initialize the restarted enclave.
    Verify that its keys match the original keys.

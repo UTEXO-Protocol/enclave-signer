@@ -24,9 +24,9 @@ use crate::proto::EvmSource;
 
 /// `keccak256("fundsOut((address,uint256,uint256,uint256,uint256,string,bytes,bytes,bytes32))")[0..4]`.
 ///
-/// The older shapes `0xccddb768` and `0xdc771390` (before `sourceBurnTxId`,
-/// bridge PR #152) fail closed at the whitelist. Thus a half-migrated backend
-/// cannot get a signature.
+/// The selectors `0xccddb768` and `0xdc771390` (shapes without
+/// `sourceBurnTxId`) fail closed at the whitelist, so a backend that sends
+/// either shape gets no signature.
 #[cfg(rgb_to_evm)]
 pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 
@@ -60,7 +60,7 @@ sol! {
     /// both the ABI decode here and the `TeeFundsOut` struct hash in
     /// [`super::signing::funds_out_digest`].
     ///
-    /// `sourceBurnTxId` (bridge PR #152) is the RGB OpId of the burn transition.
+    /// `sourceBurnTxId` is the RGB OpId of the burn transition.
     /// It is the only field that identifies the settled burn. The Bridge hashes
     /// it into `burnId` but cannot verify it. The enclave binds it to the
     /// validated consignment in
@@ -125,8 +125,8 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
 
 /// The release calldata fields that identify the settled burn and its payout.
 /// Both `fundsOut` and `lzFundsOut` carry them, so every burn bind runs on both
-/// routes (#264). The handler binds the source fields to the request's source
-/// network and recomputes `burnId`.
+/// routes. The handler binds the source fields to the request's source network
+/// and recomputes `burnId`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseIdentity {
     /// Calldata `burnId`, as the backend derived it.
@@ -188,10 +188,10 @@ impl ReleaseIdentity {
     }
 }
 
-/// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol` (bridge PRs
-/// #152 and #155). `recipient`, `proof` and `destinationChainId` are absent
-/// by design: the key is shared with `rebalanceLiquidity`. `settlementData` is
-/// absent so one burn has one `burnId` whatever deposits it cites.
+/// `Bridge.BURN_TYPEHASH` preimage, verbatim from `Bridge.sol`. `recipient`,
+/// `proof` and `destinationChainId` are absent by design: the key is shared
+/// with `rebalanceLiquidity`. `settlementData` is absent so one burn has one
+/// `burnId` whatever deposits it cites.
 #[cfg(rgb_to_evm)]
 const BURN_TYPEHASH_STR: &str = "UtexoBurnId(address bridge,uint256 chainId,address token,\
      uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,\
@@ -256,7 +256,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 /// - `sourceChainId` MUST be [`RGB_CHAIN_ID`]. It selects the
 ///   verifier, settlement module and commission rate.
 /// - `sourceAddress` MUST be empty. RGB has no source address
-///   (`RGBVerifier.UnexpectedSourceAddress`, bridge PR #152). The field is
+///   (`RGBVerifier.UnexpectedSourceAddress`). The field is
 ///   hashed into `burnId`, so another value gives one burn a second replay key.
 ///
 /// The sign handler calls it only for an RGB source. A CCD-sourced release
@@ -491,8 +491,8 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
 /// Decodes a `fundsOut` calldata blob and enforces canonical encoding. The
 /// signing path also uses it to rebuild the `TeeFundsOut` struct hash.
 ///
-/// The canonical check is here, not in the validator. A legacy flat body with
-/// a zero `recipient` decodes as a tuple, and only the re-encode catches it.
+/// The canonical check is here, not in the validator. A flat body with a zero
+/// `recipient` decodes as a tuple, and only the re-encode catches it.
 /// In the validator, the check would depend on caller order.
 #[cfg(rgb_to_evm)]
 pub fn decode_funds_out_params(call_data: &[u8]) -> Result<FundsOutParams> {

@@ -1,7 +1,7 @@
 //! Burn destination: what the 32-byte `burnReason` (`GS_BURN_REASON`) global
 //! of a burn commits to. Format spec: `docs/burn-destination.md`.
 //!
-//! - V0 (legacy): 12 zero bytes + a 20-byte EVM address. Direct route only.
+//! - V0: 12 zero bytes + a 20-byte EVM address. Direct route only.
 //! - V1: EIP-712 `hashStruct` of `UtexoBurnDestinationV1`. The backend sends
 //!   the fields; the enclave hashes them and compares.
 //!

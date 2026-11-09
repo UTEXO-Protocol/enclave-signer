@@ -62,7 +62,7 @@ if [ $((ENCLAVE_MEMORY % 1024)) -ne 0 ]; then
   echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
   exit 1
 fi
-# DEBUG-MODE (op13 crash hunt): when set to 1, enclaves run with --debug-mode so
+# DEBUG-MODE: when set to 1, enclaves run with --debug-mode so
 # `nitro-cli console` can attach. This ZEROES runtime PCR0/1/2, so the step-6
 # runtime-PCR check is skipped (the static describe-eif measurement in step 3
 # still verifies the EIF file). Default 0 keeps the normal production path.
@@ -601,8 +601,8 @@ systemd-tmpfiles --create /etc/tmpfiles.d/10-nitro-enclaves.conf || true
 systemctl daemon-reload
 
 # --- 5. (re)start enclaves via systemd -------------------------------------
-# Stop any prior unit instances, and kill stray setsid parents from pre-systemd
-# deploys (they would hold the gRPC ports). Enclave ctl `start` also terminates a
+# Stop the unit instances, and kill any parent process left outside systemd
+# (it would hold the gRPC ports). Enclave ctl `start` also terminates a
 # stale same-named enclave (anti-E39), so a leftover enclave is replaced cleanly.
 for CID in "${CIDS[@]}"; do
   systemctl stop "utexo-parent@$CID" "utexo-enclave@$CID" 2>/dev/null || true
@@ -647,8 +647,7 @@ PY
 else
 asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
 # F09-AF-07: require the EXACT expected CID set, all in RUNNING state, each with a
-# matching PCR0. Previously an empty enclave list passed silently (no mismatch to
-# find), so a host with zero/partial enclaves could report a "successful" deploy.
+# matching PCR0, so a host with zero or partial enclaves fails the deploy.
 python3 - "$MAN_PCR" "${CIDS[*]}" "$DESC_JSON" <<'PY'
 import json, sys
 man  = sys.argv[1]
@@ -673,7 +672,7 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-# F09-AF-07: require ALL expected ports to be listening, not "at least one"
+# F09-AF-07: require ALL expected ports to be listening
 # (a single surviving parent must not make a partial cluster look healthy).
 # Health ports too: a parent without its health endpoint would leave the next
 # rolling deploy polling a dead port. Liveness only - readiness stays false

@@ -115,7 +115,7 @@ pub fn expected_bits(input: &BitsInput, network: Network) -> Option<u32> {
     }
 
     // Boundary: BIP94 retargets from the period's first block, which cannot
-    // be a min-difficulty block. Older networks use the last block.
+    // be a min-difficulty block. Networks without BIP94 use the last block.
     let base = if network.bip94() {
         input.epoch_first_bits
     } else {

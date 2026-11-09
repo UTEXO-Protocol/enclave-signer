@@ -588,7 +588,7 @@ fn verify_bundle_with(
         mode,
         matches!(expected_policy, ExpectedPolicy::Production { .. }),
     )?;
-    // Read the format first, so an old bundle fails with a clear message.
+    // Read the format first, so another bundle format fails with a clear message.
     #[derive(Deserialize)]
     struct Format {
         format: String,
@@ -1508,7 +1508,7 @@ mod tests {
         .is_err());
     }
 
-    /// Issue #270: a cloning role commits the document PCR3 (the parent IAM
+    /// A cloning role commits the document PCR3 (the parent IAM
     /// role). The mint signer commits none.
     #[test]
     fn a_cloning_role_commits_the_document_pcr3() {

@@ -17,7 +17,7 @@
 #                    recipe fails the build without it
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   RGB_PRIVATE_DEPS_TOKEN  token the build scripts still require; it maps no URL,
+#   RGB_PRIVATE_DEPS_TOKEN  token the build scripts require; it maps no URL,
 #                           because the RGB protocol crates are public
 #   PRIVATE_DEPS_DIR        or a directory with those in lib_key and rgb_deps_token files
 #
@@ -57,8 +57,7 @@ IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Required. Production is
 # DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
 # signer EIFs). The other one is Dockerfile.enclave.ccd. EIF_NAME names the
-# output .eif and its SHA256SUMS entry; the default keeps the historical
-# artifact name.
+# output .eif and its SHA256SUMS entry.
 DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint, .burn or .ccd)}"
 BUILD_PROFILE="${BUILD_PROFILE:-default}"
 case "$BUILD_PROFILE" in

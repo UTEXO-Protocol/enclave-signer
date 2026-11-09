@@ -602,9 +602,9 @@ fn clone_rejections_carry_their_codes() {
     }
 }
 
-/// Issue #270. A peer with the right image (PCR0/1/2) but another IAM role
-/// (PCR3) runs under another AWS account. The donor must not seal its seed to
-/// it. A peer with the same role passes in the same run.
+/// A peer with the right image (PCR0/1/2) but another IAM role (PCR3) runs
+/// under another AWS account. The donor must not seal its seed to it. A peer
+/// with the same role passes in the same run.
 #[test]
 fn clone_donor_refuses_a_requester_under_another_iam_role() {
     let (donor_port, donor_keys) = start_donor();
@@ -636,9 +636,9 @@ fn clone_donor_refuses_a_requester_under_another_iam_role() {
     );
 }
 
-/// Issue #270, requester side: a donor document under another IAM role is
-/// refused before the seed is unsealed. The real donor document then works,
-/// so the refusal used no state.
+/// Requester side: a donor document under another IAM role is refused before
+/// the seed is unsealed. The real donor document then works, so the refusal
+/// used no state.
 #[test]
 fn clone_requester_refuses_a_donor_under_another_iam_role() {
     let (donor_port, donor_keys) = start_donor();

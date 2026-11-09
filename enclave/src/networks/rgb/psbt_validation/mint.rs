@@ -1,7 +1,7 @@
-//! The mint rules (`Sign`, EVM -> RGB) on the committed transition: what the
-//! VM's `sas` and `plc` and the former consignment binds enforced, read from
-//! the fascia, and the sats rule of its PSBT. The rule ids (M1-M8) are those of
-//! `docs/mint-flow.md` section 5.
+//! The mint rules (`Sign`, EVM -> RGB): the rules on the committed transition,
+//! read from the fascia (what the VM's `sas` and `plc` enforce, and the shape
+//! of the mint), and the sats rule of its PSBT. The rule ids (M1-M8) are those
+//! of `docs/mint-flow.md` section 5.
 
 use std::collections::HashSet;
 
@@ -74,8 +74,9 @@ pub enum MintRecipient {
 }
 
 impl MintRecipient {
-    /// The seals S6.2 compares with a legacy deposit's invoice. A witness mint
-    /// has none, so a legacy blinded invoice refuses it.
+    /// The seals S6.2 compares with the invoice in a deposit's
+    /// `destinationAddress`. A witness mint has none, so S6.2 refuses it when
+    /// the deposit names an invoice.
     pub fn blinded_seals(&self) -> Vec<String> {
         match self {
             Self::Blinded(seal) => vec![seal.clone()],

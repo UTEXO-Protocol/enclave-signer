@@ -3,7 +3,8 @@
 # or Git/SSH config in a builder layer. PRIVATE_DEPS_DIR is outside the checkout.
 # lib_key (deploy key) reads UTEXO-Protocol/rgb-lib-bfa for both workspaces via
 # the github-rgb-lib SSH alias. The RGB protocol crates are public, so rgb_deps_token
-# maps no URL, but this script still requires it (map-rgb-mirrors.sh). The parent also uses federated_key for the proto.
+# maps no URL, but this script requires it (map-rgb-mirrors.sh). The parent
+# also uses federated_key for the proto.
 set -eu
 
 scope=${1:?usage: with-private-deps.sh enclave|parent command [args...]}

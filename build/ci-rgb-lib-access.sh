@@ -2,7 +2,7 @@
 # CI only: adds the rgb-lib-bfa deploy key to SSH so Cargo
 # (via CARGO_NET_GIT_FETCH_WITH_CLI=true) can fetch the private
 # UTEXO-Protocol/rgb-lib-bfa mirror via the github-rgb-lib SSH alias. It also
-# runs map-rgb-mirrors.sh, which still needs the token but maps no URL in use.
+# runs map-rgb-mirrors.sh, which needs the token but maps no URL in use.
 set -eu
 : "${RGB_LIB_BFA_DEPLOY_KEY:?Missing RGB_LIB_BFA_DEPLOY_KEY}"
 : "${RGB_PRIVATE_DEPS_TOKEN:?Missing RGB_PRIVATE_DEPS_TOKEN}"

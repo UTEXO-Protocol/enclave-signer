@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-# Enclave (dev mode, TCP, no vsock) WITH the BFA mint path, one signer role.
+# Enclave (dev mode, TCP, no vsock) with the BFA bridge, one signer role.
 # SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
 # (RGB -> EVM). The two roles are two enclaves with two seeds.
 # rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and

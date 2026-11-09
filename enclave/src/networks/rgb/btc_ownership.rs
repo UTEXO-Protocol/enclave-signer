@@ -23,8 +23,8 @@
 //! we can spend it, so it is exempt in full. This covers fresh change and
 //! `create_utxo` allocations.
 //!
-//! There is no rule (B). A taproot leaf that names our key proves nothing about
-//! the rest of the tree or its internal key. For the same reason, (C) refuses
+//! A taproot leaf that names our key proves nothing about the rest of the tree
+//! or its internal key, so no rule accepts it. For the same reason, (C) refuses
 //! any output with a tree. [`crate::networks::rgb::btc_crosscheck`] bounds by
 //! value what neither rule proves.
 
@@ -438,7 +438,7 @@ pub(crate) mod tests {
         assert!(!owned(&psbt, &keys));
     }
 
-    // === No rule (B): metadata is not a proof of control ===
+    // === Metadata is not a proof of control ===
     //
     // Rule (C) proves our own key-path outputs directly.
 

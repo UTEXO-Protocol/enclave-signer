@@ -261,7 +261,7 @@ fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -
 }
 
 /// Bind RGB->EVM release calldata to the validated consignment before
-/// signing. It runs on both routes, `fundsOut` and `lzFundsOut` (#264).
+/// signing. It runs on both routes, `fundsOut` and `lzFundsOut`.
 /// Backend-supplied bridge operation ids are validated, not rewritten.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn apply_funds_out_binding(
@@ -289,7 +289,7 @@ fn apply_funds_out_binding(
     // Defense in depth: all consignment witness txs must be mined.
     crosscheck::assert_witnesses_confirmed(validated)?;
 
-    // BtcRelay agreement and source-block bind (#57 / #122).
+    // BtcRelay agreement and source-block bind.
     // The calldata `proof` must name headers that the enclave holds.
     // Its `source` pair must be the block of the last consignment witness tx.
     // An empty `proof` fails closed.
@@ -334,7 +334,7 @@ fn apply_funds_out_binding(
     // Consignment-bound release amount: the settling transition must be a Burn.
     crosscheck::validate_funds_out_amount(release, validated)?;
 
-    // Burn identity (bridge PR #152). `sourceBurnTxId` is the only `burnId`
+    // Burn identity. `sourceBurnTxId` is the only `burnId`
     // input that names the settled RGB operation. The contract trusts the
     // enclave for it. Bind it to the OpId of the settling transition.
     // `validate_rgb_source_identity` in `handle_sign` binds
@@ -470,7 +470,8 @@ fn verify_funds_in_deposit(
     // M6 (`verify_rgb_funds_in`) requires the deposit lockId to name the
     // signed mint transition in the signed tx. The transition commits to its recipient
     // seals and the tx to a witness mint's output script.
-    // A legacy deposit with an invoice also gets the seal bind.
+    // A deposit with an invoice (a non-empty destinationAddress) also gets
+    // the seal bind.
     if verified.destination_address.trim().is_empty() {
         return Ok(None);
     }

@@ -50,7 +50,7 @@ Attestation document { pcrs, public_key, user_data, nonce, timestamp, ... }
 `AttestedPublicKey` attests the installed public keys and configured policy.
 It does not contact the EVM RPC provider, so verification can succeed while that
 provider is unavailable. It does not show that the node can complete a signing
-request. The current `Health` response checks whether endpoints are set, keys
+request. The `Health` response checks whether endpoints are set, keys
 are loaded and, where required, SPV is ready; it does not probe EVM RPC
 availability either. Routing that requires live provider availability needs
 a separate check.
@@ -121,8 +121,8 @@ config pinned at enclave boot from env (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the enclave to a
 specific chain / contract / asset triple — a misconfigured or
 maliciously-redirected enclave is observable through this commitment. (The
-attestation-bundle/proto field keeps the legacy name `bridge_contract`; its
-value is the MultisigProxy from `EVM_PROXY_CONTRACT_ADDRESS`.)
+attestation-bundle/proto field `bridge_contract` holds the MultisigProxy
+address from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
 `rgb_asset_id=""`. The gas-tx key and the Concordium key are derived in every
@@ -162,7 +162,7 @@ policy_commitment =
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 reserved | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8
     u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest | 4 testnet4 | 5 signetcustom
@@ -201,7 +201,7 @@ the pinned RPC for the correctness of these responses. Production verification
 requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
 value; a production enclave refuses `latest` at boot, and so does the verifier.
 
-`clone_peer_pcr3` binds clone peers to the parent instance IAM role (#270). A
+`clone_peer_pcr3` binds clone peers to the parent instance IAM role. A
 verifier does not configure it: it takes PCR3 from the verified document (the
 NSM signs it), requires it to be present and not all zero for a cloning role,
 and expects no value for the mint signer. An enclave on an instance without an
@@ -273,9 +273,8 @@ A file checksum and a PCR measurement are different values.
 Reproducing the image measurements requires the release's source, toolchain
 and public build inputs, not a member's endpoint hosts, ports or RPC CA.
 This applies to both SPV and no-SPV profiles. Source/dependency access is
-still required as described in the README. The former `ENDPOINTS_SHA256`
-image setting is removed; approve the corrected release's measurements once.
-Later endpoint changes reuse that image and its PCR allowlist.
+required as described in the README. Endpoint changes reuse the same image
+and its PCR allowlist.
 
 Provider credentials can be supplied through `EVM_RPC_PATH_FILE` at launch.
 The private path is not in the image, attested policy or KMS encryption context.
@@ -432,7 +431,7 @@ inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
 verified document, as described above.
 
 These production-policy checks do not accept the no-SPV Development posture.
-The existing `export-attestation --allow-development-policy` option for real
+The `export-attestation --allow-development-policy` option for real
 burn/combined exports verifies approved nonzero image PCRs, not individual
 endpoint settings. Approve those launch inputs separately; the enclave does
 not receive an authorization from this host-side verification command.
