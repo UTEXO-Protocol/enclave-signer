@@ -46,7 +46,7 @@ pub struct Completion {
     pub detail: String,
 }
 
-/// Send SetClone once, then read all 13 identity fields.
+/// Send SetClone once, then read all 10 identity fields.
 /// Limit the total caller wait to 1.5 seconds.
 /// A timeout does not prove that SetClone failed.
 pub fn complete(
@@ -91,7 +91,7 @@ pub fn complete(
                     Outcome::RecoveredSuccess
                 },
                 detail: if identity_matches {
-                    format!("{set_detail}; requester matches expected EVM and all 13 donor fields")
+                    format!("{set_detail}; requester matches expected EVM and all 10 donor fields")
                 } else {
                     format!("{set_detail}; identity mismatch (expected EVM match: {}; differing donor fields: {})",
                         keys.evm_address == expected_evm, mismatches.join(", "))

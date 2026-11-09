@@ -1077,7 +1077,7 @@ fn run_clone(
         print_keys_response(keys);
         if completion.outcome.is_success() {
             println!(
-                "OK: cloned identity matches the donor on all 13 fields (EVM 0x{})",
+                "OK: cloned identity matches the donor on all 10 fields (EVM 0x{})",
                 hex::encode(&keys.evm_address)
             );
         }
