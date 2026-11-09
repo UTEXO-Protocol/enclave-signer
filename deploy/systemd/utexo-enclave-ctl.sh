@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # start|check|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
-# `check` refuses a launch value or a hugepage pool that cannot hold every
-# enclave of the host, and changes nothing. Run it before a rolling restart:
+# `check` refuses a launch value or a hugepage pool too small for this one
+# enclave, and changes nothing. Run it before a rolling restart:
 # under `systemctl restart` the old enclave stops before `start` runs.
 # `start` sets the chain endpoints on the fresh enclave. Identity is NOT
 # bootstrapped here - a freshly (re)started enclave is empty; run `init`/`clone`

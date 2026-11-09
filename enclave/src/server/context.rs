@@ -19,8 +19,8 @@ pub struct Launch {
     /// The enclave security policy, resolved once at launch.
     /// The attestation `user_data` commits to it through
     /// [`crate::policy::SecurityPolicy::commitment_bytes`].
-    /// Signing handlers read it. They do not derive the policy from build
-    /// features or empty request fields.
+    /// `SignBtc` reads it. The other signing handlers enforce the pins in
+    /// `BridgeConfig`. No handler derives a policy from request fields.
     pub policy: SecurityPolicy,
     /// `SetEndpoints` always sets it. Tests can leave it `None`.
     /// Then the handlers refuse.

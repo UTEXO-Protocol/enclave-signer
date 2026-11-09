@@ -181,7 +181,7 @@ pub enum AttestationMode {
 ///
 /// [`Production`](AttestedPolicy::Production) is the fail-closed bridge
 /// posture: fully pinned, real attestation, SPV anchors and a known EVM data
-/// source. A debug, dev-feature, unpinned or non-bridge build is
+/// source. A debug, dev-feature, no-SPV, unpinned or non-bridge build is
 /// [`Development`](AttestedPolicy::Development). A production verifier must
 /// reject it.
 // Built once at boot, so the variant size difference does not matter.

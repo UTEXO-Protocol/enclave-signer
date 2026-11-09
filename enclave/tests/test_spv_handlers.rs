@@ -2,7 +2,7 @@
 //! `GetLastSavedBlock`). They use the full wire path: TCP framing ->
 //! `dispatch` -> `ServerContext.header_chain` -> response.
 //!
-//! Gated with `spv`. A `ccd`-only build has no header chain.
+//! Gated with `rgb-validation`: a `ccd`-only build has no header chain. Run it with `spv`.
 #![cfg(feature = "rgb-validation")]
 
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};

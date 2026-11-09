@@ -11,8 +11,8 @@
 
 pub mod chain;
 pub mod checkpoint;
-// Merkle proofs anchor the burn path's witness txs, and the mint path's
-// Electrum witness lookups.
+// Merkle proofs anchor the witness txs of an `spv` burn, and the Electrum
+// witness lookups of a no-SPV burn.
 pub mod merkle;
 pub mod types;
 pub mod validation;

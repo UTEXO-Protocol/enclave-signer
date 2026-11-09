@@ -36,7 +36,7 @@ The burn signer signs nothing on Bitcoin.
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
 The burn signer checks request claims before it signs. It derives the burn
-amount from the consignment. It reads no Bitcoin indexer, and reads the EVM
+amount from the consignment. The image above reads no Bitcoin indexer, and reads the EVM
 RPC only for an asset whose genesis names a reject list (Stage 3b): the
 deposits behind the burn are derived, and the witnesses are checked on chain against
 the enclave's own header chain. One call of rgb-lib's
@@ -47,6 +47,14 @@ only if a Merkle proof in the request places it at least
 history fails consensus. So two conflicting
 off-chain transfers of the same units cannot both back a burn: only one of
 them can be mined.
+
+**A build without `spv`.** The stage-signet profile builds the burn signer with
+`--no-default-features --features vsock,burn-signer`. That build runs on public
+Signet only and attests `Development`. The resolver takes each witness status and depth from the
+pinned indexer, and the signer trusts that answer: TLS authenticates the
+endpoint and proves no Bitcoin consensus. Stage 3 does not run. B5.5 is reversed:
+the request must carry no Merkle proofs and an empty `proof`. See
+[Known limits](tee-spec.md#13-implementation-status).
 
 On mainnet and testnet4, SPV checks witness inclusion against the enclave
 header chain with proof of work. On testnet4, min-difficulty blocks count as
@@ -532,10 +540,8 @@ on the shapes below, the inspection takes 0.46 to 0.5 us per byte, about 46 to
 rates (650 ns per byte, 65 us per opout, 90 us per operation, 8 ns per witness
 step) hold every shape measured at a load under 4 by 8 percent or more: the
 honest 2810-mint burn closest (2.2 s at a load of 4 against 2.4 s), then the
-fan-outs (11 to 13 percent). On the burn path every witness of what the
-inspection reads is mined. In the swap flow (`allow_unbroadcast_last` in
-`networks/rgb/route.rs`) the last bundle need not be, so a host can forge one
-within the caps at no chain cost; the gate counts its inspection the same way.
+fan-outs (11 to 13 percent). Every witness of what the inspection reads is
+mined.
 
 The honest burn here is 2810 mints, each on its own right, all burned by one
 transition (2810 allocations in one tx), the widest the bridge expects, on the

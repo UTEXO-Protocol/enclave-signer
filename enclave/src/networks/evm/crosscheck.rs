@@ -16,7 +16,7 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map, which the burn path fills from verified SPV proofs only.
+/// ordinal map, filled from verified SPV proofs, or from the indexer on a no-SPV burn.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated

@@ -18,13 +18,13 @@
 #   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   RGB_PRIVATE_DEPS_TOKEN  token with read access to the UTEXO-Protocol/<repo>-s-bfa
-#                           mirrors of the RGB protocol crates
+#   RGB_PRIVATE_DEPS_TOKEN  token the build scripts still require; it maps no URL,
+#                           because the RGB protocol crates are public
 #   PRIVATE_DEPS_DIR        or a directory with those in lib_key and rgb_deps_token files
 #
-# rgb-lib and the RGB protocol crates it pins come from private mirrors. The
-# key and the token go in BuildKit secrets: never in a build arg, a layer, the
-# image or PCR0.
+# rgb-lib comes from a private mirror and the RGB protocol crates it pins from
+# public repos. The key and the token go in BuildKit secrets: never in a build
+# arg, a layer, the image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -159,7 +159,7 @@ elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ] && [ -n "${RGB_PRIVATE_DEPS_TOKEN:-}" 
     )
 else
     echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa" >&2
-    echo "       and a token with read access to the UTEXO-Protocol/<repo>-s-bfa RGB crate mirrors." >&2
+    echo "       and the token that the build scripts still require, although it maps no URL." >&2
     echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
     echo "       lib_key and rgb_deps_token files." >&2
     exit 1

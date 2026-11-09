@@ -3,13 +3,13 @@
 //! [`SecurityPolicy::resolve`] makes it from the build features and the
 //! [`BridgeConfig`]. It is:
 //!
-//!   * fail-closed: a release `rgb-validation` build without a valid
-//!     [`SecurityPolicy::Production`] does not boot or launch
-//!     ([`SecurityPolicy::assert_valid_at_boot`],
-//!     [`SecurityPolicy::assert_valid_for_build`]);
+//!   * fail-closed: a release `spv` build without a valid
+//!     [`SecurityPolicy::Production`], or a no-SPV build without
+//!     `Development { IndexerTrusted }`, does not boot or launch
+//!     ([`SecurityPolicy::assert_valid_at_boot`], `assert_valid_for_build`);
 //!   * attested: the attestation `user_data` commits
 //!     [`SecurityPolicy::commitment_bytes`];
-//!   * authoritative: handlers read it and do not derive the policy again.
+//!   * authoritative for `SignBtc`. The other handlers enforce `BridgeConfig` pins.
 //!
 //! The functions take an explicit [`BuildContext`], so unit tests cover release
 //! behavior without a release build.
@@ -34,9 +34,9 @@ const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature =
 pub enum SecurityPolicy {
     /// A fully pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
-    /// Not a production bridge signer: a debug build, a dev feature, a
-    /// non-bridge build or an unpinned config. The reason goes into logs and the
-    /// fail-closed panic.
+    /// Not a production bridge signer: a debug build, a dev feature, a no-SPV
+    /// build, a non-bridge build or an unpinned config. The reason goes into
+    /// logs and the fail-closed panic.
     Development { reason: DevReason },
 }
 
@@ -160,7 +160,7 @@ impl SecurityPolicy {
     /// Resolve the policy from the build context, the [`BridgeConfig`] and the
     /// launch endpoints.
     ///
-    /// Only a release bridge build with all three pins set gives
+    /// Only a release `spv` build with all three pins set gives
     /// [`SecurityPolicy::Production`]. All other inputs give
     /// [`SecurityPolicy::Development`].
     pub fn resolve(

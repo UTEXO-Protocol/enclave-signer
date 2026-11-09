@@ -3,7 +3,7 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the indexer client, and the mint path's witness source.
+//! - `indexer.rs`: the indexer client, and the no-SPV burn's witness source.
 //! - `witness.rs`: the on-chain witness resolver consensus runs with.
 //! - `consensus.rs`: run rgb-lib validation over the consignment bytes.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.

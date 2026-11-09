@@ -19,7 +19,7 @@ flowchart TD
         p1l -->|no| p1lr[REFUSE - not an EVM reject list]:::refuse
         p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
         p1k -->|no| p1kr[REFUSE - work cap]:::refuse
-        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
+        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof,<br/>or the indexer on a no-SPV build<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
     end
@@ -104,11 +104,14 @@ flowchart TD
   ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
-- The burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
+- An `spv` burn signer reads no Bitcoin indexer. A burn signer built without
+  `spv` (public Signet, `Development` policy) trusts the indexer for witness
+  status, and the SPV and BtcRelay gates do not run. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside
   rgb-lib's validation (P1), and never confirms an anchor or calls plain
   `validate()` without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
-  release builds. A release bridge build refuses to boot, and `SetEndpoints`
-  refuses, without a valid `Production` policy.
+  release builds. A release `spv` build refuses to boot, and `SetEndpoints`
+  refuses, without a valid `Production` policy. A release no-SPV build needs
+  `Development { IndexerTrusted }` instead.

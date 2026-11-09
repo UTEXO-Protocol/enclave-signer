@@ -258,8 +258,8 @@ fn summarize(
     })
 }
 
-/// Witnesses rgb-lib did not see mined, in display order: at most the one the
-/// swap flow signs.
+/// Witnesses rgb-lib did not see mined, in display order. A passing validation
+/// leaves none: the resolver refuses every unmined witness.
 fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32]>> {
     let mut txids = BTreeSet::new();
     for witness in &validation.witnesses {

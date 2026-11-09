@@ -39,7 +39,7 @@ use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::{find_controlled_taproot_inputs, TaprootSignJob};
 
 /// The `script_pubkey`s of the PSBT inputs this enclave provably controls on
-/// the plain-BTC (Vanilla) account.
+/// the plain-BTC (Vanilla) account. Only tests call this wrapper.
 ///
 /// Each entry comes from the custody resolver, so a real BIP-86 derivation
 /// gives its output key.
@@ -50,8 +50,8 @@ pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<
 /// [`self_controlled_input_scripts`] with the account filter made explicit.
 ///
 /// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The plain-BTC path uses `Vanilla` and the asset change oracle uses
-/// `Colored`. `None` takes either.
+/// The mint sats check (M8) uses `None`, and only tests pass `Colored`.
+/// `None` takes either.
 /// A wider filter changes only which scripts count as ours, never what is
 /// signed. `sign_psbt_scoped` controls signing.
 pub fn self_controlled_input_scripts_scoped(
@@ -841,11 +841,11 @@ pub(crate) mod tests {
             // nothing else changed.
             let both = HashSet::from([s.a_spk.to_bytes(), s.b_spk.to_bytes()]);
             assert_eq!(s.before.owned, both, "{tag}: owned before");
-            // No asset change in either run: Vanilla spends no Colored input,
-            // and Colored spends two Colored scripts, which the bounded-change
-            // rule refuses. This test makes sure the set does not change on a
-            // merge. A non-empty change leg under merge is tested in
-            // `psbt_validation::tests::anchor::change_leg_survives_merging_our_own_signature`.
+            // Two outputs pay our own scripts and the foreign one fits the
+            // unowned budget, so the plain-BTC gate passes. It runs on the
+            // Vanilla account only, so the Colored run has no gate result.
+            // This test makes sure the set does not change on a
+            // merge.
             assert_eq!(s.before.btc, None, "{tag}: plain-BTC gate before");
             assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
             assert!(s.tx_unchanged, "{tag}: tx or prevouts changed");

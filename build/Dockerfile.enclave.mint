@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + spv + mint-signer).
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
@@ -132,10 +132,10 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
 # They remain outside the image with or without SPV. Production policy commits
 # the Electrum/EVM hosts and EVM CA; Development policy does not commit them.
-# SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
+# A Production policy attests SPV_MIN_CONFIRMATIONS (at least 1), but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
-# Here it only decides when the health check reports the SPV header chain
-# synced, that many blocks past the checkpoint. Every image sets 3, the depth
+# In an `spv` build it only decides when the health check reports the SPV header chain
+# synced, that many blocks past the checkpoint. Both role images set 3, the depth
 # the burn signer checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every

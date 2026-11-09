@@ -187,7 +187,7 @@ policy_commitment =
       || u8(address_present) [|| expected_evm_address(20)]
     u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
       [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
-    // Development (debug/test/dev-feature/non-bridge/unpinned build):
+    // Development (debug/test/dev-feature/no-SPV/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
@@ -418,16 +418,15 @@ Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
 `sha256("utexo/attested-policy/v1\0" || policy_bytes)`. The parent gRPC
 `AttestedPublicKey` still refuses an answer without keys.
 
-`deploy/deploy-host.sh` runs `utexo-bridge-parent-cli verify-launch` on each
-enclave after `set-endpoints`. The script deploys only the combined image
-(`utexo-bridge-enclave.eif`) and passes `SIGNER_ROLE=combined`. For a mint or
-burn signer with Production policy, run `set-endpoints` and
-`verify-launch --signer-role mint` (or `burn`) yourself. `verify-launch` verifies the document for a fresh nonce
+`deploy/deploy-host.sh` deploys one enclave per run, for `SIGNER_ROLE=mint` or
+`burn`. `utexo-enclave-ctl.sh start` then runs `set-endpoints` and
+`utexo-bridge-parent-cli verify-launch --signer-role <role>` on that enclave.
+`verify-launch` verifies the document for a fresh nonce
 against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,
 the expected value and the attested value. The enclave is then terminated,
-all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
+its unit stops, and the deploy exits 1 before a parent starts. The deploy
 inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
 verified document, as described above.
 
