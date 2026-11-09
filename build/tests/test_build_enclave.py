@@ -58,7 +58,7 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.write_text('#!/bin/sh\nexit 99\n')
             stub.chmod(0o700)
         self.env = dict(os.environ)
-        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
+        for key in ('RGB_ASSET_ID', 'PRIVATE_DEPS_DIR',
                     'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
                     'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
                     'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
@@ -427,11 +427,10 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertIn(key, result.stderr)
                 self.assertFalse(self.argv.exists())
 
-    def test_stage_profile_rejects_bad_pins_and_debug_features(self):
+    def test_stage_profile_rejects_bad_pins(self):
         for key, value in (('STAGE_TOKEN_CONTRACT', '0x' + '00' * 20),
                            ('STAGE_TOKEN_CONTRACT', 'not-an-address'),
-                           ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
-                           ('ENCLAVE_DEBUG_FEATURES', 'allow-debug-pcrs')):
+                           ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234')):
             with self.subTest(key=key, value=value):
                 inputs = self.stage_inputs()
                 inputs[key] = value

@@ -15,7 +15,6 @@
 #                    (mint, burn)
 #   KMS_ALLOWED_ACCOUNT_IDS  mint only: AWS accounts of the seed KMS key; the
 #                    recipe fails the build without it
-#   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
 #   RGB_PRIVATE_DEPS_TOKEN  token the build scripts still require; it maps no URL,
@@ -163,13 +162,6 @@ else
     echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
     echo "       lib_key and rgb_deps_token files." >&2
     exit 1
-fi
-
-# Forward debug features only when set. (F03-AF-12)
-# Do not set ENCLAVE_DEBUG_FEATURES for production builds.
-if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
-    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
-    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
 fi
 
 # --- 1. Build the docker image ---------------------------------------------

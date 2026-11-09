@@ -49,7 +49,7 @@ Provide the existing `RGB_LIB_BFA_DEPLOY_KEY` and
 
 ## Build
 
-For Actions, choose `build_profile=stage-signet` and leave `debug_features` empty.
+For Actions, choose `build_profile=stage-signet`.
 For local builds, configure Docker, Nitro CLI and private dependency access as
 described in the repository README, then run:
 

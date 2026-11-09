@@ -5,10 +5,6 @@ case "$DOCKERFILE" in
     Dockerfile.enclave.burn) ENCLAVE_FEATURES=vsock,burn-signer ;;
     *) echo 'Error: stage-signet supports only mint and burn recipes' >&2; exit 1 ;;
 esac
-[ -z "${ENCLAVE_DEBUG_FEATURES:-}" ] || {
-    echo 'Error: stage-signet requires real attestation; leave debug features empty' >&2
-    exit 1
-}
 
 # Dedicated inputs prevent reuse of an old asset or token from another profile.
 : "${STAGE_RGB_ASSET_ID:?Set STAGE_RGB_ASSET_ID to the new public-Signet BFA asset}"
