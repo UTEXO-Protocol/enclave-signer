@@ -35,8 +35,8 @@
 //!   because the cost gate of validation refuses a chain this dense above
 //!   about 2 MiB. A smaller frame with such a consignment can take more than
 //!   its own request bound. Validation clones the decoded consignment, so
-//!   each decoded list keeps only its length. `MAX_CONSIGNMENT_BYTES` can
-//!   lower the limit, and the enclave refuses to start with a larger value.
+//!   each decoded list keeps only its length. `MAX_CONSIGNMENT_BYTES` can lower
+//!   the image value, and `SetLimits` can raise it only with a frame that fits it.
 //!
 //! [`crate::conn::WORKER_THREADS`] requests run at once, each at most
 //! [`crate::framing::MAX_MESSAGE_SIZE`] bytes. Add the memory the enclave uses

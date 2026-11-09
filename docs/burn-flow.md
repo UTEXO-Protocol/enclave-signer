@@ -129,11 +129,17 @@ error.
 
 ### Stage 1 - Is the request within the caps?
 
-- **B1.1** The consignment must not be larger than `MAX_CONSIGNMENT_BYTES`
-  (default 10 MiB). The enclave refuses to start with a larger value, because
-  the request memory model holds only up to 10 MiB.
-- **B1.2** Proof count must be at most `MAX_MERKLE_PROOFS` (default 16384).
-  Proof bytes must be at most `MAX_TOTAL_PROOF_BYTES` (default 8 MiB).
+- **B1.1** The consignment must not be larger than the runtime limit
+  `max_consignment_bytes` (10 MiB in the image). The image env
+  `MAX_CONSIGNMENT_BYTES` can only lower it: a larger value stops the boot,
+  because at the image frame the request memory model holds only up to 10 MiB.
+  The operator can change the limit on a running enclave. The enclave refuses a
+  value at which the densest consignment does not fit the memory of a frame
+  ([runtime limits](runtime-limits.md)).
+- **B1.2** Proof count must be at most `max_merkle_proofs` (16384 in the image).
+  Proof bytes must be at most `max_total_proof_bytes` (8 MiB in the image). The
+  image env `MAX_MERKLE_PROOFS` and `MAX_TOTAL_PROOF_BYTES` can lower them, and
+  both are runtime limits too.
 - **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 

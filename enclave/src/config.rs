@@ -24,11 +24,11 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// mainnet block. Measured: 10_002 transitions, each with a proof, are
 /// 8_932_069 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
 ///
-/// The memory model sets the upper end. Validation of the densest
+/// The memory model sets the upper end at the image frame. Validation of the densest
 /// consignment measured takes about 53 times its bytes. At this size, a burn
 /// request with such a consignment fits the heap each worker holds
-/// (`memory.rs`), with little room left. So the enclave refuses to start
-/// with a larger value ([`parse_consignment_limit`]).
+/// (`memory.rs`), with little room left. So a larger image value stops the boot
+/// ([`parse_consignment_limit`]). `SetLimits` checks a runtime value (`limits.rs`).
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
@@ -155,10 +155,10 @@ pub struct BridgeConfig {
     /// `none` is for a local stand only; production does not boot on it
     /// ([`crate::policy::ProductionPolicy::check_invariants`]).
     pub btc_relay_mode: BtcRelayMode,
-    /// RGB request size limits (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
-    /// `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*` value. A
-    /// consignment limit above its default stops the boot
-    /// ([`parse_consignment_limit`]). Not attested.
+    /// Image values of the RGB request size limits (`MAX_CONSIGNMENT_BYTES`,
+    /// `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*`
+    /// value. A consignment limit above its default stops the boot
+    /// ([`parse_consignment_limit`]). Not attested. `SetLimits` can change them.
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
@@ -492,10 +492,10 @@ pub fn parse_kms_allowed_accounts(value: Option<&str>) -> std::result::Result<Ve
     Ok(ids)
 }
 
-/// Parses `MAX_CONSIGNMENT_BYTES`. Unset, unparseable or zero gives the
-/// default, as for the other request limits. A value above
-/// [`DEFAULT_MAX_CONSIGNMENT_BYTES`] is refused, because the memory model
-/// holds only up to that size (`memory.rs`).
+/// Parses `MAX_CONSIGNMENT_BYTES`, the image value of `max_consignment_bytes`.
+/// Unset, unparseable or zero gives the default. A value above
+/// [`DEFAULT_MAX_CONSIGNMENT_BYTES`] is refused, because at the image frame the memory
+/// model holds only up to that size (`memory.rs`). `SetLimits` can change it later.
 pub fn parse_consignment_limit(value: Option<&str>) -> std::result::Result<usize, String> {
     match value
         .and_then(|s| s.parse::<usize>().ok())

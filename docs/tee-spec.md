@@ -195,8 +195,10 @@ cost gate of validation refuses a chain this dense above about 2 MiB. The
 sender sets part of the rate through the order of the OpIds, which sets how
 full RGB validation keeps its B-trees. Validation clones the decoded
 consignment, so each decoded list keeps only its length.
-`MAX_CONSIGNMENT_BYTES` can lower that limit, and the enclave refuses to start
-with a larger value.
+`MAX_CONSIGNMENT_BYTES` can lower that limit in the image, and the enclave
+refuses to start with a larger value. A runtime change (`SetLimits`) can raise
+it only with a frame whose memory holds the densest consignment
+(`docs/runtime-limits.md`).
 
 The tests measure the frame, consignment, PSBT, fascia, gas transaction and
 attestation document parsers on the densest shapes measured. The other parsers
