@@ -68,6 +68,16 @@ A behavior change is incomplete until its affected descriptions agree with it.
 - Comments should explain a reason, invariant, unit, protocol constraint or
   non-obvious failure case. Avoid narrating obvious code or leaving a history
   of abandoned implementations in the source.
+- Code, comments, docs, the README and PR descriptions describe the current
+  behavior. Do not write what was added, removed, renamed or retired, or how
+  the code worked before; git keeps that history. Do not name a feature, flow,
+  setting or file that the code does not have. A PR description states the
+  behavior after the change, not earlier versions or attempts.
+- A comment does not write out a value that the code defines elsewhere, that
+  `limits set` can change, or that an image setting sets, nor a number
+  computed from them. Name the constant, the runtime limit or the image
+  setting instead. A measured figure keeps its number when it names the input
+  it was measured at.
 - Preserve the provenance of generated and vendored files. Correct stale
   upstream comments upstream and re-sync the files; do not hand-edit a
   verbatim copy. Until then, keep its documented comment differences accurate
