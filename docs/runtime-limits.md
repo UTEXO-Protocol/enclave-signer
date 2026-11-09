@@ -54,8 +54,10 @@ total_request_timeout_secs=40
 ```
 
 `deploy-host.sh` and `utexo-enclave-ctl.sh` send this file at each launch, before
-`set-endpoints`. If the enclave refuses the file, it logs the refusal, it keeps the
-image values, and the launch continues.
+`set-endpoints`. The file is optional: with no file, the launch sends nothing and
+logs nothing. The enclave unit runs as `ubuntu`, so that user must be able to read
+the file. If the launch cannot read the file, or the enclave refuses it, the launch
+logs this and continues, and the enclave keeps the image values.
 
 ## Limits
 

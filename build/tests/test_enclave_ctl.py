@@ -17,6 +17,7 @@ SHARED_BLOCKS = {
     # The checks that run before anything is touched, up to the exit of `check`.
     'start and check': re.compile(r'  start\|check\)\n.*?\n      exit 0\n    fi\n', re.S),
     'free pages': re.compile(r'    # Refuse with one clear message, not five failed attempts.*?\n    fi\n', re.S),
+    'send limits': re.compile(r'# Send the limits of the operator\..*?\nsend_limits\(\) \{\n.*?\n\}\n', re.S),
 }
 
 
@@ -242,6 +243,9 @@ if 'limits' in sys.argv and {refuse!r}:
                 result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn('limits set', calls.read_text())
+                # The file is optional, so its absence is not reported.
+                self.assertNotIn(str(limits), result.stdout + result.stderr)
+                self.assertNotIn('image values', result.stdout + result.stderr)
 
                 limits.write_text('max_rgb_lib_ms=1\n')
                 calls.write_text('')
@@ -250,6 +254,30 @@ if 'limits' in sys.argv and {refuse!r}:
                 self.assertIn('keeps the image values', result.stderr)
                 self.assertIn('set-endpoints', calls.read_text())
                 limits.unlink()
+
+    def test_start_says_when_it_cannot_read_the_limits_file(self):
+        # A limits file that the unit user cannot read leaves the image values,
+        # as a refused file does. The launch says so and goes on. A link to no
+        # file counts as a file. Root reads a file of mode 0.
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        calls = self.limits_stub(refuse=False)
+        unreadable = self.base / 'enclave-limits.conf'
+        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.chmod(0)
+        dangling = self.base / 'linked-limits.conf'
+        dangling.symlink_to(self.base / 'absent-limits.conf')
+        for path in (dangling,) + ((unreadable,) if os.geteuid() else ()):
+            for script in self.scripts():
+                with self.subTest(script=script.name, path=path.name):
+                    calls.write_text('')
+                    result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(path))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f'cannot read {path} as user ', result.stderr)
+                    self.assertIn('CID 16 keeps the image values', result.stderr)
+                    sent = calls.read_text()
+                    self.assertNotIn('limits set', sent)
+                    self.assertIn('set-endpoints', sent)
 
     def test_start_refuses_when_the_free_pages_cannot_hold_its_enclave(self):
         for gib, free_gib, mib2, free_mib2, free_mib in ((12, 3, 0, 0, 3072), (3, 3, 511, 511, 4094)):
