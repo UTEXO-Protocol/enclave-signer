@@ -26,8 +26,8 @@
 //! validation takes longer as histories grow, and a new image costs a change of
 //! the PCR values. They only stop a typing error and an overflow. The checks
 //! across limits protect the enclave: they keep the request memory model
-//! (`memory.rs`), and they keep the time budget of rgb-lib below the request
-//! deadline.
+//! (`memory.rs`), and they keep the time budget of rgb-lib and each per-call
+//! timeout within the request deadline.
 
 use std::time::Duration;
 
@@ -228,12 +228,17 @@ impl Limits {
                 self.max_rgb_lib_ms, self.total_request_timeout_secs
             ));
         }
-        if self.io_idle_timeout_secs > self.total_request_timeout_secs {
-            return Err(format!(
-                "io_idle_timeout_secs is {}; it must be at most \
-                 total_request_timeout_secs, {}",
-                self.io_idle_timeout_secs, self.total_request_timeout_secs
-            ));
+        // The deadline stops the reads and writes of the request socket, but
+        // not the network calls of the enclave. So a longer network timeout
+        // lets one stalled call hold a worker past the deadline, and the
+        // request loses its reply. A longer idle timeout never applies.
+        for (name, secs) in self.per_call_timeouts() {
+            if secs > self.total_request_timeout_secs {
+                return Err(format!(
+                    "{name} is {secs}; it must be at most total_request_timeout_secs, {}",
+                    self.total_request_timeout_secs
+                ));
+            }
         }
         // An entry must outlive the request that made it, or a concurrent
         // duplicate passes the guard.
@@ -276,6 +281,18 @@ impl Limits {
         Ok(())
     }
 
+    /// The time limits of one socket operation or one network call, with
+    /// their names.
+    fn per_call_timeouts(&self) -> [(&'static str, u64); 5] {
+        [
+            ("io_idle_timeout_secs", self.io_idle_timeout_secs),
+            ("first_bytes_timeout_secs", self.first_bytes_timeout_secs),
+            ("electrum_timeout_secs", self.electrum_timeout_secs),
+            ("esplora_timeout_secs", self.esplora_timeout_secs),
+            ("evm_rpc_timeout_secs", self.evm_rpc_timeout_secs),
+        ]
+    }
+
     fn elements_bytes(&self) -> u64 {
         self.max_wire_elements * crate::memory::WIRE_ELEMENT_BYTES as u64
     }
@@ -283,6 +300,13 @@ impl Limits {
     /// The most heap one request can use under these values.
     pub fn request_bound_bytes(&self) -> u64 {
         crate::memory::REQUEST_MEMORY_FACTOR as u64 * self.max_message_bytes + self.elements_bytes()
+    }
+
+    /// The most RAM the consignment scratch file of one request can take
+    /// (`memory.rs`). The file holds the consignment bytes, and a frame
+    /// cannot carry more than itself.
+    pub fn scratch_file_bytes(&self) -> u64 {
+        self.max_consignment_bytes.min(self.max_message_bytes)
     }
 
     /// The socket deadline of one request.
@@ -492,6 +516,74 @@ mod tests {
         assert_eq!(limits.max_rgb_lib_ms, 68_000);
     }
 
+    /// Sets the per-call timeout `name`. The test names each field itself, so
+    /// a timeout that `per_call_timeouts` leaves out fails the test.
+    fn set_timeout(limits: &mut Limits, name: &str, secs: u64) {
+        let field = match name {
+            "io_idle_timeout_secs" => &mut limits.io_idle_timeout_secs,
+            "first_bytes_timeout_secs" => &mut limits.first_bytes_timeout_secs,
+            "electrum_timeout_secs" => &mut limits.electrum_timeout_secs,
+            "esplora_timeout_secs" => &mut limits.esplora_timeout_secs,
+            "evm_rpc_timeout_secs" => &mut limits.evm_rpc_timeout_secs,
+            _ => panic!("{name} is not a per-call timeout"),
+        };
+        *field = secs;
+    }
+
+    /// One stalled call must not outlast the request deadline: a timeout at
+    /// the deadline passes, and one second more is refused. A later deadline
+    /// lets it pass.
+    #[test]
+    fn each_per_call_timeout_must_fit_the_request_deadline() {
+        let cfg = BridgeConfig::default();
+        let deadline = Limits::DEFAULTS.total_request_timeout_secs;
+        for name in [
+            "io_idle_timeout_secs",
+            "first_bytes_timeout_secs",
+            "electrum_timeout_secs",
+            "esplora_timeout_secs",
+            "evm_rpc_timeout_secs",
+        ] {
+            apply_to_defaults(|l| set_timeout(l, name, deadline)).unwrap();
+            let err = apply_to_defaults(|l| set_timeout(l, name, deadline + 1)).unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "{name} is {}; it must be at most total_request_timeout_secs, {deadline}",
+                    deadline + 1
+                )),
+                "{err}"
+            );
+            let kept = Limits::DEFAULTS.with(&changes(|l| set_timeout(l, name, deadline)));
+            assert_eq!(get(), kept, "a refused change keeps the values");
+            apply_to_defaults(|l| {
+                set_timeout(l, name, deadline + 1);
+                l.total_request_timeout_secs = deadline + 1;
+            })
+            .unwrap();
+            apply(&cfg, &Limits::NONE, true, accept).unwrap();
+        }
+    }
+
+    /// The image timeouts also hold the deadline up: below the 30 s of
+    /// `esplora_timeout_secs`, a shorter deadline needs a shorter timeout.
+    #[test]
+    fn a_shorter_deadline_needs_shorter_per_call_timeouts() {
+        let esplora = Limits::DEFAULTS.esplora_timeout_secs;
+        // The rgb-lib budget must fit the shorter deadline too.
+        apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
+        apply_to_defaults(|l| l.total_request_timeout_secs = esplora).unwrap();
+        let err = apply_to_defaults(|l| l.total_request_timeout_secs = esplora - 1).unwrap_err();
+        assert!(
+            err.contains(&format!("esplora_timeout_secs is {esplora}")),
+            "{err}"
+        );
+        apply_to_defaults(|l| {
+            l.total_request_timeout_secs = esplora - 1;
+            l.esplora_timeout_secs = esplora - 1;
+        })
+        .unwrap();
+    }
+
     /// A larger consignment or PSBT needs a larger frame budget. The memory
     /// model holds at each size that passes. A lower frame limit needs nothing.
     #[test]
@@ -553,7 +645,8 @@ mod tests {
     }
 
     /// `SetLimits` is 250 bytes at most, so the lowest values still let the
-    /// operator reach the enclave and raise them again.
+    /// operator reach the enclave and raise them again. The lowest deadline
+    /// takes per-call timeouts within it.
     #[test]
     fn the_lowest_values_keep_the_enclave_reachable() {
         let lowest = changes(|l| {
@@ -561,6 +654,10 @@ mod tests {
             l.max_wire_elements = 1_024;
             l.total_request_timeout_secs = 10;
             l.io_idle_timeout_secs = 2;
+            l.first_bytes_timeout_secs = 1;
+            l.electrum_timeout_secs = 1;
+            l.esplora_timeout_secs = 1;
+            l.evm_rpc_timeout_secs = 1;
             l.max_rgb_lib_ms = 1_000;
             l.max_consignment_bytes = KIB;
             l.max_psbt_bytes = KIB;

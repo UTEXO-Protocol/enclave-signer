@@ -105,11 +105,14 @@
 //! Consignment validation also uses RAM outside the heap. rgb-lib reads a
 //! consignment only from a file, so validation writes the bytes to a scratch
 //! file in `std::env::temp_dir()`. In the enclave, `/tmp` is a tmpfs, so the
-//! file takes up to `max_consignment_bytes` of RAM for each request. The heap
-//! meter does not count it. The file exists while the enclave keeps its
-//! decoded copy and rgb-lib decodes a second one, so it adds to the request
-//! peak. Four files take at most 40 MiB. They come from the memory that
-//! [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the minimum.
+//! file takes up to `max_consignment_bytes` of RAM for each request, and never
+//! more than the frame. The heap meter does not count it. The file exists
+//! while the enclave keeps its decoded copy and rgb-lib decodes a second one,
+//! so it adds to the request peak. At the image values, four files take at
+//! most 40 MiB. The boot check does not count them: they come from the memory
+//! that [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the minimum. A change of limits
+//! counts them: [`check_limits`] adds one file for each worker. So at the
+//! image values, a change needs 40 MiB of usable memory above the minimum.
 
 use crate::conn::WORKER_THREADS;
 use crate::framing::{MAX_MESSAGE_SIZE, MAX_WIRE_ELEMENTS};
@@ -162,7 +165,8 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// The least `nitro-cli run-enclave --memory` value, in MiB. `MemTotal` in
 /// `/proc/meminfo` leaves out the memory the kernel keeps for itself, and the
 /// root file system of the image sits in RAM too. So the launch value is
-/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 1024 MiB to spare.
+/// above [`MIN_ENCLAVE_MEMORY_BYTES`], with 1024 MiB to spare. The 40 MiB of
+/// consignment scratch files at the image values come from this part too.
 ///
 /// The value is a whole number of GiB. nitro-cli gives an enclave whole
 /// hugepages, 1 GiB pages first, and the allocator reserves its pool the same
@@ -188,14 +192,19 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// start` refuses only when the free hugepages cannot hold its own enclave.
 pub const RUN_ENCLAVE_MEMORY_MIB: usize = 4096;
 
-// The largest four requests fit in the part above the baseline, and the
-// kernel and the root file system get at least 512 MiB of the launch value.
+// The largest four requests fit in the part above the baseline. After the
+// scratch files of four requests at the image consignment limit, the kernel
+// and the root file system get at least 512 MiB of the launch value.
 const _: () = assert!(
     MIN_ENCLAVE_MEMORY_BYTES - BASELINE_BYTES == 4 * (24 * 1024 * 1024 * 24 + 64 * 1024 * 1024)
 );
 const _: () = assert!(MIN_ENCLAVE_MEMORY_BYTES == 3072 * 1024 * 1024);
-const _: () =
-    assert!(RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024 - MIN_ENCLAVE_MEMORY_BYTES >= 512 * 1024 * 1024);
+const _: () = assert!(
+    RUN_ENCLAVE_MEMORY_MIB * 1024 * 1024
+        - MIN_ENCLAVE_MEMORY_BYTES
+        - WORKER_THREADS * crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES
+        >= 512 * 1024 * 1024
+);
 // nitro-cli gives an enclave whole 1 GiB pages first, so the launch value is a
 // whole number of GiB.
 const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
@@ -244,9 +253,9 @@ fn check(total: Option<usize>, ctx: &BuildContext) -> Result<(), String> {
 }
 
 /// Refuses limits whose requests do not fit the usable memory: the check of
-/// [`check_at_boot`], for a change at run time ([`crate::limits`]). So a change
-/// cannot make a request that ends the enclave. A debug build only logs a
-/// warning.
+/// [`check_at_boot`], for a change at run time ([`crate::limits`]), with the
+/// consignment scratch file of each worker (module docs). So a change cannot
+/// make a request that ends the enclave. A debug build only logs a warning.
 pub fn check_limits(limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
     check_limits_against(limits, total_memory_bytes(), ctx)
 }
@@ -256,12 +265,14 @@ fn check_limits_against(
     total: Option<usize>,
     ctx: &BuildContext,
 ) -> Result<(), String> {
-    let needed = BASELINE_BYTES + WORKER_THREADS * limits.request_bound_bytes() as usize;
-    let needed_mib = needed / (1024 * 1024);
+    let request = limits.request_bound_bytes() + limits.scratch_file_bytes();
+    let needed = BASELINE_BYTES + WORKER_THREADS * request as usize;
+    let needed_mib = needed.div_ceil(1024 * 1024);
     let problem = match total {
         Some(total) if total >= needed => return Ok(()),
         Some(total) => format!(
-            "these limits need {needed_mib} MiB of usable memory, and the enclave has {} MiB",
+            "these limits need {needed_mib} MiB of usable memory for {WORKER_THREADS} requests, \
+             their consignment scratch files and the baseline, and the enclave has {} MiB",
             total / (1024 * 1024)
         ),
         None => format!("total memory unknown, and these limits need {needed_mib} MiB"),
@@ -447,23 +458,63 @@ mod tests {
         assert!(err.contains("total memory unknown"), "{err}");
     }
 
+    /// The scratch files of four requests at the image values: 40 MiB.
+    fn image_scratch_files() -> usize {
+        WORKER_THREADS * Limits::DEFAULTS.scratch_file_bytes() as usize
+    }
+
     /// A release build refuses limits that need more memory than it has, and
-    /// the image limits fit the minimum.
+    /// the image limits fit the minimum with their scratch files.
     #[test]
     fn a_change_of_limits_must_fit_the_usable_memory() {
         let image = Limits::DEFAULTS;
-        assert!(
-            check_limits_against(&image, Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok()
-        );
+        let fits = MIN_ENCLAVE_MEMORY_BYTES + image_scratch_files();
+        assert!(check_limits_against(&image, Some(fits), &build(false)).is_ok());
         let larger = Limits {
             max_message_bytes: 2 * image.max_message_bytes,
             ..image
         };
-        let err = check_limits_against(&larger, Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false))
-            .unwrap_err();
+        let err = check_limits_against(&larger, Some(fits), &build(false)).unwrap_err();
         assert!(err.contains("these limits need"), "{err}");
         assert!(check_limits_against(&larger, None, &build(false)).is_err());
         assert!(check_limits_against(&larger, Some(1), &build(true)).is_ok());
+    }
+
+    /// Each worker can hold a scratch file of `max_consignment_bytes` beside
+    /// its heap, and never more than its frame. The boot check leaves the
+    /// files of the image values to the launch margin, so a change needs
+    /// 40 MiB above the minimum.
+    #[test]
+    fn a_change_of_limits_counts_a_scratch_file_for_each_worker() {
+        const MIB: usize = 1024 * 1024;
+        let image = Limits::DEFAULTS;
+        let release = build(false);
+        assert_eq!(image_scratch_files(), 40 * MIB);
+        let fits = MIN_ENCLAVE_MEMORY_BYTES + image_scratch_files();
+        let err = check_limits_against(&image, Some(fits - 1), &release).unwrap_err();
+        assert!(err.contains("need 3112 MiB"), "{err}");
+        assert!(err.contains("consignment scratch files"), "{err}");
+
+        // One MiB more of consignment takes one MiB more on each worker.
+        let larger = Limits {
+            max_consignment_bytes: image.max_consignment_bytes + MIB as u64,
+            ..image
+        };
+        let needed = fits + WORKER_THREADS * MIB;
+        assert!(check_limits_against(&larger, Some(needed - 1), &release).is_err());
+        assert!(check_limits_against(&larger, Some(needed), &release).is_ok());
+
+        // A frame cannot carry a larger file.
+        let frame = image.max_message_bytes;
+        let needed = MIN_ENCLAVE_MEMORY_BYTES + WORKER_THREADS * frame as usize;
+        for consignment in [frame, 2 * frame, 1 << 32] {
+            let limits = Limits {
+                max_consignment_bytes: consignment,
+                ..image
+            };
+            assert!(check_limits_against(&limits, Some(needed - 1), &release).is_err());
+            assert!(check_limits_against(&limits, Some(needed), &release).is_ok());
+        }
     }
 
     #[test]

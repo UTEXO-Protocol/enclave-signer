@@ -107,7 +107,13 @@ refuses the request and changes nothing.
 - `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`.
   A request that passes the deadline does all its work, and then it cannot send
   its reply. So 30 s of rgb-lib needs a deadline of at least 40 s.
-- `io_idle_timeout_secs` must be at most `total_request_timeout_secs`.
+- Each per-call timeout must be at most `total_request_timeout_secs`:
+  `io_idle_timeout_secs`, `first_bytes_timeout_secs`, `electrum_timeout_secs`,
+  `esplora_timeout_secs` and `evm_rpc_timeout_secs`. The deadline does not stop a
+  network call of the enclave, so a longer network timeout lets one stalled call
+  hold a worker past the deadline. With the image timeouts, a deadline below 30 s
+  also needs a lower `esplora_timeout_secs`, and a deadline below 15 s also needs
+  lower `electrum_timeout_secs` and `evm_rpc_timeout_secs`.
 - `mint_replay_ttl_secs` must be above `total_request_timeout_secs`, so an entry
   outlives the request that made it.
 - The densest consignment at `max_consignment_bytes` must fit the heap of a frame
@@ -119,8 +125,12 @@ refuses the request and changes nothing.
   250,000 more entries.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
-  limits, and the baseline. A larger frame can need a larger `run-enclave --memory`
-  value, which needs a new launch.
+  limits, a consignment scratch file for each request, and the baseline. rgb-lib
+  reads a consignment only from a file, and the enclave keeps that file in RAM. A
+  file takes up to `max_consignment_bytes`, and never more than
+  `max_message_bytes`. At the image values, this is 3112 MiB: the 3072 MiB that the
+  boot check requires, and 40 MiB for the files. A larger frame or consignment
+  limit can need a larger `run-enclave --memory` value, which needs a new launch.
 
 ## The reject list
 
