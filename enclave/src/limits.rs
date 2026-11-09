@@ -170,13 +170,13 @@ limits! {
     /// Headers in one minute.
     max_headers_per_minute: 100_000, 1, 1 << 40;
     /// How long the mint signer refuses a second request for one deposit. A
-    /// retry of the same request does not reach the enclave: the parent answers
-    /// it from the reply it kept (parent `signed_responses`). The value of the
-    /// image covers the retry backoff of the listener and the usual
-    /// confirmation of the first transaction. The PSBT is not part of the key,
-    /// so a mint rebuilt for the same deposit (other inputs, higher fee) is
-    /// refused until this time has passed. It must be above the request
-    /// deadline, so an entry outlives the request that made it.
+    /// retry of the same request normally does not reach the enclave: the
+    /// parent answers it from the reply it kept (parent `signed_responses`). It
+    /// does when the parent has no copy of the reply (`docs/mint-flow.md` S7.6).
+    /// The value of the image covers the retry backoff of the listener and the
+    /// usual confirmation of the first transaction. A mint rebuilt for the same
+    /// deposit has another txid, so M6 refuses it after this time too. The value
+    /// must be above the request deadline, so an entry outlives its request.
     mint_replay_ttl_secs: 3_600, 120, 366 * 24 * 3_600;
     /// Deposits that the mint replay guard holds. When it is full, the guard
     /// removes the oldest entry and does not block signing. Only a real deposit

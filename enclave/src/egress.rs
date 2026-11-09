@@ -7,10 +7,10 @@
 //! A forwarder for a TLS endpoint (`ssl://` or `https://` indexer, EVM RPC,
 //! KMS) accepts only a connection that starts with a TLS handshake record.
 //! Thus no client in the enclave can send plaintext to such an endpoint, not
-//! even after an HTTPS -> HTTP redirect. Some HTTP clients (`minreq` in
-//! `esplora-client`, `reqwest` in the EVM RPC client) follow such redirects,
-//! and the enclave cannot turn that off through their APIs. A redirect to a
-//! port with no forwarder, or to another host, has no route out.
+//! even after an HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) does
+//! not follow redirects. `esplora-client` (`minreq`) can follow them, and the
+//! enclave cannot turn that off through its API. A redirect to a port with no
+//! forwarder, or to another host, has no route out.
 
 use std::io::{self, Read};
 use std::net::TcpStream;

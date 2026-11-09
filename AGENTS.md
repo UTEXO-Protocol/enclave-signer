@@ -33,6 +33,7 @@ requests and relays bytes; it is outside the enclave trust boundary.
 | Attestation and public verification | `attestation-verify/`, enclave attestation, parent verifier | [Attested keys](docs/pubkey-attestation.md), [verify a signer](docs/verify-a-signer.md) |
 | Mint seed recovery | Enclave KMS and parent storage broker | [KMS persistence](docs/kms-persistence.md) |
 | Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md), [clone result codes](docs/clone-cli-results.md) |
+| Runtime limits | `enclave/src/limits.rs`, `enclave/src/memory.rs`, `parent/src/limits.rs` | [Runtime limits](docs/runtime-limits.md) |
 | Wire schema | `enclave-proto/`, `parent/Cargo.toml` | [Proto provenance and sync procedure](enclave-proto/README.md) |
 | Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [README](README.md), [stage profile](build/profiles/README.md), relevant configuration and rollout instructions |
 | Architecture and request sequences | Related handlers and adapters | [Diagram index](docs/diagrams/README.md) |
@@ -334,6 +335,10 @@ report that conflict and keep it visible until the implementation is fixed.
   Bind cached signed replies to the exact request. The same operation ID with
   different content is not an identical retry. Test caller cancellation and a
   lost reply, including whether later callers recover the original result.
+- Keep signed replies for retries in the parent; the enclave keeps none. A
+  reply store in the enclave takes enclave memory that the memory model must
+  count, and a change to it needs a new image. An identical retry that the
+  parent cannot answer reaches the enclave's replay guard.
 - Bound and clean up sessions, nonces, cache entries and proxy connections.
   Authentication failures must not exhaust legitimate replay or session state.
   Preserve half-close and EOF behavior in relays.
@@ -349,6 +354,9 @@ report that conflict and keep it visible until the implementation is fixed.
   safety depends on in the image, such as the SPV depth, the finality tag, fee
   limits, and the chain, contract and asset pins. A profile or build argument
   must not change the SPV depth or the finality tag.
+- A limit that the operator can change needs a runtime check for each relation
+  its image value meets, such as a per-call network timeout within the request
+  deadline, or the consignment scratch files within the memory margin.
 
 ## Schema, ABI and dependency changes
 
@@ -408,6 +416,9 @@ report that conflict and keep it visible until the implementation is fixed.
   public availability. Prevent different profiles from sharing an artifact
   name or silently replacing an approved release.
 - Validate configuration and required files before changing host services.
+  The runtime limits file is not a required file: if a launch cannot apply it,
+  the enclave keeps the image values, because a limit only refuses or delays
+  work. The launch must report that case.
   Require the launch policy and the complete approved identity map before
   routing traffic. Liveness checks and partial bundle exports are insufficient.
   Check host and allocator capacity before stopping working enclaves.
@@ -444,6 +455,7 @@ cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
 cargo test --workspace
 cargo test --manifest-path parent/Cargo.toml
 python3 -m unittest discover -s build/tests -v
+python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
 ```
 
 Run the checks relevant to the change. For role-specific work, also run the
