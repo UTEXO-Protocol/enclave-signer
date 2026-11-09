@@ -299,8 +299,9 @@ fn reject_debug_pcrs(pcrs: &HashMap<u32, Vec<u8>>) -> Result<()> {
     if all_zero {
         return Err(VerifyError::Attestation(
             "all-zero PCR0/1/2: attestation is from a debug-mode enclave (no measurement) \
-             and is rejected by the production verifier; build with the unsafe \
-             `allow-debug-pcrs` feature only for debug/stage drills"
+             and is rejected by the production verifier; the unsafe `allow-debug-pcrs` \
+             feature skips this check in a debug build of the enclave, and a release \
+             build with it does not compile"
                 .into(),
         ));
     }
