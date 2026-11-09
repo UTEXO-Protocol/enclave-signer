@@ -44,8 +44,10 @@ values that it read.
 A change stays until the enclave restarts. Then the enclave uses the image values.
 
 To keep values, put them in `/etc/utexo/enclave-limits.conf`.
-`ENCLAVE_LIMITS_FILE` can name another file. The file has one `NAME=VALUE` on each
-line. The text after a `#` is a comment:
+`ENCLAVE_LIMITS_FILE` can name another file: `deploy-host.sh` takes it from its
+environment and writes it into `/etc/utexo/enclave.env`, which the enclave unit
+reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has one
+`NAME=VALUE` on each line. The text after a `#` is a comment:
 
 ```text
 # Long histories.
@@ -58,6 +60,11 @@ total_request_timeout_secs=40
 logs nothing. The enclave unit runs as `ubuntu`, so that user must be able to read
 the file. If the launch cannot read the file, or the enclave refuses it, the launch
 logs this and continues, and the enclave keeps the image values.
+
+Before it downloads or stops anything, `deploy-host.sh` checks the file as
+`ubuntu`. When the file, or a link at its path, exists and `ubuntu` cannot read it,
+the deploy stops with an error. The deploy does not check the values: the enclave
+checks them at launch.
 
 ## Limits
 

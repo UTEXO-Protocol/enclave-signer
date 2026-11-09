@@ -132,6 +132,8 @@ os.execvp(args[0], args)
             PATH=self.env['PATH'], GIT_SHA='0' * 40, BUCKET='bucket',
             AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base), SIGNER_ROLE='mint',
             NITRO_ALLOCATOR_CONFIG=str(self.pool), NITRO_HUGEPAGES_DIR=str(self.pages),
+            # Never read the limits file of the machine that runs the tests.
+            ENCLAVE_LIMITS_FILE=str(self.base / 'absent' / 'enclave-limits.conf'),
         )
         env.update(extra)
         return subprocess.run(['bash', str(HOST)], env=env, capture_output=True, text=True,
@@ -278,6 +280,32 @@ if 'limits' in sys.argv and {refuse!r}:
                     sent = calls.read_text()
                     self.assertNotIn('limits set', sent)
                     self.assertIn('set-endpoints', sent)
+
+    def test_start_sends_the_limits_file_that_deploy_host_names(self):
+        # deploy-host.sh writes ENCLAVE_LIMITS_FILE into enclave.env, and systemd
+        # gives `start` the values of that file.
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
+                            HOST.read_text(), re.S)
+        self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
+        limits = self.base / 'operator-limits.conf'
+        limits.write_text('max_rgb_lib_ms=21000\n')
+        names = set(re.findall(r'\$([A-Z_][A-Z0-9_]*)', heredoc.group(1)))
+        subprocess.run(['bash', '-c', 'set -eu\ncat > "$OUT" <<EOF\n' + heredoc.group(1)],
+                       env=dict({name: '' for name in names}, ENCLAVE_LIMITS_FILE=str(limits),
+                                OUT=str(self.env_file), PATH=os.environ['PATH']),
+                       check=True)
+        written = dict(line.split('=', 1) for line in self.env_file.read_text().splitlines())
+        self.assertEqual(written['ENCLAVE_LIMITS_FILE'], str(limits))
+        calls = self.limits_stub(refuse=False)
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None,
+                                      ENCLAVE_LIMITS_FILE=written['ENCLAVE_LIMITS_FILE'])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'limits set --file {limits}', calls.read_text())
 
     def test_start_refuses_when_the_free_pages_cannot_hold_its_enclave(self):
         for gib, free_gib, mib2, free_mib2, free_mib in ((12, 3, 0, 0, 3072), (3, 3, 511, 511, 4094)):
@@ -501,6 +529,7 @@ if 'limits' in sys.argv and {refuse!r}:
                 ENCLAVE_MEMORY='8192', NITRO_ALLOCATOR_CONFIG=str(self.pool),
                 NITRO_HUGEPAGES_DIR=str(self.pages), ENCLAVE_DEBUG_MODE='0',
                 DIR='/home/ubuntu/cluster', SIGNER_ROLE='mint',
+                ENCLAVE_LIMITS_FILE='/etc/utexo/enclave-limits.conf',
                 **{key: '' if empty else value for key, value in optional.items()})
             subprocess.run(['bash', '-c', 'set -eu\nCIDS=(16)\ncat > "$OUT" <<EOF\n'
                             + heredoc.group(1)],
@@ -555,6 +584,54 @@ if 'limits' in sys.argv and {refuse!r}:
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('provision readable mTLS file', result.stdout + result.stderr)
         self.assertFalse(self.calls.exists(), 'nitro-cli ran')
+
+    def test_deploy_host_checks_the_limits_file_as_ubuntu_before_any_change(self):
+        for path in ('enclave-limits.conf', "/etc/utexo/it's.conf", '/etc/utexo/a b.conf'):
+            with self.subTest(path=path):
+                self.assert_refused(self.run_host(ENCLAVE_LIMITS_FILE=path),
+                                    'ENCLAVE_LIMITS_FILE must be an absolute path')
+        # The check runs after the script declares associative arrays, which
+        # bash 3 does not have.
+        if not bash_expands_empty_arrays():
+            return
+        # su runs the command as the user that runs the tests, and records the call.
+        su_calls = self.base / 'su.calls'
+        self.stub('su', f'''
+import os, sys
+args = sys.argv[1:]
+with open({str(su_calls)!r}, 'a') as f:
+    f.write(' '.join(args) + '\\n')
+shell = args[args.index('-s') + 1]
+os.execv(shell, [shell, '-c', args[args.index('-c') + 1]])
+''')
+        host = dict(GRPC_HOST='10.0.0.1', PARENT_TLS_DIR=str(self.base / 'tls'))
+        # A link to no file counts as a file. Root reads a file of mode 0.
+        unreadable = self.base / 'enclave-limits.conf'
+        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.chmod(0)
+        dangling = self.base / 'linked-limits.conf'
+        dangling.symlink_to(self.base / 'absent-limits.conf')
+        for path in (dangling,) + ((unreadable,) if os.geteuid() else ()):
+            with self.subTest(path=path.name):
+                result = self.run_host(ENCLAVE_LIMITS_FILE=str(path), **host)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, output)
+                self.assertIn(f'user ubuntu cannot read {path}', output)
+                self.assertNotIn('mTLS', output)
+                self.assertIn(f"-s /bin/sh ubuntu -c test -r '{path}'", su_calls.read_text())
+                self.assertFalse(self.calls.exists(), 'nitro-cli ran')
+        # With no file, or with a file that ubuntu can read, the script goes on
+        # to the mTLS files, the next check.
+        readable = self.base / 'readable-limits.conf'
+        readable.write_text('max_rgb_lib_ms=21000\n')
+        for path in (self.base / 'absent-limits.conf', readable):
+            with self.subTest(path=path.name):
+                result = self.run_host(ENCLAVE_LIMITS_FILE=str(path), **host)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, output)
+                self.assertIn('provision readable mTLS file', output)
+                self.assertNotIn('cannot read', output)
+                self.assertFalse(self.calls.exists(), 'nitro-cli ran')
 
     def test_the_embedded_copy_equals_the_standalone_one(self):
         standalone, embedded = CTL.read_text(), embedded_ctl()

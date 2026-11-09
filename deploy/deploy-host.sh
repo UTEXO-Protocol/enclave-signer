@@ -20,6 +20,9 @@
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
+# ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
+# (docs/runtime-limits.md). The script writes it into enclave.env. It stops
+# before it changes anything when that file exists and ubuntu cannot read it.
 #
 # After set-endpoints, verify each enclave's attested launch policy.
 # ENCLAVE_DEBUG_MODE=1 skips this check, because the PCRs are zero.
@@ -82,6 +85,13 @@ KMS_EXPECTED_EVM_ADDRESS="${KMS_EXPECTED_EVM_ADDRESS:-}"
 if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   && { [ -z "$KMS_KEY_ARN" ] || [ -z "$KMS_REGION" ] || [ -z "$KMS_SEED_ID" ]; }; then
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
+  exit 1
+fi
+# The path goes into enclave.env and into a shell command below, so it has only
+# plain characters.
+ENCLAVE_LIMITS_FILE="${ENCLAVE_LIMITS_FILE:-/etc/utexo/enclave-limits.conf}"
+if ! [[ "$ENCLAVE_LIMITS_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
+  echo "ENCLAVE_LIMITS_FILE must be an absolute path of letters, digits, '_', '.', '/' and '-', got '$ENCLAVE_LIMITS_FILE'" >&2
   exit 1
 fi
 # Deploy exactly one enclave per invocation. Run the command again with another
@@ -160,6 +170,16 @@ if [ -z "${GRPC_HOST:-}" ]; then
   [ -n "$GRPC_HOST" ] || { log "FATAL: empty private IPv4 from IMDS"; exit 1; }
 fi
 log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
+
+# Each launch sends the runtime limits file as ubuntu. When it cannot read the
+# file, the enclave keeps the image values. Stop here instead, before anything
+# changes. With no file there is nothing to send.
+if [ -e "$ENCLAVE_LIMITS_FILE" ] || [ -L "$ENCLAVE_LIMITS_FILE" ]; then
+  su -s /bin/sh ubuntu -c "test -r '$ENCLAVE_LIMITS_FILE'" || {
+    log "FATAL: user ubuntu cannot read $ENCLAVE_LIMITS_FILE. Make it readable for ubuntu, or remove it to launch with the image values (docs/runtime-limits.md)"
+    exit 1
+  }
+fi
 
 # Check each CID certificate and ACL before stopping services.
 # Keep private keys out of build artifacts.
@@ -566,6 +586,7 @@ ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
 PCR_FILE=$DIR/PCR.json
 IMAGE_ENV=$DIR/IMAGE-ENV.json
+ENCLAVE_LIMITS_FILE=$ENCLAVE_LIMITS_FILE
 SIGNER_ROLE=$SIGNER_ROLE
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
