@@ -259,8 +259,7 @@ pub fn validate_burn_id(cfg: &BridgeConfig, release: &ReleaseIdentity) -> Result
 ///   (`RGBVerifier.UnexpectedSourceAddress`). The field is
 ///   hashed into `burnId`, so another value gives one burn a second replay key.
 ///
-/// The sign handler calls it only for an RGB source. A CCD-sourced release
-/// names its own chain.
+/// The sign handler calls it only for an RGB source.
 #[cfg(rgb_to_evm)]
 pub fn validate_rgb_source_identity(source: &ReleaseIdentity) -> Result<()> {
     if source.source_chain_id != U256::from(RGB_CHAIN_ID) {
@@ -379,7 +378,7 @@ pub fn validate_destination(
         ));
     }
 
-    // A release build without RGB (CCD) needs the EIP-712 domain pins too.
+    // A release build without RGB needs the EIP-712 domain pins too.
     // Without them it would sign for any chain and proxy.
     #[cfg(all(not(feature = "rgb-validation"), not(debug_assertions), not(test)))]
     if bridge_config.chain_id == 0 || bridge_config.bridge_contract == [0u8; ADDRESS_LEN] {

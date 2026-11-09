@@ -14,8 +14,6 @@ use super::rights_refill::handle_sign_rights_refill;
 use super::sign::handle_sign;
 #[cfg(evm_to_rgb)]
 use super::signers::handle_sign_btc;
-#[cfg(feature = "ccd")]
-use super::signers::handle_sign_ccd;
 #[cfg(rgb_to_evm)]
 use super::signers::handle_sign_raw_digest;
 #[cfg(feature = "rgb-validation")]
@@ -27,7 +25,7 @@ use crate::proto::*;
 use crate::state::ReplayReservation;
 
 /// Error for a request whose network is not compiled into this build.
-/// Single-network EIFs (RGB-only / CCD-only) return it, so callers see the
+/// Single-network EIFs (RGB-only) return it, so callers see the
 /// refusal. It is not a silent no-op. `features` names the build features
 /// that add the network.
 #[allow(dead_code)]
@@ -125,16 +123,11 @@ pub(super) fn dispatch(
             }
         }
         Some(Request::SignCcd(req)) => {
-            tracing::info!("request: SignCcd");
-            #[cfg(feature = "ccd")]
-            {
-                ctx.launch().and_then(|_| handle_sign_ccd(&ctx.state, req))
-            }
-            #[cfg(not(feature = "ccd"))]
-            {
-                let _ = req;
-                Err(unsupported_build("ccd", "`--features ccd`"))
-            }
+            tracing::info!("request: SignCcd - removed, refusing");
+            let _ = req;
+            Err(EnclaveError::InvalidRequest(
+                "SignCcd was removed: this enclave does not sign Concordium requests".into(),
+            ))
         }
         Some(Request::SignRightsRefill(req)) => {
             tracing::info!("request: SignRightsRefill");

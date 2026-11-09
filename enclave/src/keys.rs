@@ -5,7 +5,7 @@ use bitcoin::bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv,
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
+use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use hmac::{Hmac, KeyInit, Mac};
 use k256::ecdsa::SigningKey as K256SigningKey;
 use secrecy::{ExposeSecret, SecretBox};
@@ -121,8 +121,9 @@ pub struct KeyManager {
     // Colored coin type: `RGB_COIN_TYPE_MAINNET` on mainnet,
     // `RGB_COIN_TYPE_TESTNET` on other networks.
     colored_coin_type: u32,
-    // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
-    concordium_secret: SecretBox<[u8; 32]>,
+    // Public key of the retired Concordium account (SLIP-0010,
+    // m/44'/919'/0'/0'/0'). It signs nothing. The attested key bundle still
+    // carries it until the wire schema drops the field.
     concordium_pub: [u8; 32],
 }
 
@@ -248,14 +249,13 @@ impl KeyManager {
         })?;
         let account_xpub_colored = Xpub::from_priv(&secp, &account_xpriv_colored);
 
-        // === Concordium: Ed25519 via SLIP-0010, m/44'/919'/0'/0'/0' (all hardened) ===
+        // === Retired Concordium key: public key only, no signer ===
         let mut concordium_secret_bytes = derive_ed25519_slip10(
             seed_box.expose_secret(),
             &[44, CONCORDIUM_COIN_TYPE, 0, 0, 0],
         );
         let concordium_signing = Ed25519SigningKey::from_bytes(&concordium_secret_bytes);
         let concordium_pub = concordium_signing.verifying_key().to_bytes();
-        let concordium_secret = SecretBox::new(Box::new(concordium_secret_bytes));
         concordium_secret_bytes.zeroize();
         drop(concordium_signing);
 
@@ -276,7 +276,6 @@ impl KeyManager {
             account_xpub_colored,
             vanilla_coin_type,
             colored_coin_type,
-            concordium_secret,
             concordium_pub,
         })
     }
@@ -401,13 +400,6 @@ impl KeyManager {
         result[..64].copy_from_slice(&signature.to_bytes());
         result[64] = recovery_id.to_byte();
         Ok(result)
-    }
-
-    /// Sign a 32-byte Concordium transaction hash with the governance Ed25519
-    /// key, with no more hashing. Returns the signature and the public key.
-    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
-        let signing_key = Ed25519SigningKey::from_bytes(self.concordium_secret.expose_secret());
-        Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
     /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.

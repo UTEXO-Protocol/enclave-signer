@@ -50,7 +50,7 @@ pub struct ServerContext {
     /// In-enclave Bitcoin header chain for SPV verification.
     /// It starts from the compile-time checkpoint. SubmitHeaders changes it.
     ///
-    /// A `ccd`-only build has no chain and refuses
+    /// A build without `rgb-validation` has no chain and refuses
     /// `SubmitHeaders` / `GetLastSavedBlock`.
     #[cfg(feature = "rgb-validation")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
@@ -101,7 +101,7 @@ impl ServerContext {
         ctx
     }
 
-    /// `ccd`-only variant without an SPV header chain.
+    /// Variant without an SPV header chain.
     #[cfg(not(feature = "rgb-validation"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
         let ctx = Self::awaiting_launch(state, bridge_config, BuildContext::current());

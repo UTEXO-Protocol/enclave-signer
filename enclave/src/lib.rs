@@ -73,23 +73,6 @@ compile_error!(
      vsock,spv,mint-signer`"
 );
 
-// A signer image must not also serve the CCD paths: it would attest Mint or
-// Burn and sign CCD requests, which the enclave does not validate. The release
-// CCD image is `build/Dockerfile.enclave.ccd`, which has no signer role.
-// `build/Dockerfile.enclave-dev.bfa` needs `ccd` with a role, so this guard
-// applies to release builds only.
-#[cfg(all(
-    feature = "ccd",
-    any(feature = "mint-signer", feature = "burn-signer"),
-    not(debug_assertions),
-    not(test)
-))]
-compile_error!(
-    "`ccd` must not be enabled with a signer role in a release build (debug_assertions off): \
-     the image would attest the role and also sign CCD requests. `ccd` is a default feature, \
-     so build a signer with `--no-default-features`. The CCD image has no signer role"
-);
-
 // The attested role reads the features. The gates read the `build.rs` cfgs.
 // A cfg set from outside (for example RUSTFLAGS) must not make them disagree.
 #[cfg(all(feature = "mint-signer", rgb_to_evm))]

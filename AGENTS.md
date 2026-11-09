@@ -106,7 +106,7 @@ A behavior change is incomplete until its affected descriptions agree with it.
   routing and ACLs do not protect against a compromised parent.
 - Do not trust caller flags such as "event valid", "finalized" or
   "consignment valid". Derive the evidence required by the selected flow.
-  Document any deliberate source-trust exception, including CCD.
+  Document any deliberate source-trust exception.
 - Refuse missing pins, required proofs, unsupported routes and disabled
   capabilities. Do not turn parse errors, missing data or unavailable
   dependencies into a less strict signing path.
@@ -250,8 +250,6 @@ report that conflict and keep it visible until the implementation is fixed.
 - Treat gas transaction signing as its own restricted capability. Validate the
   unsigned transaction, digest, destination, selector, value, gas and fee
   limits. Never add arbitrary EVM digest or raw-message signing.
-  Keep CCD's documented caller-supplied hash model explicit and isolated to
-  its permitted role and route.
 - Preserve the difference between an EIP-712 release and its outer gas
   transaction. Do not claim the gas transaction is bound to a specific release
   unless code actually enforces that relationship.

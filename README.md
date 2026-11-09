@@ -186,7 +186,7 @@ Key paths:
 | BIP-84 BTC key | `m/84'/0'/0'/0/0` | Public key only. Signs nothing. |
 | Vanilla taproot account | `m/86'/<coin>'/0'` (coin 0 mainnet, 1 other) | Plain-BTC `SignBtc` only. |
 | Colored taproot account | `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 other) | Mint PSBTs only. |
-| Concordium key | `m/44'/919'/0'/0'/0'` (Ed25519, SLIP-0010) | `SignCcd`. |
+| Concordium key (retired) | `m/44'/919'/0'/0'/0'` (Ed25519, SLIP-0010) | Public key only. Signs nothing. |
 
 The enclave returns the master fingerprint and both account xpubs. The bridge
 wallet uses them for its watch-only descriptors. A cloned enclave must derive
@@ -247,13 +247,13 @@ request per connection. Frame limit 24 MiB. Schema:
 | `SetEndpoints` | any | all | Sets the chain endpoints (and the KMS values on mint). Once per boot. |
 | `SetLimits`, `GetLimits` | any | all | Change or read the time, memory and size limits ([`docs/runtime-limits.md`](docs/runtime-limits.md)). |
 | `InitializeKey` | Initial | all | Mint: recover or create the KMS seed. Burn: make a seed from OS entropy, with an optional donor `cloning_secret`. |
-| `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, CCD key, boot pins. |
+| `GetPublicKey` | Active | all | EVM address and keys, gas-tx key, BTC key and xpubs, fingerprint, retired Concordium public key, boot pins. |
 | `GetAttestedPublicKey` | any, after `SetEndpoints` | all | The same bundle, plus an NSM attestation document bound to the nonce, the bundle and the policy. Before keys exist it attests the policy only. |
 | `Sign` | Active | mint, burn | Bridge signing. Mint signer: EVM -> RGB only. Burn signer: RGB -> EVM only. |
 | `SignBtc` | Active | mint | Plain-BTC PSBT on the vanilla account. Off unless the attested policy turns it on. |
 | `SignRightsRefill` | Active | mint | The mint wallet sends one `mintRight` to 2..255 of its own Colored outputs. No units move. At most 12 per hour pass the PSBT gate. See [`docs/mint-flow.md`](docs/mint-flow.md#8-rights-refill-signrightsrefill). |
 | `SignRawDigest` | Active | burn | Gas transaction under the attested allowlist. |
-| `SignCcd` | Active | `ccd` builds | Ed25519 over a 32-byte hash. |
+| `SignCcd` | - | - | Removed. Always refused. |
 | `SubmitHeaders` | any | RGB builds | Bitcoin headers (<= 10 000 per call, <= 100 000 per 60 s). The parent denies this gRPC method to clients. Direct enclave callers can still submit headers. |
 | `GetLastSavedBlock` | any | RGB builds | Header-chain tip (the checkpoint when empty). |
 | `InitiateCloning` | Initial or expired Cloning | burn | Starts a requester session or replaces an expired session. |
@@ -262,8 +262,8 @@ request per connection. Frame limit 24 MiB. Schema:
 | `SignRawMessage` | - | - | Refused in every build. |
 | `Health` | any | all | Readiness: endpoints set and key loaded. Builds with the RGB -> EVM path also require a ready header chain. |
 
-The "Signer" column is for the mint/burn images. Other builds (combined,
-CCD) keep both directions where their features allow it.
+The "Signer" column is for the mint/burn images. Other builds (combined)
+keep both directions where their features allow it.
 
 Error codes in `ErrorResponse`, with the gRPC status the parent gives each:
 
@@ -323,11 +323,8 @@ cargo build --release -p utexo-bridge-enclave --no-default-features --features v
 The tree has other builds too. They are not the production bridge:
 
 ```bash
-# Concordium only
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
-
 # Local TCP dev build (debug profile, seed import allowed)
-cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,mint-signer,ccd
+cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,mint-signer
 ```
 
 Compile-time guards in `enclave/src/lib.rs`: RGB without `spv` is limited to
@@ -335,7 +332,7 @@ real-attestation mint/burn builds for public Signet;
 exactly one of `mint-signer` / `burn-signer` whenever `rgb-validation` is on;
 `kms-persistence` requires `mint-signer`;
 `allow-seed-import`, `mock-attestation` and `allow-debug-pcrs` do not compile in
-a release profile, and neither does `ccd` with `mint-signer` or `burn-signer`.
+a release profile.
 CI asserts every guard fires.
 
 ### Enclave image (EIF)
@@ -356,7 +353,6 @@ them for the cargo build only. They are never in a layer, the image or PCR0.
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" KMS_ALLOWED_ACCOUNT_IDS="<12-digit AWS account id>" \
   DOCKERFILE=Dockerfile.enclave.mint ./build/build-enclave.sh   # mint signer
 RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn ./build/build-enclave.sh   # burn signer
-DOCKERFILE=Dockerfile.enclave.ccd       ./build/build-enclave.sh
 ```
 
 `Dockerfile.enclave.mint` and `Dockerfile.enclave.burn` build the BFA signer images.
@@ -494,7 +490,7 @@ cli get-keys
 cli --help
 ```
 
-The default enclave build is `ccd`. It takes no chain endpoints and refuses
+The default enclave build has no features. It takes no chain endpoints and refuses
 `get-last-saved-block`. On an RGB role build, `set-endpoints` also needs
 `--electrum-url`, `--evm-rpc-host`, `--evm-rpc-tls-port` and
 `--evm-rpc-ca-der-file`. See [Production (Nitro)](#production-nitro).
@@ -921,11 +917,10 @@ An ordinary CI run reports these tests as ignored, not as passed.
 
 `rgb-validation` needs exactly one signer role (`mint-signer` or `burn-signer`),
 or the build fails. `spv` turns it on too, so it has the same need.
-The default set is `ccd`.
+The default feature set is empty.
 
 | Feature | Implies | Description |
 |---------|---------|-------------|
-| `ccd` | - | Concordium stack (Ed25519 is always compiled; this gates the handlers). Does not compile in release with `mint-signer` or `burn-signer`. |
 | `kms-persistence` | - | Attested KMS seed generation/recovery with encrypted S3 persistence. Requires `mint-signer`; custody context is `rgb-mint`. |
 | `mint-signer` | `rgb-validation`, `kms-persistence` | Mint/burn signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). Reads its mints and refills from the rgb-lib fascia of each tx, which needs the `strict_encoding` dependency. Exactly one role per mint/burn build. |
 | `burn-signer` | `rgb-validation` | Mint/burn signer role: RGB -> EVM only (`fundsOut`, gas tx). Exactly one role per mint/burn build. |
@@ -958,8 +953,7 @@ Re-syncing changes PCR0. Procedure in
 ## Security model
 
 - **Untrusted host.** Requests from the parent, listener and backend are checked
-  inside the enclave. Concordium source validation trusts the listener;
-  see the spec for network-specific limits.
+  inside the enclave. See the spec for network-specific limits.
 - **On-chain RGB witnesses.** RGB consensus counts a witness tx as valid only
   if it is mined at least `SPV_MIN_CONFIRMATIONS` deep, so an off-chain
   transfer in the history fails validation. The burn signer proves this with

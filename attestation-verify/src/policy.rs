@@ -28,13 +28,11 @@ pub const POLICY_COMMITMENT_V1: u8 = 1;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignerRole {
-    /// No signer role: an image that is neither mint nor burn (for example
-    /// the `ccd` image).
+    /// No signer role: an image that is neither mint nor burn.
     Combined = 0,
     /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
     Mint = 1,
-    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
-    /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
+    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT.
     Burn = 2,
 }
 

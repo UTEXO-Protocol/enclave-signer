@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn empty_asset_pin_matches_empty_wire() {
-        // A build with no RGB asset (EVM or CCD only) must match a "" pin.
+        // A build with no RGB asset (EVM only) must match a "" pin.
         let mut w = wire();
         w.rgb_asset_id = String::new();
         let exp = expect_prod(None, None, Some(String::new()));

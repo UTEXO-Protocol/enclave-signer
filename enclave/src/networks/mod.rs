@@ -3,11 +3,8 @@
 //! Wiring only. `route.rs` holds the source/destination dispatch and the
 //! route amount bind. Each network module owns the checks for its payload.
 
-// `ccd` is self-contained, so a feature gates it. `rgb` and `evm` always
-// compile because shared code uses them (keys.rs PSBT signing, error.rs
-// SpvError). Their heavy deps are behind `rgb-validation`.
-#[cfg(feature = "ccd")]
-pub mod ccd;
+// `rgb` and `evm` always compile because shared code uses them (keys.rs PSBT
+// signing, error.rs SpvError). Their heavy deps are behind `rgb-validation`.
 pub mod evm;
 pub mod rgb;
 mod route;

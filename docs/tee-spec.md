@@ -33,8 +33,7 @@ Its job is to move trust away from the host operator: requests from a compromise
 the checks implemented for the selected route. The enclave validates RGB consignments (burn),
 the RGB data a mint or refill tx commits, from its rgb-lib fascia (mint), Bitcoin SPV inclusion, EVM
 deposit events, and cross-domain bindings itself; it does not treat request
-flags as evidence. The EVM RPC and CCD are trust
-exceptions, described below.
+flags as evidence. The EVM RPC is a trust exception, described below.
 
 ## 2. Trust boundary and threat model
 
@@ -50,7 +49,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 |----------------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------|
 | Nitro hardware + NSM             | measurement (PCRs), attestation signing, entropy | --                                                                                     |
 | Enclave code (this repo)         | validation, key custody, signing                 | -- (the thing being attested)                                                          |
-| Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA; CCD has an explicit trust exception |
+| Parent host / listener / backend | liveness, transport, data *delivery*             | request claims are checked; the EVM RPC is TLS to a pinned CA |
 | Electrum / Esplora indexer (pinned URL, TLS in the enclave) | nothing on the production signing paths. A burn signer built without `spv` (public Signet, `Development` policy) trusts it for witness status and confirmation depth (Known limits) | the mint signer reads its RGB data from the rgb-lib fascia of the PSBT's tx (Sec 7.2); an `spv` burn counts a witness as mined only through an SPV proof against the enclave header chain. TLS authenticates the indexer; it proves no Bitcoin consensus. The mint and burn launches pin the URL even where no signing path reads it. |
 | EVM RPC endpoint (pinned TLS) | receipt, canonical block and selected finality head correctness and availability, as an explicit design assumption. On the burn signer also the reject-list reads: `length()` and `entries()` of an asset's `IRgbRejectList` (Known limits). A hidden entry lets a rejected lineage release. An invented entry or a failed read refuses releases. | TLS authenticates the endpoint; it does not prove canonical EVM history or the answer of an `eth_call` (Sec 7.1-7.2) |
 | Operator | deployment, configuration pins, the cloning secret | plaintext seed export from the enclave |
@@ -70,8 +69,7 @@ risk; `safe` waits for the batch to be posted and covered by L1's safe head,
 with residual L1 reorg risk; `finalized` waits for L1 finalized coverage.
 A production policy refuses `latest` at boot.
 The mint signer validates no RGB history: a bad history makes the mint
-invalid for every receiver, so it is liveness only (Sec 7.2). CCD source
-checks trust the listener.
+invalid for every receiver, so it is liveness only (Sec 7.2).
 
 **Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
 mint and burn images use `PinnedTlsRpc`. TLS ends inside the enclave and
@@ -105,12 +103,8 @@ A synchronization failure leaves the current clock unchanged.
 **No batch signing:** the enclave builds exactly two digest shapes -- the
 typed `TeeFundsOut` and `TeeLzFundsOut` EIP-712 structs over decoded calldata
 fields (Sec 7.1). This path has no batch or opaque-calldata digest builder. The receiving
-contract must use the same signature format. Gas transaction and Concordium
-signing have separate rules.
-
-**Concordium exception:** the CCD source is the one input the enclave does not
-re-validate (Sec 7.9). The listener's finality check is trusted there by
-design; the enclave binds only the amount.
+contract must use the same signature format. Gas transaction signing has
+separate rules.
 
 ## 3. Architecture
 
@@ -129,7 +123,6 @@ Four crates plus the infrastructure they touch:
   - `networks/evm/` -- `fundsOut` / `lzFundsOut` calldata validation and
     crosschecks, EIP-712 signing, `FundsIn` event verification
     (`events.rs`), gas-tx validation;
-  - `networks/ccd.rs` -- Concordium source (amount bind only, Sec 7.9).
 - **`enclave-proto`** -- the vendored `enclave` protobuf package, committed as
   pre-generated Rust so no codegen toolchain enters PCR0.
 - **`attestation-verify`** -- shared library that verifies COSE_Sign1 Nitro
@@ -141,13 +134,12 @@ Four crates plus the infrastructure they touch:
   protocol, the operator CLI, and the `attest-verify` CLI.
 
 **Cargo features.** `spv` (implies `rgb-validation`),
-`ccd`,
 `vsock`, and for mint/burn exactly one signer role: `mint-signer` (EVM -> RGB)
 or `burn-signer` (RGB -> EVM), each implying `rgb-validation`. `mint-signer` also
 enables `kms-persistence`. Production images are built with
 `--no-default-features` and an explicit set (README, Building). Dev-only features
 (`mock-attestation`, `allow-seed-import`, `allow-debug-pcrs`) are
-`compile_error!` in release. So is `ccd` with a signer role (Sec 7.9).
+`compile_error!` in release. The default feature set is empty.
 
 **Wire protocol** enclave<->parent: 4-byte little-endian length prefix + prost
 protobuf, 24 MiB frame limit, no version field (`framing.rs`). Before the
@@ -239,7 +231,7 @@ recovery requires a live approved donor with matching PCRs and policy. Changing
 an attested host or CA can therefore prevent cloning from an old-policy donor,
 even when the image PCRs are unchanged. Until the set, the
 enclave refuses `Sign`,
-`SignBtc`, `SignRightsRefill`, `SignRawDigest`, `SignCcd`,
+`SignBtc`, `SignRightsRefill`, `SignRawDigest`,
 `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the mint signer,
 `InitializeKey`. It starts no Electrum or
 EVM RPC forwarder and opens no chain connection, and `Health` reports not
@@ -421,8 +413,9 @@ own keys.
   - BIP-86 taproot: vanilla `m/86'/<coin>'/0'` (0 mainnet, 1 otherwise), colored
     (RGB) `m/86'/<rgb_coin>'/0'` (827166 mainnet, 827167 otherwise -- the split
     `rgb-lib` uses, so the host's colored addresses resolve).
-  - Concordium governance key: Ed25519 via SLIP-0010, all-hardened
-    `m/44'/919'/0'/0'/0'`. Always derived, so the attested key bundle has the
+  - Concordium key (retired): Ed25519 via SLIP-0010, all-hardened
+    `m/44'/919'/0'/0'/0'`. Only its public key is published; the enclave signs
+    nothing with it. It is still derived, so the attested key bundle has the
     same shape in every build.
 - The **EVM address is the cluster identity**: a cloned enclave installs the
   same seed and signs as the same address; `complete_cloning` asserts the
@@ -458,10 +451,11 @@ Mnemonic and seed import require `allow-seed-import`, which release builds rejec
 ## 7. Protocol flows
 
 All bridge signing goes through one `Sign` request carrying a source network
-(EVM, RGB, or CCD) and a destination network (EVM or RGB). Accepted routes are
-RGB -> EVM, EVM -> RGB, and CCD -> EVM; any other pair is refused. Plain-BTC
-signing is a separate `SignBtc` request (Sec 7.3), Concordium hash signing a
-separate `SignCcd` (Sec 7.9).
+(EVM or RGB) and a destination network (EVM or RGB). Accepted routes are
+RGB -> EVM and EVM -> RGB; any other pair is refused. A `CcdSource` or a
+`SignCcd` request is refused: Concordium support was removed, and its wire
+fields stay in the schema until an upstream change drops them. Plain-BTC
+signing is a separate `SignBtc` request (Sec 7.3).
 
 ### 7.1 RGB burn -> EVM unlock (`fundsOut`)
 
@@ -518,7 +512,7 @@ release. An RGB-sourced release (direct `fundsOut` and LayerZero `lzFundsOut`
 alike) MUST carry `sourceChainId == 827166`, the bridge's RGB network id, pinned as
 a compile-time constant (`RGB_CHAIN_ID`) and so measured into PCR0. The
 `sourceAddress` rule above applies to both routes the same way
-(`validate_rgb_source_identity`). A CCD-sourced release is not subject to it.
+(`validate_rgb_source_identity`).
 
 **`burnId` recompute.** `burnId` is also recomputed in-enclave, exactly as
 `Bridge._deriveBurnIdFromFields` does, from the pinned `FUNDS_IN_CONTRACT`
@@ -830,31 +824,13 @@ when the response was lost. Automation must use the versioned
 [CLI completion results](clone-cli-results.md); an error or timeout alone does
 not establish whether keys were installed.
 
-### 7.9 Concordium (`CcdSource`, `SignCcd`)
+### 7.9 Concordium (removed)
 
-`ccd` builds add two paths that follow the Concordium hash-signing model, where
-the node derives what is signed:
-
-- **CCD -> EVM release.** A `Sign` request with a `CcdSource` MUST carry a
-  32-byte source tx hash. The enclave does **not** re-validate the Concordium
-  transaction; the listener's finality and structure check is trusted. The
-  enclave binds `SignRequest.amount` into the route proof, so the EVM
-  destination amount check (Sec 7.1) still applies, and signs the same typed
-  `fundsOut` digest.
-- **`SignCcd`.** Ed25519 signature over a caller-supplied 32-byte hash with the
-  governance key (Sec 5), returned with the 32-byte public key. No structural
-  validation inside the enclave.
-
-Both are trust exceptions to Sec 2, summarized in Sec 13.
-
-The only release image permitted to carry these paths is
-`build/Dockerfile.enclave.ccd`, built with
-`--no-default-features --features vsock,ccd`. It has no signer role. A release
-build with `ccd` and `mint-signer` or `burn-signer` does not compile
-(`enclave/src/lib.rs`). Without that guard, such an image would attest Mint or
-Burn and also sign these requests.
-`build/Dockerfile.enclave-dev.bfa` enables `ccd` with a signer role in a debug
-build, which resolves to `Development` (Sec 4).
+The Concordium source route, `SignCcd` and the `ccd` feature were removed.
+The enclave refuses `SignCcd` and any `CcdSource`. The key at
+`m/44'/919'/0'/0'/0'` is still derived and its public key stays in the
+attested key bundle, so the bundle format does not change. The key signs
+nothing.
 
 ## 8. RGB / Bitcoin / SPV verification
 
@@ -1112,7 +1088,7 @@ End-to-end release uniqueness also depends on contract checks outside this repo
   Signet/regtest have different validation rules (Sec 8).
 - EVM deposit checks use the selected provider's receipt, canonical block and
   selected finality head. `PinnedTlsRpc` retains trust in the approved provider's
-  data (Sec 2); CCD source validity is delegated to the listener.
+  data (Sec 2).
 - Plain-BTC and bridge PSBTs sign only vanilla and colored accounts respectively.
   The plain-BTC unowned budget permits bounded outputs outside proved custody
   scripts.
@@ -1138,9 +1114,7 @@ pins the spent right (mint signer); disallowed output script or value cap exceed
 ## 13. Implementation status
 
 The production images are the mint signer (`Dockerfile.enclave.mint`) and the
-burn signer (`Dockerfile.enclave.burn`). The tree also has a CCD build. The default feature set is `ccd`. A build choice is not evidence of the deployed image.
-`Dockerfile.enclave.ccd` sets no EVM pins, so its release image refuses every
-EVM signature and every plain-BTC PSBT. CI does not build or publish it.
+burn signer (`Dockerfile.enclave.burn`). The default feature set is empty. A build choice is not evidence of the deployed image.
 
 Known limits. Read them before deployment.
 
@@ -1245,12 +1219,11 @@ Known limits. Read them before deployment.
   that pays the user. M8 keeps the units off the enclave's outputs and bounds
   the sats that leave to `MINT_WITNESS_SAT`. A witness mint has no amount cap
   yet.
-- **EVM and CCD trust.** The images trust the pinned EVM RPC endpoint for
+- **EVM trust.** The images trust the pinned EVM RPC endpoint for
   receipts, canonical blocks and the selected finality head. TLS authenticates the
   endpoint, not its EVM history. A self-consistent false history from an
   approved provider can pass the deposit checks; this risk is accepted by
-  design (Sec 2). CCD source
-  validation trusts the listener.
+  design (Sec 2).
 - **Gas transactions.** The gas limits apply to one transaction, not to a
   sum. A gas transaction is not linked to one checked release. The LayerZero
   fee is not bound to its release.

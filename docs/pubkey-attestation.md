@@ -113,7 +113,7 @@ canonical_bundle =
     u32_be(len(rgb_asset_id))                || rgb_asset_id_utf8
     u32_be(len(evm_gas_tx_uncompressed_pub)) || evm_gas_tx_uncompressed_pub   // 64 bytes
     u32_be(len(evm_gas_tx_address))          || evm_gas_tx_address            // 20 bytes
-    u32_be(len(ccd_ed25519_pub))             || ccd_ed25519_pub               // 32 bytes
+    u32_be(len(ccd_ed25519_pub))             || ccd_ed25519_pub               // 32 bytes, retired key, public key only
 ```
 
 Thirteen fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
@@ -125,7 +125,7 @@ attestation-bundle/proto field `bridge_contract` holds the MultisigProxy
 address from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
-`rgb_asset_id=""`. The gas-tx key and the Concordium key are derived in every
+`rgb_asset_id=""`. The gas-tx key and the retired Concordium key are derived in every
 build, so the bundle has the same shape regardless of features.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
@@ -364,7 +364,7 @@ attest-verify \
 
 # --expect-signer-role is required: `mint` for the mint signer image
 # (Dockerfile.enclave.mint), `burn` for the burn signer
-# (Dockerfile.enclave.burn), `combined` for a build with no signer role (CCD). A burn signer that
+# (Dockerfile.enclave.burn), `combined` for a build with no signer role. A burn signer that
 # attests `mint` fails verification. A role attests the other role's path as
 # off whatever its env says: a burn signer never attests plain-BTC signing
 # (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit

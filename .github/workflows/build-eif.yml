@@ -5,8 +5,7 @@ name: "Build EIF"
 # pull the EIF by SHA instead of anyone building on a side machine.
 #
 # Builds two variants (matrix): rgb-mint and rgb-burn, each under its own S3
-# subpath. The ccd image is not built here: it has no EVM pins, so its release build refuses
-# every Sign. Build it locally with Dockerfile.enclave.ccd.
+# subpath.
 # Deploy whichever the target host needs.
 #
 # Reproducible PCRs: PCR0/PCR1 are a measurement of the EIF, which bakes in the

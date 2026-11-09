@@ -6,7 +6,7 @@
 //! the same `assert_chain_ready` precondition that signing applies. These tests
 //! pin each corner of that conjunction, so a not-ready enclave cannot report ready.
 //!
-//! SPV/RGB builds only. A `ccd`-only build has no header chain and reports SPV
+//! SPV/RGB builds only. A build without `rgb-validation` has no header chain and reports SPV
 //! readiness vacuously. A mint signer also skips the SPV half;
 //! `test_signer_role.rs` covers it.
 #![cfg(all(feature = "rgb-validation", rgb_to_evm))]

@@ -393,15 +393,9 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
-            // CCD source (fundsIn burn) for an EVM release. The listener
-            // checked finality and structure on-chain. The enclave trusts it and
-            // checks the release amount against the destination.
-            Some(source_proof::Chain::Ccd(ccd)) => Ok(
-                enclave_proto::sign_request::SourceNetwork::CcdSource(enclave_proto::CcdSource {
-                    tx_hash: ccd.tx_hash,
-                    commission: source.commission,
-                }),
-            ),
+            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
+                "Concordium sources are not supported",
+            )),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -456,9 +450,9 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // `sign` handles CCD before destination dispatch.
+            // `sign` refuses Concordium data before destination dispatch.
             sign_request::Data::CcdData(_) => {
-                unreachable!("CCD sign requests are handled before destination dispatch")
+                unreachable!("Concordium sign requests are refused before destination dispatch")
             }
         }
     }
@@ -561,50 +555,10 @@ impl ParentService for ParentAdapterService {
         })?;
         let signer_network_id = common.dst_network_id;
 
-        // Concordium: the listener validated the operation and derived the
-        // transaction hash. The enclave signs the hash. There is no
-        // source/destination check or amount check here.
-        if let Some(sign_request::Data::CcdData(payload)) = inner.data.as_ref() {
-            if data_type != DataType::Transaction {
-                return Err(Status::invalid_argument(
-                    "CCD signing requires TRANSACTION data_type",
-                ));
-            }
-            tracing::info!(
-                src_network_id = common.src_network_id,
-                dst_network_id = common.dst_network_id,
-                hash_len = payload.hash.len(),
-                "gRPC Sign: Concordium transaction"
-            );
-
-            let enclave_req = EnclaveRequest {
-                request: Some(enclave_request::Request::SignCcd(
-                    enclave_proto::SignCcdRequest {
-                        hash: payload.hash.clone(),
-                    },
-                )),
-            };
-            let resp = self.send_to_enclave(enclave_req).await?;
-            return match resp.response {
-                Some(enclave_response::Response::CcdSignature(r)) => {
-                    Ok(Response::new(SignatureResponse {
-                        signer_network_id,
-                        signature: r.signature,
-                        identifier: None,
-                        call_data: Vec::new(),
-                        // Ed25519: the signer cannot be recovered from the signature,
-                        // so the key travels with it.
-                        public_key: r.public_key,
-                    }))
-                }
-                Some(enclave_response::Response::Error(e)) => {
-                    Err(Self::enclave_error_to_status(&e))
-                }
-                other => Err(Status::internal(format!(
-                    "unexpected enclave response for CCD Sign: {:?}",
-                    other
-                ))),
-            };
+        if let Some(sign_request::Data::CcdData(_)) = inner.data.as_ref() {
+            return Err(Status::invalid_argument(
+                "Concordium signing is not supported",
+            ));
         }
 
         match data_type {
@@ -644,7 +598,7 @@ impl ParentService for ParentAdapterService {
                     }
                     Some(sign_request::Data::CcdData(_)) => {
                         return Err(Status::internal(
-                            "CCD sign request should have been handled before destination dispatch",
+                            "Concordium sign request should have been refused before destination dispatch",
                         ));
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
@@ -841,10 +795,7 @@ impl ParentService for ParentAdapterService {
     /// Return an enclave public key, selected by `data_type`:
     /// - EVM_GAS_TX: 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1).
     /// - TRANSACTION, UNSPENDABLE: 33-byte compressed BTC public key.
-    /// - CCD_GOVERNANCE: 32-byte Concordium Ed25519 governance key
-    ///   (m/44'/919'/0'/0'/0').
     ///
-    /// `CCD_GOVERNANCE` reads the governance key without attestation.
     /// For Nitro evidence binding these public keys to approved measured code,
     /// use `AttestedPublicKey` with a trusted Real verifier. Genuine Nitro
     /// evidence requires a Nitro Security Module. See docs/pubkey-attestation.md
@@ -875,7 +826,6 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
-                    DataType::CcdGovernance => r.ccd_ed25519_pub,
                     DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(

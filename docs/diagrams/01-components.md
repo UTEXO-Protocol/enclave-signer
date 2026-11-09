@@ -70,9 +70,6 @@ flowchart TB
                 SVal[validation.rs<br/>linkage + PoW + nBits]
             end
         end
-        subgraph NCCD [networks/ccd.rs]
-            NCS[CcdSource: 32-byte tx hash,<br/>amount bind only — listener-trusted]
-        end
         subgraph ATTGRP [attestation + cloning]
             AF[attestation.rs<br/>NSM facade<br/>+ verify_peer_attestation]
             CL[cloning.rs<br/>X25519 + HKDF-SHA256<br/>+ ChaCha20Poly1305]
@@ -87,7 +84,7 @@ flowchart TB
     VPe[(host vsock-proxy<br/>port 8002)]
 
     %% Wires
-    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO / RGB_RIGHTS_REFILL; EVM / RGB / CCD payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
+    L -->|"gRPC parent.ParentService<br/>Sign (data_type TRANSACTION /<br/>EVM_GAS_TX / BTC_UTXO / RGB_RIGHTS_REFILL; EVM / RGB payload) /<br/>PublicKey / Clone /<br/>GetLastSavedBlock /<br/>AttestedPublicKey"| PMain
     Op --> PCli
     V --> AVCli
     PCli --> PClient
@@ -116,7 +113,6 @@ flowchart TB
     ESrv --> NRB
     ESrv --> NRS
     ESrv --> NRI
-    ESrv -->|"SignCcd / CcdSource"| NCS
     NRV --> NRF
     NRP --> NRF
     ESrv -->|"InitiateCloning / GetClone / SetClone /<br/>GetAttestedPublicKey"| AF

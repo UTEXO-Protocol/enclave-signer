@@ -477,12 +477,6 @@ impl EnclaveState {
         self.with_active(|km| km.sign_evm(message_hash))
     }
 
-    /// Sign a 32-byte Concordium account-transaction hash with the governance
-    /// Ed25519 key. Returns the 64-byte signature and the 32-byte public key.
-    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
-        self.with_active(|km| km.sign_ccd(hash))
-    }
-
     /// Sign a 32-byte digest with the EVM gas TX key. Returns 65-byte signature.
     pub fn sign_evm_gas_tx(&self, message_hash: &[u8; 32]) -> Result<[u8; 65]> {
         self.with_active(|km| km.sign_evm_gas_tx(message_hash))

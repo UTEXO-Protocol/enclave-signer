@@ -56,9 +56,9 @@ OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Required. Production is
 # DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
-# signer EIFs). The other one is Dockerfile.enclave.ccd. EIF_NAME names the
+# signer EIFs). EIF_NAME names the
 # output .eif and its SHA256SUMS entry.
-DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint, .burn or .ccd)}"
+DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint or .burn)}"
 BUILD_PROFILE="${BUILD_PROFILE:-default}"
 case "$BUILD_PROFILE" in
     default) ;;

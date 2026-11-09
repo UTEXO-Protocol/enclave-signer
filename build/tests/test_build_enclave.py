@@ -218,7 +218,7 @@ class BuildArgumentsTests(unittest.TestCase):
                         self.assertTrue(build_arg_names.isdisjoint(MEMBER_INPUT_NAMES))
 
     def test_optional_overrides_do_not_leak_into_other_recipes(self):
-        for recipe in ('Dockerfile.enclave.ccd', 'Dockerfile.enclave-dev.bfa'):
+        for recipe in ('Dockerfile.enclave-dev.bfa',):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
                                      ENCLAVE_FEATURES='vsock,mint-signer', **MEASURED_PINS)
@@ -275,8 +275,7 @@ class BuildArgumentsTests(unittest.TestCase):
 
     def test_no_recipe_forwards_kms_pins(self):
         pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '12' * 20)
-        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev.bfa'):
+        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
                 self.assertEqual(result.returncode, 42, result.stderr)
@@ -321,15 +320,6 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertIn('KMS_ALLOWED_ACCOUNT_IDS required', result.stderr)
         self.assertFalse(self.argv.exists())
 
-    def test_make_ccd_target_has_no_kms_dependency_or_arguments(self):
-        for target in ('build_enclave_ccd',):
-            with self.subTest(target=target):
-                result = self.invoke_make(target)
-                self.assertEqual(result.returncode, 2, result.stderr)  # Reaches Docker.
-                argv = json.loads(self.argv.read_text())
-                self.assertEqual(argv[0], 'build')
-                self.assertFalse(any('KMS_' in value for value in argv))
-
     def test_the_measured_image_env_is_published(self):
         stubs = {
             'docker': ('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && '
@@ -350,8 +340,7 @@ class BuildArgumentsTests(unittest.TestCase):
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
 
     def test_every_recipe_takes_the_deploy_key_and_the_mirror_token_as_secrets(self):
-        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev.bfa'):
+        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
@@ -365,7 +354,7 @@ class BuildArgumentsTests(unittest.TestCase):
         deps.mkdir()
         (deps / 'lib_key').write_text('fixture-deploy-key-file')
         (deps / 'rgb_deps_token').write_text('fixture-mirror-token-file')
-        result = self.invoke('Dockerfile.enclave.ccd', PRIVATE_DEPS_DIR=str(deps))
+        result = self.invoke('Dockerfile.enclave-dev.bfa', PRIVATE_DEPS_DIR=str(deps))
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_secrets(), [
             f'id=lib_key,src={deps}/lib_key',
@@ -385,7 +374,7 @@ class BuildArgumentsTests(unittest.TestCase):
         )
         for unset, missing_file, named in cases:
             with self.subTest(unset=unset, missing_file=missing_file):
-                env = dict(self.env, DOCKERFILE='Dockerfile.enclave.ccd')
+                env = dict(self.env, DOCKERFILE='Dockerfile.enclave-dev.bfa')
                 if unset:
                     env.pop(unset)
                 else:
@@ -398,16 +387,6 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(named, result.stderr)
                 self.assertFalse(self.argv.exists())
-
-    def test_ccd_does_not_require_asset(self):
-        result = self.invoke('Dockerfile.enclave.ccd')
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
-
-    def test_ccd_ignores_workflow_asset(self):
-        result = self.invoke('Dockerfile.enclave.ccd', RGB_ASSET_ID='rgb:test-bfa-asset')
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
 
     def stage_inputs(self):
         return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:stage-signet-asset',
@@ -476,7 +455,7 @@ class BuildArgumentsTests(unittest.TestCase):
 
 
 class ImageInputsTests(unittest.TestCase):
-    RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+    RECIPES = RGB_RECIPES
 
     def test_every_rgb_recipe_fixes_the_finality_tag_and_the_depth(self):
         # Every image uses `finalized` and 3. With no ARG, no build can change them.

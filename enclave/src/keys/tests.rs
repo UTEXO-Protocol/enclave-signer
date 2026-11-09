@@ -342,32 +342,6 @@ fn test_concordium_different_seeds_differ() {
     assert_ne!(a.ccd_ed25519_pub(), b.ccd_ed25519_pub());
 }
 
-#[test]
-fn test_sign_ccd_produces_valid_signature() {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
-    let hash = [0xABu8; 32];
-    let (sig_bytes, public_key) = km.sign_ccd(&hash).unwrap();
-    assert_eq!(sig_bytes.len(), 64);
-
-    // The reported key must be the one that signed: the consumer maps the
-    // signature onto an account key index by it.
-    assert_eq!(&public_key, km.ccd_ed25519_pub());
-
-    let vk = VerifyingKey::from_bytes(&public_key).unwrap();
-    let sig = Signature::from_bytes(&sig_bytes);
-    assert!(vk.verify(&hash, &sig).is_ok());
-}
-
-#[test]
-fn test_sign_ccd_deterministic() {
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
-    let hash = [0xABu8; 32];
-    // Ed25519 (RFC 8032) is deterministic.
-    assert_eq!(km.sign_ccd(&hash).unwrap(), km.sign_ccd(&hash).unwrap());
-}
-
 /// There is no segwit v0 P2WSH signer: a valid 2-of-3 P2WSH input with our
 /// BIP-84 key in its witness script is not signed.
 #[test]

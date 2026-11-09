@@ -8,8 +8,6 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
-#[cfg(feature = "ccd")]
-use crate::state::EnclaveState;
 
 /// Check that all pinned Bitcoin blocks still have the same hash and at least
 /// the depth their check required. Then run `sign` with the header-chain lock
@@ -240,40 +238,6 @@ pub(super) fn handle_sign_raw_digest(
     Ok(EnclaveResponse {
         response: Some(Response::RawDigestSig(RawDigestSignatureResponse {
             signature: signature.to_vec(),
-        })),
-    })
-}
-
-/// Sign a 32-byte Concordium account-transaction hash with the governance
-/// Ed25519 key. The listener derives the hash and checks the transaction
-/// structure and amounts. The enclave signs the hash directly.
-/// Returns the 64-byte signature and the public key.
-#[cfg(feature = "ccd")]
-pub(super) fn handle_sign_ccd(
-    state: &EnclaveState,
-    req: SignCcdRequest,
-) -> Result<EnclaveResponse> {
-    if req.hash.len() != 32 {
-        return Err(EnclaveError::InvalidRequest(format!(
-            "hash must be exactly 32 bytes, got {}",
-            req.hash.len()
-        )));
-    }
-
-    let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
-    let (signature, public_key) = state.sign_ccd(&hash)?;
-
-    tracing::info!(
-        hash_hex = %hex::encode(hash),
-        "concordium signature produced (ed25519 governance key)"
-    );
-
-    Ok(EnclaveResponse {
-        response: Some(Response::CcdSignature(CcdSignatureResponse {
-            signature: signature.to_vec(),
-            // Ed25519 signatures are not recoverable. The consumer needs the key
-            // to find the signer index on the governance account.
-            public_key: public_key.to_vec(),
         })),
     })
 }

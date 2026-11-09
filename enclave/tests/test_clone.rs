@@ -2,7 +2,7 @@
 
 //! Integration tests for the cloning handshake.
 //!
-//! Run with `--no-default-features --features ccd,mock-attestation,allow-seed-import`.
+//! Run with `--no-default-features --features mock-attestation,allow-seed-import`.
 //! KMS persistence disables cloning. Mock attestation skips NSM, COSE, and
 //! cert-chain validation. It still checks the pubkey, digest, nonce, and PCR
 //! bindings. `allow-seed-import` only gives the donor a known seed. The cloning

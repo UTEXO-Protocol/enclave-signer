@@ -118,7 +118,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Defaults are `ccd` only. RGB builds need a signer role (lanes below).
+      # Defaults have no features. RGB builds need a signer role (lanes below).
       - name: Build (default features)
         run: cargo build --workspace
 
@@ -210,32 +210,7 @@ jobs:
             cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,$role --lib --bins --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path -- -D warnings
           done
 
-      # CCD-only single-network EIF profile: ccd + shared EVM signing, no RGB
-      # stack (no rgb-ops/rgb-lib/rgb-schemas/spv). Mirrors
-      # Dockerfile.enclave.ccd; RGB requests must be refused. The SignCcd
-      # integration suite (test_sign_ccd.rs) is gated on ccd+allow-seed-import.
-      # Enable vsock in the test step to run the forwarder regression tests;
-      # they use loopback TCP sockets and need no vsock device or Nitro enclave.
-      - name: Build (ccd-only)
-        run: cargo build -p utexo-bridge-enclave --no-default-features --features vsock,ccd
-      - name: Clippy (ccd-only)
-        run: cargo clippy -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import --all-targets -- -D warnings
-      - name: Test (ccd-only)
-        run: cargo test -p utexo-bridge-enclave --no-default-features --features vsock,ccd,mock-attestation,allow-seed-import
-      # The release-only refusals are `not(test)`, so no unit test reaches them.
-      # No CI job ships the ccd image. Compile the release build and check that
-      # both refusals are in the binary, so a wrong cfg cannot drop them silently.
-      - name: Clippy (ccd-only, release)
-        run: cargo clippy --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd -- -D warnings
-      - name: Release refusals present (ccd-only)
-        run: |
-          cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,ccd
-          bin=target/release/utexo-bridge-enclave
-          grep -aq "EVM domain unpinned" "$bin"
-          grep -aq "plain-BTC signing requires BTC_MAX_TOTAL_SATS to be pinned" "$bin"
-
-      # Minimal build: no features at all (`--no-default-features` drops the
-      # default ccd set). Exercises the guard that a build without
+      # Minimal build: no features at all (`--no-default-features`). Exercises the guard that a build without
       # `rgb-validation` refuses an RGB source
       # (a_build_without_rgb_validation_refuses_rgb_sources).
       # Compiles no RGB dep. The no-SPV lanes above compile the no-SPV path.
@@ -406,23 +381,6 @@ jobs:
             done
           done
 
-      # A signer image must not also serve the CCD paths. The dev image builds
-      # this combination in debug mode, so the same set must compile there.
-      - name: Assert ccd with a signer role is rejected in a release build only
-        run: |
-          for role in mint-signer burn-signer; do
-            if cargo check --locked --release -p utexo-bridge-enclave --no-default-features --features "vsock,spv,ccd,$role" 2>build.log; then
-              echo "::error::release build unexpectedly compiled with ccd and $role"
-              exit 1
-            fi
-            if ! grep -q "must not be enabled with a signer role in a release build" build.log; then
-              echo "::error::release build failed, but not via the expected compile_error guard for ccd and $role"
-              cat build.log
-              exit 1
-            fi
-            cargo check --locked -p utexo-bridge-enclave --no-default-features --features "allow-seed-import,mock-attestation,spv,ccd,$role"
-          done
-
       - name: Assert bare rgb-validation without a signer role is rejected
         run: |
           if cargo build -p utexo-bridge-enclave --no-default-features --features rgb-validation 2>build.log; then
@@ -467,7 +425,7 @@ jobs:
 
       - name: Assert KMS persistence outside the mint signer is rejected
         run: |
-          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence ccd,kms-persistence; do
+          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence; do
             if cargo check --locked -p utexo-bridge-enclave --no-default-features --features "$features" 2>build.log; then
               echo "::error::KMS persistence unexpectedly compiled with '$features'"
               exit 1

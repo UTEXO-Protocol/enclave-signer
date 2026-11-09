@@ -33,7 +33,7 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `spv` implies `rgb-validation`. `--no-default-features` drops `ccd`
+# `spv` implies `rgb-validation`. `--no-default-features` keeps the feature list explicit
 # (so this binary is RGB-only). The signer role implies `rgb-validation`,
 # which includes in-enclave FundsIn verification (alloy + tokio). It needs a
 # second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).

@@ -7,8 +7,6 @@
 #[cfg(feature = "rgb-validation")]
 use std::sync::Mutex;
 
-#[cfg(feature = "ccd")]
-use super::ccd;
 use super::{evm, rgb};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
@@ -90,18 +88,11 @@ pub fn validate_source(
             rgb_consignment: None,
         }),
         // On a build without the validator, `rgb::validate_source` fails
-        // closed. Thus a `ccd`-only enclave refuses RGB sources.
+        // closed.
         #[cfg(rgb_to_evm)]
         SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
-        #[cfg(feature = "ccd")]
-        SourceNetwork::CcdSource(source) => Ok(SourceProof {
-            proof: ccd::validate_source(amount, source)?,
-            #[cfg(feature = "rgb-validation")]
-            rgb_consignment: None,
-        }),
-        #[allow(unreachable_patterns)]
         _ => Err(EnclaveError::InvalidRequest(
-            "source network not supported by this build (rebuild with `--features ccd`)".into(),
+            "source network not supported by this enclave".into(),
         )),
     }
 }
@@ -199,11 +190,6 @@ pub fn validate_route_proofs(
             validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
             // The handler binds burn identity on both routes: `validate_burn_id`
             // and the `sourceBurnTxId` OpId bind.
-        }
-        // Concordium fundsIn -> EVM release. The listener validates the source.
-        #[cfg(feature = "ccd")]
-        (SourceNetwork::CcdSource(_), DestinationNetwork::EvmDestination(_)) => {
-            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
         }
         _ => Err(EnclaveError::InvalidRequest(
             "unsupported source/destination network pair".into(),

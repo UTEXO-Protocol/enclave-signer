@@ -5,7 +5,7 @@
 //! The individual checks are in `networks/`.
 
 use super::context::ServerContext;
-use super::dispatch::{unsupported_build, wrong_signer_role};
+use super::dispatch::wrong_signer_role;
 #[cfg(rgb_to_evm)]
 use super::signers::handle_sign_evm;
 #[cfg(evm_to_rgb)]
@@ -176,9 +176,6 @@ pub(super) fn handle_sign(
             // that validation authenticated (witness confirmation, BtcRelay
             // agreement, consignment-bound release amount).
             //
-            // RGB source only. A CCD source has no consignment, and the
-            // validation above already authorizes a CCD -> EVM release.
-            //
             // Burn identity comes first, on both release routes. It needs only
             // the calldata and the pins.
             let release = destination_proof
@@ -241,8 +238,7 @@ pub(super) fn handle_sign(
 }
 
 /// Refuse a route of the other signer role. No-op on a build with both
-/// directions. It refuses by exclusion, so a burn build with `ccd` still signs
-/// CCD -> EVM.
+/// directions.
 fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -> Result<()> {
     #[cfg(not(evm_to_rgb))]
     if matches!(source, SourceNetwork::EvmSource(_))
@@ -358,16 +354,15 @@ fn apply_funds_out_binding(
 
 /// The commission the source network declares, per compiled build.
 ///
-/// Only a `ccd` build has a CCD source. Other builds need the fallback arm
-/// to type-check. `validate_source` already refused the request there.
+/// Only an EVM or RGB source has a commission. `validate_source` already
+/// refused any other source, so the fallback arm only has to type-check.
 fn source_commission(source: &SourceNetwork) -> Result<u64> {
     match source {
         SourceNetwork::EvmSource(source) => Ok(source.commission),
         SourceNetwork::RgbSource(source) => Ok(source.commission),
-        #[cfg(feature = "ccd")]
-        SourceNetwork::CcdSource(source) => Ok(source.commission),
-        #[allow(unreachable_patterns)]
-        _ => Err(unsupported_build("ccd", "`--features ccd`")),
+        _ => Err(EnclaveError::InvalidRequest(
+            "source network not supported by this enclave".into(),
+        )),
     }
 }
 

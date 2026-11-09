@@ -1,7 +1,5 @@
 use super::*;
-#[cfg(feature = "ccd")]
-use crate::proto::CcdSource;
-use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
+use crate::proto::{CcdSource, EvmDestination, EvmSource, RgbDestination, RgbSource};
 
 fn evm_source(commission: u64) -> SourceNetwork {
     SourceNetwork::EvmSource(EvmSource {
@@ -39,7 +37,6 @@ fn rgb_source() -> SourceNetwork {
     })
 }
 
-#[cfg(feature = "ccd")]
 fn ccd_source(commission: u64) -> SourceNetwork {
     SourceNetwork::CcdSource(CcdSource {
         tx_hash: vec![0xCC; 32],
@@ -79,53 +76,13 @@ fn route_proofs_accept_exact_match_to_rgb_destination() {
     .is_ok());
 }
 
-#[cfg(feature = "ccd")]
 #[test]
-fn route_proofs_accept_ccd_source_to_evm_destination() {
-    assert!(validate_route_proofs(
-        &ccd_source(10),
-        &evm_destination(990, 10),
-        &proof(990, None),
-        &proof(990, None),
-    )
-    .is_ok());
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn route_proofs_reject_underfunded_ccd_to_evm_destination() {
+fn route_proofs_refuse_a_concordium_source() {
     let err = validate_route_proofs(
         &ccd_source(10),
         &evm_destination(990, 10),
-        &proof(980, None), // source amount < destination amount
         &proof(990, None),
-    );
-    assert!(err.is_err());
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn ccd_validate_source_trusts_and_binds_amount() {
-    let proof = ccd::validate_source(
-        990,
-        &CcdSource {
-            tx_hash: vec![0xCC; 32],
-            commission: 10,
-        },
-    )
-    .expect("trusted CCD source");
-    assert_eq!(proof.amount, 990);
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn ccd_validate_source_rejects_bad_tx_hash() {
-    let err = ccd::validate_source(
-        990,
-        &CcdSource {
-            tx_hash: vec![0xCC; 31],
-            commission: 10,
-        },
+        &proof(990, None),
     );
     assert!(err.is_err());
 }

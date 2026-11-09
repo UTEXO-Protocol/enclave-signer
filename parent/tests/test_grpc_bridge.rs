@@ -404,9 +404,9 @@ async fn grpc_public_key_transaction_type() {
 }
 
 #[tokio::test]
-async fn grpc_public_key_ccd_governance() {
-    // Plain PublicKey must return the governance key without attestation.
-    // AttestedPublicKey needs an NSM device, and the dev container has none.
+async fn grpc_public_key_refuses_ccd_governance() {
+    // Concordium was removed. The data type stays in the gRPC schema, and the
+    // parent refuses it.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -414,26 +414,20 @@ async fn grpc_public_key_ccd_governance() {
         .await
         .unwrap();
 
-    let resp = client
+    let err = client
         .public_key(PublicKeyRequest {
             network_id: 0,
             data_type: DataType::CcdGovernance as i32,
         })
         .await
-        .unwrap()
-        .into_inner();
+        .unwrap_err();
 
-    assert_eq!(
-        resp.public_key.len(),
-        32,
-        "CCD_GOVERNANCE returns a 32-byte Ed25519 pubkey"
-    );
-    assert_eq!(resp.public_key, vec![0x99; 32]);
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
 async fn grpc_public_key_rejects_unsupported_data_type() {
-    // The CCD_GOVERNANCE arm must not become a catch-all. Data types without
+    // The key match must not become a catch-all. Data types without
     // their own public key must still fail.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
