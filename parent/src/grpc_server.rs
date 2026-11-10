@@ -36,9 +36,9 @@ pub fn image_handler_timeout_is_valid(handler_secs: u64) -> bool {
     handler_timeout_covers_enclave_wait(handler_secs, IMAGE_DEADLINE_SECS)
 }
 
-/// How often the parent reads the deadline in force. The operator changes it
+/// How often the parent reads the limits in force. The operator changes them
 /// with the CLI, which goes straight to the enclave.
-const DEADLINE_READ_INTERVAL: Duration = Duration::from_secs(5);
+const LIMITS_READ_INTERVAL: Duration = Duration::from_secs(5);
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -50,6 +50,34 @@ use crate::signer::{
     DataType, PublicKeyRequest, PublicKeyResponse, SignRequest as CommonSignRequest,
     SignatureResponse,
 };
+
+/// Why the parent's own request timeout ends a call before its wait for the
+/// enclave does. Such a call loses a reply that the enclave still sends.
+fn timeout_conflict(request_timeout: Duration, enclave_wait: Duration) -> Option<String> {
+    (request_timeout <= enclave_wait).then(|| {
+        format!(
+            "GRPC_REQUEST_TIMEOUT_SECS is {} s, but the parent waits up to {} s for the \
+             enclave (total_request_timeout_secs plus ENCLAVE_WAIT_MARGIN_SECS): a slow \
+             request ends before the enclave answers; raise GRPC_REQUEST_TIMEOUT_SECS",
+            request_timeout.as_secs(),
+            enclave_wait.as_secs()
+        )
+    })
+}
+
+/// Why a mint retry can meet the enclave's replay guard: the parent drops its
+/// reply before the window of the enclave ends.
+fn reply_ttl_conflict(parent_ttl: Duration, enclave_ttl: Duration) -> Option<String> {
+    (parent_ttl < enclave_ttl).then(|| {
+        format!(
+            "SIGNED_RESPONSE_TTL_SECS is {} s, below the enclave's mint_replay_ttl_secs of \
+             {} s: the enclave refuses a mint retry that comes after the parent dropped \
+             its reply, until its window ends",
+            parent_ttl.as_secs(),
+            enclave_ttl.as_secs()
+        )
+    })
+}
 
 /// Enclave connection target: a TCP address or a vsock CID and port.
 #[derive(Clone)]
@@ -209,8 +237,12 @@ pub struct ParentAdapterService {
     signed: std::sync::Arc<SignedResponses>,
     /// The socket deadline of the enclave, in seconds.
     deadline_secs: std::sync::Arc<AtomicU64>,
-    /// The gRPC handler timeout, in seconds. Zero means it is not known.
-    handler_timeout_secs: u64,
+    /// The limits in force that the enclave last reported. `None` until the
+    /// first read.
+    limits: std::sync::Arc<std::sync::RwLock<Option<enclave_proto::Limits>>>,
+    /// The parent's own time limit of one gRPC request
+    /// (`GRPC_REQUEST_TIMEOUT_SECS`), when the server has one.
+    request_timeout: Option<Duration>,
 }
 
 impl ParentAdapterService {
@@ -234,15 +266,21 @@ impl ParentAdapterService {
             target,
             signed,
             deadline_secs: std::sync::Arc::new(AtomicU64::new(IMAGE_DEADLINE_SECS)),
-            handler_timeout_secs: 0,
+            limits: Default::default(),
+            request_timeout: None,
         }
     }
 
-    /// Tells the service the gRPC handler timeout, so it can report a
-    /// deadline change that breaks the timeout order.
-    pub fn with_handler_timeout_secs(mut self, secs: u64) -> Self {
-        self.handler_timeout_secs = secs;
+    /// Sets the parent's own time limit of one gRPC request. The parent logs
+    /// an error when its wait for the enclave reaches it.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
         self
+    }
+
+    /// The limits in force that the enclave last reported.
+    pub(crate) fn limits_in_force(&self) -> Option<enclave_proto::Limits> {
+        *self.limits.read().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Sets the socket deadline that the parent assumes.
@@ -257,41 +295,66 @@ impl ParentAdapterService {
         Duration::from_secs(deadline.saturating_add(ENCLAVE_WAIT_MARGIN_SECS))
     }
 
-    /// Reads the socket deadline in force. A failed read keeps the last value.
-    async fn read_enclave_deadline(&self) {
+    /// Reads the limits in force. A failed read keeps the last values.
+    async fn read_enclave_limits(&self) {
         let request = EnclaveRequest {
             request: Some(enclave_request::Request::GetLimits(
                 enclave_proto::GetLimitsRequest {},
             )),
         };
         let response = self.send_to_enclave(request).await.ok();
-        if let Some(enclave_response::Response::Limits(limits)) = response.and_then(|r| r.response)
-        {
-            let current = limits.current.map(|c| c.total_request_timeout_secs);
-            if let Some(secs) = current.filter(|&secs| secs != 0) {
-                self.deadline_secs.store(secs, Ordering::Relaxed);
-                if self.handler_timeout_secs != 0
-                    && !handler_timeout_covers_enclave_wait(self.handler_timeout_secs, secs)
-                {
-                    tracing::error!(
-                        deadline_secs = secs,
-                        handler_timeout_secs = self.handler_timeout_secs,
-                        "enclave deadline plus margin reaches the gRPC handler timeout: \
-                         replies can be lost after the enclave commits. Raise \
-                         GRPC_REQUEST_TIMEOUT_SECS and restart the parent."
-                    );
-                }
+        let Some(enclave_response::Response::Limits(limits)) = response.and_then(|r| r.response)
+        else {
+            return;
+        };
+        let Some(current) = limits.current else {
+            return;
+        };
+        if current.total_request_timeout_secs != 0 {
+            self.deadline_secs
+                .store(current.total_request_timeout_secs, Ordering::Relaxed);
+        }
+        let previous = self
+            .limits
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(current);
+        self.report_conflicts(previous.as_ref(), &current);
+    }
+
+    /// Logs a parent setting that the limits in force make wrong, once for
+    /// each change of those limits.
+    fn report_conflicts(
+        &self,
+        previous: Option<&enclave_proto::Limits>,
+        current: &enclave_proto::Limits,
+    ) {
+        let changed = |f: fn(&enclave_proto::Limits) -> u64| previous.map(f) != Some(f(current));
+        if changed(|l| l.total_request_timeout_secs) {
+            let wait = self.enclave_wait();
+            if let Some(problem) = self
+                .request_timeout
+                .and_then(|timeout| timeout_conflict(timeout, wait))
+            {
+                tracing::error!("{problem}");
+            }
+        }
+        if changed(|l| l.mint_replay_ttl_secs) {
+            let enclave_ttl = Duration::from_secs(current.mint_replay_ttl_secs);
+            if let Some(problem) = reply_ttl_conflict(self.signed.ttl(), enclave_ttl) {
+                tracing::warn!("{problem}");
             }
         }
     }
 
-    /// Keeps the wait of the parent above the socket deadline in force, for
-    /// the life of the parent.
-    pub async fn follow_enclave_deadline(self) {
-        let mut interval = tokio::time::interval(DEADLINE_READ_INTERVAL);
+    /// Keeps the wait of the parent above the socket deadline in force, and
+    /// the header sync within the header limits in force, for the life of the
+    /// parent.
+    pub async fn follow_enclave_limits(self) {
+        let mut interval = tokio::time::interval(LIMITS_READ_INTERVAL);
         loop {
             interval.tick().await;
-            self.read_enclave_deadline().await;
+            self.read_enclave_limits().await;
         }
     }
 

@@ -18,21 +18,23 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 use crate::enclave_proto::{
-    enclave_request, enclave_response, EnclaveRequest, GetLastSavedBlockRequest,
+    enclave_request, enclave_response, EnclaveRequest, GetLastSavedBlockRequest, Limits,
     SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use crate::grpc_server::ParentAdapterService;
 use crate::header_source::{ElectrumSource, CALL_TIMEOUT, MAX_HEADERS};
 
-/// Headers above a fork point that a fork repair resends.
+/// Headers above a fork point that a fork repair resends: one less than the
+/// enclave's `MAX_REORG_DEPTH`, so a repair replaces the deepest fork that the
+/// enclave accepts.
 const REWIND: u32 = 99;
-/// Half the enclave's header rate limit.
+/// Headers in each `RATE_WINDOW` until the parent has read the limits in force:
+/// half the image value of the enclave's `max_headers_per_minute`. Then the
+/// sync sends half the value in force.
 const RATE_LIMIT: u32 = 50_000;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Failed steps in a row that make the state `stalled`.
 const STALL_AFTER: u32 = 3;
-const TIP_AGE_WARN_SECS: u32 = 3600;
-const TIP_AGE_ERROR_SECS: u32 = 7200;
 /// The enclave names its checkpoint in this refusal (`SpvError::BelowCheckpoint`).
 const BELOW_CHECKPOINT: &str = "below checkpoint ";
 
@@ -173,7 +175,7 @@ impl HeaderSync {
         let Some(source) = self.source.clone() else {
             return Ok(SyncState::Unconfigured);
         };
-        self.log_tip_age(health.spv_tip_age_secs);
+        self.log_tip_age(health.spv_tip_age_secs, health.spv_max_tip_age_secs);
 
         let (h, hash) = self.enclave_tip().await?;
         self.status.send_modify(|s| s.enclave_tip = Some(h));
@@ -182,8 +184,11 @@ impl HeaderSync {
         let rewind_to = h
             .saturating_sub(REWIND)
             .max(self.floor.map_or(1, |f| f + 1));
+        let (max_batch, rate) = header_limits(self.service.limits_in_force().as_ref());
         let (s, batch) = self
-            .source_call(&source, move |src| fetch(src, h, hash, rewind_to))
+            .source_call(&source, move |src| {
+                fetch(src, h, hash, rewind_to, max_batch)
+            })
             .await?;
         self.status.send_modify(|st| {
             st.source_tip = Some(s);
@@ -199,7 +204,7 @@ impl HeaderSync {
             .last()
             .context("source sent no headers")?
             .block_hash();
-        self.wait_for_rate(len).await;
+        self.wait_for_rate(len, rate).await;
         let reply = self.submit(start, &headers).await?;
         ensure!(
             reply.headers_accepted == len
@@ -220,17 +225,27 @@ impl HeaderSync {
         })
     }
 
-    fn log_tip_age(&mut self, age: u32) {
+    /// Logs an old header tip of the enclave: a warning at half the enclave's
+    /// `spv_max_tip_age_secs`, and an error at that age, where signing stops.
+    fn log_tip_age(&mut self, age: u32, max_age: u32) {
         let level = match age {
-            a if a >= TIP_AGE_ERROR_SECS => 2,
-            a if a >= TIP_AGE_WARN_SECS => 1,
+            a if a >= max_age => 2,
+            a if a >= max_age / 2 => 1,
             _ => 0,
         };
         if level > self.age_level {
             if level == 2 {
-                tracing::error!(age, "enclave header tip is two hours old; signing stops");
+                tracing::error!(
+                    age,
+                    max_age,
+                    "enclave header tip is at the enclave's maximum tip age; signing stops"
+                );
             } else {
-                tracing::warn!(age, "enclave header tip is one hour old");
+                tracing::warn!(
+                    age,
+                    max_age,
+                    "enclave header tip is at half the enclave's maximum tip age"
+                );
             }
         }
         self.age_level = level;
@@ -258,7 +273,7 @@ impl HeaderSync {
         }
     }
 
-    async fn wait_for_rate(&mut self, n: u32) {
+    async fn wait_for_rate(&mut self, n: u32, limit: u32) {
         loop {
             let now = Instant::now();
             while self
@@ -270,7 +285,7 @@ impl HeaderSync {
             }
             let used: u32 = self.sent.iter().map(|(_, n)| n).sum();
             match self.sent.front() {
-                Some((oldest, _)) if used + n > RATE_LIMIT => {
+                Some((oldest, _)) if used + n > limit => {
                     tokio::time::sleep(RATE_WINDOW - now.duration_since(*oldest)).await;
                 }
                 _ => break,
@@ -341,6 +356,21 @@ impl HeaderSync {
 /// The headers the enclave is missing, from this start height.
 type Batch = (u32, Vec<Header>);
 
+/// The most headers in one batch, and in one `RATE_WINDOW`. The enclave refuses
+/// more than `max_headers_per_submit` in one `SubmitHeaders`, and more than
+/// `max_headers_per_minute` in a minute. So the batch is the source's
+/// `MAX_HEADERS` or the enclave's limit in force, if lower, and the rate is half
+/// the enclave's limit in force. Before the first read of the limits, the sync
+/// uses `MAX_HEADERS` and `RATE_LIMIT`. A batch is never above the rate.
+fn header_limits(limits: Option<&Limits>) -> (u32, u32) {
+    let to_u32 = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+    let per_submit = limits.map(|l| l.max_headers_per_submit).filter(|&n| n != 0);
+    let per_minute = limits.map(|l| l.max_headers_per_minute).filter(|&n| n != 0);
+    let rate = per_minute.map_or(RATE_LIMIT, |n| to_u32(n / 2).max(1));
+    let batch = per_submit.map_or(MAX_HEADERS, |n| to_u32(n).min(MAX_HEADERS));
+    (batch.min(rate), rate)
+}
+
 /// On one connection: the source tip, and the batch the enclave is missing
 /// above its tip `h` (`None` when it has them all). A fork is repaired from
 /// `rewind_to`. Every header is checked to link to the one before.
@@ -349,6 +379,7 @@ fn fetch(
     h: u32,
     hash: BlockHash,
     rewind_to: u32,
+    max_count: u32,
 ) -> anyhow::Result<(u32, Option<Batch>)> {
     let session = src.connect()?;
     let (s, tip_header) = session.tip()?;
@@ -377,7 +408,7 @@ fn fetch(
         );
         (rewind_to, None)
     };
-    let count = (s - start + 1).min(MAX_HEADERS);
+    let count = (s - start + 1).min(max_count);
     let headers = session.headers(start, count)?;
     ensure!(!headers.is_empty(), "source sent no headers");
     if let Some(prev) = prev {
@@ -406,6 +437,44 @@ fn checkpoint_in(message: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sync's own values follow the enclave image.
+    #[test]
+    fn the_sync_constants_match_the_enclave() {
+        use utexo_bridge_enclave::limits::Limits as EnclaveLimits;
+        use utexo_bridge_enclave::networks::rgb::spv::chain::MAX_REORG_DEPTH;
+        assert_eq!(REWIND + 1, MAX_REORG_DEPTH);
+        let image = EnclaveLimits::DEFAULTS;
+        assert_eq!(u64::from(RATE_LIMIT) * 2, image.max_headers_per_minute);
+        assert!(u64::from(MAX_HEADERS) <= image.max_headers_per_submit);
+    }
+
+    /// The batch and the rate stay within the header limits in force.
+    #[test]
+    fn the_sync_follows_the_header_limits_in_force() {
+        let limits = |per_submit, per_minute| Limits {
+            max_headers_per_submit: per_submit,
+            max_headers_per_minute: per_minute,
+            ..Default::default()
+        };
+        assert_eq!(header_limits(None), (MAX_HEADERS, RATE_LIMIT));
+        // The image values.
+        assert_eq!(
+            header_limits(Some(&limits(10_000, 100_000))),
+            (MAX_HEADERS, 50_000)
+        );
+        // A lower limit of one submit gives a smaller batch.
+        assert_eq!(header_limits(Some(&limits(500, 100_000))), (500, 50_000));
+        // A lower limit of one minute lowers the rate, and the batch with it.
+        assert_eq!(header_limits(Some(&limits(10_000, 1_000))), (500, 500));
+        // A higher limit raises only the rate.
+        assert_eq!(
+            header_limits(Some(&limits(1 << 32, 400_000))),
+            (MAX_HEADERS, 200_000)
+        );
+        // The smallest limits still send one header.
+        assert_eq!(header_limits(Some(&limits(1, 1))), (1, 1));
+    }
 
     #[test]
     fn checkpoint_is_read_from_the_enclave_refusal() {

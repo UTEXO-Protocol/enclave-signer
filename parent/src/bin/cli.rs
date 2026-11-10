@@ -699,13 +699,16 @@ fn main() {
                 }
             };
             match response {
-                Ok(r) => print!(
-                    "{}",
-                    utexo_bridge_parent::limits::table(
-                        &r.current.unwrap_or_default(),
-                        &r.image.unwrap_or_default()
-                    )
-                ),
+                Ok(r) => {
+                    let current = r.current.unwrap_or_default();
+                    print!(
+                        "{}",
+                        utexo_bridge_parent::limits::table(&current, &r.image.unwrap_or_default())
+                    );
+                    for note in utexo_bridge_parent::limits::notes(&current) {
+                        eprintln!("note: {note}");
+                    }
+                }
                 Err(e) => fail(e.to_string()),
             }
         }

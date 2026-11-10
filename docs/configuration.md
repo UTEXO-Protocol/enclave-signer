@@ -159,14 +159,14 @@ The TLS and ACL settings are in
 | `GRPC_MAX_CONCURRENT` | `128` | Requests in progress over all connections. The parent refuses a request above the limit and does not queue it. `0` acts as `1`. |
 | `GRPC_MAX_CONCURRENT_SIGN` | `8` | `Sign` requests in progress. A `Sign` above the limit gets `UNAVAILABLE` at once. `0` acts as `1`. The `MemoryMax` of the parent unit counts on the default. |
 | `GRPC_MAX_CONCURRENT_PER_CONN` | `32` | Requests in progress on one connection, and the HTTP/2 stream limit. `0` acts as `1`. |
-| `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC request. Keep it above the request deadline of the enclave plus `ENCLAVE_WAIT_MARGIN_SECS`. `0` acts as `1`. |
+| `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC request. Keep it above the request deadline of the enclave plus `ENCLAVE_WAIT_MARGIN_SECS`. The parent logs an error when the deadline in force reaches it. `0` acts as `1`. |
 | `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, 1 to 10000. A value out of range, a non-number or an empty value stops the parent at boot. A parent without mTLS does not read it and has no budget. |
 | `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, with the same rules. Each call makes one NSM attestation. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` or `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. With `USE_VSOCK`, a set value that is not a number stops the parent at start. |
 | `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. With `USE_VSOCK`, a set value that is not a number stops the parent at start. |
-| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM -> RGB sign and answers a retry of the same request from it. Keep it at or above the enclave's `mint_replay_ttl_secs`. With `0`, no retry gets a kept reply. |
+| `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM -> RGB sign and answers a retry of the same request from it. Keep it at or above the enclave's `mint_replay_ttl_secs`. The parent logs a warning when it is below the value in force. With `0`, no retry gets a kept reply. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. `0` still keeps one reply. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. The parent does not keep a larger reply. `0` keeps none. |
 | `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked, so no private or self-signed certificate), or `tcp://` to a loopback IP. The header sync of the parent reads Bitcoin headers here. Unset or malformed: the parent still serves, and `header_sync.state` is `unconfigured`. The deploy passes it through; it does not copy `ELECTRUM_URL`. |
