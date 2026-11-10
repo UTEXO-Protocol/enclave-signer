@@ -39,8 +39,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `67d60b7a64d33b87edcfe3384c461ebcbf332797` (branch `docs/enclave-proto-match-enclave`, "docs(proto): match the enclave.proto comments to the enclave's behaviour") |
-| Commit date | 2026-11-10T12:48:45Z |
+| Commit | `86b964b3b94762a380374985bd902580bf202b10` (branch `docs/enclave-proto-match-enclave`, "docs(proto): match the parent.proto comments to the parent's behaviour") |
+| Commit date | 2026-11-10T13:04:06Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -54,7 +54,7 @@ crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=67d60b7a64d33b87edcfe3384c461ebcbf332797
+REV=86b964b3b94762a380374985bd902580bf202b10
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
