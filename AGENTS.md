@@ -95,8 +95,8 @@ A behavior change is incomplete until its affected descriptions agree with it.
   example `M6`, `RR10`, `PP1`).
 - Preserve the provenance of generated and vendored files. Correct stale
   upstream comments upstream and re-sync the files; do not hand-edit a
-  verbatim copy. Until then, keep its documented comment differences accurate
-  in `enclave-proto/README.md`.
+  verbatim copy. Until the re-sync lands, list each comment difference in
+  `enclave-proto/README.md`.
 - Check that documented commands, flags, paths and links exist on the target
   branch. Examples must use compatible roles, networks, schemas and modes.
 

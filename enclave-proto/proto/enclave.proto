@@ -58,15 +58,15 @@ message EnclaveResponse {
 }
 
 message InitializeKeyRequest {
-  // Empty seed and mnemonic generate a new mnemonic from enclave entropy.
-  // Non-empty = import raw 64-byte seed (requires `allow-seed-import` feature, testing only).
+  // Both empty: a KMS build (the mint signer) loads or creates its seed through KMS; other builds
+  // generate a new mnemonic from enclave entropy. Non-empty = import a raw 64-byte seed (`allow-seed-import`, testing only).
   bytes seed = 1;
   // BIP-39 mnemonic phrase (requires `allow-seed-import` feature, testing only).
   // If non-empty, takes precedence over seed.
   string mnemonic = 2;
-  // Donor-side cloning secret, delivered at runtime (NOT baked into the EIF, so
-  // it stays out of the PCRs). Optional: only set for enclaves that will serve
-  // GetClone. Empty = donor cloning disabled.
+  // Donor-side cloning secret, delivered at runtime (not in the EIF, so it stays
+  // out of the PCRs). Set it only on an enclave that serves GetClone. Empty keeps
+  // any secret loaded at boot. A KMS build refuses a non-empty value.
   string cloning_secret = 3;
 }
 
@@ -78,10 +78,10 @@ message InitializeKeyResponse {
   bytes evm_address = 1; // 20 bytes: keccak256(uncompressed_pubkey[1..])[12..].
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
-  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
+  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827166'/0' on mainnet, m/86'/827167'/0' on other networks.
   bytes evm_uncompressed_pub = 7; // 64-byte secp256k1 X || Y, without 0x04 prefix.
   uint64 chain_id = 8; // EVM chain ID pinned at enclave boot.
-  bytes bridge_contract = 9; // 20-byte bridge contract address pinned at enclave boot.
+  bytes bridge_contract = 9; // 20-byte MultisigProxy address (the EIP-712 verifying contract) pinned at enclave boot.
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
@@ -99,10 +99,10 @@ message PublicKeysResponse {
   bytes evm_address = 1; // 20-byte Ethereum address of the primary signing key.
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
-  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
+  string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827166'/0' on mainnet, m/86'/827167'/0' on other networks.
   bytes evm_uncompressed_pub = 7; // 64-byte secp256k1 X || Y, without 0x04 prefix.
   uint64 chain_id = 8; // EVM chain ID pinned at enclave boot.
-  bytes bridge_contract = 9; // 20-byte bridge contract address pinned at enclave boot.
+  bytes bridge_contract = 9; // 20-byte MultisigProxy address (the EIP-712 verifying contract) pinned at enclave boot.
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
@@ -113,9 +113,9 @@ message GetAttestedPublicKeyRequest {
 }
 
 message GetAttestedPublicKeyResponse {
-  PublicKeysResponse public_keys = 1; // Public-key bundle bound by the attestation.
-  bytes attestation_doc = 2; // COSE_Sign1 NSM document, or raw CBOR in mock mode.
-  bytes attested_policy = 3; // Policy bytes that attestation user_data commits.
+  PublicKeysResponse public_keys = 1; // Public-key bundle bound by the attestation. Unset until the keys exist.
+  bytes attestation_doc = 2; // COSE_Sign1 NSM document, or raw CBOR in mock mode. No public key until the keys exist.
+  bytes attested_policy = 3; // Policy bytes that attestation user_data commits, with the key bundle once the keys exist.
 }
 
 message SignRequest {
@@ -138,11 +138,11 @@ message SignRequest {
 
 message EvmSource {
   bytes tx_hash = 1; // 32-byte source EVM transaction hash.
-  bool event_valid = 2; // Whether the listener validated the source EVM event.
-  bool event_finalized = 3; // Whether the source EVM event is finalized.
-  bytes token = 4; // 20-byte ERC-20 address; empty for native currency.
-  bytes recipient = 5; // 20-byte recipient address.
-  uint64 commission = 6; // Commission reported by the source event.
+  bool event_valid = 2; // Listener result. The enclave ignores it and reads the deposit log itself.
+  bool event_finalized = 3; // Listener result. The enclave ignores it and applies its own finality rule.
+  bytes token = 4; // 20-byte ERC-20 address; empty for native currency. The enclave does not read it.
+  bytes recipient = 5; // 20-byte recipient address. The enclave does not read it.
+  uint64 commission = 6; // Commission reported by the source event. It must equal the deposit's tokenCommission.
   // On-chain BridgeFundsIn.operationId of the source deposit, exactly 32 bytes.
   // Required: the enclave binds the FundsIn log to it and refuses to sign
   // without it. Not RgbDestination.operation_idx, which is a different id-space.
@@ -150,12 +150,12 @@ message EvmSource {
 }
 
 message RgbSource {
-  bool consignment_valid = 1; // Listener-provided RGB validation result.
+  bool consignment_valid = 1; // Listener result. The enclave ignores it and validates the consignment itself.
   string asset_id = 3; // RGB asset identifier derived from the consignment.
   bytes consignment = 4; // Raw RGB consignment bytes.
   bytes consignment_hash = 5; // keccak256(consignment).
   repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
-  uint64 commission = 7; // Commission reported by the source event.
+  uint64 commission = 7; // Commission reported by the source event. The enclave does not use it.
   // 8 is reserved. Do not use it.
   reserved 8;
   reserved "mint_ancestors";
@@ -168,7 +168,7 @@ message EvmDestination {
   uint64 chain_id = 4; // EVM chain ID used by the EIP-712 domain.
   bytes proxy_contract = 5; // 20-byte EIP-712 verifying contract address.
   uint64 calldata_amount = 6; // Amount pre-extracted from call_data.
-  uint64 calldata_commission = 7; // Commission pre-extracted from call_data.
+  uint64 calldata_commission = 7; // Commission pre-extracted from call_data. The enclave does not read it.
   // lz_release, if set, signals that this is an lzFundsOutCall release and
   // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
   // crosscheck. Absent for direct fundsOutCall releases.
@@ -190,7 +190,7 @@ message BurnDestination {
   uint64 destination_chain_id = 2;
   // dst_eid is the LayerZero endpoint id. 0 means a direct fundsOut.
   uint32 dst_eid = 3;
-  // recipient is the chain-native payee address, 1 to 32 bytes.
+  // recipient is the chain-native payee address: 20 bytes for a direct fundsOut, 1 to 32 bytes for LayerZero.
   bytes recipient = 4;
 }
 
@@ -207,12 +207,12 @@ message LzReleaseParams {
 }
 
 message RgbDestination {
-  uint64 operation_idx = 1; // Destination operation index.
+  uint64 operation_idx = 1; // Destination operation index. The enclave does not read it.
   bytes psbt_bytes = 2; // Serialized PSBT to sign.
-  uint64 psbt_output_amount = 3; // Total non-change output amount.
+  uint64 psbt_output_amount = 3; // Total non-change output amount. The enclave does not read it: the fascia gives the amount.
   string asset_id = 4; // RGB asset identifier associated with the transfer.
-  bytes consignment = 5; // Raw destination RGB consignment bytes.
-  bytes consignment_hash = 6; // keccak256(consignment).
+  bytes consignment = 5; // Raw destination RGB consignment bytes. The enclave does not read it.
+  bytes consignment_hash = 6; // keccak256(consignment). The enclave does not read it.
   // 7 is reserved. Do not use it.
   reserved 7;
   reserved "mint_ancestors";
@@ -229,7 +229,7 @@ message MerkleProofEntry {
   bytes txid = 1; // 32-byte transaction ID in display byte order.
   uint32 block_height = 2; // Height of the block containing the transaction.
   uint32 tx_position = 3; // Transaction position in the block.
-  repeated bytes merkle_path = 4; // 32-byte sibling hashes from leaf to Merkle root.
+  repeated bytes merkle_path = 4; // 32-byte sibling hashes from leaf to Merkle root, in display byte order.
 }
 
 message EvmSignatureResponse {
@@ -237,9 +237,9 @@ message EvmSignatureResponse {
   // 0 or 1, not 27 or 28.
   bytes signature = 1;
   // The request's call_data, unchanged. The enclave validates it as canonical
-  // ABI and signs the EIP-712 TeeFundsOut digest built from the validated
-  // fields; it never rewrites the calldata and never signs its keccak256. The
-  // caller submits these bytes on-chain with the signature.
+  // ABI and signs the EIP-712 digest built from the validated fields: TeeFundsOut
+  // on the direct route, TeeLzFundsOut when lz_release is set. It never rewrites
+  // the calldata or signs its keccak256. The caller submits it with the signature.
   bytes call_data = 2;
 }
 
@@ -248,8 +248,8 @@ message SignedPsbtResponse {
   uint32 inputs_signed = 2; // Number of inputs signed by the enclave.
 }
 
-// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
-// bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
+// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Only the mint signer
+// signs it. Unlike SignRequest, it carries no RGB consignment and no EVM
 // correlation. The enclave authorises it from the PSBT, never from a listener
 // flag. It derives which outputs pay back to scripts it co-controls; the rest
 // must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
@@ -261,9 +261,9 @@ message SignBtcRequest {
 }
 
 // BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
-// 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
-// source and no EVM deposit, so only the mint signer handles it, by shape alone, from
-// its fascia. Response is a SignedPsbtResponse.
+// MIN_REFILL_RIGHTS to MAX_REFILL_RIGHTS mintRights out to the enclave's own revealed
+// outputs, no tokens. It has no source and no EVM deposit, so only the mint signer
+// handles it, by shape alone, from its fascia. Response is a SignedPsbtResponse.
 message SignRightsRefillRequest {
   reserved 2, 3;
   reserved "consignment", "consignment_hash";
@@ -279,15 +279,15 @@ message SignRightsRefillRequest {
 }
 
 message SignRawMessageRequest {
-  bytes message = 1; // Arbitrary message wrapped and hashed using EIP-191 before signing.
+  bytes message = 1; // The enclave refuses this request in every build. It signs no raw message.
 }
 
 message RawSignatureResponse {
-  bytes signature = 1; // 65-byte Ethereum signature: r || s || v.
+  bytes signature = 1; // Never sent: the enclave refuses SignRawMessage.
 }
 
 message SignRawDigestRequest {
-  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
+  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs. Only the burn signer answers this request.
   bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist.
 }
 
@@ -296,7 +296,7 @@ message RawDigestSignatureResponse {
 }
 
 message InitiateCloningRequest {
-  string cloning_secret = 1; // Pre-shared operator secret, never sent to the donor.
+  string cloning_secret = 1; // Pre-shared operator secret, never sent to the donor. A KMS build refuses cloning.
   bytes cluster_public_key = 2; // 20-byte EVM address of the intended donor.
 }
 
@@ -327,29 +327,29 @@ message SetCloneRequest {
 
 message SetCloneResponse {}
 
-// Bitcoin header synchronization for in-enclave SPV validation.
+// Bitcoin header synchronization for in-enclave SPV validation. A build without SPV refuses it.
 
 message SubmitHeadersRequest {
-  // Raw 80-byte Bitcoin headers (batch, contiguous, in ascending height order).
-  // Listener typically batches up to ~500 to keep gRPC messages small.
+  // Raw 80-byte Bitcoin headers, contiguous, in ascending height order. All or nothing.
+  // The parent's header sync sends them. Limits: max_headers_per_submit, max_headers_per_minute.
   repeated bytes headers = 1;
-  // Block height of headers[0]. Headers must connect to the enclave's stored
-  // chain (i.e. start_height == last_saved_height + 1) — except for the very
-  // first batch which connects to the compiled-in checkpoint.
+  // Block height of headers[0]: above the checkpoint and at most the tip + 1. The
+  // tip + 1 extends the chain. A lower start replaces at most MAX_REORG_DEPTH
+  // headers, and only with more work. An empty batch changes nothing.
   uint32 start_height = 2;
 }
 
 message SubmitHeadersResponse {
-  uint32 last_block_height = 1; // enclave's tip after applying this batch
-  bytes last_block_hash = 2; // 32 bytes
-  uint32 headers_accepted = 3; // number of headers from the batch that validated
+  uint32 last_block_height = 1; // Height of the enclave's tip after this batch.
+  bytes last_block_hash = 2; // 32-byte hash of that tip, in internal byte order.
+  uint32 headers_accepted = 3; // The batch length: a batch is all or nothing.
 }
 
 message GetLastSavedBlockRequest {}
 
 message GetLastSavedBlockResponse {
-  uint32 block_height = 1; // Height of the latest accepted header.
-  bytes block_hash = 2; // 32-byte hash of the latest accepted header.
+  uint32 block_height = 1; // Height of the latest accepted header, or the checkpoint before any.
+  bytes block_hash = 2; // 32-byte hash of that header or checkpoint, in internal byte order.
 }
 
 // Readiness probe: answers whether the enclave is ready to sign. Deploy
@@ -358,18 +358,18 @@ message GetLastSavedBlockResponse {
 message HealthRequest {}
 
 message HealthResponse {
-  // endpoints_set && key_loaded && spv_synced. The only field a caller needs;
-  // the rest are diagnostics for logs.
+  // endpoints_set && key_loaded, and on the burn signer also spv_synced. The
+  // only field a caller needs; the rest are diagnostics for logs.
   bool ready = 1;
   // Signing key present, i.e. the phase state machine reached "active".
   bool key_loaded = 2;
-  // Header chain tip is recent enough that a signature would pass the same
-  // staleness gate signing applies. False while the chain is still catching up.
+  // The header chain passes the checks signing applies: a fresh tip and enough
+  // blocks above the checkpoint. A build without SPV reports true.
   bool spv_synced = 3;
-  // Phase name: "initial", "cloning", or "active".
+  // Phase name: "initial", "cloning" or "active". A KMS build has "initializing" in place of "cloning".
   string phase = 4;
-  // Height of the latest accepted header (the compiled-in checkpoint height
-  // when no headers have been accepted yet).
+  // Height of the latest accepted header, or the compiled-in checkpoint height
+  // before any. A build without SPV reports 0 in this and the other spv_ numbers.
   uint32 spv_tip_height = 5;
   // Block timestamp of that header.
   uint32 spv_tip_time = 6;
@@ -385,7 +385,7 @@ message HealthResponse {
 // The time, memory and size limits. The operator can change them at run time,
 // and a change needs no new image. Each limit only sets when the enclave refuses
 // a request or how long it waits. The attestation does not cover these values.
-// docs/runtime-limits.md has the rules.
+// enclave-signer docs/runtime-limits.md has the rules.
 message Limits {
   // 26 and 27 are reserved. Do not use them.
   reserved 26, 27;
@@ -441,16 +441,16 @@ message LimitsResponse {
 // signs nothing and opens no chain connection. A build that does not use a
 // value requires it empty.
 message SetEndpointsRequest {
-  string electrum_url = 1; // ssl://host:port or tcp://host:port.
+  string electrum_url = 1; // ssl://host:port (Electrum) or https://host[:port] (Esplora). A release image refuses tcp:// and http://.
   string evm_rpc_host = 2; // TLS name of the EVM RPC. No scheme, path or port.
   bytes evm_rpc_ca_der = 3; // DER of the only CA the EVM RPC TLS trusts.
   uint32 evm_rpc_tls_port = 4; // TLS port of the EVM RPC, 1-65535.
   string kms_key_arn = 5; // Full ARN of the KMS key that wraps the seed.
   string kms_region = 6; // AWS region of the KMS key.
   string kms_seed_id = 7; // Name of the seed object the parent stores.
-  string kms_expected_evm_address = 8; // 20-byte hex EVM address the seed must give. Empty: none.
-  // Absolute HTTP path, e.g. /v3/<API_KEY>. Empty means /. No query or fragment.
-  // May contain credentials: do not log it or publish it in attestation data.
+  string kms_expected_evm_address = 8; // 20-byte hex EVM address the seed must give. Empty: create a seed; a saved one is refused.
+  // Absolute ASCII path, e.g. /v3/<API_KEY>. Empty means /. Only letters, digits and /-._~: no authority,
+  // query, fragment, escape or dot segment. May contain credentials: it is not logged or attested.
   string evm_rpc_path = 9;
 }
 
