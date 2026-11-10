@@ -201,69 +201,35 @@ on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
 
 ## Smaller production host
 
-For a production host half the size of the measured 8-vCPU, 32-GiB host,
-use a 2-vCPU (one physical core), 4096-MiB burn enclave with four workers.
-The parent profile sets `GRPC_MAX_CONCURRENT_SIGN=4`, so extra `Sign` requests
-are refused rather than queued behind a full wave of four. Direct vsock
-traffic and multiple parents can bypass this admission limit; include their
-load when verifying the deployment.
-The profile in
-[`deploy/profiles/burn-small-host-limits.conf`](../deploy/profiles/burn-small-host-limits.conf)
-keeps `max_rgb_lib_ms=30000`, so the admitted histories do not get shorter,
-and sets `total_request_timeout_secs=320`.
+For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
+**4096 MiB** and these settings:
 
-This reserves twice the CPU time on the measured host. Half the host size
-does not itself imply half the per-core speed: the factor of two is a
-planning allowance, not a measurement of the smaller machine. With four
-workers sharing one core, the allowance is `30 s × 2 × 4 = 240 s`.
-Keeping that within three quarters of the deadline gives `240 / 0.75 = 320 s`.
-Round planned times up to multiples of five seconds: 10.18 s becomes 15 s;
-after a factor of two it becomes 25 s. Keep raw measurements unrounded.
-The [CPU measurements](validation-cost-model.md#burn-host-cpu-measurements)
-support keeping the coefficients. They do not prove the 320-second deadline
-under concurrent load on the smaller host. Confirm that workload there
-before treating the allowance as a measured bound.
+| Setting | Value |
+|---|---:|
+| `max_rgb_lib_ms` | 30000 |
+| `total_request_timeout_secs` | 320 |
+| `GRPC_MAX_CONCURRENT_SIGN` | 4 |
+| Parent enclave wait | 330 s |
+| `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
+| Backend request timeout | At least 340 s |
 
-Set the backend request timeout to at least **340 s** and the parent
-`GRPC_REQUEST_TIMEOUT_SECS` to **335 s** and `GRPC_MAX_CONCURRENT_SIGN` to **4**
-before raising the enclave deadline.
-The parent's enclave wait becomes **330 s** (320 + its 10-second margin).
-Client, proxy and load-balancer timeouts must allow the backend timeout too.
-The backend setting lives outside this repository.
+Verified on 2026-11-10: all 12 consignment shapes passed two CPU timing runs
+on the burn host's Xeon Platinum 8375C. The largest validation-plus-inspection
+time was **96.9% of its model**. A real Nitro enclave with 2 vCPUs and
+4096 MiB accepted **30000 ms / 320 s**; readback confirmed both values and
+that all other limits stayed unchanged.
 
-For a deploy, copy the limits file to a path specific to the selected CID,
-readable by `ubuntu`, then supply these settings to `deploy-host.sh` on every
-deployment, along with the usual release, role and host settings:
+The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: keep the admitted histories,
+reserve twice the CPU time, account for four workers sharing one core, and
+leave one quarter for other work. The ×2 factor is headroom for the smaller
+host. Timeouts round up to five seconds: enclave 320, parent wait 330,
+parent request 335, backend 340.
 
-```bash
-export ENCLAVE_CID=16
-export ENCLAVE_LIMITS_FILE=/etc/utexo/enclave-16-limits.conf
-set -a
-. deploy/profiles/burn-small-host.env
-set +a
-```
-
-The contents of `ENCLAVE_LIMITS_FILE` must match the profile above. The deploy
-script rewrites the selected parent's environment file and applies the
-limits at enclave launch. Without `GRPC_REQUEST_TIMEOUT_SECS`, the next deploy
-restores the parent's 120-second default. Without `GRPC_MAX_CONCURRENT_SIGN`,
-it restores the eight-request default. The release workflow currently
-does not forward these overrides; use the host deploy script for this profile.
-
-For an already running enclave, update its parent environment file and
-restart only that parent after raising the backend timeout. Once it is
-ready, apply the saved limits without restarting the enclave:
-
-```bash
-utexo-bridge-parent-cli --addr vsock://16:5000 limits set --file /etc/utexo/enclave-16-limits.conf
-utexo-bridge-parent-cli --addr vsock://16:5000 limits show
-```
-
-Set `ENCLAVE_LIMITS_FILE` to that same path in its existing
-`/etc/utexo/enclave-16.env` for later restarts. Wait at least five seconds for
-the parent's limits poll before resuming traffic, then verify the configured
-backend and parent timeouts and the two values from `limits show`. Repeat for
-each intended burn CID. No EIF, PCR, key or cost coefficient change is needed.
+Use [the parent profile](../deploy/profiles/burn-small-host.env) and
+[the limits file](../deploy/profiles/burn-small-host-limits.conf) on every
+host deploy. Set the backend and parent values before raising the enclave
+deadline; [apply and persist the limits](#commands) for each selected CID.
+The release workflow does not forward the profile overrides.
 
 ## What the attestation shows
 

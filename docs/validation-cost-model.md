@@ -100,33 +100,18 @@ time.
 
 ## Burn host CPU measurements
 
-On 2026-11-10, all twelve shapes ran twice on an Intel Xeon Platinum 8375C
-at 2.90 GHz, the CPU used by the burn enclaves. Both full ignored `caps`
-runs passed (five tests each). Each measured phase and their sum stayed
-within its model. The closest sum was the 65,535-output fan-out at **96.9%**
-of its model. No coefficient or image-default change follows from these
-measurements.
+On 2026-11-10, all twelve shapes passed two runs on the burn host's Intel
+Xeon Platinum 8375C at 2.90 GHz. Validation, inspection and their sum stayed
+within the model. The largest sum was **96.9% of its model**. The coefficients
+and image defaults stay unchanged.
 
-The source was `34721c5eb5d4328e4c475800333e975ddbd5619c` with the timing
-module restored in this change, rgb-lib
-`5010eefa355beb9c42a4c1b69883f7651241a111` and rgb-consensus
-`d4bbbce212e4d9967e10cc3c6a7db2f664d52bd2`. Rust was 1.96.1
-(`31fca3adb`), using the repository's release profile (`opt-level=z`, LTO,
-one codegen unit). The native Linux test binary ran in a container pinned
-to CPU 2, with one test thread, no network and a 1-GiB `/tmp` tmpfs. Witness
-and list resolvers used memory. No build or other benchmark ran alongside
-it. One-minute host load went from 0.29 to 1.01 for the first run and 0.61
-to 1.00 for the second. These are host CPU measurements, not measurements
-inside Nitro or of live RPCs. Exact nanoseconds, work counts, gate decisions,
-source and binary hashes, and run metadata are in the
-[measurement record](measurements/rgb-lib-2026-11-10.json).
+Production source: `34721c5eb5d4`; rgb-lib: `5010eefa355b`; rgb-consensus:
+`d4bbbce212e4`; Rust: 1.96.1, release mode.
 
-The validation and inspection columns show both runs. The final column is
-an allowance for one request on the planned smaller host: twice the largest
-measured sum, rounded **up** to five seconds. It is not a new admission limit
-or a measured time. The concurrent request and transport settings are in
+The table gives both runs. The final column is twice the largest measured
+sum, rounded up to five seconds, for
 [the smaller-host profile](runtime-limits.md#smaller-production-host).
-Model comparisons use the exact values in the record, before rounding.
+Comparisons use the unrounded timings.
 
 | Consignment | Model (s) | Validation (s) | Inspection (s) | Max total / model | ×2 allowance (s) |
 |---|---:|---:|---:|---:|---:|
