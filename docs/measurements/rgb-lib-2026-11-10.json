@@ -392,6 +392,7 @@
     "total_request_timeout_secs": 320,
     "parent_grpc_request_timeout_secs": 335,
     "backend_request_timeout_secs": 340,
-    "status": "Planning allowance; not measured under concurrent load on the smaller host."
+    "status": "Planning allowance; not measured under concurrent load on the smaller host.",
+    "parent_grpc_max_concurrent_sign": 4
   }
 }

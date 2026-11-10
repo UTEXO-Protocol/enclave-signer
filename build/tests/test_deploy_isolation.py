@@ -207,6 +207,7 @@ elif name == 'ss':
         peer = self.etc / 'utexo/parent-16.env'
         before = peer.read_bytes()
         self.assertIn(b'GRPC_REQUEST_TIMEOUT_SECS=120\n', before)
+        self.assertIn(b'GRPC_MAX_CONCURRENT_SIGN=8\n', before)
         profile = dict(line.split('=', 1) for line in
                        (ROOT / 'deploy/profiles/burn-small-host.env').read_text().splitlines()
                        if line and not line.startswith('#'))
@@ -216,17 +217,19 @@ elif name == 'ss':
         self.assertEqual(peer.read_bytes(), before)
         parent = (self.etc / 'utexo/parent-18.env').read_text()
         self.assertIn('GRPC_REQUEST_TIMEOUT_SECS=335\n', parent)
+        self.assertIn('GRPC_MAX_CONCURRENT_SIGN=4\n', parent)
 
     def test_invalid_parent_timeout_fails_before_host_changes(self):
         before = self.snapshots()
-        for value in ('', '0', '0335', '-1', '1.5', '335s', '10000000',
-                      '335\nGRPC_HOST=0.0.0.0'):
-            with self.subTest(value=value):
-                result = self.deploy(GRPC_REQUEST_TIMEOUT_SECS=value)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('GRPC_REQUEST_TIMEOUT_SECS must be', result.stderr)
-                self.assertEqual(self.snapshots(), before)
-                self.assertFalse(self.calls.exists())
+        for name in ('GRPC_REQUEST_TIMEOUT_SECS', 'GRPC_MAX_CONCURRENT_SIGN'):
+            for value in ('', '0', '0335', '-1', '1.5', '335s', '10000000',
+                          '335\nGRPC_HOST=0.0.0.0'):
+                with self.subTest(name=name, value=value):
+                    result = self.deploy(**{name: value})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f'{name} must be', result.stderr)
+                    self.assertEqual(self.snapshots(), before)
+                    self.assertFalse(self.calls.exists())
 
     def test_invalid_target_never_starts_its_parent_or_stops_a_peer(self):
         self.assert_success(self.deploy(16, 'mint'))

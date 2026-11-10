@@ -203,6 +203,10 @@ on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
 
 For a production host half the size of the measured 8-vCPU, 32-GiB host,
 use a 2-vCPU (one physical core), 4096-MiB burn enclave with four workers.
+The parent profile sets `GRPC_MAX_CONCURRENT_SIGN=4`, so extra `Sign` requests
+are refused rather than queued behind a full wave of four. Direct vsock
+traffic and multiple parents can bypass this admission limit; include their
+load when verifying the deployment.
 The profile in
 [`deploy/profiles/burn-small-host-limits.conf`](../deploy/profiles/burn-small-host-limits.conf)
 keeps `max_rgb_lib_ms=30000`, so the admitted histories do not get shorter,
@@ -221,7 +225,8 @@ under concurrent load on the smaller host. Confirm that workload there
 before treating the allowance as a measured bound.
 
 Set the backend request timeout to at least **340 s** and the parent
-`GRPC_REQUEST_TIMEOUT_SECS` to **335 s** before raising the enclave deadline.
+`GRPC_REQUEST_TIMEOUT_SECS` to **335 s** and `GRPC_MAX_CONCURRENT_SIGN` to **4**
+before raising the enclave deadline.
 The parent's enclave wait becomes **330 s** (320 + its 10-second margin).
 Client, proxy and load-balancer timeouts must allow the backend timeout too.
 The backend setting lives outside this repository.
@@ -241,8 +246,9 @@ set +a
 The contents of `ENCLAVE_LIMITS_FILE` must match the profile above. The deploy
 script rewrites the selected parent's environment file and applies the
 limits at enclave launch. Without `GRPC_REQUEST_TIMEOUT_SECS`, the next deploy
-restores the parent's 120-second default. The release workflow currently
-does not forward this override; use the host deploy script for this profile.
+restores the parent's 120-second default. Without `GRPC_MAX_CONCURRENT_SIGN`,
+it restores the eight-request default. The release workflow currently
+does not forward these overrides; use the host deploy script for this profile.
 
 For an already running enclave, update its parent environment file and
 restart only that parent after raising the backend timeout. Once it is

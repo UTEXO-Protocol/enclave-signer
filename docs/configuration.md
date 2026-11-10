@@ -142,9 +142,11 @@ The parent reads these from its environment at start. A number that does not
 parse takes the default with no log, unless the row says otherwise.
 `deploy-host.sh` rewrites `/etc/utexo/parent-<CID>.env` on each run, so a
 value set by hand in that file is lost. It passes through
-`GRPC_REQUEST_TIMEOUT_SECS` (default 120), rejecting an empty value, zero,
+`GRPC_REQUEST_TIMEOUT_SECS` (default 120) and `GRPC_MAX_CONCURRENT_SIGN`
+(default 8), rejecting an empty value, zero,
 leading zeros, non-digits or more than seven digits before changing the host.
-Supply that value on each deploy. It writes no `GRPC_MAX_CONCURRENT*` or
+Supply those values on each deploy. It writes no `GRPC_MAX_CONCURRENT`,
+`GRPC_MAX_CONCURRENT_PER_CONN` or
 `SIGNED_RESPONSE_*` value, so a deployed parent uses their defaults.
 The TLS and ACL settings are in
 [parent-mtls.md](parent-mtls.md), and the KMS storage settings in

@@ -25,6 +25,7 @@
 # before it changes anything when that file exists and ubuntu cannot read it.
 # GRPC_REQUEST_TIMEOUT_SECS sets the parent request timeout (default 120).
 # Keep it above the enclave deadline plus its 10-second parent wait margin.
+# GRPC_MAX_CONCURRENT_SIGN sets the parent's admission limit for Sign (default 8).
 #
 # After set-endpoints, verify each enclave's attested launch policy.
 # ENCLAVE_DEBUG_MODE=1 skips this check, because the PCRs are zero.
@@ -51,9 +52,12 @@ SRC="s3://$BUCKET/eif/$GIT_SHA/rgb-$SIGNER_ROLE"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
 ENCLAVE_MEMORY="${ENCLAVE_MEMORY:-4096}"
 GRPC_REQUEST_TIMEOUT_SECS="${GRPC_REQUEST_TIMEOUT_SECS-120}"
-case "$GRPC_REQUEST_TIMEOUT_SECS" in
-  ''|0*|*[!0-9]*|????????*) echo "GRPC_REQUEST_TIMEOUT_SECS must be a positive whole number of seconds with at most 7 digits and no leading zero" >&2; exit 1 ;;
-esac
+GRPC_MAX_CONCURRENT_SIGN="${GRPC_MAX_CONCURRENT_SIGN-8}"
+for name in GRPC_REQUEST_TIMEOUT_SECS GRPC_MAX_CONCURRENT_SIGN; do
+  case "${!name}" in
+    ''|0*|*[!0-9]*|????????*) echo "$name must be a positive whole number with at most 7 digits and no leading zero" >&2; exit 1 ;;
+  esac
+done
 # A release enclave refuses to start below 3072 MiB of usable memory
 # (enclave/src/memory.rs). The kernel keeps part of the launch value for
 # itself, so the launch value must be at least 4096 MiB. Refuse here, where
@@ -664,6 +668,7 @@ GRPC_TLS_ACL_FILE=$PARENT_TLS_DIR/$CID/clients.acl
 GRPC_CLONE_MAX_PER_MINUTE=30
 GRPC_MAX_CONNECTIONS=64
 GRPC_REQUEST_TIMEOUT_SECS=$GRPC_REQUEST_TIMEOUT_SECS
+GRPC_MAX_CONCURRENT_SIGN=$GRPC_MAX_CONCURRENT_SIGN
 HEALTH_HOST=127.0.0.1
 HEALTH_PORT=${HPORT[$CID]}
 USE_VSOCK=true
