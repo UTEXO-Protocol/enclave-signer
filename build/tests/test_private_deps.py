@@ -213,11 +213,17 @@ class CacheTests(unittest.TestCase):
     """This repo is public, and fork PRs can restore its CI caches."""
 
     def test_no_cargo_cache_holds_the_private_sources(self):
-        blocks = (ROOT / '.github/workflows/ci.yml').read_text().split('uses: actions/cache@')[1:]
+        # Workflows and the composite actions they call.
+        files = sorted(f for f in (ROOT / '.github').rglob('*') if f.suffix in ('.yml', '.yaml'))
+        blocks = [
+            (f, block)
+            for f in files
+            for block in f.read_text().split('uses: actions/cache@')[1:]
+        ]
         self.assertTrue(blocks)
-        for no, block in enumerate(blocks):
+        for no, (f, block) in enumerate(blocks):
             paths = [line.strip() for line in block.split('key:')[0].splitlines()]
-            with self.subTest(cache=no):
+            with self.subTest(file=str(f.relative_to(ROOT)), cache=no):
                 # tar packs a listed directory whole, excludes below it included.
                 self.assertNotIn('~/.cargo/git', paths)
                 for repo in ('rgb-lib-bfa',) + PROTOCOL_REPOS:
