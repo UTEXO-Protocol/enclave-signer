@@ -1,4 +1,4 @@
-//! The caps on the work rgb-lib does, checked before it runs, and two
+//! The caps on the work rgb-lib does, checked before it runs, and
 //! release-mode timings: `cargo test --release -p utexo-bridge-enclave
 //! --no-default-features --features spv,burn-signer --lib caps -- --ignored
 //! --nocapture --test-threads=1`. `docs/validation-cost-model.md` has the
@@ -28,6 +28,8 @@ use super::super::cost::{
 };
 use super::super::scratch::with_scratch_file;
 use super::*;
+
+mod timings;
 
 fn load(bytes: &[u8]) -> Transfer {
     Transfer::load(std::io::Cursor::new(bytes)).unwrap()

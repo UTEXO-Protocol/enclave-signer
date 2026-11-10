@@ -199,6 +199,38 @@ about 65 s on 2 vCPUs, so they fit the deadline of the image, 90 s. A forged req
 can model at the 30 s of `max_rgb_lib_ms`. Four of these at once can take about 110 s
 on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
 
+## Smaller production host
+
+For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
+**4096 MiB** and these settings:
+
+| Setting | Value |
+|---|---:|
+| `max_rgb_lib_ms` | 30000 |
+| `total_request_timeout_secs` | 320 |
+| `GRPC_MAX_CONCURRENT_SIGN` | 4 |
+| Parent enclave wait | 330 s |
+| `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
+| Backend request timeout | At least 340 s |
+
+The CPU times behind these values are in
+[validation-cost-model.md](validation-cost-model.md#measurements). Checked on
+2026-11-10 on a Nitro enclave with 2 vCPUs and 4096 MiB: `limits set` accepts
+the two enclave limits, and `limits show` reads them back with every other
+limit at its image value.
+
+The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: keep the admitted histories,
+reserve twice the CPU time, account for four workers sharing one core, and
+leave one quarter for other work. The ×2 factor is headroom for the smaller
+host. Timeouts round up to five seconds: enclave 320, parent wait 330,
+parent request 335, backend 340.
+
+Use [the parent profile](../deploy/profiles/burn-small-host.env) and
+[the limits file](../deploy/profiles/burn-small-host-limits.conf) on every
+host deploy. Set the backend and parent values before raising the enclave
+deadline; [apply and persist the limits](#commands) for each selected CID.
+The release workflow does not forward the profile overrides.
+
 ## What the attestation shows
 
 The attestation does not cover these values. Two enclaves with the same PCR values

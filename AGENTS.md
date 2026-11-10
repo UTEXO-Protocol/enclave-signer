@@ -342,6 +342,18 @@ report that conflict and keep it visible until the implementation is fixed.
   A long log line can hold heap after its request ends.
 - Measure a cost model or memory model again when the code or dependency it
   describes changes.
+- For every rgb-lib or rgb-consensus pin change, rerun the release-mode
+  consignment validation and inspection timings on the CPU used by the burn
+  enclaves. Follow [the cost-model measurement procedure](docs/validation-cost-model.md#when-to-measure-again):
+  measure every documented shape, compare validation plus inspection with its
+  model, and record the source and dependency revisions, compiler, CPU, load,
+  concurrency and repeated results. A passing test on another CPU is not this
+  measurement. If all admitted shapes fit, no change is needed for that CPU
+  and load. Keep allowances for other hardware or concurrency separate from
+  measured results, and round planned timeouts up to five seconds. If a shape
+  exceeds its model, document the observed ratio and either account for it in
+  runtime limits or recalibrate the model. Coefficient changes require an EIF
+  rebuild and new PCR expectations; runtime limit changes do not.
 - Carry a request deadline through queueing, connection setup, reads, writes,
   RPC retries and expensive work. A socket timeout alone does not cancel a
   handler or prove that signing stopped.
