@@ -264,8 +264,7 @@ fn refuses_parent_right_on_a_blinded_recipient_seal() {
     let blinded = |vout, blinding| {
         BuilderSeal::Concealed(GraphSeal::with_blinded_vout(vout, blinding).to_secret_seal())
     };
-    let (mut history, parent, right) =
-        parent_with_seals(vec![blinded(1u32, 1), blinded(2u32, 2)]);
+    let (mut history, parent, right) = parent_with_seals(vec![blinded(1u32, 1), blinded(2u32, 2)]);
     let child = refill(&mut history, right);
     let err = refusal(&child, &parent, right, &history);
     assert!(err.contains("is on blinded seal"), "{err}");
