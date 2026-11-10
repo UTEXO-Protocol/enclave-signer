@@ -199,6 +199,28 @@ mod tests {
 
     // F03-AF-22: test truncated and invalid protobuf frames.
 
+    /// Reject a body shorter than its length header.
+    #[test]
+    fn reject_truncated_body() {
+        let mut buf = 32u32.to_le_bytes().to_vec(); // claim 32 body bytes...
+        buf.extend_from_slice(&[0u8; 8]); // ...but supply only 8
+        let mut cursor = Cursor::new(buf);
+        let result: Result<EnclaveRequest> = read_message(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    /// Return a decode error for invalid protobuf data.
+    #[test]
+    fn reject_garbage_body() {
+        // 0xFF bytes are an invalid protobuf field/wire-type stream for this msg.
+        let body = vec![0xFFu8; 24];
+        let mut buf = (body.len() as u32).to_le_bytes().to_vec();
+        buf.extend_from_slice(&body);
+        let mut cursor = Cursor::new(buf);
+        let result: Result<EnclaveRequest> = read_message(&mut cursor);
+        assert!(result.is_err());
+    }
+
     /// The request memory model (`memory.rs`): reading a frame of the largest
     /// size uses a small multiple of its bytes.
     #[test]
@@ -635,6 +657,41 @@ mod tests {
                 holds_repeated_fields(name, &messages, 0),
                 "{schema:?} ({name}) holds no repeated field, so the walk need not enter it"
             );
+        }
+    }
+
+    /// Bytes that look like protobuf keys and lengths. Drawn at random, they
+    /// make nested messages, groups, truncated varints and lengths past the
+    /// frame.
+    const KEY_LIKE_BYTES: [u8; 12] = [
+        0x18, 0x1a, 0x1b, 0x1c, 0x32, 0x22, 0x5a, 0x00, 0x01, 0x02, 0x7f, 0xff,
+    ];
+
+    /// Handle each fixed test frame without a panic, through the plain read
+    /// and through the shape check. Inputs stay below the frame limit.
+    #[test]
+    fn framed_garbage_corpus_never_panics() {
+        let mut state = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        };
+        let frame = |body: &[u8]| {
+            let mut buf = (body.len() as u32).to_le_bytes().to_vec();
+            buf.extend_from_slice(body);
+            buf
+        };
+        for len in [1usize, 2, 5, 13, 64, 255, 1024, 4096, 65536] {
+            let body: Vec<u8> = (0..len).map(|_| next()).collect();
+            let _res: Result<EnclaveRequest> = read_message(&mut Cursor::new(frame(&body)));
+            let _res = read_request(&mut Cursor::new(frame(&body)));
+            let keys: Vec<u8> = body
+                .iter()
+                .map(|b| KEY_LIKE_BYTES[usize::from(*b) % KEY_LIKE_BYTES.len()])
+                .collect();
+            let _res = read_request(&mut Cursor::new(frame(&keys)));
         }
     }
 }
