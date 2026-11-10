@@ -78,6 +78,21 @@ A behavior change is incomplete until its affected descriptions agree with it.
   computed from them. Name the constant, the runtime limit or the image
   setting instead. A measured figure keeps its number when it names the input
   it was measured at.
+- The tree has no audit finding ids, review labels, scan finding numbers, or
+  issue and pull request numbers. This applies to comments, docs, specs, the
+  README, log and error texts, test names, file names and test data. Such ids
+  look like `F<nn>-AF-<nn>`, `AF-<nn>`, a letter-and-number label such as
+  `I-<nn>` or `TH-<n>`, "finding <n>" or `#<n>`. Do not point to an audit or
+  a review in place of a reason. State the rule and its reason in words, and
+  name a test by what it checks. Git history and the tracker keep the link to
+  a finding. A reference to another repository names that repository and the
+  file, not a pull request number. Search the diff for these forms before
+  each commit.
+- These identifiers name a public fact or a rule of the specs, so they stay:
+  CVE and RUSTSEC ids, RFC, BIP and EIP numbers, upstream bug links, tool error
+  codes such as the nitro-cli `E<nn>` codes, and the rule ids that
+  `docs/mint-flow.md` and `docs/tee-spec.md` define and the code cites (for
+  example `M6`, `RR10`, `PP1`).
 - Preserve the provenance of generated and vendored files. Correct stale
   upstream comments upstream and re-sync the files; do not hand-edit a
   verbatim copy. Until then, keep its documented comment differences accurate
@@ -513,7 +528,8 @@ production role. Do not combine mutually exclusive features with
   describe the same behavior, or clearly identify the remaining gap.
 - Lead the PR description with the concrete problem and resulting behavior.
   Include relevant tests, trust or compatibility changes and rollout needs.
-- Cite related issues or PRs where they explain the requirement. Do not keep
-  stale titles, descriptions or claims from an earlier version of the work.
+- Cite related issues or PRs in the PR description, not in the tree, where
+  they explain the requirement. Do not keep stale titles, descriptions or
+  claims from an earlier version of the work.
 - State what remains unimplemented or unverified. Do not claim that guidance,
   a passing mock test or an attestation alone fixes a deployment.
