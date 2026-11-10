@@ -23,11 +23,15 @@ The handshake succeeds only between two enclaves that:
 PCR0, PCR1 and PCR2 are the same for every instance of a published image, in
 any AWS account. PCR3 binds the peer to the operator's role. An enclave on an
 instance without an IAM role cannot clone. Recovery onto an instance with
-another role fails by design.
+another role fails by design. A production burn enclave on an instance
+without an IAM role refuses `SetEndpoints`, so it signs nothing.
 
 The cloning secret is an operator value, at least `MIN_CLONING_SECRET_BYTES`
-long. A donor learns it at run time, from `init --cloning-secret-file` or
-from a completed clone. A release image never carries it.
+long with at least `MIN_CLONING_SECRET_DISTINCT_BYTES` different byte values.
+A donor learns it at run time, from `init --cloning-secret-file` or from a
+completed clone. A burn signer that got `init` without the secret can never
+donate. No supplied recipe puts the secret in an image; a release burn
+binary still reads `UTEXO_CLONING_SECRET` from the image env at boot.
 
 ## The handshake
 
@@ -36,8 +40,11 @@ Three messages. Each side verifies the other's attestation document
 
 1. **`InitiateCloning`** on the new enclave (the requester). It makes an
    ephemeral X25519 key and an attestation document that binds this key and
-   an HMAC of it under the cloning secret. The requester enters `Cloning`. A
-   session expires after `CLONING_SESSION_TTL`.
+   an HMAC, under the cloning secret, of the key and the donor's EVM address.
+   The requester enters `Cloning`. While a session is younger than
+   `CLONING_SESSION_TTL`, the enclave refuses a second `InitiateCloning`.
+   After that time a new one replaces the session. `SetClone` does not check
+   the age.
 2. **`GetClone`** on the donor, through the gRPC `Clone` RPC of the donor's
    parent. The donor checks the HMAC, the requester's attestation, the PCRs
    and its export cap. Then it records the attestation nonce and encrypts the
@@ -51,7 +58,9 @@ The seed ciphertext is bound to both handshake keys, and the key exchange
 refuses small-order points. A donor records a nonce only after the
 authentication passed, so a refused handshake uses no space in the replay
 guard. A failed `SetClone` leaves the requester in `Cloning`, and it changes
-no keys.
+no keys. The secret of a completed session replaces a donor secret that was
+loaded at boot. A replaced or dropped session erases its pending secret; the
+expiry alone does not.
 
 ## The `clone` command
 
@@ -67,9 +76,11 @@ the `clone-operator` role for the donor's parent
 ([parent-mtls.md](parent-mtls.md)). Use a fresh requester: initialization and
 cloning are two ways into `Active`, and an enclave takes only one.
 
-The command prints exactly one result line on stdout:
-`CLONE_RESULT_V1=<result>`. It prints the detail on stderr. Automation must
-read the result line, not the exit code alone.
+After its arguments parse, the command prints exactly one line
+`CLONE_RESULT_V1=<result>` on stdout, among progress lines and the key
+printout. It prints the detail on stderr. Automation must read the result
+line, not the exit code alone. A usage error prints no result line and exits
+with code 2.
 
 | Result | Meaning | Exit code |
 | --- | --- | --- |
@@ -81,18 +92,22 @@ read the result line, not the exit code alone.
 | `preflight_error` | The command failed before it sent `SetClone`, for example no cloning secret or a donor bundle that does not match `--donor-evm`. | 1 |
 
 After `SetClone` the CLI reads the identity back, also when the reply was
-lost. It waits a short fixed time for `SetClone` and the read-back
-(`parent/src/bin/cli/clone_completion.rs`). A timeout does not cancel
-`SetClone` and does not prove that it failed.
+lost. It waits a short fixed time for `SetClone` and for the read-back
+(`SET_WAIT` and `READ_WAIT` in `parent/src/bin/cli/clone_completion.rs`). A
+timeout does not cancel `SetClone` and does not prove that it failed. After
+a failed `clone`, wait for the session to expire or restart the requester.
 
 ## Limits
 
 - **A clone can donate.** A completed clone keeps the cloning secret and can
   donate to another replica, also when its own donor is gone.
 - **No revocation.** Blocking the original donor does not revoke its clones.
+- **A new image cannot clone from an old one.** Their PCRs differ. A burn
+  signer on a new image makes a new seed, so it has a new signing address.
 - **The export cap is per enclave.** `CLONE_EXPORT_HARD_CAP` limits the seed
   exports of one enclave process. It is not a limit on the replicas of a
-  cluster. Unset or zero means no cap, and no supplied image sets it.
+  cluster. Unset, zero or a non-number means no cap, and no supplied image
+  sets it.
 - **The replay guard is per donor.** Each donor refuses an attestation nonce
   that it recorded. Another donor accepts the same requester attestation. An
   entry leaves the guard when it expires or when the guard is full.

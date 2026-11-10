@@ -1,7 +1,9 @@
 # Nitro Enclave Signer: technical specification
 
-**Component:** `enclave-signer` (the enclave validator and signer, and its parent adapter)
-**Reviewed:** 2026-11-02 against repository code. Deployment was not checked.
+- **Component:** `enclave-signer` (the enclave validator and signer, and its
+  parent adapter).
+- **Reviewed:** 2026-11-10 against repository code. Deployment was not
+  checked.
 
 This document states what the enclave trusts, what it checks and what it
 signs. It describes implemented behavior and its limits. It is not a security
@@ -35,8 +37,9 @@ the RGB data that a mint transaction commits (mint), Bitcoin SPV inclusion,
 EVM deposit events, and the bindings between the chains. A flag in a request
 is never evidence. The EVM RPC is a trust exception (section 2).
 
-A failed check returns an error and no signature. A missing pin, proof,
-receipt or feature refuses the request; it never selects a weaker path.
+A failed check returns an error and no signature. In a release image a
+missing pin, proof, receipt or feature refuses the request; it never selects
+a weaker path.
 
 ## 2. Trust model
 
@@ -52,7 +55,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Nitro hardware and NSM | Isolation, measurement (PCRs), attestation signing, entropy | - |
 | Enclave code (this repository) | Validation, key custody, signing | - (the attestation measures it) |
 | Parent, listener, backend | Liveness and delivery of data | Every claim in a request. The enclave checks each one. |
-| EVM RPC (pinned host and CA) | Receipts, canonical blocks and the selected finality head. On the burn signer also the content of an asset's reject list. | TLS authenticates the endpoint. It does not prove EVM history or the answer of an `eth_call`. |
+| EVM RPC (pinned host and CA) | Mint signer: receipts, canonical blocks and the selected finality head. Burn signer: only the content of an asset's reject list. | TLS authenticates the endpoint. It does not prove EVM history or the answer of an `eth_call`. |
 | Bitcoin indexer (pinned URL) | Nothing on an `spv` signing path. A burn signer built without `spv` trusts it for witness status and depth. | TLS authenticates the indexer. It proves no Bitcoin consensus. |
 | Bridge contracts and their governance | Honest deposit events. The on-chain release rules and the signature quorum. | - |
 | Operator | Deployment, launch values, the cloning secret | Export of the plaintext seed |
@@ -70,19 +73,24 @@ authenticates the configured host against the pinned CA. The host relay can
 block or delay traffic. It cannot change an answer without detection. A TLS or
 RPC failure refuses the request.
 
-The enclave checks that a receipt succeeded, that it holds exactly the
-expected events from the pinned contract, that the operation id and the
-amounts match the request, that the head selected by `EVM_FINALITY_TAG` covers
-the receipt, and that the block hash at its height is the canonical one. The
-receipt, the blocks and the head come from the same provider. So these are
-consistency checks, not a proof of EVM consensus: an approved provider that is
-faulty or compromised can return a false history that is consistent with
-itself. A production policy refuses the `latest` tag.
+The mint signer checks that a deposit receipt succeeded, that it holds
+exactly the expected events from the pinned contract, that the operation id
+and the amounts match the request, that the head selected by
+`EVM_FINALITY_TAG` covers the receipt, and that the block hash at its height
+is the canonical one. The receipt, the blocks and the head come from the same
+provider. So these are consistency checks, not a proof of EVM consensus: an
+approved provider that is faulty or compromised can return a false history
+that is consistent with itself. A production policy refuses the `latest`
+tag.
 
-**Clock.** The deadline check, the SPV tip-age check and the header rate
-limit read the system clock. Inside Nitro this is the hypervisor clock; the
-NSM attests no time. So the AWS hypervisor is trusted for coarse time, as it
-is for isolation. No request sets the clock. On Linux the enclave copies the
+The burn signer reads no deposit. It derives each deposit id, and it reads
+the RPC only for a reject list.
+
+**Clock.** The deadline check, the SPV tip-age check, the header time rule,
+the header rate limit and the certificate checks read the system clock.
+Inside Nitro this is the hypervisor clock, and the enclave uses no attested
+time. So the AWS hypervisor is trusted for coarse time, as it is for
+isolation. No request sets the clock. On Linux the enclave copies the
 hypervisor PTP clock into `CLOCK_REALTIME` at a fixed interval
 (`enclave/src/clocksync.rs`). A failed copy leaves the clock unchanged.
 
@@ -130,7 +138,10 @@ Bitcoin indexer and KMS through loopback forwarders that bridge to
 relays bytes only. A forwarder of a TLS endpoint passes only a connection
 that starts with a TLS handshake, so no client in the enclave can send
 plaintext to the host for that endpoint. The EVM RPC client follows no
-redirect.
+redirect. The indexer client can follow one, but a redirect to another host
+or port has no route out of the enclave. A mint signer also connects to the
+seed broker of the parent over vsock, for the AWS credentials and the stored
+ciphertext of the seed.
 
 ### The parent
 
@@ -166,6 +177,8 @@ signer the KMS values ([configuration.md](configuration.md#launch-values)).
   a retry works. New values need a restart, which clears the keys in memory.
 - The values, and any digest of them, are outside the image. Members with the
   same role, release and build profile run one EIF with different endpoints.
+  A mint image also holds `KMS_ALLOWED_ACCOUNT_IDS`, so members share it only
+  if the list has the account of each member's key.
 - A release image accepts only a TLS indexer URL (`ssl://` or `https://`).
 - A `Production` policy commits the indexer host, the EVM RPC host, the CA
   hash and the KMS values (section 4). A `Development` policy commits none of
@@ -184,12 +197,15 @@ image. [runtime-limits.md](runtime-limits.md) lists the limits and their
 image values.
 
 The enclave has a fixed amount of memory and no swap. So the heap that one
-request can use has a bound that depends only on the size of the request:
-`REQUEST_MEMORY_FACTOR` times the frame, plus a term for the decoded protobuf
-elements. A parser that can take more has its own size limit. A release build
-refuses to start with less usable memory than the model needs for all its
-workers. `enclave/src/memory.rs` holds the model, its measured factors and
-its tests. [operations.md](operations.md#memory) gives the launch value.
+request can use has a bound that does not depend on the content of the
+request: `REQUEST_MEMORY_FACTOR` times the frame, plus a term for the decoded
+protobuf elements. A parser that can take more has its own size limit. The
+answers of the EVM RPC and the indexer are outside the model, except a reject
+list, whose entry limit the model counts. A release build refuses to start
+with less usable memory than the model needs for all its workers.
+`enclave/src/memory.rs` holds the model and its measured factors; the tests
+are next to the parsers that they measure.
+[operations.md](operations.md#memory) gives the launch value.
 
 ## 4. Security policy
 
@@ -224,15 +240,19 @@ without `spv` and a build with a missing pin resolve to `Development`.
 `Production` policy refuses to boot. `SetEndpoints` runs the gate again with
 the launch values and refuses the set on an error. The gate requires:
 
-- non-zero `FUNDS_IN_CONTRACT` and `TOKEN_CONTRACT`;
+- a non-zero FundsIn contract (`FUNDS_IN_CONTRACT`, or its default, the
+  proxy address) and a non-zero `TOKEN_CONTRACT`;
 - `BTC_RELAY_MODE=required`;
 - `BITCOIN_NETWORK=bitcoin` when `EVM_CHAIN_ID` is 1 or 42161;
 - an `EVM_FINALITY_TAG` of `safe` or `finalized`;
-- the pinned-TLS EVM source with a valid host and CA;
-- for a cloning role, a PCR3 that is not all zero.
+- `SPV_MIN_CONFIRMATIONS` of at least 1;
+- at `SetEndpoints`: an indexer host, no plaintext EVM source, and a host and
+  CA pin for the pinned-TLS source;
+- at `SetEndpoints`, for a cloning role: a PCR3 that is not all zero.
 
-A release build without `spv` needs a signer role, real attestation,
-`BITCOIN_NETWORK=signet` and `BTC_RELAY_MODE=none`. It boots and signs on
+A build with a signer role and without `spv` needs real attestation,
+`BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none` and the bridge pins, in a
+debug and in a release profile. It boots and signs on
 `Development { IndexerTrusted }` and on no other policy. Each dev feature
 (`mock-attestation`, `allow-seed-import`, `allow-debug-pcrs`) fails to
 compile in a release build. A build with both signer roles, or with
@@ -252,15 +272,16 @@ signing on, another EVM source, a dev build) then fails verification. Values
 copied from the signer under check prove nothing. Attestation shows which
 endpoint is configured; it does not show that the provider is honest.
 
-**Not in the commitment.** The image measurement (PCR0) covers these, not the
-policy:
+**Not in the commitment.**
 
-- the scheme and port of the indexer URL, and the EVM RPC port. A release
-  image accepts only TLS for the indexer, so the rule is in the code;
-- the values of `BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS`. Only "plain
-  BTC on or off" is committed;
-- `MINT_WITNESS_SAT`;
-- the runtime limits, which nothing attests.
+- Launch values that nothing attests or measures: the scheme and port of the
+  indexer URL, and the port and path of the EVM RPC. A release image accepts
+  only TLS for the indexer; PCR0 measures that rule, not the value.
+- Image settings that PCR0 measures and the policy does not commit: the
+  values of `BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS` (only "plain BTC
+  on or off" is committed), `MINT_WITNESS_SAT` and `KMS_ALLOWED_ACCOUNT_IDS`.
+- The runtime limits in force, which nothing attests. PCR0 measures only
+  their image values.
 
 On a build without `spv` the `Development` policy commits no field. Its gas
 rule and `SPV_MIN_CONFIRMATIONS` are measured, not attested.
@@ -300,8 +321,10 @@ session. See the [phase diagram](diagrams/09-state-phase.md).
 
 **Upgrade.** A new image runs as a new enclave process, with measurements that
 must be approved before use. A mint signer recovers its seed through KMS when
-the key policy permits the new image. A burn signer gets its seed from a
-donor with the same measurements ([cloning.md](cloning.md)).
+the key policy permits the new image. A burn signer on a new image cannot
+take the seed of an old image, because cloning needs equal PCR0, PCR1 and
+PCR2 ([cloning.md](cloning.md)). It makes a new seed, or it clones from
+another enclave of the new image.
 
 **Clones are one identity.** A cloned enclave signs as the same EVM address.
 Replicas of one seed are not independent quorum members.
@@ -320,8 +343,8 @@ Replicas of one seed are not independent quorum members.
 | `SignRightsRefill` | `Active` | mint | A send of one mint right to new rights of the mint wallet. |
 | `SignRawDigest` | `Active` | burn | A gas transaction under the attested allowlist. |
 | `SignRawMessage` | - | none | Refused in every build. |
-| `SubmitHeaders` | any | mint, burn | Bitcoin headers for the header chain. |
-| `GetLastSavedBlock` | any | mint, burn | The tip of the header chain, or the checkpoint when the chain is empty. |
+| `SubmitHeaders` | any | mint, burn, built with `spv` | Bitcoin headers for the header chain. |
+| `GetLastSavedBlock` | any | mint, burn, built with `spv` | The tip of the header chain, or the checkpoint when the chain is empty. |
 | `InitiateCloning`, `GetClone`, `SetClone` | see [cloning.md](cloning.md) | burn | The seed cloning handshake. |
 | `Health` | any | all | Readiness: launch values set, keys loaded and, where a release needs it, a ready header chain. |
 
@@ -350,7 +373,8 @@ one output that holds the mint right. It then signs with the colored account.
 ### 6.2 Other signing requests
 
 - **`SignBtc`** signs a plain-BTC PSBT with the vanilla account only. It is
-  off unless the attested policy turns it on. Each request must pay its
+  off unless the image sets `BTC_MAX_TOTAL_SATS`; a `Production` policy
+  attests that switch. Each request must pay its
   outputs back into the custody of its inputs, within a value cap, an
   unowned-sats budget and the fee policy
   ([mint-flow.md](mint-flow.md#7-plain-btc-signbtc)).
@@ -370,27 +394,28 @@ one output that holds the mint right. It then signs with the colored account.
 ### 6.3 Errors
 
 A refused request gets an `ErrorResponse` with a code. The parent maps the
-code to a gRPC status. A caller identifies a retryable state by the code, not
-by the text.
+code to a gRPC status. A direct caller identifies a retryable state by the
+code, not by the text. The parent gives codes 3 and 8 the same gRPC status,
+so a gRPC caller identifies the finality wait by its fixed prefix.
 
 | Code | Meaning | gRPC status |
 |------|---------|-------------|
-| 1 | Any other error | `INTERNAL` |
-| 2 | Not ready. On a mint signer also an unavailable KMS or seed store. | `UNAVAILABLE` |
+| 1 | Any other error. A request that needs keys before they exist gets this code. | `INTERNAL` |
+| 2 | Not ready: the launch values are not set, or the enclave is not in the phase that the request needs. On a mint signer also an unavailable KMS or seed store. | `UNAVAILABLE` |
 | 3 | A failed cross-check or SPV check. On `GetClone` also a donor without keys. | `FAILED_PRECONDITION` |
 | 4 | `GetClone`: invalid input | `INVALID_ARGUMENT` |
 | 5 | `GetClone`: refused credential, attestation, PCR or public key | `PERMISSION_DENIED` |
 | 6 | `GetClone`: replayed attestation nonce | `ALREADY_EXISTS` |
 | 7 | `GetClone`: seed-export cap reached | `RESOURCE_EXHAUSTED` |
-| 8 | The deposit receipt is above the selected EVM finality head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
+| 8 | The deposit receipt is above the `safe` or `finalized` head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
 
 ## 7. Bitcoin header chain (SPV)
 
 An `spv` build keeps its own Bitcoin header chain. The parent feeds it with
 `SubmitHeaders`, and the enclave validates every header
-([sequence](diagrams/08-seq-spv-submit-headers.md)). A release needs a proof
-in this chain for every witness transaction of its consignment. The mint
-signer checks no witness.
+([sequence](diagrams/08-seq-spv-submit-headers.md)). An RGB -> EVM release
+needs a proof in this chain for every witness transaction of its consignment.
+The mint signer checks no witness.
 
 1. **Header validity.** On mainnet and the testnets the enclave checks
    linkage, proof of work and `nBits`. The testnets apply the 20-minute
@@ -426,15 +451,16 @@ signer checks no witness.
 8. **Network.** The consignment's `chain_net` must be the enclave's
    `BITCOIN_NETWORK`.
 9. **Pins until the key is used.** The enclave records the hash and the
-   required depth of each block that a check used. It checks both again under
-   the signing lock. A changed hash, or a block shallower than its check
-   required, refuses the signature. The caller sends the request again when
+   required depth of each block that a check used. It checks both again while
+   it holds the lock of the header chain, and keeps the lock until it has
+   signed. A changed hash, or a block shallower than its check required,
+   refuses the signature. The caller sends the request again when
    the block is deep enough.
 
 `SPV_MIN_CONFIRMATIONS` and `BITCOIN_NETWORK` come from the image env, so
 PCR0 measures them, and a `Production` policy commits them. A Nitro enclave
-takes no env from the host. The other SPV thresholds are compile-time
-constants.
+takes no env from the host. The limits of rule 5 are runtime limits. The
+other SPV thresholds are compile-time constants.
 
 **Checkpoints.** The checkpoint is the trust anchor of the chain. A release
 build uses only the compiled-in value. `SPV_CHECKPOINT` can move the anchor
@@ -448,8 +474,8 @@ on a dev build; a production-shaped build refuses to start when it is set.
 | `signet`, `signetcustom` | Block 334,000 of the UTEXO signet, without chainwork | No proof of work, `nBits` or signet challenge signature. Linkage, time, reorganization, rate and freshness rules only. |
 | `regtest` | Genesis | No proof of work or `nBits`. |
 
-A release under `BTC_RELAY_MODE=required` needs the chainwork of the
-checkpoint. So it fails on `testnet4` and the signets, unless a dev build
+An RGB -> EVM release under `BTC_RELAY_MODE=required` needs the chainwork of
+the checkpoint. So it fails on `testnet4` and the signets, unless a dev build
 sets `SPV_CHECKPOINT` with chainwork.
 
 ## 8. Release authorization (burn)
@@ -517,8 +543,9 @@ deployed.
   trusts the RPC for its content. A provider that hides an entry lets a
   rejected lineage release. A failed read, or a list above
   `max_reject_list_entries`, refuses every burn of the asset. Whoever can
-  append to the list can stop every release
-  ([burn-flow.md](burn-flow.md), Stage 3b).
+  append to the list can stop every release. A burn of rejected units stays
+  refused until an allow for them is finalized, and its units are already
+  burned ([burn-flow.md](burn-flow.md), Stage 3b).
 - **Validation time.** Work caps and a modeled time budget bound the work of
   rgb-lib on a consignment. The model is fitted to measurements, not proved:
   a shape that costs more than the measured ones runs longer than its budget.
@@ -533,6 +560,9 @@ deployed.
 
 **Mint**
 
+- **EVM RPC trust.** A false history that is consistent with itself, from the
+  approved provider, passes the deposit checks of the mint signer. This is
+  accepted by design (section 2).
 - **No history check.** The mint signer validates no RGB history: no
   consensus, genesis, ancestor, witness depth or reject list. A host that
   controls the bridge can make a mint that no wallet accepts, after the user
@@ -554,19 +584,20 @@ deployed.
 
 **Both**
 
-- **EVM RPC trust.** A false history that is consistent with itself, from the
-  approved provider, passes the deposit checks. This is accepted by design
-  (section 2).
 - **Policy coverage.** The commitment does not hold every enforced setting
   (section 4). A verifier must compare the attested chain, contract and asset
   pins with the intended deployment.
-- **Builds without `spv`.** A burn signer built without `spv` trusts the
-  pinned indexer for witness status and depth, and checks no Merkle proof and
-  no BtcRelay proof. It runs on public Signet only and attests `Development`,
-  which commits no endpoint. A compromised host can launch it with its own
-  TLS endpoint. `attest-verify` and `verify-launch` refuse this policy.
-- **Test networks.** Testnet4 SPV is test-grade, and the signets and regtest
-  check no proof of work (section 7).
+- **Builds without `spv`.** A build with a signer role and without `spv` runs
+  on public Signet only and attests `Development`, which commits no endpoint
+  and no KMS value. A compromised host can launch it with its own TLS
+  endpoints: its own indexer for a burn signer, its own EVM RPC for a mint
+  signer. A burn signer built this way trusts the indexer for witness status
+  and depth, and checks no Merkle proof and no BtcRelay proof.
+  `attest-verify` and `verify-launch` refuse this policy.
+- **Test networks.** Testnet4 SPV is test-grade: a host can make
+  min-difficulty blocks at almost no cost, and they count for depth and
+  freshness. Run it with `BTC_RELAY_MODE=required` and a relay that applies
+  the same rule. The signets and regtest check no proof of work (section 7).
 - **Request deadline.** The socket deadline does not cancel a handler. A
   handler with slow indexer or RPC calls can run past it.
 - **Build reproducibility.** Reproducing PCR0 needs read access to a private

@@ -16,8 +16,10 @@ A launch has these steps, in this order:
 4. Send the launch values once (`set-endpoints`).
 5. Check the attested launch policy (`verify-launch`).
 6. Start the parent.
-7. Initialize the keys: `init` on a mint signer and on the first burn
-   signer, `clone` on each other burn signer ([cloning.md](cloning.md)).
+7. Initialize the keys: `init` on a mint signer,
+   `init --cloning-secret-file <file>` on the first burn signer, and `clone`
+   on each other burn signer ([cloning.md](cloning.md)). A burn signer that
+   got `init` without the secret can never donate its seed.
 
 By hand:
 
@@ -38,46 +40,65 @@ utexo-bridge-parent-cli --addr vsock://16:5000 set-endpoints \
 GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   GRPC_TLS_CERT_FILE=server.pem GRPC_TLS_KEY_FILE=server.key \
   GRPC_TLS_CLIENT_CA_FILE=client-ca.pem GRPC_TLS_ACL_FILE=clients.acl \
+  HEADER_ELECTRUM_URL=ssl://<electrum-host>:50002 \
   ./utexo-bridge-parent
 ```
 
-A mint signer also needs the KMS proxy and the parent's storage settings
-([kms-persistence.md](kms-persistence.md)). `deploy/host-prep-evmrpc.sh` sets
-up the EVM RPC proxy.
+- A burn signer built with `spv` gets its Bitcoin headers from the header
+  sync of the parent. Without `HEADER_ELECTRUM_URL` it never becomes ready.
+- A mint signer also needs the KMS proxy and the parent's storage settings
+  ([kms-persistence.md](kms-persistence.md)).
+- The CLI of a Nitro host is built with the parent feature `vsock`
+  ([building.md](building.md#workspaces)).
 
 Before an enclave takes traffic, check that a genuine request of its flow
 succeeds and that a request of the other flow is refused.
 
 ### `deploy-host.sh`
 
-`deploy/deploy-host.sh` runs these steps for one enclave and its parent, for
-`SIGNER_ROLE=mint` or `burn`. It installs the systemd units, fetches the EIF
-for one commit from S3, and checks the EIF checksum and PCR0 against the
-published manifest before and after the start.
+`deploy/deploy-host.sh` runs steps 2 to 6 for one enclave and its parent. It
+needs `GIT_SHA`, `BUCKET`, `AWS_REGION`, `CLUSTER_DIR` and `SIGNER_ROLE`
+(`mint` or `burn`). It installs the systemd units and fetches the EIF of that
+commit from S3.
 
-- One run deploys one enclave. The default CID is 16. Set `ENCLAVE_CID=18` or
-  `20` for another supported CID, with parents on ports 50051 to 50053.
-- It does a cold deployment. It does not initialize keys, and it is not a
-  rolling restart.
+- It starts no host proxy. Run `deploy/host-prep-evmrpc.sh` first: it starts
+  the EVM RPC proxy and writes the `EVM_RPC_HOST` and `EVM_RPC_TLS_PORT`
+  that the launch sends.
+- Before the start it checks the EIF checksum and the PCR0 of the EIF file
+  against the published files. After the start it checks the PCR0 of the
+  running enclave. `ENCLAVE_DEBUG_MODE=1` skips the second check.
 - It checks its inputs before it changes a service: the TLS files of the
   parent, the limits file, and the memory pool.
-- A deploy for one CID does not touch the services of another CID.
+- It does a cold deployment. It does not initialize keys, and it is not a
+  rolling restart.
+- One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18` or
+  `20` selects another supported CID, with parents on ports 50051 to 50053.
+- It stops and starts only the units of its own CID. But it ends every
+  `utexo-bridge-parent` process of the host, and it replaces
+  `/etc/utexo/enclave.env`, the unit files and the EIF in `CLUSTER_DIR`,
+  which all enclaves of the host share. Its check after the start fails when
+  an enclave of another CID runs.
 
 ### Memory
 
 `--memory` must be at least 4096 MiB, a whole number of GiB. The enclave
 needs 3072 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
 the root file system keep part of the launch value. A release enclave refuses
-to start with less. nitro-cli gives an enclave whole hugepages, 1 GiB pages
-first, so the deploy scripts refuse a value that is not a whole number of
-GiB. `ENCLAVE_MEMORY` sets the value for `deploy-host.sh`.
+to start with less, or when it cannot read its memory total. nitro-cli gives
+an enclave whole hugepages, 1 GiB pages first, so the deploy scripts refuse a
+value that is not a whole number of GiB. `ENCLAVE_MEMORY` sets the value for
+`deploy-host.sh`; its default is the minimum.
 
 The allocator pool. `memory_mib` in `/etc/nitro_enclaves/allocator.yaml`
 sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
 
 - The pool comes out of the memory of the parent instance. Leave enough for
   the system and the parents. If the allocator cannot reserve the pool, its
-  service fails and no enclave of the host starts.
+  service fails and no enclave of the host starts. A new start of the
+  allocator does not start the enclave units: set `memory_mib` to a value
+  that the instance can hold, then reboot the host or start the
+  `utexo-parent@` units. Each parent unit also starts its enclave unit and
+  the allocator.
 - The allocator refuses to change the pool while an enclave runs, and the
   enclave units require its service. So a restart of the allocator stops and
   restarts every enclave of the host, which removes their keys. Change the
@@ -87,7 +108,8 @@ sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
   the pages that another enclave holds.
 - `utexo-enclave-ctl.sh check <cid>` makes the same checks and changes
   nothing. Run it before each step of a rolling restart: `systemctl restart`
-  stops the old enclave before the new one starts.
+  stops the old enclave before the new one starts. `start` itself refuses
+  only when the free hugepages cannot hold its own enclave.
 
 `check` reads its values from `/etc/utexo/enclave.env`, the file that
 systemd gives to the unit. Run it as root, or as a user that can read the
@@ -115,7 +137,8 @@ must report a `total_mib` of at least the usable minimum.
 ## Launch check
 
 `utexo-enclave-ctl.sh start` runs `set-endpoints` and then
-`utexo-bridge-parent-cli verify-launch --signer-role <role>`.
+`utexo-bridge-parent-cli verify-launch --pcr-file <PCR.json> --image-env <IMAGE-ENV.json> --signer-role <role>`,
+with the launch values as flags or in its environment.
 
 Before keys exist, `GetAttestedPublicKey` attests the policy only.
 `verify-launch` verifies that document for a fresh nonce against `PCR.json`.
@@ -127,9 +150,11 @@ unit stops, and the deploy exits before a parent starts.
 
 - `verify-launch` accepts a `Production` policy only. It refuses an image
   built without `spv`.
-- `export-attestation --allow-development-policy` exports a bundle of a
-  real-attestation burn build without `spv`. It verifies the approved image
-  PCRs, not the endpoint settings. Approve those launch values separately.
+- `export-attestation --allow-development-policy` exports a bundle of an
+  enclave that attests `Development` with a real NSM document, such as a
+  build without `spv`. It needs approved PCRs that are not zero. It verifies
+  those PCRs, not the role and not the endpoint settings. Approve the launch
+  values separately.
 - `ENCLAVE_DEBUG_MODE=1` skips the check, because the PCRs are zero.
 - The check runs on the host. It protects against a wrong launch, not against
   a compromised host. An outside verifier runs its own check
@@ -164,7 +189,9 @@ status of the parent:
 
 The probe binds to loopback (`HEALTH_HOST`, `HEALTH_PORT`). Keep it away from
 other hosts. The deploy script gives the three parents the health ports
-50061 to 50063. The CLI gives the same answer:
+50061 to 50063, and the parent Docker image uses the probe as its
+`HEALTHCHECK`. The CLI gives the enclave part of the answer, without
+`header_sync`:
 
 ```bash
 utexo-bridge-parent-cli --addr vsock://16:5000 health
@@ -178,12 +205,13 @@ utexo-bridge-parent-cli --addr vsock://16:5000 health
 
 After a manual `set-endpoints` with no reply, do not send it again blindly:
 the enclave refuses a second set. Read the state first with the `health`
-command. Its exit code 1 only means "not ready".
+command. Its exit code 1 means "not ready" or no answer: read the
+`Endpoints set` and `Key loaded` lines. With no such lines, the read failed.
 
 | `Endpoints set` | `Key loaded` | Action |
 | --- | --- | --- |
 | false | any | The set did not take effect. Send `set-endpoints` again. |
-| true | false | The set took effect. Run `verify-launch` with the same values. On a mismatch, terminate the enclave and start it again. It has no key to lose. |
+| true | false | The set took effect. Run `verify-launch` with `--pcr-file`, `--image-env`, `--signer-role` and the same launch values. On a mismatch, terminate the enclave and start it again. It has no key to lose. |
 | true | true | The set took effect. Do not run `verify-launch`: it refuses an enclave with keys. Do not restart: a restart removes the keys. Check the attested values with `attest-verify`, through the parent. On a mismatch, stop and report. |
 
 ## Restart and upgrade
@@ -196,7 +224,9 @@ A restart removes the keys in memory. systemd restores only the processes.
   and the same attested policy ([cloning.md](cloning.md)). The seed exists
   only in enclave memory, so recovery needs a live donor.
 - A new image has new PCRs. Approve them, and update the verifier
-  expectations and the KMS key policy, before the image takes traffic.
+  expectations and the KMS key policy, before the image takes traffic. A burn
+  signer on a new image cannot clone from an enclave of the old image: it
+  starts from a new seed.
 - New launch values need a new launch of the same EIF. The PCR allowlists do
   not change.
 

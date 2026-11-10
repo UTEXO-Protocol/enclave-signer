@@ -1,7 +1,8 @@
 # Configuration
 
-Every setting has one of four homes. The home decides who can change the
-setting and what proves its value.
+A setting of the enclave or the parent has one of four homes. The home
+decides who can change the setting and what proves its value. The inputs of
+the deploy script are in [operations.md](operations.md).
 
 | Kind | Set by | Takes effect | Proven by |
 |------|--------|--------------|-----------|
@@ -26,17 +27,17 @@ All of the first three are required for a `Production` policy.
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. There is no default asset. |
 | `FUNDS_IN_CONTRACT` | the proxy address | The emitter of `FundsIn` and `BridgeFundsIn`. Attested. It must be non-zero in production. |
 | `TOKEN_CONTRACT` | zero | The ERC-20 that the Bridge releases. An input of `burnId` and of the deposit id. Attested. It must be non-zero in production. |
-| `BTC_RELAY_MODE` | `required` | `required` checks both BtcRelay words of a release against the enclave's own records. `none` requires both words to be zero. A production policy refuses to boot on `none`. Any other value acts as `required`, with a warning at boot. |
-| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin`, `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom` or `regtest`. It selects the SPV rules and checkpoint, the RGB chain network, the coin types and the xpub prefix. An unknown value stops the boot. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
+| `BTC_RELAY_MODE` | `required` | `required` checks both BtcRelay words of a release against the enclave's own records. `none` requires both words to be zero. A production policy refuses to boot on `none`, and a build without `spv` boots only on `none`. Any other value acts as `required`, with a warning at boot. |
+| `BITCOIN_NETWORK` | `bitcoin` | `bitcoin` (or `mainnet`), `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom` or `regtest`. It selects the SPV rules and checkpoint, the RGB chain network, the coin types and the xpub prefix. An unknown value stops the boot. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
 
 ### Acceptance rules
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EVM_FINALITY_TAG` | `finalized` | The head that must cover a deposit receipt: `latest`, `safe` or `finalized`, in exactly this spelling. Another value stops the boot. Attested. A production policy refuses `latest`. Every image sets `finalized`. |
-| `SPV_MIN_CONFIRMATIONS` | `3` | Minimum depth of each Bitcoin witness transaction on the burn path. Zero or a non-number stops the boot. Attested. Every image sets 3. No mint check reads it. |
-| `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats that a witness mint pays to the user's output. A value outside 546 to 10000 stops the boot. It must equal the connector's `MINT_WITNESS_SAT` ([mint-flow.md](mint-flow.md), M8). Measured, not attested. |
-| `BTC_MAX_TOTAL_SATS` | `0` | Cap on the total input value of one `SignBtc` transaction. A non-zero value also turns `allow_vanilla_psbt` on in the attested policy. |
+| `EVM_FINALITY_TAG` | `finalized` | The head that must cover a deposit receipt: `latest`, `safe` or `finalized`, in exactly this spelling. Another value stops the boot. Attested. A production policy refuses `latest`. Both EIF recipes set `finalized`. |
+| `SPV_MIN_CONFIRMATIONS` | `3` | Minimum depth of each Bitcoin witness transaction on the burn path. Zero or a non-number stops the boot. Attested. Both EIF recipes set 3. No mint check reads it. |
+| `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats that a witness mint pays to the user's output. A non-number or a value outside 546 to 10000 stops the boot. It must equal the connector's `MINT_WITNESS_SAT` ([mint-flow.md](mint-flow.md), M8). Measured, not attested: read the value of an image from its `IMAGE-ENV.json`. |
+| `BTC_MAX_TOTAL_SATS` | `0` | Cap on the total input value of one `SignBtc` transaction. On a mint signer a non-zero value also turns `allow_vanilla_psbt` on in the attested policy. |
 | `BTC_MAX_UNOWNED_SATS` | `0` | `SignBtc` budget for outputs that the enclave does not prove it owns. |
 | `GAS_TX_ALLOWED_TO` | unset | The only `to` that a gas transaction may have. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
@@ -45,8 +46,10 @@ All of the first three are required for a `Production` policy.
 | `GAS_TX_MAX_VALUE_WEI` | unset | Ceiling on the native `value`. Only `lzFundsOutCall` to the proxy may carry value. |
 | `KMS_ALLOWED_ACCOUNT_IDS` | none | Mint signer: the AWS accounts that the seed KMS key may live in ([kms-persistence.md](kms-persistence.md)). |
 
-A gas setting that is unset refuses every gas transaction. The whole gas rule
-is part of the attested policy, and an unset value commits as zero.
+An unset destination, gas ceiling, fee ceiling or selector list refuses every
+gas transaction. An unset `GAS_TX_MAX_VALUE_WEI` refuses only a gas
+transaction with a non-zero value. The whole gas rule is part of the attested
+policy, and an unset value commits as zero.
 
 `EVM_FINALITY_TAG` on Arbitrum:
 
@@ -68,18 +71,23 @@ See the
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host `vsock-proxy` port for AWS KMS. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, on a build without `vsock` only. |
 | `RUST_LOG` | unset | Log filter. The enclave always turns `alloy_transport_http` logs off: they can hold the full RPC URL. |
-| `MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES` | the image values of the runtime limits | Each can only lower the image value of its [runtime limit](runtime-limits.md). A larger `MAX_CONSIGNMENT_BYTES` stops the boot. No supplied image sets them. |
+| `MAX_CONSIGNMENT_BYTES` | the image value of `max_consignment_bytes` | It can only lower the image value of that [runtime limit](runtime-limits.md); a larger value stops the boot. Unset, zero or a non-number gives the default. No supplied image sets it. |
+| `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES` | the image values of `max_merkle_proofs` and `max_total_proof_bytes` | Each replaces the image value of its runtime limit with any positive number, lower or higher. Unset, zero or a non-number gives the default. No supplied image sets them. |
 | `CLONE_EXPORT_SOFT_CAP` | unset | Seed exports of one enclave process before a warning. It blocks nothing. |
-| `CLONE_EXPORT_HARD_CAP` | unset | Seed exports of one enclave process. A restart resets the count. Unset or zero means no cap. No supplied image sets it. |
-| `UTEXO_CLONING_SECRET` | unset | Dev only: the donor cloning secret, read from the image env at boot. A mint signer ignores it. |
+| `CLONE_EXPORT_HARD_CAP` | unset | Seed exports of one enclave process. A restart resets the count. Unset, zero or a non-number means no cap. No supplied image sets it. |
+| `UTEXO_CLONING_SECRET` | unset | For dev images: the donor cloning secret, read from the image env at boot. Every build without `kms-persistence` reads it, a release burn image too, so no release recipe may set it. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash:bits:time[:chainwork]` moves the SPV anchor forward. `bits` and `time` are those of that block. Without `chainwork`, a release fails under `BTC_RELAY_MODE=required`. A production-shaped build refuses to boot when it is set. |
 
 ## Launch values
 
 The operator sends these once after launch, with
-`utexo-bridge-parent-cli set-endpoints` (`SetEndpoints`). `deploy-host.sh`
-reads them from its environment and writes them to `/etc/utexo/enclave.env`.
-A build requires the values that it uses and refuses the others.
+`utexo-bridge-parent-cli set-endpoints` (`SetEndpoints`). A build requires
+the values that it uses and refuses the others. `deploy-host.sh` reads
+`ELECTRUM_URL`, `EVM_RPC_TLS_CA_DER_FILE`, `EVM_RPC_PATH_FILE` and the KMS
+values from its environment and writes them to `/etc/utexo/enclave.env`.
+`EVM_RPC_HOST` and `EVM_RPC_TLS_PORT` come from
+`/etc/nitro_enclaves/vsock-proxy-evmrpc.env`, which
+`deploy/host-prep-evmrpc.sh` writes.
 
 | CLI flag / variable | Build | Description |
 |---------------------|-------|-------------|
@@ -90,7 +98,7 @@ A build requires the values that it uses and refuses the others.
 | `--evm-rpc-path-file` / `EVM_RPC_PATH_FILE` | mint, burn, optional | A restricted file with the absolute RPC path, such as `/v2/<key>`. Without it the path is `/`. |
 | `--kms-key-arn` / `KMS_KEY_ARN` | mint | Full ARN of the symmetric KMS key. An alias is refused. |
 | `--kms-region` / `KMS_REGION` | mint | Commercial AWS region of the key. |
-| `--kms-seed-id` / `KMS_SEED_ID` | mint | Stable signer id, used in the KMS encryption context and the storage name. |
+| `--kms-seed-id` / `KMS_SEED_ID` | mint | Stable signer id, used in the KMS encryption context and sent in each storage request. It must equal the `KMS_SEED_ID` of the parent. |
 | `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | mint, optional | The identity pin: 40 hex digits, `0x` optional. Empty for the first bootstrap only ([kms-persistence.md](kms-persistence.md)). |
 
 **What is attested.** A `Production` policy commits the indexer host, the EVM
@@ -122,8 +130,11 @@ an API key in the URL path. Put the path in a restricted file and pass
   values. No rebuild and no change of a PCR allowlist is needed.
 - The parent supplies the file, so a compromised parent can read the key.
 - `deploy-host.sh` keeps a copy in `/etc/utexo/evm-rpc-path`, with mode 0600
-  and the service user as owner. A deploy without the variable keeps the
-  copy. To go back to the path `/`, delete the copy and deploy again.
+  and the service user as owner, and the launch reads that copy. A deploy
+  without the variable keeps the copy. To rotate a key on such a host,
+  replace the copy and restart the enclave, or deploy again with
+  `EVM_RPC_PATH_FILE`. To go back to the path `/`, delete the copy and deploy
+  again.
 
 ## Parent settings
 
@@ -144,8 +155,8 @@ parent uses their defaults. The TLS and ACL settings are in
 | `GRPC_MAX_CONCURRENT_SIGN` | `8` | `Sign` requests in progress. A `Sign` above the limit gets `UNAVAILABLE` at once. `0` acts as `1`. The `MemoryMax` of the parent unit counts on the default. |
 | `GRPC_MAX_CONCURRENT_PER_CONN` | `32` | Requests in progress on one connection, and the HTTP/2 stream limit. `0` acts as `1`. |
 | `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC request. Keep it above the request deadline of the enclave plus `ENCLAVE_WAIT_MARGIN_SECS`. `0` acts as `1`. |
-| `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, 1 to 10000. A value out of range stops the parent at boot. |
-| `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, 1 to 10000. Each call makes one NSM attestation. A value out of range stops the parent at boot. |
+| `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, 1 to 10000. A value out of range, a non-number or an empty value stops the parent at boot. A parent without mTLS does not read it and has no budget. |
+| `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, with the same rules. Each call makes one NSM attestation. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` or `1` selects vsock (Linux only). |
 | `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
@@ -153,7 +164,7 @@ parent uses their defaults. The TLS and ACL settings are in
 | `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM -> RGB sign and answers a retry of the same request from it. Keep it at or above the enclave's `mint_replay_ttl_secs`. With `0`, no retry gets a kept reply. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. `0` still keeps one reply. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. The parent does not keep a larger reply. `0` keeps none. |
-| `HEADER_ELECTRUM_URL` | unset | `ssl://host:port`, or `tcp://` to a loopback IP. The header sync of the parent reads Bitcoin headers here. Unset or malformed: the parent still serves, and `header_sync.state` is `unconfigured`. The deploy passes it through; it does not copy `ELECTRUM_URL`. |
+| `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked, so no private or self-signed certificate), or `tcp://` to a loopback IP. The header sync of the parent reads Bitcoin headers here. Unset or malformed: the parent still serves, and `header_sync.state` is `unconfigured`. The deploy passes it through; it does not copy `ELECTRUM_URL`. |
 | `HEADER_SYNC_INTERVAL_SECS` | `10` | Seconds between header sync steps, 1 to 600. A malformed value stops the parent at boot. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host of `GET /health`. Keep it on loopback. |
 | `HEALTH_PORT` | `5001` | Port of `GET /health`. |

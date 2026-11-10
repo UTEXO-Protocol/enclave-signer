@@ -78,7 +78,8 @@ argument, so PCR0 measures it.
   `attest-verify --expect-kms-key-arn`.
 
 A development image built with `allow-seed-import` and launched with all KMS
-values empty is import-only: `init` needs a mnemonic.
+values empty is import-only: use `init-mnemonic` or `init-seed`. A plain
+`init` fails.
 
 ## Parent setup
 
@@ -97,7 +98,9 @@ export ENCLAVE_VSOCK_CID=18
 ./utexo-bridge-parent
 ```
 
-- Without the storage settings, the parent starts no custody broker.
+- Without the storage settings, the parent starts no custody broker. With
+  only some of them, the parent does not start. The `KMS_SEED_ID` of the
+  parent must equal the launch value of the enclave.
 - The AWS SDK gets and refreshes the credentials. Use a dedicated EC2
   instance role with IMDSv2.
 - The broker serves the enclave on `ENCLAVE_VSOCK_CID`. `KMS_ALLOWED_CIDS`
@@ -111,7 +114,8 @@ export ENCLAVE_VSOCK_CID=18
 
 The enclave reaches KMS through a `vsock-proxy` on the host. It pins
 `kms.<region>.amazonaws.com` to loopback and forwards port 443 to vsock port
-8003 (`KMS_VSOCK_PORT`). The proxy relays bytes only:
+8003 (`KMS_VSOCK_PORT`). The proxy relays bytes only. It restricts the
+destination, not the source CID:
 
 ```bash
 export AWS_REGION=eu-central-1

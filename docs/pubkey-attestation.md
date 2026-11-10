@@ -109,8 +109,8 @@ are the image pins `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS` (the
 
 A verifier MUST use the same fields, order and length prefixes. The reference
 encoder is `canonical_pubkey_bundle` in
-[`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs). The reference
-decoder is `canonical_bundle` in
+[`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs). The verifier's
+encoder is `canonical_bundle` in
 [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs). The offline
 bundle format is `utexo-signer-attestation/3`.
 
@@ -147,7 +147,7 @@ policy_commitment =
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
-    u32_be(len(selectors)) || selector(4)...        // sorted, without duplicates
+    u32_be(count(selectors)) || selector(4)...      // sorted, without duplicates
     token_contract(20)                              // released ERC-20 (burnId preimage input)
     u8(kms_present)                                 // 0 absent; 1 followed by (set at launch):
       u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
@@ -171,8 +171,9 @@ Notes on the fields:
   consignments. A verifier declares it (`--expect-bitcoin-network`).
 - **The gas rule.** The whole `SignRawDigest` rule is committed, so a
   verifier can check it. An unset ceiling commits as 0, which is the rule it
-  enforces: no value is signable. So an unset rule and a zero rule give the
-  same bytes.
+  enforces: a zero gas or fee ceiling refuses every gas transaction, and a
+  zero value ceiling refuses every non-zero value. So an unset rule and a
+  zero rule give the same bytes.
 - **`clone_peer_pcr3`.** A verifier sets no expected value. It takes PCR3
   from the verified document, requires it to be present and not all zero for
   a cloning role, and expects none for the mint signer.
@@ -227,9 +228,9 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
 4. Verify the COSE signature: P-384 ECDSA over
    `Sig_structure1 = ["Signature1", protected, h"", payload]`. The signature
    is raw `r||s` (96 bytes), not DER (RFC 8152, section 8.1).
-5. Reject all-zero PCR0, PCR1 and PCR2. Compare each PCR with its expected
-   value, byte for byte. The dev feature `allow-debug-pcrs` turns off the
-   all-zero rejection only; a release build with it does not compile.
+5. Reject a document whose PCR0, PCR1 and PCR2 are all zero: it comes from
+   an enclave in debug mode. Compare each PCR with its expected value, byte
+   for byte.
 6. Nonce: `doc.nonce == nonce_sent`.
 7. Public key: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
 8. Commitment:
@@ -268,16 +269,17 @@ attest-verify \
 
 | Flags | Expected value |
 |-------|----------------|
-| `--pcr0`, `--pcr1`, `--pcr2` | The approved measurements. |
-| `--expect-signer-role` | Required: `mint`, `burn`, or `combined` for a build with no signer role. |
+| `--pcr0`, `--pcr1`, `--pcr2` | Required: the approved measurements. |
+| `--expect-signer-role` | Required: `mint` or `burn`. `combined` names a build with no signer role; such a build attests `Development` and does not pass this check. |
 | `--expect-evm-finality-tag` | Required: `safe` or `finalized`. |
-| `--expect-funds-in-contract`, `--expect-token-contract` | The image pins. Required. |
+| `--expect-funds-in-contract`, `--expect-token-contract` | Required: the image pins. |
 | `--expect-spv-min-confirmations`, `--expect-bitcoin-network` | The image values. Defaults: 3 and `bitcoin`. |
-| `--expect-electrum-host`, `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | The approved launch values. |
+| `--expect-electrum-host` | Required: the approved indexer host. |
+| `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | Required with the `tls` source: the approved RPC host and CA hash. |
 | `--expect-evm-source` | `tls` (the default, and what the images use), `raw` or `disabled`. |
 | `--expect-gas-tx-to`, `--expect-gas-max-gas-limit`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. |
 | `--expect-vanilla-psbt` | A mint signer with plain-BTC signing on. |
-| `--expect-kms-key-arn`, `--expect-kms-region`, `--expect-kms-seed-id`, `--expect-kms-evm-address` | The KMS values of a mint signer. The address only when the operator set one. |
+| `--expect-kms-key-arn`, `--expect-kms-region`, `--expect-kms-seed-id`, `--expect-kms-evm-address` | The KMS values of a mint signer. The first three are required with the role `mint`; the address only when the operator set one. |
 | `--expect-chain-id`, `--expect-bridge-contract`, `--expect-rgb-asset-id` | Optional: compare the bridge pins. |
 | `--from-file <bundle.json>` | Verify a published bundle offline ([verify-a-signer.md](verify-a-signer.md)). |
 | `--mock` | Dev and CI only: a `mock-attestation` enclave. Expects a `Development` policy. |
@@ -285,9 +287,22 @@ attest-verify \
 A role attests the path of the other role as off, whatever its env says. A
 burn signer never attests plain-BTC signing, so omit `--expect-vanilla-psbt`.
 A mint signer never attests a gas rule, so omit the `--expect-gas-*` flags.
+The mint recipe sets `BTC_MAX_TOTAL_SATS`, so its check needs
+`--expect-vanilla-psbt`:
 
-A successful run prints every verified field as one `name: value` line. The
-names are the paths of the exported bundle.
+```bash
+attest-verify --endpoint https://parent.example:50051 \
+    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
+    --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
+    --expect-evm-finality-tag finalized \
+    --expect-electrum-host <electrum host> \
+    --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
+    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
+    --expect-vanilla-psbt
+```
+
+A successful run prints `OK` and every verified field as one `name: value`
+line. Most names are the paths of the exported bundle.
 
 | Exit code | Meaning |
 |-----------|---------|

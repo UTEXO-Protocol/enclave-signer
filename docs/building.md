@@ -13,16 +13,17 @@ image measurements reproducible. Launching an image is in
     through the `github-rgb-lib` SSH alias (deploy key `lib_key`).
   - The RGB protocol crates that rgb-lib pins are public. They come from the
     `[patch.crates-io]` of `Cargo.toml` and `parent/Cargo.toml`. The build
-    scripts still require the `rgb_deps_token` secret
+    scripts require the `rgb_deps_token` secret too
     (`build/map-rgb-mirrors.sh`), although it maps no URL.
   - The parent also needs `federated-signer-proto`, through the
     `github-federated-signer` SSH alias.
   - CI wires these in `.github/workflows/ci.yml` (secrets
     `RGB_LIB_BFA_DEPLOY_KEY`, `RGB_PRIVATE_DEPS_TOKEN` and
-    `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
-- **Docker and `nitro-cli`** for an EIF. Any x86_64 Linux host with Docker
-  can build an EIF and read its PCRs. Nitro hardware is needed only to run
-  it.
+    `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). `build/with-private-deps.sh` runs
+    cargo with that access and keeps the credentials out of the build layers.
+- **Docker with Buildx, `nitro-cli` and `jq`** for an EIF. Any x86_64 Linux
+  host with Docker can build an EIF and read its PCRs. Nitro hardware is
+  needed only to run it.
 
 ## Workspaces
 
@@ -37,6 +38,10 @@ Build the parent with `--manifest-path parent/Cargo.toml`, never with `-p`.
 cargo build                                   # enclave workspace
 cargo build --manifest-path parent/Cargo.toml # parent workspace
 ```
+
+The parent and its CLI reach a Nitro enclave over vsock only when they are
+built with the parent feature `vsock` (Linux):
+`cargo build --release --locked --manifest-path parent/Cargo.toml --features vsock`.
 
 The enclave's wire schema is vendored in `enclave-proto/`, with its generated
 Rust committed, so that no code generator enters the measured build. Both
@@ -75,8 +80,8 @@ Compile-time guards in `enclave/src/lib.rs`, each checked in CI:
 
 - `rgb-validation` needs exactly one of `mint-signer` and `burn-signer`.
 - `kms-persistence` needs `mint-signer`.
-- `rgb-validation` without `spv` is limited to real-attestation mint and
-  burn builds for public Signet.
+- `rgb-validation` without `spv` needs a signer role and no dev feature.
+  The limit of such a build to public Signet is a boot check.
 - The three dev features do not compile in a release profile.
 
 Do not combine mutually exclusive features with `--all-features`.
@@ -93,9 +98,10 @@ RGB_ASSET_ID="rgb:<approved-bfa-contract-id>" DOCKERFILE=Dockerfile.enclave.burn
 ```
 
 The script builds the Docker image, converts it with
-`nitro-cli build-enclave`, and writes the EIF, `PCR.json` and `SHA256SUMS` to
-`build/`. Each recipe runs the binary's dynamic loader check before the
-conversion, so a missing library fails the build, not the launch.
+`nitro-cli build-enclave`, and writes the EIF, `PCR.json`, `SHA256SUMS` and
+`IMAGE-ENV.json` to `build/`. Each recipe checks the binary with the dynamic
+loader of its runtime image before the conversion, so a missing library
+fails the build, not the launch.
 
 **Inputs.**
 
@@ -107,6 +113,10 @@ conversion, so a missing library fails the build, not the launch.
 - The secrets `lib_key` and `rgb_deps_token`, from `RGB_LIB_BFA_DEPLOY_KEY`
   and `RGB_PRIVATE_DEPS_TOKEN` or from files in `PRIVATE_DEPS_DIR`. They are
   BuildKit secrets: never in a layer, the image or PCR0.
+- Optional measured overrides. When `ENCLAVE_FEATURES`, `BITCOIN_NETWORK`,
+  `BTC_RELAY_MODE`, a bridge pin, a `GAS_TX_*` setting or `RUST_LOG` is set
+  in the environment, the helper passes it to the recipe, and PCR0 changes.
+  Unset them to get the values of the recipe.
 
 **What the image holds.** The recipes set the bridge pins and the acceptance
 rules as `ENV` ([configuration.md](configuration.md#image-settings)), so PCR0
@@ -128,23 +138,28 @@ mint image and the burn image.
 `s3://<bucket>/eif/<git_sha>/rgb-<role>/`. It takes the asset from the
 repository variable `BFA_RGB_ASSET_ID` and the account list from
 `KMS_ALLOWED_ACCOUNT_IDS`, and records the asset pin of the built image in
-`metadata.json`. `release-eif.yml` deploys one role with
-`deploy/deploy-host.sh`, on the default CID. The `cd-*.yml` workflows push
-container images of the parent and of the dev enclave images only.
+`metadata.json`. `release-eif.yml` runs `deploy/deploy-host.sh` for one role
+on the default CID. It passes no launch value, and `set-endpoints` of a role
+image refuses blank values. The `cd-*.yml` workflows push container images
+of the parent and of the dev enclave images only.
 
 ## Reproducibility
 
-A rebuild of the same commit with the same inputs gives the same PCR0, PCR1
-and PCR2. These inputs are pinned:
+The recipes pin the inputs below, so that a rebuild of the same commit with
+the same inputs gives the same PCR0, PCR1 and PCR2. No CI job compares two
+builds.
 
 - the Rust toolchain, and the dependencies through `--locked`;
-- both base images, by digest, in all three EIF recipes;
-- the OS packages, from a signed Debian snapshot named in each recipe;
+- both base images, by digest, in both EIF recipes;
+- the OS packages, from a signed Debian snapshot named in each recipe. APT
+  checks the repository signatures; its expiry check is off, because a fixed
+  snapshot stays in use after its metadata expires;
 - the build timestamps, through `SOURCE_DATE_EPOCH` (the commit time);
 - the build paths, through path-prefix remapping, with `CARGO_INCREMENTAL=0`;
 - the generated proto code, which is committed;
 - `nitro-cli` and its kernel and init blobs, in the EIF workflow. PCR0 and
-  PCR1 depend on them.
+  PCR1 depend on them, so a local rebuild must use the same version and
+  blobs.
 
 Limits:
 
@@ -154,8 +169,10 @@ Limits:
 - The parent image and the dev images use live APT repositories. They are
   not measured.
 
-To reproduce a published EIF, use the asset id and account list recorded with
-it (`metadata.json`, `IMAGE-ENV.json`), not the current repository variables.
+To reproduce a published EIF, use the values recorded with it
+(`metadata.json`, `IMAGE-ENV.json`): the asset id, the account list and every
+setting that differs from the recipe. Do not use the current repository
+variables.
 A change of a base image, the toolchain or a measured input changes the
 measurements: build new EIFs and approve their PCRs before you update an
 attestation allowlist or a KMS policy.

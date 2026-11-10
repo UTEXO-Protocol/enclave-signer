@@ -73,6 +73,10 @@ What the enclave checks for V1:
 - `dstEid != 0`: calldata is `lzFundsOut`, calldata `dstEid` == `dstEid`, and
   `recipient` left-padded to 32 bytes == calldata `bytes32 recipient`.
 
+The enclave does not check that `dstEid` is the LayerZero endpoint of
+`destinationChainId`. It checks each value against the record. The wallet
+must write a pair that belongs together.
+
 A V0 burn names no chain, so it is released on the direct route only, and its
 request must carry no record.
 
@@ -96,17 +100,19 @@ fields.
 | Listener to parent | parent `EnrichedEvmPayload.burn_destination` (10) |
 | Parent to enclave | enclave `EvmDestination.burn_destination` (9) |
 
-What each component does:
+What each component must do. Only the parent and the enclave are in this
+repository.
 
 - **Wallet.** Builds the record, computes `hash_v1` and passes the hash as
   the `burnReason` of the burn. Sends the record to the backend with the
-  burn.
+  burn, and keeps a copy: the burn holds only the hash.
 - **Backend.** Checks `hash_v1(record) == burnReason` and refuses a mismatch.
   Stores the record with the burn: a burn whose record is lost cannot be
   released. Picks the route from the record: `dstEid == 0` is `fundsOut`,
   otherwise `lzFundsOut`.
 - **Listener.** Copies the record unchanged. It must not rebuild the record
   from the calldata: the padded recipient loses its length.
+- **Parent.** Forwards the record unchanged.
 - **Enclave.** Checks the record against the burn and the calldata, as above.
 
 ## Rules for new versions

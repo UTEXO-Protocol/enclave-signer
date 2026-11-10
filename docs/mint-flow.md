@@ -1,9 +1,9 @@
 # Mint flow (EVM -> RGB)
 
-**Signer image:** `mint-signer` (`--no-default-features --features vsock,spv,mint-signer`).
-**Checked against repository code:** 2026-11-04, rgb-lib-bfa 5010eefa
-(RGB-Tools bfa 66bae096).
-Deployment was not checked.
+- **Signer image:** `mint-signer`
+  (`--no-default-features --features vsock,spv,mint-signer`).
+- **Checked against repository code:** 2026-11-10, rgb-lib-bfa 5010eefa
+  (RGB-Tools bfa 66bae096). Deployment was not checked.
 
 This document gives the checks of the mint signer, in order. The
 [specification](tee-spec.md) gives the trust model and the known limits. If
@@ -159,8 +159,9 @@ error.
 
 The stages group the checks by topic. The code order differs in places: F7
 and the fee check run after M1 - M5 and M7, and the fee check runs after the
-parent proof. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md) show
-the code order.
+parent proof. Stage 2 parses the invoice of S6.2; only the seal compare
+runs in Stage 6. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md)
+show the code order.
 
 ### Stage 0 - Can this enclave do this request?
 
@@ -210,18 +211,20 @@ host. TLS ends inside the enclave. Each call has the timeout
 
 The core. It reads the RGB data from the request's `fascia`, never from the
 PSBT: RGB keys left in a PSBT are ignored. It also runs on the parent fascia
-and the transaction that it carries (PP2), where F1, F2 and F7 do not apply:
-the enclave does not sign the parent.
+and the transaction that it carries (PP2), where M0, F1, F2 and F7 do not
+apply: the enclave does not sign the parent.
 
-- **F1** The PSBT must parse and have at least one input. It may have at
-  most `mint_max_inputs` inputs and `mint_max_outputs` outputs, which the
-  enclave checks before it decodes a fascia.
+- **M0** The mint transaction has at most `mint_max_inputs` inputs and
+  `mint_max_outputs` outputs. The enclave checks this before it decodes a
+  fascia.
+- **F1** The PSBT must parse and have at least one input.
 - **F2** Each input must have a `witness_utxo` with a native witness
   program, so the unsigned txid is the final txid. Each sighash type must be
   `SIGHASH_ALL` or Taproot `DEFAULT`.
 - **F3** The first output that is an `OP_RETURN` or a P2TR must be an
   `OP_RETURN`. RGB consensus reads the commitment from that output. A P2TR
-  first would make it a tapret host that the opret check never sees.
+  first would make it a tapret host that the opret check never sees. P2A is
+  not P2TR.
 - **F4** `fascia` must not be empty and must decode as rgb-lib reads its
   fascia file: strict encoding, nothing after it, at most `max_psbt_bytes`.
   Its witness txid must be the PSBT's unsigned txid. It discloses exactly one
@@ -231,12 +234,15 @@ the enclave does not sign the parent.
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. A fascia without the entropy is refused. So the fascia shows
   exactly the bundles that the transaction commits: a hidden, extra or
-  swapped bundle changes the commitment.
-- **F6** The bundle holds exactly one transition, stored under its own id,
-  which the enclave recomputes. The input map must close exactly the inputs
-  of that transition. rgb-lib moves any other allocation of the spent UTXO by
-  a transition of its own in the same bundle. So a link right must not share
-  a UTXO with mint rights: F6 refuses that mint or refill.
+  swapped bundle changes the commitment. The enclave does not read the DBC
+  proof of the fascia: it checks its own opret proof, and F3 rules out a
+  tapret.
+- **F6** The bundle holds exactly one transition of the pinned contract,
+  stored under its own id, which the enclave recomputes. The input map must
+  close exactly the inputs of that transition. rgb-lib moves any other
+  allocation of the spent UTXO by a transition of its own in the same
+  bundle. So a link right must not share a UTXO with mint rights: F6 refuses
+  that mint or refill.
 - **F7** The PSBT spends exactly one input (`MINT_INPUTS`), a Colored
   key-path input of the enclave. So the UTXO of the right must pay the fee
   and, for a witness mint, `MINT_WITNESS_SAT`. If that UTXO is too small for
@@ -277,8 +283,9 @@ needs a new image.
     must.
   - A witness mint pays exactly `MINT_WITNESS_SAT` to the output of its seal.
     That output must exist, must not be an `OP_RETURN`, and must not be the
-    enclave's own (rule A or rule C). Every other output is the enclave's or
-    carries 0 sat. The change may be missing.
+    enclave's own (rule A or rule C). Every other output is the enclave's by
+    rule C, or carries 0 sat; rule A gives no exemption here. The change may
+    be missing.
   - The connector and the enclave must use the same `MINT_WITNESS_SAT`. The
     PSBT pays the connector's value, fixed at `mint_begin`, and a mismatch is
     refused here, after the user's lock. The attestation does not carry the
@@ -309,22 +316,25 @@ The txid of a native SegWit transaction does not change when it is signed.
 
 - **M6** The deposit must name this mint and this transaction:
   - The EVM node must report `EVM_CHAIN_ID`. `TOKEN_CONTRACT` and
-    `EVM_CHAIN_ID` must be pinned, which the enclave checks before any RPC
-    call.
+    `EVM_CHAIN_ID` must be pinned, which the enclave checks before the RPC
+    calls of M6.
   - The receipt of `evm_tx_hash` must have exactly one `FundsIn` event from
     `FUNDS_IN_CONTRACT` whose `lockId` is `LockId(opid, txid)` of this mint
     and the PSBT's transaction, with `issuedSupply` as its amount.
   - It must have exactly one `BridgeFundsIn` event whose `operationId` is the
     deposit id that the mint derives from its lockId and `issuedSupply`
     ([burn-flow.md](burn-flow.md), B2.4). That id must be the request's
-    `funds_in_operation_id`, which S2.3 bound. Other deposits in the
-    transaction are ignored.
+    `funds_in_operation_id`, which S2.3 bound. Its `netAmount` must equal
+    `issuedSupply`. Other deposits in the transaction are ignored.
   - `destinationChainId` must be `RGB_CHAIN_ID`.
   - The receipt block must be before `beforeBlock`, at or below the head
     that `EVM_FINALITY_TAG` selects, and its `blockHash` must match the
     canonical block at its height. The enclave reads the head again
-    afterwards to detect a reorg.
-- **S6.1** The amount must cover the minted units plus the commission.
+    afterwards to detect a reorg. A receiving rgb-lib wallet confirms the
+    mint only once the lock is `finalized`.
+- **S6.1** The amount must cover the minted units plus the commission. The
+  enclave takes the minted amount from the fascia, not from the request's
+  `psbt_output_amount`.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal. A
   witness mint has no blinded seal, so a deposit with an invoice refuses it.
@@ -351,11 +361,13 @@ The txid of a native SegWit transaction does not change when it is signed.
   prove that the caller received the response. So the parent keeps the reply
   of an EVM -> RGB sign for `SIGNED_RESPONSE_TTL_SECS` and answers a retry of
   the same request itself. A retry of a request still in flight waits for
-  that exchange and gets its reply. An identical retry reaches the enclave,
-  and is refused there, only when the parent has no reply for it: the parent
-  did not read the reply, the reply was above `SIGNED_RESPONSE_MAX_BYTES`,
-  the parent dropped it at `SIGNED_RESPONSE_MAX_ENTRIES` or
-  `SIGNED_RESPONSE_MAX_BYTES`, or the parent restarted.
+  that exchange and gets its reply. A retry of a request that the enclave
+  already signed reaches the enclave only when the parent has no reply for
+  it: the parent did not read the reply, the reply was above
+  `SIGNED_RESPONSE_MAX_BYTES`, the parent dropped it at
+  `SIGNED_RESPONSE_MAX_ENTRIES` or `SIGNED_RESPONSE_MAX_BYTES`, the reply is
+  older than `SIGNED_RESPONSE_TTL_SECS`, or the parent restarted. The enclave
+  refuses that retry while its replay guard holds the key (section 6).
 
 ## 6. Replay
 
@@ -369,19 +381,22 @@ The guard is not the safety control. The parent proof is: every signature
 for one mint transition spends the output that PP7 pins. Two signed
 transactions for one deposit that use the same parent spend the same output,
 and Bitcoin confirms at most one. The enclave does not compare parents across
-requests. A different parent transaction must spend the inputs of the real
-parent again, so it conflicts with it on Bitcoin. The same transition
-committed again in a transaction that spends another Colored UTXO is refused
-(PP7). A new transition for the same deposit is refused too: the deposit
-names one lockId (M6).
+requests, and it does not check what a parent transaction spends (section
+8). A different parent transaction is valid for a receiver only if it spends
+the inputs of the real parent again, so it conflicts with the real parent on
+Bitcoin. The same transition committed again in a transaction that spends
+another Colored UTXO is refused (PP7). A new transition for the same deposit
+is refused too: the deposit names one lockId (M6).
 
 ## 7. Plain BTC (`SignBtc`)
 
 The mint signer also signs plain Bitcoin PSBTs, for example to make UTXOs. It
 is a request of its own: a `Sign` request cannot reach this path.
 
-- The attested policy must allow it (`allow_vanilla_psbt`). This needs a
-  non-zero `BTC_MAX_TOTAL_SATS`.
+- On a `Production` policy the attested policy must allow it
+  (`allow_vanilla_psbt`), which needs a non-zero `BTC_MAX_TOTAL_SATS`. On any
+  other policy the enclave still refuses every request while
+  `BTC_MAX_TOTAL_SATS` is 0.
 - Only the vanilla account signs. A colored input is never signed here.
 - The total input value must not be more than `BTC_MAX_TOTAL_SATS`.
 - Outputs that the enclave does not own must total at most
@@ -396,12 +411,14 @@ scripts. An output is the enclave's own in two cases:
   sign: a Taproot key-path input whose internal key derives from a BIP-86
   account and, with its tweak, gives the output key. A script tree can hold
   foreign spend paths, so the exemption is limited to the input value on that
-  script.
+  script. In `SignBtc` only inputs of the vanilla account count. M8 counts
+  inputs of either account.
 - **Rule C.** It is a BIP-86 key-path output of an enclave account, with no
   script tree, at a wallet path `[k, i]`: both steps non-hardened, `k` = 0 on
-  the colored account and 0 or 1 on the vanilla account. The enclave derives
-  the key and rebuilds the script. An enclave key at any other path counts as
-  not owned.
+  the colored account and 0 or 1 on the vanilla account. The PSBT output
+  must carry the internal key and its key origin. The enclave derives the key
+  at that path and rebuilds the script. An output without this data, and an
+  enclave key at any other path, count as not owned.
 
 An enclave key in one Taproot leaf proves nothing about the rest of the
 tree, so no rule accepts it.
@@ -467,7 +484,8 @@ The cheap checks run first.
   an error.
 
 The rule numbers RR1, RR2 and RR4 are not used: a refill carries no
-consignment, so no size, hash, consensus or reject-list check runs on it.
+consignment, so no consignment size, hash, consensus or reject-list check
+runs on it.
 
 **Where the fascias come from.** rgb-lib writes each fascia as the `fascia`
 file of the transfer directory. A mint's own fascia is that of its mint
@@ -491,6 +509,8 @@ What a refill does not check, and why that is safe:
 - **Concealed assignments.** PP6 cannot see a concealed assignment of the
   parent. The parent is an enclave refill (RR7 and RR8: rights only, all
   revealed) or the issuer's send to witness invoices.
+- **Fees.** Each refill signature can burn at most the fee limits of Stage 3
+  (RR13). RR15 bounds how many signatures an enclave makes in an hour.
 
 The refill limits are compiled in, so PCR0 measures them.
 
@@ -551,13 +571,14 @@ missing check is a liveness limit only:
   from the funds-in pin is an operator error: receivers look for the lock on
   the genesis bridge and refuse the mint.
 - No ancestor mint check. The burn signer derives each deposit.
-- No witness depth. The host picks the indexer, so a depth check would prove
-  nothing against it.
+- No witness depth. The mint signer checks no witness transaction of the
+  history.
 - No reject list. The connector's rgb-lib checks it before `mint_begin`.
-- No invoice expiry. A v2 deposit carries no invoice, so the enclave never
-  sees the expiry, and it can sign a mint after the invoice expired. The
-  connector checks the time left on the invoice when it prepares the mint
-  (`MINT_INVOICE_MIN_TTL`).
+- No invoice expiry. S6.2 does not check the expiry of an invoice, and a v2
+  deposit carries no invoice. So the enclave can sign a mint after the
+  invoice expired. A wallet fails a receive that it has not checked when the
+  invoice expires. The connector checks the time left when it prepares the
+  mint (`MINT_INVOICE_MIN_TTL`), but slow blocks can still pass the expiry.
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,
@@ -581,11 +602,15 @@ that leave to `MINT_WITNESS_SAT`.
 **The receiving wallet can still refuse a mint.** rgb-lib's receive also
 checks limits on the receiver's own wallet state: the allocations on the
 receiving UTXO, and the total amount of the asset. The enclave cannot see
-that state. A refusal fails the receive for good, while the connector still
-signs, broadcasts and completes the mint. The units then sit on a seal that
-the wallet does not track, and the deposit stays in the Bridge. Before the
-lock a refusal costs nothing. So a caller should lock only once the wallet
-reports the mint with the returned lockId (`ReceivedMint.lock_id`). A witness
+that state. rgb-lib runs these checks when it first processes the mint and
+again when the lock is final. A refusal fails the receive for good, while
+the connector still signs, broadcasts and completes the mint. After the lock
+this is more than a liveness limit: the user loses the mint. The units sit
+on a seal that the wallet does not track, the deposit stays in the Bridge
+with no refund, and it cannot back another mint, because the lockId commits
+this one. Before the lock a refusal costs nothing. So a caller should lock
+only once the wallet reports the mint with the returned lockId
+(`ReceivedMint.lock_id`). A witness
 mint pays a new output, which starts with no allocations, so these limits
 apply mainly to blinded mints.
 

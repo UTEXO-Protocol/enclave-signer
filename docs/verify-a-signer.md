@@ -23,7 +23,8 @@ It does not prove:
   ([limits of an attestation](pubkey-attestation.md#what-an-attestation-proves)).
 - That the enclave runs now. The document is a record of one moment.
 - That the document is fresh. The operator chose the nonce. For a live
-  check, run `attest-verify --endpoint` with your own nonce.
+  check, run `attest-verify --endpoint`, which makes a fresh nonce. That
+  call needs a client certificate that the operator's parent accepts.
 - Anything about the mint signer.
 - Anything about the time, memory and size limits. The operator can change
   them, and they do not change what the enclave signs
@@ -100,7 +101,7 @@ bash build/verify-signer.sh https://<published location>/attestation-16.json \
 The script:
 
 1. Checks that the RPC serves chain 42161.
-2. Downloads the bundle when you give a URL.
+2. Downloads the bundle when you give an `https://` URL.
 3. Runs `attest-verify --from-file` with your PCRs and flags. This checks the
    certificate chain to the AWS Nitro root, the COSE signature, the PCRs, the
    nonce, the public key and the commitment of the keys and the policy.
@@ -143,9 +144,12 @@ bash deploy/verify-identity.sh
   exit 2 before any enclave is queried.
 - For a burn signer in normal mode, set `SIGNER_ROLE`, `PCR_FILE` and
   `IMAGE_ENV` in `ENCLAVE_ENV`, with the launch values of the release. Each
-  export gets its approved address through `--expect-evm-address`.
+  export gets its approved address through `--expect-evm-address`. The
+  script reads the EVM RPC host and port from
+  `/etc/nitro_enclaves/vsock-proxy-evmrpc.env`.
 - For a mint signer, or in debug mode, the script compares the main address
-  from `get-keys`. That is a structural identity check, not an attestation.
+  from `get-keys`. That is a structural identity check, not an attestation. A
+  mint signer needs `SIGNER_ROLE` too.
 - The script compares the approvals that you supply. It does not read the
   chain.
 

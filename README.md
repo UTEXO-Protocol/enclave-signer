@@ -3,8 +3,9 @@
 This service signs for the UTEXO bridge. It runs inside an
 [AWS Nitro Enclave](https://aws.amazon.com/ec2/nitro/nitro-enclaves/).
 
-The enclave makes its own keys. It checks each bridge operation itself. It
-signs only when all checks pass. The host is not trusted.
+The keys exist only inside the enclave. The enclave checks each bridge
+operation itself, and it signs only when all checks pass. The host is not
+trusted.
 
 The bridge has two flows:
 
@@ -42,7 +43,7 @@ The [documentation index](docs/README.md) lists every document.
 2. The parent runs on the EC2 host. It is not trusted. It sends the request
    to the enclave over vsock.
 3. The enclave holds the keys. It checks the request and signs, or refuses.
-4. The enclave reaches the EVM JSON-RPC and the Bitcoin indexer through
+4. The enclave reaches its endpoints, such as the EVM JSON-RPC, through
    vsock proxies on the host. TLS ends inside the enclave.
 5. The parent sends Bitcoin block headers to the enclave. The enclave
    validates them and keeps its own header chain.
@@ -115,7 +116,8 @@ cli --help
 - The default enclave build has no features. It takes no chain endpoints. A
   build with a signer role needs the launch values in `set-endpoints`
   ([`docs/configuration.md`](docs/configuration.md#launch-values)).
-- `--addr host:port` or `--addr vsock://<cid>:<port>` selects the enclave.
+- `--addr host:port` selects the enclave. A CLI built with the parent
+  feature `vsock` takes `--addr vsock://<cid>:<port>` instead.
 - To make a clone donor, use `cli init --cloning-secret-file <file>`
   ([`docs/cloning.md`](docs/cloning.md)).
 - The parent cargo feature `insecure-dev` serves plaintext gRPC with no
@@ -172,8 +174,9 @@ mint and burn sets too. `.github/workflows/ci.yml` has the full matrix.
   resolve to one security policy, committed into the attestation. A verifier
   compares it with independently approved values.
 - **Key custody.** The seed never leaves the enclave in plaintext. A mint
-  signer keeps it as KMS ciphertext in S3. A burn signer keeps it in memory
-  and clones it only to an enclave with the same measurements.
+  signer gets it from AWS KMS under recipient attestation and keeps it as KMS
+  ciphertext in S3. A burn signer makes it itself, keeps it in memory, and
+  clones it only to an enclave with the same measurements.
 
 The [specification](docs/tee-spec.md#2-trust-model) has the trust model, and
 its [known limits](docs/tee-spec.md#10-known-limits) say what the checks do

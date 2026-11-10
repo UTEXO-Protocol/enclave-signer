@@ -1,9 +1,9 @@
 # Burn flow (RGB -> EVM)
 
-**Signer image:** `burn-signer` (`--no-default-features --features vsock,spv,burn-signer`).
-**Checked against repository code:** 2026-11-04, rgb-lib-bfa 5010eefa
-(RGB-Tools bfa 66bae096).
-Deployment was not checked.
+- **Signer image:** `burn-signer`
+  (`--no-default-features --features vsock,spv,burn-signer`).
+- **Checked against repository code:** 2026-11-10, rgb-lib-bfa 5010eefa
+  (RGB-Tools bfa 66bae096). Deployment was not checked.
 
 This document gives the checks of the burn signer, in order. The
 [specification](tee-spec.md) gives the trust model, the SPV rules and the
@@ -23,9 +23,11 @@ difference. Either can contain an error.
 
 The burn signer signs nothing on Bitcoin.
 
-rgb-lib builds a burn as two transitions in one transaction. A transfer first
-splits the units and keeps the change. The burn then destroys the other
-output of the split. So a burn transition has no outputs.
+A BFA burn transition has no outputs, so a burn cannot return change. When
+its inputs hold more units than it destroys, rgb-lib adds a transfer to the
+same transaction: the transfer splits the units and keeps the change, and the
+burn destroys the other output of the split. A burn of the exact amount has
+no split.
 
 ## 2. Who does what
 
@@ -120,6 +122,12 @@ other SPV constants are in the
 If one check fails, the burn signer stops. It signs nothing. It returns an
 error.
 
+The stages group the checks by topic, in code order with these exceptions.
+B3.4 and B3.5 also run before Stage 2, for every proof of the request. Stage
+3b runs inside rgb-lib, so before B3.1 to B3.3 and B3.6. The burn-type check
+of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
+[sequence in code order](diagrams/03-seq-sign-evm.md) shows the exact order.
+
 ### Stage 0 - Can this enclave do this request?
 
 - **B0.1** The launch values must be set (`SetEndpoints`).
@@ -139,13 +147,13 @@ error.
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
 - **B2.1** The bytes must be a V1 transfer file. The genesis schema must be
-  BFA. If the genesis names a reject list (`GS_REJECT_LIST`), it must be an
-  EVM contract; a URL list is refused.
+  BFA.
 - **B2.2** Before rgb-lib runs, the contract id must pass the asset bind
   (B2.7). So a foreign genesis never reaches rgb-lib, and it cannot choose
-  what the enclave reads. Then the enclave bounds the work that rgb-lib would
-  do on the transfer and refuses one above a work cap
-  ([section 10](#10-work-caps)).
+  what the enclave reads. Then, if the genesis names a reject list
+  (`GS_REJECT_LIST`), it must be an EVM contract; a URL list is refused. Last,
+  the enclave bounds the work that rgb-lib would do on the transfer and
+  refuses one above a work cap ([section 10](#10-work-caps)).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules of the pinned
   `rgb-schemas`. rgb-lib asks three resolvers of the enclave: for each
@@ -158,14 +166,17 @@ error.
   EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, lockId, minted units))`. The
   lockId is `LockId(mint OpId, mint witness txid)`
   ([mint-flow.md](mint-flow.md#the-lockid)). The genesis `bridgeLocation` must
-  name the pinned `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`. The burn signer reads
-  nothing from the chain here.
+  name the pinned `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`. `TOKEN_CONTRACT` and
+  `EVM_CHAIN_ID` must be set: without them the burn signer refuses a history
+  that has a mint. The burn signer reads nothing from the chain here.
 - **B2.5** rgb-lib confirms each mint only against its derived deposit, one
   for one. The Bridge holds a record under that id only if a deposit of
-  exactly the minted units was made for that mint, and the release checks
-  each cited record on chain. So a mint with no deposit fails on chain. The
-  burn signer does not check the `beforeBlock` of a mint; the mint signer
-  checked it before it signed the mint.
+  exactly the minted units was made for that mint, and
+  `RgbSettlementModule.beforeFundsOut` checks each cited record on chain. So
+  a mint with no deposit fails on chain, when the release route uses that
+  module ([known limits](tee-spec.md#10-known-limits)). The burn signer does
+  not check the `beforeBlock` of a mint; the mint signer checked it before
+  it signed the mint.
 - **B2.6** The result is the list of the deposit `operationId`s of the
   history. Stage 5 uses it.
 - **B2.7** The contract id must equal the declared `asset_id` and the pinned
@@ -217,9 +228,12 @@ authenticates the endpoint, not the answers.
 - **B3.8** The enclave reads the whole list on each request: `length()` at
   the `finalized` block and at the latest block, then the entries at the
   latest block, in pages of `reject_list_page_entries`. It refuses on any RPC
-  error, on a contract with no code, on a list that is shorter at the latest
-  block, on a bad or short page, on more than `max_reject_list_entries`
-  entries, and on a read that cannot end before the request deadline.
+  error, on a contract with no code at the latest block, on a list that is
+  shorter at the latest block, on a bad or short page, and on more than
+  `max_reject_list_entries` entries. A contract with no code at the
+  `finalized` block has no finalized entries. Before each RPC call the
+  enclave refuses if a call as slow as the slowest one so far would end
+  less than `RESPONSE_MARGIN` before the request deadline.
 - **B3.9** The latest finalized entry for an output decides. A pending
   reject counts at once, also over a finalized allow. A pending allow does
   not count. The `finalized` tag is fixed in code here, not taken from
@@ -230,10 +244,10 @@ authenticates the endpoint, not the answers.
   walks the history of each one back. An allowed output stops its branch. A
   rejected output on a branch that nothing stopped refuses the release. Three
   things follow:
-  - The burn has no outputs, so the walk starts from its inputs and reaches
-    the burned units through the split.
-  - The split is not terminal, because the burn spends its output. So the
-    change of the split is not checked.
+  - The burn has no outputs, so the walk starts from its inputs. When there
+    is a split, the walk reaches the burned units through it.
+  - A split is not terminal, because the burn spends its output. So the
+    change of a split is not checked.
   - A companion transfer in the same bundle is terminal too. A rejected line
     behind it refuses the release, even when the burned units are clean.
 
@@ -254,12 +268,12 @@ authenticates the endpoint, not the answers.
 - **B4.7** The deadline must be in the future, and at most
   `MAX_TEE_DEADLINE_SECS` after now. So every signature expires.
 - **B4.8** LayerZero route only: `minAmountLD` must be above 0 and at most
-  `amount`. The request's `lz_release` (`dst_eid`, `min_amount_ld`,
-  `recipient`) must match the decoded calldata.
+  `amount`. A LayerZero request must carry `lz_release`, and a direct request
+  must not.
 - **B4.9** LayerZero route only: `extraOptions` must be empty or one executor
   `lzReceive` gas option with no value and at most `MAX_LZ_RECEIVE_GAS`. A
-  native drop, a compose option and every other option are refused: they move
-  native tokens that the burn did not name.
+  native drop, a compose option and an `lzReceive` value move native tokens
+  that the burn did not name. Every other option is refused too.
 
 ### Stage 5 - Does the release belong to this burn?
 
@@ -312,8 +326,8 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
   the deposits of Stage 2 (B2.6). An empty list is refused.
 
 Only a V1 burn can leave through LayerZero, because only V1 names a chain.
-The burn does not name `minAmountLD`: B4.8 checks it against the request
-only.
+The burn does not name `minAmountLD`: it is checked against the request only
+(B4.8, B6.2).
 
 ### Stage 6 - Sign
 
@@ -322,7 +336,9 @@ only.
   - direct route: `TeeFundsOut(recipient, amount, burnId, sourceChainId,
     destinationChainId, sourceAddress, proof, settlementData,
     sourceBurnTxId, nonce, deadline)`;
-  - LayerZero route: `TeeLzFundsOut(...)`, 14 fields.
+  - LayerZero route: `TeeLzFundsOut(...)`, 14 fields. Before the digest is
+    built, the request's `lz_release` (`dst_eid`, `min_amount_ld`,
+    `recipient`) must equal the decoded calldata.
 - **B6.3** The burn signer signs with the EVM bridge key `m/44'/60'/0'/0/0`.
   The signature is 65 bytes (`r || s || v`). `v` is the raw recovery id, 0 to
   3, with no +27.
@@ -358,10 +374,11 @@ uses the gas key `m/44'/60'/0'/0/1`.
   allowlist must be set. An unset value refuses the request. An unset value
   ceiling refuses only a non-zero `value`.
 
-The gas rule is part of the attested policy, so a verifier can check it. The
-limits apply to one transaction, not to a sum of transactions. A gas
-transaction is not linked to one checked release, and the LayerZero fee is
-not a field of `TeeLzFundsOut`.
+A `Production` policy attests the gas rule, so a verifier can check it. A
+build without `spv` only measures it. The limits apply to one transaction,
+not to a sum of transactions. A gas transaction is not linked to one checked
+release, and the LayerZero fee is not a field of `TeeLzFundsOut`. The enclave
+does not check who receives the fees.
 
 ## 7. Replay
 
@@ -371,7 +388,8 @@ chain:
 - the `MultisigProxy` nonce is in the signed digest;
 - the Bridge refuses a `burnId` that it used before.
 
-On both routes, `burnId` is bound to the burn through B5.3, B5.6 and B5.7.
+On both routes, `burnId` is bound to the burn through B5.2, B5.3, B5.4, B5.6
+and B5.7.
 
 ## 8. What the burn signer refuses
 
@@ -393,8 +411,9 @@ globals. So the burn signer needs three proofs that agree:
    saw each one as mined (B2.9).
 3. Globals: the amount and the payee in the burn equal those in the calldata.
 
-The contract proves that the cited deposits exist. The burn signer proves that
-they are the deposits behind this burn (B5.9). Each half needs the other.
+`RgbSettlementModule` proves that the cited deposits exist. The burn signer
+proves that they are the deposits behind this burn (B5.9). Each half needs
+the other.
 
 ## 10. Work caps
 
@@ -407,11 +426,13 @@ limits apply:
 | `max_witness_check_cost` | The checks of each transition against the witness transaction and the anchor of its bundle. |
 | `max_bundle_id_cost` | The hashing of bundle ids over the input map of each bundle. |
 | `max_reject_walk_cost` | For an asset with a reject list: the steps of the walk of B3.10. |
-| `max_rgb_lib_ms` | The modeled time of rgb-lib's validation and inspection: the file, its outputs, its operations and the three costs above. |
+| `max_rgb_lib_ms` | The modeled time of rgb-lib's validation and inspection: the file, its outputs, its operations, the genesis hashes and the three costs above. |
 
-The first three bound work that grows faster than the file: an honest bundle
-has one or two transitions, and a forged bundle can have thousands. The time
-budget bounds the sum. A refusal names the limit that it passed.
+The first two bound work of rgb-lib that grows faster than the file: an
+honest bundle has one or two transitions, and a forged bundle can have
+thousands. The third bounds a count of the reject walk, one walk for each
+origin. The time budget bounds the sum. A refusal states the cost that
+passed its limit and the value of the limit.
 
 An honest burn is far below the caps. The widest burn that the bridge
 expects, 2810 mints burned by one transition, uses about 6 percent of the

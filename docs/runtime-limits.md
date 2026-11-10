@@ -99,9 +99,10 @@ checks them at launch.
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 
-The image env can lower `max_consignment_bytes`, `max_merkle_proofs` and
-`max_total_proof_bytes`. Then `limits show` prints those values as the image
-values.
+The image env can set the image values of `max_consignment_bytes` (to a lower
+value only), `max_merkle_proofs` and `max_total_proof_bytes`
+([configuration.md](configuration.md#transport-limits-and-dev-settings)). Then
+`limits show` prints those values as the image values.
 
 The lowest values keep the enclave reachable, so the operator can always send a
 new `limits set`. The highest values are very wide on purpose, because validation
@@ -138,7 +139,8 @@ refuses the request and changes nothing.
   limits, a consignment scratch file for each request, and the baseline. rgb-lib
   reads a consignment only from a file, and the enclave keeps that file in RAM. A
   file takes up to `max_consignment_bytes`, and never more than
-  `max_message_bytes`. The boot check does not count the files. This check counts
+  `max_message_bytes`. The enclave removes the file when rgb-lib ends, also after
+  a refusal. The boot check does not count the files. This check counts
   them, also for a change that keeps the image values. A refusal states how many
   MiB the new limits need. A larger frame or consignment limit can need a larger
   `run-enclave --memory` value, which needs a new launch

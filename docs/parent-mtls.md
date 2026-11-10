@@ -21,9 +21,11 @@ inside the enclave, on every path.
 | `GRPC_ATTEST_MAX_PER_MINUTE` | `AttestedPublicKey` calls per minute for all clients, `1..10000`, default `6`. |
 | `GRPC_ALLOW_INSECURE_LOOPBACK` | `true` turns off TLS and the ACL. The parent then requires a loopback bind and no `GRPC_TLS_*` setting. Use it only for tests. |
 
-The parent refuses to start with only some of the four `GRPC_TLS_*` files. A
-call over the `Clone` or `AttestedPublicKey` budget gets `RESOURCE_EXHAUSTED`
-before it reaches the enclave. The other parent settings are in
+The parent refuses to start with only some of the four `GRPC_TLS_*` files,
+and with a `GRPC_MAX_CONNECTIONS` or a budget that is out of range or not a
+number. With mTLS, a call over the `Clone` or `AttestedPublicKey` budget gets
+`RESOURCE_EXHAUSTED` before it reaches the enclave. The loopback mode has no
+budget. The other parent settings are in
 [configuration.md](configuration.md#parent-settings).
 
 A debug build with the `insecure-dev` feature serves plaintext with no ACL,
@@ -68,15 +70,15 @@ connection by force at age plus grace.
 
 `deploy/deploy-host.sh` reads `server.pem`, `server.key`, `client-ca.pem` and
 `clients.acl` from `$PARENT_TLS_DIR/<CID>/` (default `/etc/utexo/tls`). It
-stops before it changes a service if one of them is missing or not readable
-by the `ubuntu` user.
+stops before it changes a service if one of them is missing, empty or not
+readable by the `ubuntu` user.
 
 ## Access matrix
 
 | Path into the enclave | Who can use it | Checks before the enclave | What it can send |
 | --- | --- | --- | --- |
 | Parent gRPC with mTLS | A client with a certificate from the client CA whose SHA-256 is in the ACL | TLS handshake, ACL pin, role, `Clone` and `AttestedPublicKey` budgets, connection cap, concurrency limit, request timeout (`parent/src/main.rs`) | The RPCs of its role |
-| Parent gRPC, insecure loopback | Any process on the parent instance | None | Every parent RPC. `SubmitHeaders` is still refused. |
+| Parent gRPC, insecure loopback | Any process on the parent instance | Connection cap, concurrency limit, request timeout. No TLS, ACL, role or budget. | Every parent RPC. `SubmitHeaders` is still refused. |
 | Parent `GET /health` (`HEALTH_HOST:HEALTH_PORT`, default `127.0.0.1:5001`) | Any process that reaches that address | None | `Health` only |
 | Parent CLI `utexo-bridge-parent-cli --addr vsock://<CID>:5000` | Any process on the parent instance | None. The CLI opens the vsock connection itself. | Its fixed commands: `init`, `init-seed`, `init-mnemonic`, `get-keys`, `sign-evm`, `sign-psbt`, `get-last-saved-block`, `health`, `set-endpoints`, `verify-launch`, `export-attestation`, `clone`, `limits`, `interactive` |
 | Direct vsock, port 5000 (`enclave/src/main.rs`) | Any process on the parent instance with its own client | None. The enclave does not identify the caller (`enclave/src/server/wire.rs`). | Every `EnclaveRequest` in `enclave-proto/proto/enclave.proto` |
@@ -92,7 +94,8 @@ The enclave applies the same checks on every path
 - `SignRawDigest` signs only a gas transaction that passes the pinned
   checks, with the gas key only.
 - `SetEndpoints` is accepted once.
-- `SetLimits` changes only when the enclave refuses or delays a request.
+- `SetLimits` has no check of the caller. It changes only the limits at
+  which the enclave refuses or delays a request, not what the enclave signs.
 - `GetClone` checks the requester attestation and the cloning secret.
 - `Health` has no check.
 
