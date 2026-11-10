@@ -46,21 +46,28 @@ Why each term is there:
 
 ## Measurements
 
-Release mode, Apple M1 Pro, 2026-10-30, load under 4, on rgb-lib 1ae1c160:
-two runs each, unless the row says one run. Nothing here was measured on the
-pinned rgb-lib, which shares the reject walk across origins, so the walk
-times below overstate it. The honest burns use the pinned genesis of 10 mint
+The original calibration used release mode on an Apple M1 Pro, 2026-10-30,
+load under 4, on rgb-lib 1ae1c160: two runs each, unless the row says one run.
+These calibration measurements predate the current rgb-lib pin, which shares
+the reject walk across origins, so their walk times overstate it. The honest
+burns use the pinned genesis of 10 mint
 rights, and the forged histories a genesis of 1 right, unless the row names
 more. The model column is validation plus inspection.
 
-This tree keeps the timing test of one shape, the chain from a genesis of
-255 rights. This command runs it:
+The ignored `caps::timings` test measures all twelve shapes in the table.
+The `caps` tests also check the chain from a genesis of 255 rights and the
+read of a wide burn's last bundle. Run them in release mode:
 
 ```bash
 cargo test --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib caps -- --ignored --nocapture --test-threads=1
 ```
 
-The timing tests of the other shapes are in commit 8cd5cb7.
+Each `RGB_COST` line is a JSON record with validation and inspection times,
+their sum, the separate model terms, work counts and the gate's decision.
+The timing test checks that a valid fixture passes rgb-lib, or that an
+unmined forged fixture reaches the witness phase. It reports timings even
+for shapes that the production gate refuses. Their inspection is a benchmark
+only: production inspects a consignment only after validation succeeds.
 
 | Consignment | Size | Outputs | Model | rgb-lib validation | rgb-lib inspection |
 |-------------|------|---------|-------|--------------------|--------------------|
@@ -91,6 +98,56 @@ load under 4 ran within its modeled time.
 enclave. On every shape measured there, one request took at most its modeled
 time.
 
+## Burn host CPU measurements
+
+On 2026-11-10, all twelve shapes ran twice on an Intel Xeon Platinum 8375C
+at 2.90 GHz, the CPU used by the burn enclaves. Both full ignored `caps`
+runs passed (five tests each). Each measured phase and their sum stayed
+within its model. The closest sum was the 65,535-output fan-out at **96.9%**
+of its model. No coefficient or image-default change follows from these
+measurements.
+
+The source was `34721c5eb5d4328e4c475800333e975ddbd5619c` with the timing
+module restored in this change, rgb-lib
+`5010eefa355beb9c42a4c1b69883f7651241a111` and rgb-consensus
+`d4bbbce212e4d9967e10cc3c6a7db2f664d52bd2`. Rust was 1.96.1
+(`31fca3adb`), using the repository's release profile (`opt-level=z`, LTO,
+one codegen unit). The native Linux test binary ran in a container pinned
+to CPU 2, with one test thread, no network and a 1-GiB `/tmp` tmpfs. Witness
+and list resolvers used memory. No build or other benchmark ran alongside
+it. One-minute host load went from 0.29 to 1.01 for the first run and 0.61
+to 1.00 for the second. These are host CPU measurements, not measurements
+inside Nitro or of live RPCs. Exact nanoseconds, work counts, gate decisions,
+source and binary hashes, and run metadata are in the
+[measurement record](measurements/rgb-lib-2026-11-10.json).
+
+The validation and inspection columns show both runs. The final column is
+an allowance for one request on the planned smaller host: twice the largest
+measured sum, rounded **up** to five seconds. It is not a new admission limit
+or a measured time. The concurrent request and transport settings are in
+[the smaller-host profile](runtime-limits.md#smaller-production-host).
+Model comparisons use the exact values in the record, before rounding.
+
+| Consignment | Model (s) | Validation (s) | Inspection (s) | Max total / model | ×2 allowance (s) |
+|---|---:|---:|---:|---:|---:|
+| Honest burn, 2810 mints | 6.100 | 3.079–3.086 | 1.846–1.851 | 0.809 | 10 |
+| Honest burn, 3 transfers a line | 17.910 | 10.149–10.165 | 5.571–5.574 | 0.879 | 35 |
+| Honest burn, genesis of 255 rights | 16.487 | 13.448–13.541 | 1.865–1.871 | 0.934 | 35 |
+| Chain of 2000 one-right propagates | 2.471 | 0.931–0.933 | 0.850–0.852 | 0.722 | 5 |
+| Same chain, genesis of 255 rights | 10.145 | 8.587–8.610 | 0.873–0.878 | 0.935 | 20 |
+| Fan-out to 65,535 outputs | 10.505 | 5.097–5.122 | 5.030–5.054 | 0.969 | 25 |
+| Burn of 65,535 rights | 29.855 | 8.736–8.769 | 9.474–9.526 | 0.613 | 40 |
+| 13 propagates of 65,535 rights (refused) | 123.122 | 47.664–47.899 | 55.380–55.675 | 0.841 | 210 |
+| 64 burns, 49,900 dummy inputs | 7.213 | 1.898–1.904 | 1.282–1.299 | 0.444 | 10 |
+| 512 burns in one bundle (refused) | 1.581 | 1.337–1.362 | 0.135–0.135 | 0.947 | 5 |
+| 2048 burns in one bundle (refused) | 20.472 | 17.677–18.010 | 0.536–0.537 | 0.906 | 40 |
+| Listed fan-out after 500 transfers | 16.078 | 5.446–5.455 | 5.261–5.294 | 0.669 | 25 |
+
+The model numbers for the 512- and 2048-burn bundles are diagnostic: the
+bundle-id cap rejects both before the time budget is considered. The
+13-propagate shape is also refused. Timing their inspection characterizes
+work that the production gate prevents.
+
 ## What the model refuses in an honest history
 
 - **The time budget** refuses a history past its modeled time. On the pinned
@@ -109,9 +166,10 @@ The operator can raise each limit on a running enclave.
 
 ## What the model does not prove
 
-- The weights come from timings on one machine. Their margin is about the
-  spread between runs: 8 percent on the closest shape, the inspection of the
-  honest 2810-mint burn. A shape that costs rgb-lib more per byte, output,
+- The weights were fitted on one machine and checked on the burn host CPU.
+  The closest total in the burn host check leaves about 3 percent of the
+  modeled time. Repeated runs do not prove an upper bound. A shape that costs
+  rgb-lib more per byte, output,
   operation or genesis leaf than the measured ones runs past its modeled
   time. So does a busy or slower CPU.
 - The budget is rgb-lib's alone. The enclave's own work on the transfer took
@@ -120,6 +178,34 @@ The operator can raise each limit on a running enclave.
 ## When to measure again
 
 Measure again when the rgb-lib or rgb-consensus pin changes, or when
-`cost.rs` changes. Measure each shape with its timing test, compare it with
-its modeled time, and update the weights, this table and the limits if a
-shape runs past its model.
+`cost.rs` changes. Use the pinned dependencies and compiler, the release
+profile, and the CPU used by the burn enclaves. Run the command above at
+least twice with one test thread and no concurrent build or benchmark.
+Keep scratch files in RAM, as they are in the enclave. Record the source
+revision, dependency pins, compiler, CPU, load, CPU affinity, scratch storage
+and number of runs with the results.
+
+Compare validation plus inspection with the Model column, using the exact
+`model_total_ns` from the same fixture to avoid rounding errors. Also keep
+the two phases separately. A row refused by a structural cap does not have
+an admitted time budget; its printed time model is diagnostic. Host timings
+with in-memory resolvers measure CPU work, not live RPC latency, enclave
+overhead or simultaneous requests. Measure concurrency separately before
+choosing a request deadline.
+
+If every admitted shape fits its model, no change of coefficients or limits
+is needed for that measured CPU and load. A smaller host or a different
+concurrent workload still needs its own allowance and verification.
+If a shape takes `k` times its model, runtime limits can account for the
+observed slowdown without rebuilding the image: lower `max_rgb_lib_ms` to
+admit less work for the same wall-time budget, or increase
+`total_request_timeout_secs` to allow the same work more time. The modeled
+budget does not turn into a stopwatch, and increasing it admits more work.
+Include the enclave's own work, RPCs and concurrency when choosing the
+deadline. Apply and persist the settings as described in
+[runtime-limits.md](runtime-limits.md#commands).
+
+For a recalibrated model, change the `NS_PER_*` and `INSPECT_NS_*` constants
+in `cost.rs`, repeat every shape, and update this table. Those coefficients
+are image code: deploying them needs a new EIF and new approved PCRs. Record
+any remaining overrun; a passing result on another CPU does not resolve it.
