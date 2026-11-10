@@ -196,7 +196,7 @@ impl EnclaveState {
                     reserved_or_completed = used,
                     hard_cap = cap,
                     "GetClone: seed-export HARD cap reached - export refused \
-                     (F03-AF-10, fail-closed). Rotate/re-provision to lift."
+                     (fail-closed). Rotate/re-provision to lift."
                 );
                 return Err(EnclaveError::ExportCapReached { used, cap });
             }
@@ -214,7 +214,7 @@ impl EnclaveState {
         tracing::warn!(
             seed_export_count = count,
             requester_pk = %hex::encode(requester_pk),
-            "GetClone: donor exported its seed (F03-AF-10 telemetry)"
+            "GetClone: donor exported its seed"
         );
         if self.seed_export_soft_cap > 0 && count > self.seed_export_soft_cap {
             tracing::warn!(

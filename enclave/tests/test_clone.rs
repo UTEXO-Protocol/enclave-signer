@@ -237,7 +237,7 @@ fn clone_donor_rejects_request_armed_for_a_different_target() {
     assert_eq!(err.code, 5);
     assert!(
         err.message.contains("digest") || err.message.contains("cloning"),
-        "expected a digest-binding rejection (F03-AF-07), got: {}",
+        "expected a digest-binding rejection, got: {}",
         err.message
     );
 }

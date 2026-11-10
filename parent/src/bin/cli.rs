@@ -982,7 +982,7 @@ fn resolve_cloning_secret(
     if let Some(s) = arg {
         eprintln!(
             "WARNING: --cloning-secret on the command line is visible in `ps`, shell history \
-             and SSM logs (F03-AF-06); prefer --cloning-secret-file or the UTEXO_CLONING_SECRET \
+             and SSM logs; prefer --cloning-secret-file or the UTEXO_CLONING_SECRET \
              env var."
         );
         return Ok(Some(s));

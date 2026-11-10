@@ -64,7 +64,7 @@ fn malformed_corpus() -> Vec<Vec<u8>> {
 /// Reject each malformed input without a panic.
 /// No input has a valid Nitro certificate chain and signature.
 #[test]
-fn af22_real_verifier_rejects_every_malformed_input_gracefully() {
+fn real_verifier_rejects_every_malformed_input_gracefully() {
     let pcrs = ExpectedPcrs::zero();
     let nonce = [0u8; 32];
 
@@ -94,7 +94,7 @@ mod mock_path {
     use attestation_verify::{build_mock_document, verify_mock_attestation};
 
     #[test]
-    fn af22_mock_control_verifies_and_corruptions_are_bounded() {
+    fn mock_control_verifies_and_corruptions_are_bounded() {
         let nonce = [0x11u8; 32];
         let pubkey = [0x22u8; 32];
         let pcrs = ExpectedPcrs::zero();

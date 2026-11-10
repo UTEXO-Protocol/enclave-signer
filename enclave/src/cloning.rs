@@ -407,24 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn af25_cloning_digest_reference_vector() {
+    fn cloning_digest_reference_vector() {
         // HMAC-SHA256(secret_utf8, encryption_pubkey || target) from Python `hmac`.
-        let secret = "utexo-af25-fixed-reference-secret-0123456789";
+        let secret = "utexo-fixed-reference-secret-0123456789";
         let pubkey = hexn::<32>("030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc");
         let target = hexn::<20>("05101b26313c47525d68737e89949faab5c0cbd6");
-        let want = hexn::<32>("ac9ab8ce85a4eabf160922d0077690807c434c4d338d1140fb3f8581605de25b");
+        let want = hexn::<32>("5205503b952299cda46eb7982f5e0e29752f723a23e8d2ae55869504f0a195f4");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
         assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
 
         // A target that differs in each byte gives a different digest.
         let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
-        let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
+        let want_b = hexn::<32>("8abb75a1b5ddeebb9bb096597060a9b3501293bc422ec4ff859ad4eeac3fe57f");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);
         assert_ne!(want, want_b);
     }
 
     #[test]
-    fn af25_seed_seal_reference_vector() {
+    fn seed_seal_reference_vector() {
         // Check X25519, HKDF-SHA256, and ChaCha20Poly1305 against independent vectors.
         let req_sk = hexn::<32>("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
         let donor_sk =
