@@ -1277,6 +1277,13 @@ mod tests {
             .contains("is not ssl://"));
     }
 
+    /// The test build is a dev build, so the launch path takes plaintext.
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn a_test_build_allows_a_plaintext_indexer() {
+        assert!(plaintext_indexer_allowed());
+    }
+
     #[cfg(feature = "rgb-validation")]
     #[test]
     fn esplora_url_takes_a_default_port() {

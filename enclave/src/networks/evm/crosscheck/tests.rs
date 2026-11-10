@@ -744,6 +744,12 @@ mod lz_route {
         assert!(err.to_string().contains("dstEid mismatch"), "{err}");
     }
 
+    #[test]
+    fn rejects_an_lz_release_without_the_record() {
+        let r = release(honest());
+        assert!(validate_funds_out_burn_recipient(&r, &burn(), None).is_err());
+    }
+
     /// A 32-byte (non-EVM) recipient fills the whole LayerZero word.
     #[test]
     fn passes_a_32_byte_lz_recipient() {

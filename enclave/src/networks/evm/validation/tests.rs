@@ -752,6 +752,20 @@ fn burn_id_recompute_matches_the_contract_formula() {
     );
 }
 
+#[test]
+fn burn_id_ignores_settlement_data() {
+    // One burn has one burnId, so a second release citing other deposits reverts.
+    let cfg = token_pinned_config();
+    let base = rgb_release();
+    let other = ReleaseIdentity {
+        settlement_data: vec![0x01],
+        ..base.clone()
+    };
+    assert_eq!(
+        expected_burn_id(&cfg, &other),
+        expected_burn_id(&cfg, &base)
+    );
+}
 /// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID`.
 #[test]
 fn burn_id_matches_the_shared_vector() {
@@ -781,6 +795,29 @@ fn burn_id_matches_the_shared_vector() {
     assert_eq!(
         hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
         "29c56dee5d5c83392c91d778ef063a7e72432d0c5c3d85d509ad802df0a10fe5"
+    );
+}
+
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
+/// `sourceChainId` = 827166. The contract test still pins the 96 form.
+#[test]
+fn burn_id_matches_the_contract_vector() {
+    let cfg = BridgeConfig {
+        chain_id: 42161,
+        funds_in_contract: [0x11; ADDRESS_LEN],
+        token_contract: [0x22; ADDRESS_LEN],
+        ..config()
+    };
+    let mut release = ReleaseIdentity {
+        amount: U256::from(1_000_000u64),
+        source_burn_tx_id: [0u8; 32],
+        ..rgb_release()
+    };
+    release.source_burn_tx_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
+
+    assert_eq!(
+        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f"
     );
 }
 

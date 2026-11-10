@@ -670,6 +670,13 @@ fn accepts_allowlisted_selector_with_args() {
 }
 
 #[test]
+fn accepts_allowlisted_selector_legacy() {
+    let data = ALLOWED_SELECTOR.to_vec();
+    let tx = legacy_full(CHAIN_ID, &ALLOWED_TO, 0, 100, 21_000, &data);
+    assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
+}
+
+#[test]
 fn rejects_disallowed_selector() {
     let data = [0x11, 0x22, 0x33, 0x44]; // not in the allowlist
     let tx = eip1559_full(CHAIN_ID, &ALLOWED_TO, 0, 1, 100, 21_000, &data);

@@ -75,6 +75,13 @@ fn rejects_psbt_with_no_inputs() {
 // Operation-dedup key - `psbt_operation_key`
 
 #[test]
+fn op_key_is_deterministic() {
+    let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+    let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
+    assert_eq!(a, b);
+}
+
+#[test]
 fn op_key_varies_with_every_field() {
     let base = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
     assert_ne!(

@@ -363,6 +363,11 @@ mod mint {
     };
 
     #[test]
+    fn accepts_the_deposit_the_mint_derives() {
+        assert!(bind_request_deposit(&DERIVED, &DERIVED).is_ok());
+    }
+
+    #[test]
     fn refuses_another_net_amount_for_the_same_deposit() {
         let other = VerifiedLock {
             net_amount: 99,
