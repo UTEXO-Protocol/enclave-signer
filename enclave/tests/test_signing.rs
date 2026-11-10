@@ -690,13 +690,13 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
-// A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
+// A length-valid, all-zero evm_tx_hash does not skip the bridge checks.
 // An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
 // consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
+fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     // The deposit stub lets the run pass the FundsIn gate and reach the
     // consignment bind.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
