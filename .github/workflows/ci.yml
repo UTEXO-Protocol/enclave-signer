@@ -177,8 +177,10 @@ jobs:
             exit 1
           fi
 
-  # The mint signer (EVM -> RGB, Dockerfile.enclave.mint). The test build adds
-  # mock attestation and seed import, which only a debug build allows.
+  # The mint signer (EVM -> RGB, Dockerfile.enclave.mint), its build without
+  # SPV, and the release check and feature guards of both roles, which reuse
+  # its compiled dependencies. The test build adds mock attestation and seed
+  # import, which only a debug build allows.
   mint-signer:
     runs-on: ubuntu-latest
     env:
@@ -229,8 +231,43 @@ jobs:
           cargo test $ENCLAVE --features mint-signer --test test_indexer_only --test test_bfa_mint_over_the_wire
           cargo test $ENCLAVE --features mint-signer --test test_signing test_sign_btc
 
-  # The burn signer (RGB -> EVM, Dockerfile.enclave.burn), its build without
-  # SPV, and the feature guards, which reuse its compiled dependencies.
+      # Both roles here, so the release-mode dependencies compile once.
+      - name: Check release (without SPV, mint and burn)
+        run: |
+          for role in mint-signer burn-signer; do
+            cargo check --release $ENCLAVE --features vsock,$role
+          done
+
+      # Unsupported feature sets must fail on their own `compile_error!`, not on
+      # an unrelated error. `cargo check` reuses the dependencies clippy built.
+      - name: Assert unsupported feature sets are rejected
+        run: |
+          expect_guard() {
+            local features=$1 message=$2
+            if cargo check --locked $ENCLAVE --features "$features" 2>build.log; then
+              echo "::error::build unexpectedly compiled with '$features'"
+              exit 1
+            fi
+            if ! grep -q "$message" build.log; then
+              echo "::error::build with '$features' failed, but not on the guard: $message"
+              cat build.log
+              exit 1
+            fi
+          }
+          for role in mint-signer burn-signer; do
+            for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
+              expect_guard "$role,$forbidden" "rgb-validation without spv requires real attestation"
+            done
+          done
+          expect_guard rgb-validation "rgb-validation without spv requires mint-signer or burn-signer"
+          expect_guard spv,mint-signer,burn-signer "mint-signer and burn-signer are mutually exclusive"
+          expect_guard spv "an RGB build requires a signer role"
+          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence; do
+            expect_guard "$features" "kms-persistence requires mint-signer"
+          done
+
+  # The burn signer (RGB -> EVM, Dockerfile.enclave.burn) and its build without
+  # SPV.
   burn-signer:
     runs-on: ubuntu-latest
     env:
@@ -282,41 +319,6 @@ jobs:
         run: |
           cargo test $ENCLAVE --features burn-signer --lib indexer_only
           cargo test $ENCLAVE --features burn-signer --test test_indexer_only
-
-      # Both roles here, so the release-mode dependencies compile once.
-      - name: Check release (without SPV, mint and burn)
-        run: |
-          for role in mint-signer burn-signer; do
-            cargo check --release $ENCLAVE --features vsock,$role
-          done
-
-      # Unsupported feature sets must fail on their own `compile_error!`, not on
-      # an unrelated error. `cargo check` reuses the dependencies clippy built.
-      - name: Assert unsupported feature sets are rejected
-        run: |
-          expect_guard() {
-            local features=$1 message=$2
-            if cargo check --locked $ENCLAVE --features "$features" 2>build.log; then
-              echo "::error::build unexpectedly compiled with '$features'"
-              exit 1
-            fi
-            if ! grep -q "$message" build.log; then
-              echo "::error::build with '$features' failed, but not on the guard: $message"
-              cat build.log
-              exit 1
-            fi
-          }
-          for role in mint-signer burn-signer; do
-            for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
-              expect_guard "$role,$forbidden" "rgb-validation without spv requires real attestation"
-            done
-          done
-          expect_guard rgb-validation "rgb-validation without spv requires mint-signer or burn-signer"
-          expect_guard spv,mint-signer,burn-signer "mint-signer and burn-signer are mutually exclusive"
-          expect_guard spv "an RGB build requires a signer role"
-          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence; do
-            expect_guard "$features" "kms-persistence requires mint-signer"
-          done
 
   # The one check name that branch protection watches. It passes only when
   # every job above passed, and it fails when one was skipped or cancelled.
