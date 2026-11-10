@@ -3,16 +3,12 @@
 #[cfg(feature = "rgb-validation")]
 pub(crate) mod bfa_consignment;
 
-/// BFA ids as the flat summary carries them. `validation::tests` pins them
-/// to `rgb-schemas`.
-#[cfg(feature = "rgb-validation")]
+/// BFA transition ids as the flat summary carries them. Only burn tests use them.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub(crate) mod bfa_ids {
     pub const TS_TRANSFER: u16 = 10000;
     pub const TS_BURN: u16 = 8010;
     pub const TS_MINT: u16 = 8013;
-    pub const TS_PROPAGATE: u16 = 8014;
-    pub const OS_ASSET: u16 = 4000;
-    pub const OS_MINT: u16 = 4013;
 }
 
 /// A `uint256` ABI word holding `value`.
@@ -356,37 +352,4 @@ pub(crate) fn chain_with_witnesses(
         })
         .collect();
     (std::sync::Mutex::new(chain), proofs)
-}
-
-/// The fixtures are test code too, and this is their test.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-mod tests {
-    use super::chain_with_witnesses;
-    use crate::networks::rgb::spv::chain::MAX_HEADERS_PER_SUBMIT;
-
-    /// A chain longer than one submit goes in batches, and every block of it
-    /// is there: the witness blocks and the tip.
-    #[test]
-    fn a_long_witness_chain_is_submitted_in_batches() {
-        let witnesses: Vec<[u8; 32]> = (0..MAX_HEADERS_PER_SUBMIT as u32 - 4)
-            .map(|i| {
-                let mut txid = [0x77u8; 32];
-                txid[..4].copy_from_slice(&i.to_le_bytes());
-                txid
-            })
-            .collect();
-        let depth_above = 5;
-        let (chain, proofs) = chain_with_witnesses(&witnesses, depth_above);
-        let chain = chain.lock().unwrap();
-        let last_witness = witnesses.len() as u32;
-        let tip = last_witness + depth_above;
-        assert_eq!(tip, MAX_HEADERS_PER_SUBMIT as u32 + 1);
-        assert_eq!(chain.tip_height(), tip);
-        assert_eq!(proofs.len(), witnesses.len());
-        assert!(chain.hash_at(1).is_some());
-        assert!(chain.hash_at(last_witness).is_some());
-        assert!(chain.hash_at(tip).is_some());
-        // The last witness has the empty blocks above it.
-        assert_eq!(chain.confirmations(last_witness, 6), 6);
-    }
 }

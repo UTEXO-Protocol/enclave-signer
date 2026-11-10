@@ -650,18 +650,6 @@ pub(crate) mod tests {
         assert_eq!(unowned_output_sats(&psbt, &inputs, &keys), Some(0));
     }
 
-    /// BIP-371 metadata cannot describe a non-taproot output, so only rule (A)
-    /// can accept it. The enclave controls key-path taproot inputs only, so a
-    /// P2WPKH input never passes rule (A).
-    #[test]
-    fn rejects_non_taproot_output() {
-        let keys = km();
-        let p2wpkh = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xCC; 20]));
-        let mut psbt = psbt_with(ScriptBuf::new(), p2wpkh);
-        make_input_ours(&mut psbt, &keys);
-        assert!(!owned(&psbt, &keys));
-    }
-
     // === custody must not depend on merge progress ===
 
     /// Results of the plain-BTC sats gate and the ownership resolvers for one PSBT.

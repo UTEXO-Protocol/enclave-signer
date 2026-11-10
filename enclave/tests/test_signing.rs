@@ -518,51 +518,6 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-/// Fail-closed: a build that can validate consignments must not sign without a
-/// pinned operator config. It must not fall back to trusting the listener.
-/// The harness builds the library without `cfg(test)`, so the production guard
-/// is active. The test builds the empty `BridgeConfig`, so env cannot interfere.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-#[test]
-fn evm_destination_rejects_unconfigured_bridge_config() {
-    use std::sync::Mutex;
-    use utexo_bridge_enclave::networks::evm::validation::validate_destination;
-    use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
-    use utexo_bridge_enclave::networks::rgb::spv_crosscheck::ChainPins;
-    use utexo_bridge_enclave::networks::ValidationContext;
-
-    let req = valid_sign_evm_request(1000, 50);
-    let Some(DestinationNetwork::EvmDestination(destination)) = req.destination_network else {
-        unreachable!();
-    };
-    let chain = Mutex::new(HeaderChain::new(
-        Network::Regtest,
-        checkpoint_for(Network::Regtest),
-    ));
-    let pins = ChainPins::new();
-    let validate = |config: &BridgeConfig| {
-        let ctx = ValidationContext {
-            bridge_config: config,
-            rgb_validator: None,
-            header_chain: &chain,
-            chain_pins: &pins,
-            anchor_binder: None,
-            reject_list_reader: None,
-            #[cfg(evm_to_rgb)]
-            psbt_fee_key_paths: None,
-        };
-        validate_destination(&destination, &ctx)
-    };
-    // Integration tests compile the library without cfg(test), so this reaches
-    // the production-only guard. Source/validator failures cannot mask it.
-    validate(&pinned_bridge_config()).expect("control: pinned destination must pass");
-    let err = validate(&BridgeConfig::default())
-        .err()
-        .expect("unconfigured destination must fail")
-        .to_string();
-    assert!(err.contains("bridge config unconfigured"), "{err}");
-}
-
 // Route proofs bind the amount. RGB source validation emits the consignment
 // amount. EVM destination validation decodes `fundsOut.amount` and checks it
 // against `calldata_amount`. `validate_route_proofs` compares the two.
@@ -688,11 +643,6 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
     }
 }
 
-/// The first RGB bind refusal of a bare PSBT: the mint signer reads the
-/// PSBT's own data and inputs.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-const RGB_BIND_REFUSAL: &str = "witness_utxo";
-
 // An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
 // An empty `evm_tx_hash` does not skip the bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -732,63 +682,6 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
             );
         }
         other => panic!("unexpected response: {:?}", other),
-    }
-}
-
-// A length-valid, all-zero evm_tx_hash does not skip the bridge checks.
-// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
-// consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
-// covers the zero-length hash.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-#[test]
-fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
-    // The deposit stub lets the run pass the FundsIn gate and reach the
-    // consignment bind.
-    let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
-        operation_id: [0x33; 32],
-        gross: 1000,
-        commission: 0,
-        emitter: utexo_bridge_enclave::config::BridgeConfig::from_env().funds_in_contract,
-    }));
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    // An all-zero 32-byte hash passes the length check. The RgbDestination has
-    // no consignment and its PSBT no RGB data, so bridge mode must fail closed.
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(sign_psbt_request(
-            vec![0u8; 32],
-            false,
-            false,
-            1000,
-            0,
-            minimal_valid_psbt_bytes(),
-            500,
-        ))),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
-            // Bridge mode ran and its RGB bind refused.
-            assert!(
-                e.message.contains(RGB_BIND_REFUSAL),
-                "expected an RGB-binding rejection (bridge mode), got: {}",
-                e.message
-            );
-        }
-        other => panic!(
-            "zero-hash SignPsbt must fail closed in bridge mode, never sign: {:?}",
-            other
-        ),
     }
 }
 

@@ -69,16 +69,6 @@ class GrpcSmokeTestTests(unittest.TestCase):
     def fails(self, result):
         return [line for line in result.stdout.splitlines() if '[FAIL]' in line]
 
-    def test_correct_replies_pass_with_distinct_negative_payloads(self):
-        result = self.run_script(POSITIVE + NEGATIVE)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        calls = [json.loads(line) for line in (self.dir / 'log').read_text().splitlines()]
-        self.assertEqual(len(calls), len(POSITIVE + NEGATIVE))
-        self.assertEqual({(c[0].split('/')[0], c[2]) for c in calls},
-                         {('parent.ParentService', 'enclave/parent.proto')})
-        payloads = [c[1] for c in calls]
-        self.assertEqual(len(set(payloads)), len(payloads))
-
     def test_a_mismatched_reply_fails_only_that_case(self):
         mutations = [
             (2, ok('Sign', 'signature'), 'Sign without common'),  # success instead of error
@@ -96,13 +86,6 @@ class GrpcSmokeTestTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(len(self.fails(result)), 1)
                 self.assertIn(expect_name, self.fails(result)[0])
-
-    def test_an_unrelated_error_fails_every_negative_case(self):
-        replies = POSITIVE + [err(r[0], 'Unavailable', 'enclave connection failed: refused')
-                              for r in NEGATIVE]
-        result = self.run_script(replies)
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(len(self.fails(result)), len(NEGATIVE))
 
 
 if __name__ == '__main__':

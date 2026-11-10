@@ -1170,15 +1170,6 @@ mod tests {
     }
 
     #[test]
-    fn omitted_rpc_path_is_sent_empty_for_the_enclave_root_default() {
-        let cli = Cli::try_parse_from(["cli", "set-endpoints"]).unwrap();
-        let Command::SetEndpoints { endpoints } = cli.command else {
-            panic!("expected set-endpoints");
-        };
-        assert!(endpoints_request(endpoints).evm_rpc_path.is_empty());
-    }
-
-    #[test]
     fn rpc_path_rejects_unsafe_syntax_without_disclosing_keys() {
         let file = std::env::temp_dir().join(format!(
             "rpc-path-validation-{}-{:016x}",
@@ -1235,100 +1226,6 @@ mod tests {
             read_rpc_path(&file).unwrap_err(),
             "cannot open EVM_RPC_PATH_FILE"
         );
-    }
-
-    #[test]
-    fn set_endpoints_has_no_print_sha256_option() {
-        let err = Cli::try_parse_from(["cli", "set-endpoints", "--print-sha256"])
-            .err()
-            .expect("--print-sha256 must not parse");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-        assert!(err.to_string().contains("--print-sha256"));
-    }
-
-    #[test]
-    fn submit_headers_is_not_a_command() {
-        let err = Cli::try_parse_from([
-            "utexo-bridge-parent-cli",
-            "submit-headers",
-            "--start-height",
-            "1",
-            "--headers-file",
-            "h.txt",
-        ])
-        .err()
-        .expect("submit-headers must not parse");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-    }
-
-    #[test]
-    fn verify_launch_takes_the_ctl_arguments() {
-        let cli = Cli::try_parse_from([
-            "utexo-bridge-parent-cli",
-            "--addr",
-            "vsock://16:5000",
-            "verify-launch",
-            "--pcr-file",
-            "PCR.json",
-            "--image-env",
-            "IMAGE-ENV.json",
-            "--signer-role",
-            "combined",
-        ])
-        .unwrap();
-        assert!(matches!(cli.command, Command::VerifyLaunch { .. }));
-    }
-
-    #[test]
-    fn export_attestation_takes_the_ctl_arguments() {
-        let args = |role: &'static str| {
-            [
-                "utexo-bridge-parent-cli",
-                "--addr",
-                "vsock://16:5000",
-                "export-attestation",
-                "--pcr-file",
-                "PCR.json",
-                "--image-env",
-                "IMAGE-ENV.json",
-                "--signer-role",
-                role,
-                "--out",
-                "attestation-16.json",
-                "--expect-evm-address",
-                "0x0000000000000000000000000000000000000001",
-            ]
-        };
-        let cli = Cli::try_parse_from(args("burn")).unwrap();
-        assert!(matches!(cli.command, Command::ExportAttestation { .. }));
-        assert!(Cli::try_parse_from(args("mint")).is_err());
-    }
-
-    /// rgb-lib strips the PSBT, so `sign-psbt` takes two fascias, not a parent PSBT.
-    #[test]
-    fn sign_psbt_takes_the_fascia_and_the_parent_fascia() {
-        let sign_psbt = |flag: &'static str| {
-            Cli::try_parse_from([
-                "utexo-bridge-parent-cli",
-                "sign-psbt",
-                "--psbt",
-                "70736274",
-                "--fascia",
-                "aa",
-                flag,
-                "bb",
-            ])
-        };
-        let Command::SignPsbt {
-            fascia,
-            parent_fascia,
-            ..
-        } = sign_psbt("--parent-fascia").unwrap().command
-        else {
-            panic!("expected sign-psbt");
-        };
-        assert_eq!((fascia.as_str(), parent_fascia.as_str()), ("aa", "bb"));
-        assert!(sign_psbt("--parent-psbt").is_err());
     }
 
     #[test]

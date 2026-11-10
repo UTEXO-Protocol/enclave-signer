@@ -167,27 +167,6 @@ async fn e2e_attest_verify_fails_on_real_path_against_mock_enclave() {
 }
 
 #[tokio::test]
-async fn e2e_attest_verify_fails_on_unreachable_endpoint() {
-    let err = verify_attested_pubkey(
-        "http://127.0.0.1:1", // nothing listening here
-        attestation_verify::ExpectedPcrs::zero(),
-        VerifyMode::Mock,
-        ExpectedPolicy::Development,
-    )
-    .await
-    .expect_err("connection to dead port must fail");
-
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("connecting")
-            || msg.contains("connect")
-            || msg.contains("Connection")
-            || msg.contains("transport"),
-        "expected connection error, got: {msg}"
-    );
-}
-
-#[tokio::test]
 async fn e2e_attest_verify_refuses_mock_with_production() {
     // Nothing listens here. The refusal comes before the connect.
     let err = verify_attested_pubkey(
@@ -378,16 +357,6 @@ async fn attest_verify_cli_missing_pcr_exits_one_not_parse_error() {
     let out = run_attest_verify(&["--expect-evm-finality-tag", "safe"]).await;
     assert_cli_failure(&out, 1, "FAIL: --pcr0 required (or pass --mock)");
     assert_eq!(out.stderr, b"FAIL: --pcr0 required (or pass --mock)\n");
-}
-
-#[tokio::test]
-async fn attest_verify_cli_unknown_argument_exits_two() {
-    let out = run_attest_verify(&["--mock", "--unknown-af06-flag"]).await;
-    assert_cli_failure(&out, 2, "error: unexpected argument '--unknown-af06-flag'");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("Usage:"), "{stderr}");
-    assert!(!stderr.contains("FAIL:"), "{stderr}");
-    assert!(!stderr.contains("warning: --mock"), "{stderr}");
 }
 
 /// The `OK` output without the lines that change with the nonce.

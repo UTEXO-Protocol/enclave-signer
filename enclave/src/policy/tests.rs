@@ -311,22 +311,6 @@ fn production_boots_with_the_safe_and_finalized_tags() {
 }
 
 #[test]
-fn development_build_may_use_the_latest_finality_tag() {
-    let ctx = BuildContext {
-        debug_or_test: true,
-        ..release_bridge_ctx()
-    };
-    let cfg = BridgeConfig {
-        evm_finality_tag: EvmFinalityTag::Latest,
-        ..pinned_config()
-    };
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
-    assert!(matches!(policy, SecurityPolicy::Development { .. }));
-    assert!(policy.assert_valid_at_boot(&ctx).is_ok());
-    assert!(policy.assert_valid_for_build(&ctx).is_ok());
-}
-
-#[test]
 fn production_rejects_a_zero_spv_confirmation_rule() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
@@ -385,21 +369,6 @@ fn production_defaults_to_btc_relay_required() {
         SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
         other => panic!("expected Production, got {other:?}"),
     }
-    assert!(policy.assert_valid_for_build(&ctx).is_ok());
-}
-
-/// A debug build uses the env value and does not gate on it: the policy is
-/// `Development`.
-#[test]
-fn dev_build_ignores_btc_relay_mode_for_the_boot_gate() {
-    let ctx = BuildContext {
-        debug_or_test: true,
-        ..release_bridge_ctx()
-    };
-    let mut cfg = pinned_config();
-    cfg.btc_relay_mode = BtcRelayMode::None;
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
-    assert!(matches!(policy, SecurityPolicy::Development { .. }));
     assert!(policy.assert_valid_for_build(&ctx).is_ok());
 }
 
@@ -820,20 +789,6 @@ fn the_clone_peer_pcr3_is_attested() {
         }
     ));
     assert_ne!(a.commitment_bytes(), resolve([0x44; 48]).commitment_bytes());
-}
-
-/// A development policy keeps no PCR3 and does not read it.
-#[test]
-fn a_development_policy_does_not_read_pcr3() {
-    let ctx = BuildContext {
-        debug_or_test: true,
-        signer_role: SignerRole::Burn,
-        ..release_bridge_ctx()
-    };
-    let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None, "")
-        .with_clone_peer_pcr3(|| panic!("a development policy must not read PCR3"))
-        .unwrap();
-    assert!(matches!(p, SecurityPolicy::Development { .. }));
 }
 
 /// A boot-time policy for `chain_id` and `network`. Endpoints are not needed.

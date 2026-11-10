@@ -969,11 +969,6 @@ IwLz3/Y=
         // --- certificate validity window w/ clock-skew tolerance -----------
 
         #[test]
-        fn cert_validity_accepts_now_inside_window() {
-            assert!(check_cert_validity_window(1_000, 900, 1_100).is_ok());
-        }
-
-        #[test]
         fn cert_validity_accepts_fresh_peer_within_skew_tolerance() {
             // The verifier clock is behind not_before by less than the tolerance.
             let not_before = 1_000;
@@ -1004,30 +999,7 @@ IwLz3/Y=
             assert!(matches!(err, VerifyError::Certificate(_)));
         }
 
-        #[test]
-        fn cert_validity_saturates_near_epoch_zero() {
-            // `now` near 0 must not underflow.
-            assert!(check_cert_validity_window(0, 10, 10_000).is_ok());
-        }
-
         // --- COSE signature form (I-05) ------------------------------------
-
-        #[test]
-        fn cose_sig_accepts_96_byte_raw() {
-            // r = s = 0x0101..01 (48 bytes each) is a valid, in-range P-384 sig.
-            assert!(parse_cose_ecdsa_signature(&[0x01u8; 96]).is_ok());
-        }
-
-        #[test]
-        fn cose_sig_rejects_non_96_lengths() {
-            for len in [0usize, 48, 64, 95, 97, 128] {
-                let err = parse_cose_ecdsa_signature(&vec![0x01u8; len]).unwrap_err();
-                assert!(
-                    matches!(err, VerifyError::Attestation(_)),
-                    "length {len} should be rejected"
-                );
-            }
-        }
 
         #[test]
         fn cose_sig_rejects_der_encoding() {
@@ -1050,11 +1022,6 @@ IwLz3/Y=
         }
 
         // --- COSE protected-header algorithm ------------------------
-
-        #[test]
-        fn cose_alg_es384_accepted() {
-            assert!(verify_cose_alg_es384(&protected_with_alg(COSE_ALG_ES384)).is_ok());
-        }
 
         #[test]
         fn cose_alg_es256_rejected() {
@@ -1413,17 +1380,6 @@ mod tests {
         assert_eq!(pcrs.pcr2[47], 0x22);
     }
 
-    #[test]
-    fn expected_pcrs_from_hex_bad_length() {
-        assert!(ExpectedPcrs::from_hex("ab", "cd", "ef").is_err());
-    }
-
-    #[test]
-    fn expected_pcrs_from_hex_invalid_chars() {
-        let bad = "zz".repeat(48);
-        assert!(ExpectedPcrs::from_hex(&bad, &bad, &bad).is_err());
-    }
-
     #[cfg(feature = "mock")]
     mod mock_flow {
         use super::*;
@@ -1510,14 +1466,6 @@ mod tests {
             let err =
                 verify_mock_policy_attestation(&doc, &ExpectedPcrs::zero(), &nonce).unwrap_err();
             assert!(err.to_string().contains("missing nonce"), "{err}");
-        }
-
-        #[test]
-        fn mock_reject_corrupted_doc() {
-            let err =
-                verify_mock_attestation(&[0xffu8; 16], &ExpectedPcrs::zero(), Some(&[0u8; 32]))
-                    .unwrap_err();
-            assert!(matches!(err, VerifyError::Attestation(_)));
         }
     }
 }

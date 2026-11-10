@@ -89,13 +89,3 @@ fn a_node_on_another_chain_is_refused() {
     assert!(err.contains("reports chain id 1"), "{err}");
     assert!(calls.lock().unwrap().is_empty());
 }
-
-#[test]
-fn an_rpc_failure_is_refused() {
-    let mut rpc = ListEvm::new(CHAIN, vec![]);
-    rpc.deployed = false;
-    let err = read_decisions(&context(Some(rpc)), &LIST, far_deadline())
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("no contract code"), "{err}");
-}

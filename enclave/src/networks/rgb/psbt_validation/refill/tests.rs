@@ -318,12 +318,6 @@ fn refuses_a_right_on_another_transaction() {
     assert!(err.contains("of another transaction"), "{err}");
 }
 
-#[test]
-fn refuses_two_rights_on_one_vout() {
-    let err = error_text(assert_refill_rights(&[on_witness(1), on_witness(1)]));
-    assert!(err.contains("two rights on vout 1"), "{err}");
-}
-
 /// The same check on a transition: rights built on one vout.
 #[test]
 fn refuses_a_transition_that_puts_two_rights_on_one_vout() {

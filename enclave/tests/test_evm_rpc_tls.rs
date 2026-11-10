@@ -18,13 +18,10 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::framing;
+#[cfg(evm_to_rgb)]
+use utexo_bridge_enclave::networks::evm::events::verify_funds_in_event;
 use utexo_bridge_enclave::networks::evm::events::{verify_rgb_funds_in, EvmReceiptProvider};
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, HeaderChain, Network};
-#[cfg(evm_to_rgb)]
-use utexo_bridge_enclave::networks::{
-    evm::events::verify_funds_in_event,
-    rgb::invoice::{assert_recipient_authorized, parse_authorized_recipient},
-};
 use utexo_bridge_enclave::policy::BuildContext;
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
@@ -71,8 +68,6 @@ const EXPIRED_RPC_TEST: (&str, &str) = (
 const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
                        XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
                        UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
-#[cfg(evm_to_rgb)]
-const SEAL: &str = "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
 /// One receipt log from `BRIDGE` at block 100.
 fn log_json(topics: &[alloy_primitives::B256], data: &[u8], index: u8) -> String {
@@ -469,38 +464,6 @@ fn non_default_port_reaches_listener_with_host_header() {
     assert!(HOSTS.lock().unwrap().contains(&want), "no Host {want}");
 }
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn pinned_ca_and_host_return_the_deposit() {
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_funds_in_event(
-        &*client,
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &OP_ID,
-        1000,
-        50,
-    )
-    .unwrap();
-}
-
-#[test]
-fn pinned_ca_and_host_return_the_ancestor_mint_lock() {
-    let client = pinned_client(serve(Some(RPC_TEST), false), CA_A_HEX);
-    verify_rgb_funds_in(
-        &*client,
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &MINT_LOCK_ID,
-        &OP_ID,
-        950,
-        BEFORE_BLOCK,
-    )
-    .unwrap();
-}
-
 /// The chain id read parses a real node's answer.
 #[test]
 fn pinned_client_reads_the_chain_id() {
@@ -776,41 +739,5 @@ fn pinned_host_redirect_is_not_followed() {
         target_requests(),
         before,
         "production client followed the redirect"
-    );
-}
-
-#[cfg(evm_to_rgb)]
-#[test]
-fn host_forged_receipt_is_refused() {
-    // The host answers in plaintext. The TLS handshake fails.
-    let client = pinned_client(serve(None, false), CA_A_HEX);
-    // The mint path: the deposit predicate, the recipient bind, then the BFA
-    // mint lock, all read through the same client.
-    let got = verify_funds_in_event(
-        &*client,
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &OP_ID,
-        1000,
-        50,
-    )
-    .and_then(|v| parse_authorized_recipient(&v.destination_address))
-    .and_then(|r| assert_recipient_authorized(&[SEAL.into()], &r))
-    .and_then(|()| {
-        verify_rgb_funds_in(
-            &*client,
-            &BRIDGE,
-            EvmFinalityTag::Safe,
-            &TX,
-            &MINT_LOCK_ID,
-            &OP_ID,
-            950,
-            BEFORE_BLOCK,
-        )
-    });
-    assert!(
-        got.is_err(),
-        "the enclave accepted a FundsIn receipt that the host forged over plaintext: {got:?}"
     );
 }

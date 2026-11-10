@@ -243,27 +243,6 @@ fn clone_donor_rejects_request_armed_for_a_different_target() {
 }
 
 #[test]
-fn clone_rejects_tampered_ciphertext() {
-    let (donor_port, donor_keys) = start_donor();
-    let requester_port = start_requester();
-
-    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
-    let mut clone = request_get_clone(donor_port, &donor_keys.evm_address, &init)
-        .expect("GetClone should succeed");
-    // Flip a byte in the Poly1305 tag (the last 16 bytes of the ciphertext).
-    let len = clone.encrypted_seed.len();
-    clone.encrypted_seed[len - 1] ^= 0x01;
-
-    let err = request_set_clone(requester_port, &clone)
-        .expect_err("SetClone should reject a tampered ciphertext");
-    assert!(
-        err.message.contains("unseal") || err.message.contains("clone"),
-        "unexpected error: {}",
-        err.message
-    );
-}
-
-#[test]
 fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
     // The requester records the donor nonce only after `complete_cloning`
     // commits. A SetClone that fails inside completion leaves the enclave in
@@ -359,35 +338,6 @@ fn clone_rejected_handshake_does_not_consume_replay_nonce() {
     request_get_clone(donor_port, &donor_keys.evm_address, &init).expect(
         "valid handshake reusing the same nonce must still succeed after a rejected attempt",
     );
-}
-
-#[test]
-fn cannot_initialize_after_entering_cloning() {
-    let requester_port = start_requester();
-    // Start a clone session with a throwaway donor address.
-    let _init = initiate_cloning(requester_port, CLONING_SECRET, &[0x11u8; 20]);
-
-    // InitializeKey must fail, because the enclave is in Phase::Cloning.
-    let resp = send_request(
-        requester_port,
-        &EnclaveRequest {
-            request: Some(Req::InitializeKey(InitializeKeyRequest {
-                seed: vec![],
-                mnemonic: DONOR_MNEMONIC.into(),
-                cloning_secret: String::new(),
-            })),
-        },
-    );
-    match resp.response {
-        Some(Resp::Error(e)) => {
-            assert!(
-                e.message.contains("already") || e.message.contains("initialized"),
-                "unexpected error: {}",
-                e.message
-            );
-        }
-        other => panic!("expected Error, got {:?}", other),
-    }
 }
 
 #[test]

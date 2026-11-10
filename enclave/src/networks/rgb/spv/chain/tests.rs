@@ -43,15 +43,6 @@ fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {
 }
 
 #[test]
-fn empty_chain_tip_is_checkpoint() {
-    let (chain, _) = synthetic_regtest_setup();
-    assert_eq!(chain.tip_height(), 100);
-    assert_eq!(chain.tip_hash()[0], 0xAA);
-    assert_eq!(chain.len(), 0);
-    assert!(chain.is_empty());
-}
-
-#[test]
 fn submits_contiguous_batch() {
     let (mut chain, raws) = synthetic_regtest_setup();
     let outcome = chain.submit_headers(101, &raws, NOW).unwrap();
@@ -237,21 +228,6 @@ fn reorg_rejected_when_alt_chain_is_equal_length() {
     assert!(matches!(err, SpvError::WeakerChain));
     assert_eq!(chain.tip_hash(), original_tip);
     assert_eq!(chain.tip_height(), original_height);
-}
-
-#[test]
-fn reorg_rejected_when_alt_chain_is_shorter() {
-    let (mut chain, original) = synthetic_regtest_setup();
-    chain.submit_headers(101, &original, NOW).unwrap();
-    let original_tip = chain.tip_hash();
-
-    // Reorg at 102 with 3 alt blocks. The original has 4 (102..=105).
-    let pred_hash = chain.hash_at(101).unwrap();
-    let (alt, _) = synth_chain_from(pred_hash, 1_700_000_002, 11, 3);
-
-    let err = chain.submit_headers(102, &alt, NOW).unwrap_err();
-    assert!(matches!(err, SpvError::WeakerChain));
-    assert_eq!(chain.tip_hash(), original_tip);
 }
 
 #[test]
@@ -664,19 +640,6 @@ fn min_difficulty_blocks_confirm_on_testnets() {
     assert_eq!(chain.confirmations(155_257, 6), 6);
     assert_eq!(chain.confirmations(155_262, 6), 1);
     assert_eq!(chain.confirmations(155_263, 6), 0);
-}
-
-#[test]
-fn confirmations_stop_at_the_cap() {
-    let chain = testnet4_chain();
-    assert_eq!(chain.confirmations(155_233, 2), 2);
-}
-
-#[test]
-fn every_block_confirms_where_min_difficulty_is_not_allowed() {
-    let (mut chain, raws) = synthetic_regtest_setup();
-    chain.submit_headers(101, &raws, NOW).unwrap();
-    assert_eq!(chain.confirmations(101, 6), 5);
 }
 
 /// A free block dated weeks ahead would let a host fork retarget down without

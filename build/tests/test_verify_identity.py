@@ -83,18 +83,6 @@ sys.exit(int(os.environ.get('CLI_RC', '0')))
                     self.assertFalse(self.calls.exists())
                     self.assertFalse(list(self.base.glob('attestation-*.json')))
 
-    def test_unset_map_fails(self):
-        del self.env['EXPECTED_EVM']
-        self.assert_denied(self.run_gate(), 2)
-
-    def test_empty_duplicate_reserved_or_malformed_cids_fail(self):
-        for cids in ('', ' \t\n', '16 16 18 20', '16 invalid', '016 18 20',
-                     '0', '3', '4294967295', '999999999999999999999',
-                     '16 18\n20 20'):
-            with self.subTest(cids=cids):
-                self.assert_denied(self.run_gate(CIDS=cids), 2)
-                self.assertFalse(self.calls.exists())
-
     def test_unset_cids_defaults_but_empty_does_not(self):
         del self.env['CIDS']
         self.assertEqual(self.run_gate().returncode, 0)

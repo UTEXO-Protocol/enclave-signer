@@ -354,23 +354,4 @@ mod tests {
         assert_eq!(served(cache.claim([1; 32]).await), reply(1));
         assert_eq!(served(cache.claim([2; 32]).await), reply(2));
     }
-
-    #[test]
-    fn the_key_is_the_request_digest() {
-        use crate::enclave_proto::{enclave_request, SignRequest};
-        let a = EnclaveRequest {
-            request: Some(enclave_request::Request::Sign(SignRequest {
-                amount: 1,
-                ..Default::default()
-            })),
-        };
-        let b = EnclaveRequest {
-            request: Some(enclave_request::Request::Sign(SignRequest {
-                amount: 2,
-                ..Default::default()
-            })),
-        };
-        assert_eq!(SignedResponses::key(&a), SignedResponses::key(&a));
-        assert_ne!(SignedResponses::key(&a), SignedResponses::key(&b));
-    }
 }

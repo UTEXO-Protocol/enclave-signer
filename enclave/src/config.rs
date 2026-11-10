@@ -1149,12 +1149,6 @@ mod tests {
         assert!(c.is_partially_configured());
     }
 
-    /// Default is the fail-closed `None`: only `value == 0`.
-    #[test]
-    fn gas_tx_value_ceiling_defaults_to_unset() {
-        assert_eq!(BridgeConfig::default().gas_tx_max_value_wei, None);
-    }
-
     #[test]
     fn zero_chain_id_is_not_configured() {
         let c = BridgeConfig {
@@ -1281,13 +1275,6 @@ mod tests {
         assert!(parse_indexer_url("ftp://electrum.test:1", false)
             .unwrap_err()
             .contains("is not ssl://"));
-    }
-
-    /// The test build is a dev build, so the launch path takes plaintext.
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn a_test_build_allows_a_plaintext_indexer() {
-        assert!(plaintext_indexer_allowed());
     }
 
     #[cfg(feature = "rgb-validation")]

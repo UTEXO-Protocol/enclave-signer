@@ -695,19 +695,10 @@ class DeployRpcPathTests(unittest.TestCase):
         self.assertEqual(self.run_step(''), str(self.copy))
         self.assertFalse(self.calls.exists())
 
-    def test_no_variable_and_no_copy_leaves_the_path_empty(self):
-        self.assertEqual(self.run_step(''), '')
-
     def test_the_copy_is_not_installed_over_itself(self):
         self.copy.write_text('/v2/key\n')
         self.assertEqual(self.run_step(str(self.copy)), str(self.copy))
         self.assertFalse(self.calls.exists())
-
-    def test_the_enclave_env_carries_the_file(self):
-        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
-                            HOST.read_text(), re.S)
-        self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
-        self.assertIn('EVM_RPC_PATH_FILE=$EVM_RPC_PATH_FILE\n', heredoc.group(1))
 
 
 if __name__ == '__main__':

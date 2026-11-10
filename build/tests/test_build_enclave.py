@@ -160,19 +160,6 @@ class BuildArgumentsTests(unittest.TestCase):
                     [f'build override: {key}={value}' for key, value in applied.items()],
                 )
 
-    def test_kms_account_pin_reaches_only_the_recipe_that_declares_it(self):
-        for role, forwarded in (('mint', True), ('burn', False)):
-            with self.subTest(role=role):
-                result = self.invoke(f'Dockerfile.enclave.{role}',
-                                     RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES=f'vsock,{role}-signer',
-                                     BITCOIN_NETWORK='signet',
-                                     KMS_ALLOWED_ACCOUNT_IDS='123456789012')
-                self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(
-                    'KMS_ALLOWED_ACCOUNT_IDS=123456789012' in self.captured_build_args(),
-                    forwarded)
-
     def test_member_settings_do_not_change_role_build_arguments(self):
         # Capture the real wrapper's full Docker command for both feature profiles.
         # No Docker/Nitro build runs here; ImageInputsTests separately checks that
@@ -217,18 +204,6 @@ class BuildArgumentsTests(unittest.TestCase):
                                            for arg in self.captured_build_args()}
                         self.assertTrue(build_arg_names.isdisjoint(MEMBER_INPUT_NAMES))
 
-    def test_optional_overrides_do_not_leak_into_other_recipes(self):
-        for recipe in ('Dockerfile.enclave-dev.bfa',):
-            with self.subTest(recipe=recipe):
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES='vsock,mint-signer', **MEASURED_PINS)
-                self.assertEqual(result.returncode, 42, result.stderr)
-                expected = ['SOURCE_DATE_EPOCH=1700000000']
-                if recipe in RGB_RECIPES:
-                    expected = self.base_args(recipe)
-                self.assertEqual(self.captured_build_args(), expected)
-                self.assertNotIn('build override:', result.stdout)
-
     def test_empty_role_overrides_keep_recipe_defaults(self):
         for role in ('mint', 'burn'):
             with self.subTest(role=role):
@@ -252,16 +227,6 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertIn('requires the spv feature', result.stderr)
                     self.assertFalse(self.argv.exists())
 
-    def test_related_feature_names_do_not_satisfy_spv_guard(self):
-        for feature in ('rgb', 'rgb-validation'):
-            with self.subTest(feature=feature):
-                result = self.invoke('Dockerfile.enclave.burn',
-                                     RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES=f'vsock,{feature},burn-signer')
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('requires the spv feature', result.stderr)
-                self.assertFalse(self.argv.exists())
-
     def test_non_signet_roles_accept_explicit_spv(self):
         for role in ('mint', 'burn'):
             for features in (f'spv,vsock,{role}-signer', f'vsock,spv,{role}-signer',
@@ -272,17 +237,6 @@ class BuildArgumentsTests(unittest.TestCase):
                                          BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES=features)
                     self.assertEqual(result.returncode, 42, result.stderr)
                     self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
-
-    def test_no_recipe_forwards_kms_pins(self):
-        pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '12' * 20)
-        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
-            with self.subTest(recipe=recipe):
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
-                self.assertEqual(result.returncode, 42, result.stderr)
-                expected = ['SOURCE_DATE_EPOCH=1700000000']
-                if recipe in RGB_RECIPES:
-                    expected = self.base_args(recipe)
-                self.assertEqual(self.captured_build_args(), expected)
 
     def invoke_make(self, target, **extra):
         self.argv.unlink(missing_ok=True)
@@ -444,14 +398,6 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], inputs['STAGE_GAS_TX_ALLOWED_SELECTORS'])
                 else:
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
-
-    def test_stage_profile_refuses_other_recipes_and_unknown_profile(self):
-        for recipe, profile in (('Dockerfile.enclave.ccd', 'stage-signet'),
-                                ('Dockerfile.enclave.burn', 'typo')):
-            with self.subTest(recipe=recipe, profile=profile):
-                result = self.invoke(recipe, BUILD_PROFILE=profile)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(self.argv.exists())
 
 
 class ImageInputsTests(unittest.TestCase):

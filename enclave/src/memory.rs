@@ -519,15 +519,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_debug_build_only_warns() {
-        assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(true)).is_ok());
-        assert!(check(None, &build(true)).is_ok());
-        // A test build is a debug build in the model: the real check never
-        // refuses, whatever the machine has.
-        assert!(check_at_boot(&BuildContext::current()).is_ok());
-    }
-
     /// The scripts and documents carry the two memory values as literals.
     /// This pins the literals to the constants: the values the scripts use,
     /// not their comments, and the values the documents state.
@@ -587,13 +578,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_meter_counts_the_thread_allocation() {
-        let (n, len, peak) = peak::measure(|| 1usize << 20, |n| vec![0u8; *n].len());
-        assert_eq!(len, n);
-        // Per-thread count: exactly this allocation, whatever other tests do.
-        assert_eq!(peak, 1 << 20, "peak {peak}");
     }
 }

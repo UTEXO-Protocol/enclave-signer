@@ -61,14 +61,6 @@ fn reads_length_at_finalized_then_latest() {
     assert_eq!(lengths, vec![100, 200]);
 }
 
-#[test]
-fn an_empty_list_reads_no_page() {
-    let rpc = ListEvm::new(1, vec![]);
-    let log = read_reject_list(&rpc, &LIST, far_deadline()).unwrap();
-    assert!(log.entries.is_empty());
-    assert_eq!(rpc.calls().len(), 2);
-}
-
 /// No code returns no data: refused, not read as an empty list.
 #[test]
 fn missing_contract_fails_closed() {

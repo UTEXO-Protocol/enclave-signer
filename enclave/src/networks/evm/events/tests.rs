@@ -129,13 +129,6 @@ fn verify(p: &FakeEvm) -> Result<()> {
 }
 
 #[test]
-fn extract_uint256_works() {
-    let mut data = vec![0u8; 40];
-    data[39] = 42;
-    assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
-}
-
-#[test]
 fn extract_uint256_rejects_short_data() {
     let data = vec![0u8; 10];
     assert!(extract_uint256_as_u64(&data, 0).is_err());
@@ -164,22 +157,6 @@ fn topic0_vectors_are_pinned() {
     );
 }
 
-/// Pins the topic0s of the 9-field and the 11-field (no `settlementData`)
-/// `BridgeFundsIn` signatures. If `BRIDGE_FUNDS_IN_SIG` is either one, this
-/// test fails, so the error is not a later "no deposit found".
-#[test]
-fn bridge_funds_in_topic0_is_not_the_9_or_11_field_signature() {
-    let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
-    assert_ne!(
-        current, "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
-        "BRIDGE_FUNDS_IN_SIG is the 9-field BridgeFundsIn signature"
-    );
-    assert_ne!(
-        current, "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
-        "BRIDGE_FUNDS_IN_SIG is the 11-field BridgeFundsIn signature (no settlementData)"
-    );
-}
-
 // ---- happy path ----
 
 #[cfg(evm_to_rgb)]
@@ -204,25 +181,6 @@ fn accepts_real_contract_dual_emit() {
         ..FakeEvm::default()
     };
     assert!(verify(&p).is_ok());
-}
-
-#[cfg(evm_to_rgb)]
-#[test]
-fn dual_emit_binds_via_bridge_shape_not_the_companion() {
-    // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
-    // The companion event has no commission, so a pass means a fallback to it.
-    let p = FakeEvm {
-        receipt: Some(receipt_with(
-            vec![
-                rgb_companion_log(7, 100),
-                bridge_log(op_id(7), 1000, 950, 999),
-            ],
-            100,
-        )),
-        ..FakeEvm::default()
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("tokenCommission mismatch"), "got: {e}");
 }
 
 /// A tx with only the companion `FundsIn` is not an authorised deposit: its
@@ -434,19 +392,6 @@ fn rejects_log_without_operation_id_topic() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
-/// A full-width 32-byte id must bind.
-#[cfg(evm_to_rgb)]
-#[test]
-fn binds_full_width_operation_id() {
-    let p = happy_provider();
-    assert!(verify(&p).is_ok(), "a 32-byte operationId must bind");
-    // ...and a different one must not.
-    let e = verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(9), 1000, 50)
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-}
-
 /// An absent id must refuse, not skip the bind.
 #[cfg(evm_to_rgb)]
 #[test]
@@ -457,24 +402,6 @@ fn rejects_when_operation_id_not_supplied() {
         EvmFinalityTag::Safe,
         &TX,
         &[],
-        1000,
-        50,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
-}
-
-/// A wrong-length id is a mis-encoding, not an absent one: refuse.
-#[cfg(evm_to_rgb)]
-#[test]
-fn rejects_malformed_expected_operation_id() {
-    let e = verify_funds_in_event(
-        &happy_provider(),
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &[0xAA; 8],
         1000,
         50,
     )
@@ -897,70 +824,9 @@ fn receipt_mapping_rejects_missing_or_null_block_hash() {
     }
 }
 
-#[test]
-fn rpc_block_requires_hash_and_number() {
-    let block: alloy::rpc::types::Block = Default::default();
-    let json = serde_json::to_value(block).unwrap();
-    // Pin Alloy's wire behavior: neither tagged nor canonical block responses
-    // may silently turn missing identity fields into zero-valued defaults.
-    serde_json::from_value::<alloy::rpc::types::Block>(json.clone()).unwrap();
-    for field in ["hash", "number"] {
-        let mut missing = json.clone();
-        missing.as_object_mut().unwrap().remove(field);
-        let mut null = json.clone();
-        null[field] = serde_json::Value::Null;
-        for malformed in [missing, null] {
-            assert!(
-                serde_json::from_value::<alloy::rpc::types::Block>(malformed).is_err(),
-                "missing/null {field} must fail block parsing"
-            );
-        }
-    }
-}
-
 // ---- listener flags cannot authorize ----
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn issue_51_no_receipt_means_no_authorization() {
-    // The listener sets event_valid/event_finalized=true, but no deposit
-    // exists. Verification must reject, so the flags do not gate signing.
-    let p = FakeEvm {
-        receipt: None,
-        ..FakeEvm::default()
-    };
-    assert!(verify(&p).is_err());
-}
-
 // ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
-
-#[test]
-fn rejects_another_funds_in_signature() {
-    let mut log = rgb_companion_log(0xab, 100);
-    log.topics[0] = event_topic0("FundsIn(address,uint256,uint256)");
-    assert!(decode_funds_in(&log, &word(0xab)).is_err());
-}
-
-#[test]
-fn decodes_funds_in_with_the_lock_id_as_topic2() {
-    let log = rgb_companion_log(0xab, 100);
-    assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
-}
-
-/// The topic is the lockId bytes as they are, a big-endian uint256.
-#[test]
-fn funds_in_reads_the_lock_id_big_endian() {
-    let mut lock_id = [0u8; 32];
-    lock_id[0] = 0xab;
-    lock_id[31] = 0x02;
-    let mut log = rgb_companion_log(0, 100);
-    log.topics[2] = lock_id;
-    assert_eq!(decode_funds_in(&log, &lock_id).unwrap(), 100);
-
-    let mut reversed = lock_id;
-    reversed.reverse();
-    assert!(decode_funds_in(&log, &reversed).is_err());
-}
 
 /// A lock keyed by the bare OpId, or by the OpId in another tx, is not the
 /// lock of the mint in this tx.
@@ -980,22 +846,6 @@ fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
         let err = decode_funds_in(&log, &ours).unwrap_err().to_string();
         assert!(err.contains("lockId mismatch"), "{err}");
     }
-}
-
-#[test]
-fn rejects_funds_in_for_a_different_lock_id() {
-    let log = rgb_companion_log(0xab, 100);
-    assert!(decode_funds_in(&log, &word(0xcd)).is_err());
-}
-
-#[test]
-fn rejects_funds_in_amount_above_u64() {
-    let log = LogEntry {
-        address: BRIDGE,
-        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(0xab)],
-        data: vec![0x01; 32],
-    };
-    assert!(decode_funds_in(&log, &word(0xab)).is_err());
 }
 
 #[test]

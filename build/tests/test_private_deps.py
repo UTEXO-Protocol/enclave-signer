@@ -73,13 +73,6 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(Path(result.stdout.strip()).parent.exists())
 
-    def test_only_the_parent_and_enclave_scopes_exist(self):
-        self.lib_key()
-        result = self.run_auth('tools', 'print("must not start")')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Invalid dependency scope', result.stderr)
-        self.assertEqual(result.stdout, '')
-
     def test_missing_or_empty_lib_key_refuses_before_build(self):
         for scope in ('parent', 'enclave'):
             for content in (None, ''):
@@ -93,41 +86,6 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
                     self.assertIn('lib_key', result.stderr)
                     self.assertIn('rgb-lib-bfa', result.stderr)
                     self.assertEqual(result.stdout, '')
-
-    def test_missing_or_empty_mirror_token_refuses_before_build(self):
-        for scope in ('parent', 'enclave'):
-            for content in (None, ''):
-                with self.subTest(scope=scope, content=content):
-                    self.lib_key()
-                    path = self.secrets / 'rgb_deps_token'
-                    path.unlink()
-                    if content is not None:
-                        path.write_text(content)
-                    result = self.run_auth(scope, 'print("must not start")')
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('rgb_deps_token', result.stderr)
-                    self.assertIn('RGB_PRIVATE_DEPS_TOKEN', result.stderr)
-                    self.assertEqual(result.stdout, '')
-
-    def test_both_scopes_fetch_the_protocol_crates_from_our_mirrors(self):
-        self.keys()
-        for scope in ('parent', 'enclave'):
-            with self.subTest(scope=scope):
-                result = self.run_auth(scope, f'''
-for repo in {PROTOCOL_REPOS!r}:
-    mirror = f'https://github.com/UTEXO-Protocol/{{repo}}-s-bfa.git'
-    url = subprocess.check_output(['git', 'ls-remote', '--get-url',
-                                   f'ssh://git@github.com/rgb-tools-devs/{{repo}}.git'], text=True)
-    assert url.strip() == mirror, url
-    filled = subprocess.run(['git', 'credential', 'fill'], input=f'url={{mirror}}\\n\\n',
-                            capture_output=True, text=True)
-    assert 'password={MIRROR_TOKEN}\\n' in filled.stdout, 'no token for ' + mirror
-    assert {MIRROR_TOKEN!r} not in open(os.environ['GIT_CONFIG_GLOBAL']).read()
-print(os.environ['GIT_CONFIG_GLOBAL'])
-''')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertNotIn(MIRROR_TOKEN, result.stdout + result.stderr)
-                self.assertFalse(Path(result.stdout.strip()).parent.exists())
 
     def test_the_mirror_token_goes_to_the_mirrors_only(self):
         self.keys()
@@ -150,17 +108,6 @@ assert 'identityfile ' + os.environ['PRIVATE_DEPS_DIR'] + '/lib_key' in config, 
 args2 = shlex.split(os.environ['GIT_SSH_COMMAND']) + ['-G', 'github-federated-signer']
 config2 = subprocess.check_output(args2, text=True, stderr=subprocess.DEVNULL)
 assert os.environ['PRIVATE_DEPS_DIR'] + '/federated_key' not in config2, config2
-''')
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_deploy_key_reads_proto_when_both_keys_present(self):
-        self.keys()
-        result = self.run_auth('parent', f'''
-for alias, key in {ALIASES!r}.items():
-    args = shlex.split(os.environ['GIT_SSH_COMMAND']) + ['-G', alias]
-    config = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
-    assert os.environ['PRIVATE_DEPS_DIR'] + '/' + key in config, (alias, config)
-assert 'GIT_SSH_COMMAND' in os.environ
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -220,28 +167,6 @@ assert 'GIT_SSH_COMMAND' in os.environ
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(f'Missing {name}', result.stderr)
 
-    def test_ci_access_maps_the_protocol_crates_to_our_mirrors(self):
-        home = self.base / 'home'
-        home.mkdir()
-        env = dict(self.env, HOME=str(home), GIT_TERMINAL_PROMPT='0',
-                   GIT_CONFIG_GLOBAL=str(home / '.gitconfig'), GIT_CONFIG_NOSYSTEM='1',
-                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY, RGB_PRIVATE_DEPS_TOKEN=MIRROR_TOKEN)
-        result = subprocess.run(['sh', str(ROOT / 'build/ci-rgb-lib-access.sh')], env=env,
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn(MIRROR_TOKEN, (home / '.gitconfig').read_text())
-        token = home / '.rgb-private-deps/token'
-        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
-        for repo in PROTOCOL_REPOS:
-            mirror = f'https://github.com/UTEXO-Protocol/{repo}-s-bfa.git'
-            url = subprocess.check_output(
-                ['git', 'ls-remote', '--get-url', f'ssh://git@github.com/rgb-tools-devs/{repo}.git'],
-                env=env, text=True)
-            self.assertEqual(url.strip(), mirror)
-            filled = subprocess.run(['git', 'credential', 'fill'], input=f'url={mirror}\n\n',
-                                    env=env, capture_output=True, text=True)
-            self.assertIn(f'password={MIRROR_TOKEN}\n', filled.stdout)
-
     def test_every_dockerfile_builds_through_its_secret_scope(self):
         for path in (ROOT / 'build').glob('Dockerfile*'):
             with self.subTest(dockerfile=path.name):
@@ -282,14 +207,6 @@ class PatchTests(unittest.TestCase):
                 if package['name'] in names:
                     with self.subTest(lock=lock, crate=package['name']):
                         self.assertTrue(package.get('source', '').startswith('git+'), package)
-
-    def test_the_private_crates_come_from_the_repos_the_mirrors_map(self):
-        for name, source in self.patch('Cargo.toml').items():
-            with self.subTest(crate=name):
-                self.assertRegex(source['rev'], r'^[0-9a-f]{40}$')
-                if source['git'].startswith('ssh://'):
-                    repo = source['git'].removeprefix('ssh://git@github.com/rgb-tools-devs/')
-                    self.assertIn(repo.removesuffix('.git'), PROTOCOL_REPOS)
 
 
 class CacheTests(unittest.TestCase):

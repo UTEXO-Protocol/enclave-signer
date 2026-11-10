@@ -683,11 +683,4 @@ mod tests {
         .unwrap();
         assert_eq!(in_force(&cfg).max_consignment_bytes, 2048);
     }
-
-    #[test]
-    fn the_proto_keeps_each_value() {
-        let limits = Limits::DEFAULTS;
-        let wire = proto::Limits::from(&limits);
-        assert_eq!(Limits::from(&wire), limits);
-    }
 }

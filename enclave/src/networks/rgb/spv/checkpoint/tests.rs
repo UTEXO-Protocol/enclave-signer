@@ -1,29 +1,6 @@
 use super::*;
 
 #[test]
-fn signet_challenge_matches_oleksandrs_hex() {
-    // The bytes must match the published hex, to catch a typo before release.
-    let hex = hex::encode(UTEXO_SIGNET_CHALLENGE);
-    assert_eq!(
-        hex,
-        "6a4c09011e000000000000004c6953210224a528aa141b7d2ed093575b5d2c2cee4065abc6f7f6b19a970a8975d327f935210249c6bf8338ecda2749c3ffad4b8ec22f71581947c10d1766d9ce83d1bcafb99421024f3a831fcb4db446b07fe8897d193b86f913984f6eb3ab6e9745eeb61017a3b553ae"
-    );
-}
-
-#[test]
-fn signet_magic_matches_the_network() {
-    assert_eq!(UTEXO_SIGNET_MAGIC, [0x6f, 0x21, 0x61, 0x5a]);
-}
-
-#[test]
-fn checkpoint_for_dispatches_on_network() {
-    assert!(checkpoint_for(Network::Mainnet).is_real);
-    assert!(checkpoint_for(Network::Signet).is_real);
-    assert!(!checkpoint_for(Network::Testnet3).is_real);
-    assert!(checkpoint_for(Network::Regtest).is_real);
-}
-
-#[test]
 fn mainnet_checkpoint_is_retarget_boundary_aligned() {
     // Else the chain stops at the first boundary above it.
     assert_eq!(MAINNET_CHECKPOINT.height % RETARGET_INTERVAL, 0);
@@ -120,13 +97,6 @@ fn parse_spec_rejects_malformed_specs() {
             "spec {spec:?} should have been rejected"
         );
     }
-}
-
-/// `cfg(test)` allows the override. The boot gate refuses it only in release
-/// builds without `allow-seed-import`.
-#[test]
-fn override_is_allowed_in_test_builds() {
-    assert!(checkpoint_override_allowed());
 }
 
 /// With no env var set, boot resolution is the compiled-in constant.

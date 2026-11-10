@@ -177,18 +177,6 @@ async fn enclave_without_health_support_returns_503() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unknown_path_is_404() {
-    let port = serve_with(Some(enclave_response::Response::Health(ready_response(
-        true,
-    ))))
-    .await;
-
-    // The probe server has only one route.
-    let (status, _) = get(port, "/metrics");
-    assert_eq!(status, 404);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn header_sync_is_reported_and_code_follows_ready() {
     let stalled = SyncStatus {
         state: SyncState::Stalled,

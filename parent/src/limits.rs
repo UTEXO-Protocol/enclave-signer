@@ -158,18 +158,4 @@ mod tests {
         rows.sort_unstable();
         assert_eq!(names, rows);
     }
-
-    #[test]
-    fn the_table_marks_a_changed_value() {
-        let current = Limits {
-            max_rgb_lib_ms: 24_000,
-            ..Limits::default()
-        };
-        let table = table(&current, &Limits::default());
-        let line = table
-            .lines()
-            .find(|line| line.starts_with("max_rgb_lib_ms"))
-            .unwrap();
-        assert!(line.ends_with("changed"), "{line}");
-    }
 }

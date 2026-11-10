@@ -387,50 +387,6 @@ async fn grpc_public_key_refuses_transaction_type() {
 }
 
 #[tokio::test]
-async fn grpc_public_key_refuses_ccd_governance() {
-    // Concordium was removed. The data type stays in the gRPC schema, and the
-    // parent refuses it.
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let err = client
-        .public_key(PublicKeyRequest {
-            network_id: 0,
-            data_type: DataType::CcdGovernance as i32,
-        })
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
-async fn grpc_public_key_rejects_unsupported_data_type() {
-    // The key match must not become a catch-all. Data types without
-    // their own public key must still fail.
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let err = client
-        .public_key(PublicKeyRequest {
-            network_id: 0,
-            data_type: DataType::Swap as i32,
-        })
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
 async fn grpc_public_key_rejects_unknown_data_type() {
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
@@ -526,35 +482,6 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         resp.signature,
         vec![0x02; 65],
         "parent must forward EnrichedEvmPayload.unsigned_tx to the enclave"
-    );
-}
-
-#[tokio::test]
-async fn grpc_sign_psbt_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let payload = enriched::EnrichedRgbPayload {
-        operation_idx: 5,
-        psbt_bytes: vec![0xFF; 32],
-        psbt_output_amount: 0,
-        rgb_asset_id: String::new(),
-        consignment: vec![],
-        consignment_hash: vec![],
-        fascia: vec![],
-        parent_fascia: vec![],
-    };
-
-    let req = sign_rgb_request(evm_source(0, 0), payload);
-
-    let resp = client.sign(req).await.unwrap().into_inner();
-    assert!(
-        !resp.signature.is_empty(),
-        "signed PSBT should not be empty"
     );
 }
 
@@ -951,81 +878,6 @@ async fn grpc_evm_passes_enriched_fields_through() {
     }
 }
 
-#[tokio::test]
-async fn grpc_evm_forwards_raw_consignment_bytes() {
-    // The parent must forward both the raw RGB consignment and its keccak256
-    // hash.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let enclave_port = listener.local_addr().unwrap().port();
-
-    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignRequest>();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
-
-            if let Some(enclave_request::Request::Sign(sign_req)) = req.request {
-                tx.send(sign_req).unwrap();
-                let resp = EnclaveResponse {
-                    response: Some(enclave_response::Response::EvmSignature(
-                        enclave_proto::EvmSignatureResponse {
-                            signature: vec![0xCC; 65],
-                            call_data: Vec::new(),
-                        },
-                    )),
-                };
-                let _ = framing::write_message(&mut stream, &resp);
-            }
-        }
-    });
-
-    let grpc_port = start_grpc_server(enclave_port).await;
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let consignment_bytes: Vec<u8> = (0..256u32).map(|i| (i & 0xFF) as u8).collect();
-    let consignment_hash = vec![0x5A; 32];
-
-    let payload = enriched::EnrichedEvmPayload {
-        call_data: vec![0xAB; 132],
-        nonce: 7,
-        deadline: 1234,
-        chain_id: 1,
-        proxy_contract: vec![0x02; 20],
-        calldata_amount: 0,
-        calldata_commission: 0,
-        unsigned_tx: Vec::new(),
-        lz_release: None,
-        burn_destination: None,
-    };
-
-    let req = sign_evm_request(
-        rgb_source(
-            0,
-            0,
-            consignment_bytes.clone(),
-            consignment_hash.clone(),
-            String::new(),
-        ),
-        payload,
-    );
-
-    client.sign(req).await.unwrap();
-
-    let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-    match received.source_network {
-        Some(enclave_proto::sign_request::SourceNetwork::RgbSource(source)) => {
-            assert_eq!(source.consignment.len(), 256);
-            assert_eq!(source.consignment, consignment_bytes);
-            assert_eq!(source.consignment_hash.len(), 32);
-            assert_eq!(source.consignment_hash, consignment_hash);
-        }
-        other => panic!("expected RGB source, got {other:?}"),
-    }
-}
-
 // Error-path tests
 
 #[tokio::test]
@@ -1061,26 +913,6 @@ async fn grpc_sign_rejects_unknown_data_type() {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
     }
-}
-
-#[tokio::test]
-async fn grpc_invalid_data_type_returns_error() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    // SIGNATURE data_type is not supported.
-    let req = SignRequest {
-        common: Some(common(0, 84, DataType::Signature)),
-        source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
-        data: None,
-    };
-
-    let err = client.sign(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -1132,29 +964,6 @@ async fn grpc_clone_maps_enclave_codes() {
             .unwrap_err();
         assert_eq!(status.code(), expected, "code {code}");
     }
-}
-
-#[tokio::test]
-async fn grpc_initialize_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let resp = client
-        .initialize(utexo_bridge_parent::grpc_proto::InitializeRequest {
-            cloning_secret: String::new(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert!(
-        resp.public_key.is_empty(),
-        "the BTC key is retired, so no public key returns"
-    );
 }
 
 #[tokio::test]

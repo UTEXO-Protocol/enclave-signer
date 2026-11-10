@@ -577,9 +577,10 @@ overcounts a shared history, so it can refuse a shape rgb-lib would finish. It
 undercounts an unshared one by up to 2x, small next to the 55,000 ns it counts
 per opout.
 
-Measured in release mode on an Apple M1 Pro (`cargo test --release -p
-utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib
-caps -- --ignored --nocapture --test-threads=1`, `validation/tests/caps.rs`),
+Measured in release mode on an Apple M1 Pro with the timing tests of
+`validation/tests/caps.rs` (`cargo test --release -p utexo-bridge-enclave
+--no-default-features --features spv,burn-signer --lib caps -- --ignored
+--nocapture --test-threads=1`); commit b14a79e has those tests. Measured
 on rgb-lib 1ae1c160, 2026-10-30, at a load under 4 unless a cell names more,
 two runs each; a row marked "one run" ran once. rgb-lib 1ae1c160 walks each
 origin on its own, and nothing here was measured on 5010eefa: the "of which the

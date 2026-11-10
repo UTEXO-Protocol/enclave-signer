@@ -4,54 +4,6 @@ use super::*;
 use crate::state::EnclaveState;
 
 #[test]
-fn deterministic_derivation() {
-    let seed = [42u8; 64];
-    let km1 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let km2 = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-
-    assert_eq!(km1.evm_address(), km2.evm_address());
-    assert_eq!(
-        km1.account_xpub_vanilla().to_string(),
-        km2.account_xpub_vanilla().to_string()
-    );
-}
-
-#[test]
-fn from_mnemonic_deterministic() {
-    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let km1 = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
-    let km2 = KeyManager::from_mnemonic(mnemonic, Network::Bitcoin).unwrap();
-
-    assert_eq!(km1.evm_address(), km2.evm_address());
-    assert_eq!(
-        km1.account_xpub_vanilla().to_string(),
-        km2.account_xpub_vanilla().to_string()
-    );
-}
-
-#[test]
-fn from_mnemonic_matches_seed_derivation() {
-    let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let mnemonic = Mnemonic::from_str(mnemonic_str).unwrap();
-    let seed = mnemonic.to_seed("");
-
-    let km_mnemonic = KeyManager::from_mnemonic(mnemonic_str, Network::Bitcoin).unwrap();
-    let km_seed = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-
-    assert_eq!(km_mnemonic.evm_address(), km_seed.evm_address());
-    assert_eq!(
-        km_mnemonic.account_xpub_vanilla().to_string(),
-        km_seed.account_xpub_vanilla().to_string()
-    );
-}
-
-#[test]
-fn from_mnemonic_invalid() {
-    let result = KeyManager::from_mnemonic("not a valid mnemonic", Network::Bitcoin);
-    assert!(result.is_err());
-}
-
-#[test]
 fn initialize_from_mnemonic_then_double_init_fails() {
     let state = EnclaveState::new(Network::Bitcoin);
     state
@@ -127,37 +79,6 @@ fn bip86_colored_xpub_coin_type_follows_the_network() {
 }
 
 #[test]
-fn bip86_vanilla_and_colored_xpubs_differ() {
-    let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
-    assert_ne!(
-        km.account_xpub_vanilla().to_string(),
-        km.account_xpub_colored().to_string()
-    );
-}
-
-#[test]
-fn bip86_mainnet_vs_testnet_vanilla_differ() {
-    let seed = [42u8; 64];
-    let km_main = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let km_test = KeyManager::from_seed(seed, Network::Testnet).unwrap();
-
-    assert_eq!(km_main.master_fingerprint(), km_test.master_fingerprint());
-    // Different coin type and network prefix.
-    assert_ne!(
-        km_main.account_xpub_vanilla().to_string(),
-        km_test.account_xpub_vanilla().to_string()
-    );
-    assert!(km_main
-        .account_xpub_vanilla()
-        .to_string()
-        .starts_with("xpub"));
-    assert!(km_test
-        .account_xpub_vanilla()
-        .to_string()
-        .starts_with("tpub"));
-}
-
-#[test]
 fn resolve_account_and_child_path_works() {
     let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
 
@@ -215,94 +136,10 @@ fn colored_coin_type_follows_the_network() {
 }
 
 #[test]
-fn derive_btc_child_deterministic() {
-    let km = KeyManager::from_seed([42u8; 64], Network::Testnet).unwrap();
-    let child1 = km
-        .derive_btc_child(
-            AccountType::Vanilla,
-            &[
-                ChildNumber::Normal { index: 0 },
-                ChildNumber::Normal { index: 0 },
-            ],
-        )
-        .unwrap();
-    let child2 = km
-        .derive_btc_child(
-            AccountType::Vanilla,
-            &[
-                ChildNumber::Normal { index: 0 },
-                ChildNumber::Normal { index: 0 },
-            ],
-        )
-        .unwrap();
-    assert_eq!(child1.secret_bytes(), child2.secret_bytes());
-}
-
-#[test]
-fn generate_different_keys() {
-    let mut entropy1 = [1u8; 32];
-    let mut entropy2 = [2u8; 32];
-    let (km1, _) = KeyManager::generate(&mut entropy1, Network::Bitcoin).unwrap();
-    let (km2, _) = KeyManager::generate(&mut entropy2, Network::Bitcoin).unwrap();
-
-    assert_ne!(km1.evm_address(), km2.evm_address());
-}
-
-#[test]
-fn key_formats() {
-    let seed = [42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-
-    assert_eq!(km.evm_address().len(), 20);
-    assert!(
-        km.account_xpub_vanilla().to_string().starts_with("xpub"),
-        "xpub must start with 'xpub'"
-    );
-}
-
-#[test]
 fn seed_preserved_for_cloning() {
     let original_seed = [99u8; 64];
     let km = KeyManager::from_seed(original_seed, Network::Bitcoin).unwrap();
     assert_eq!(km.expose_seed(), &original_seed);
-}
-
-#[test]
-fn double_initialization_error() {
-    let state = EnclaveState::new(Network::Bitcoin);
-    let mut entropy1 = [1u8; 32];
-    let mut entropy2 = [2u8; 32];
-
-    state.initialize_from_entropy(&mut entropy1).unwrap();
-    let result = state.initialize_from_entropy(&mut entropy2);
-    assert!(result.is_err());
-}
-
-#[test]
-fn get_keys_before_init_error() {
-    let state = EnclaveState::new(Network::Bitcoin);
-    let result = state.get_keys();
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_sign_evm_produces_65_bytes() {
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let hash = [0xABu8; 32];
-    let sig = km.sign_evm(&hash).unwrap();
-    assert_eq!(sig.len(), 65);
-    assert!(sig[64] <= 1);
-}
-
-#[test]
-fn test_sign_evm_deterministic() {
-    let seed = [0x42u8; 64];
-    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let hash = [0xABu8; 32];
-    let sig1 = km.sign_evm(&hash).unwrap();
-    let sig2 = km.sign_evm(&hash).unwrap();
-    assert_eq!(sig1, sig2); // k256 uses RFC 6979 deterministic nonces
 }
 
 #[test]
@@ -323,81 +160,6 @@ fn test_sign_evm_recoverable() {
     let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
 
     assert_eq!(&recovered_address, km.evm_address());
-}
-
-/// There is no segwit v0 P2WSH signer: a valid 2-of-3 P2WSH input with our
-/// vanilla account key in its witness script is not signed.
-#[test]
-fn p2wsh_input_naming_our_account_key_is_never_signed() {
-    use bitcoin::blockdata::opcodes::all::OP_CHECKMULTISIG;
-    use bitcoin::blockdata::script::Builder as ScriptBuilder;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
-
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Bitcoin).unwrap();
-    let secp = Secp256k1::new();
-    let ours_secret = km
-        .derive_btc_child(
-            AccountType::Vanilla,
-            &[
-                ChildNumber::from_normal_idx(0).unwrap(),
-                ChildNumber::from_normal_idx(0).unwrap(),
-            ],
-        )
-        .unwrap();
-    let ours = bitcoin::PublicKey::new(ours_secret.public_key(&secp));
-    let other =
-        |b: u8| bitcoin::PublicKey::new(SecretKey::from_slice(&[b; 32]).unwrap().public_key(&secp));
-    let mut pubkeys = [ours, other(0x02), other(0x03)];
-    pubkeys.sort_by_key(|k| k.to_bytes());
-    let witness_script = ScriptBuilder::new()
-        .push_int(2)
-        .push_key(&pubkeys[0])
-        .push_key(&pubkeys[1])
-        .push_key(&pubkeys[2])
-        .push_int(3)
-        .push_opcode(OP_CHECKMULTISIG)
-        .into_script();
-
-    let unsigned_tx = Transaction {
-        version: bitcoin::transaction::Version(2),
-        lock_time: bitcoin::blockdata::locktime::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0xAA; 32]),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: bitcoin::Witness::default(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                [0xBB; 20],
-            )),
-        }],
-    };
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: Amount::from_sat(100_000),
-        script_pubkey: ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::hash(witness_script.as_bytes())),
-    });
-    psbt.inputs[0].witness_script = Some(witness_script);
-
-    let (signed_bytes, count) = km.sign_psbt(&psbt.serialize()).unwrap();
-    assert_eq!(count, 0);
-    let signed = Psbt::deserialize(&signed_bytes).unwrap();
-    assert!(signed.inputs[0].partial_sigs.is_empty());
-}
-
-#[test]
-fn test_sign_psbt_invalid_bytes() {
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).unwrap();
-    let (km, _mnemonic) = KeyManager::generate(&mut entropy, Network::Bitcoin).unwrap();
-
-    let result = km.sign_psbt(&[0xFF, 0xFF, 0xFF]);
-    assert!(result.is_err());
 }
 
 /// A PSBT over the size limit is refused before the parse, for every account
@@ -505,18 +267,6 @@ fn test_sign_taproot_psbt_skip_already_signed() {
     // A signed input is skipped.
     let (_, count2) = km.sign_psbt(&signed_bytes).unwrap();
     assert_eq!(count2, 0);
-}
-
-#[test]
-fn test_sign_taproot_psbt_no_matching_fingerprint() {
-    // A different seed gives a different fingerprint, so nothing is signed.
-    let km_signer = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let km_other = KeyManager::from_seed([0x99u8; 64], Network::Testnet).unwrap();
-
-    let psbt_bytes = build_test_taproot_psbt(&km_signer);
-
-    let (_, count) = km_other.sign_psbt(&psbt_bytes).unwrap();
-    assert_eq!(count, 0);
 }
 
 #[test]

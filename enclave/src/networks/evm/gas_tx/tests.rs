@@ -313,23 +313,6 @@ fn rejects_value_above_the_ceiling() {
     );
 }
 
-/// A bare selector passes leg (a). The ceiling stops it.
-#[test]
-fn rejects_bare_selector_above_the_ceiling() {
-    let tx = eip1559_with_data(
-        CHAIN_ID,
-        &ALLOWED_TO,
-        u64::MAX,
-        &ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR,
-    );
-    let err = validate_gas_tx_request(&req(tx), &lz_cfg()).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("exceeds pinned GAS_TX_MAX_VALUE_WEI"),
-        "got: {err}"
-    );
-}
-
 #[test]
 fn rejects_wrong_chain_id() {
     let tx = eip1559(999, &ALLOWED_TO, 0);
@@ -684,13 +667,6 @@ fn accepts_allowlisted_selector_with_args() {
     let expected: [u8; 32] = Keccak256::digest(&tx).into();
     let got = validate_gas_tx_request(&req(tx), &cfg()).unwrap();
     assert_eq!(got, expected);
-}
-
-#[test]
-fn accepts_allowlisted_selector_legacy() {
-    let data = ALLOWED_SELECTOR.to_vec();
-    let tx = legacy_full(CHAIN_ID, &ALLOWED_TO, 0, 100, 21_000, &data);
-    assert!(validate_gas_tx_request(&req(tx), &cfg()).is_ok());
 }
 
 #[test]

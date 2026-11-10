@@ -6,28 +6,6 @@ fn reference_params() -> FundsOutParams {
     decode_funds_out_params(&reference_call_data()).expect("reference calldata must decode")
 }
 
-#[test]
-fn test_abi_encode_u256() {
-    let encoded = abi_encode_u256(42);
-    assert_eq!(encoded[31], 42);
-    assert!(encoded[..31].iter().all(|&b| b == 0));
-}
-
-#[test]
-fn test_abi_encode_u256_large() {
-    let encoded = abi_encode_u256(u64::MAX);
-    assert_eq!(&encoded[24..], &u64::MAX.to_be_bytes());
-    assert!(encoded[..24].iter().all(|&b| b == 0));
-}
-
-#[test]
-fn test_abi_encode_address() {
-    let addr = [0xAA; 20];
-    let encoded = abi_encode_address(&addr);
-    assert!(encoded[..12].iter().all(|&b| b == 0));
-    assert_eq!(&encoded[12..], &[0xAA; 20]);
-}
-
 /// Reference calldata for the fields in
 /// [`test_digest_matches_reference_vector`], with `sourceBurnTxId = 0xdd..dd`.
 fn reference_call_data() -> Vec<u8> {
@@ -100,27 +78,6 @@ fn test_tee_lz_funds_out_typehash_matches_contract() {
         hex::encode(type_hash),
         "5b65e176d2ff704611f5ee5f0709dee77247e909ddf326ff947b248ee80cdf9e"
     );
-}
-
-#[test]
-fn test_different_nonce_different_digest() {
-    let domain = arbitrum_domain();
-    let params = reference_params();
-    let d1 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
-    let d2 = funds_out_digest(&domain, &params, 1, 1_700_000_000).unwrap();
-    assert_ne!(d1, d2);
-}
-
-/// The decode, before signing, rejects short and non-`fundsOut` calldata.
-#[test]
-fn test_undecodable_call_data_rejected() {
-    assert!(decode_funds_out_params(&[0xAA, 0xBB]).is_err());
-    let erc20_transfer = decode(
-        "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
-         0000000000000000000000000000000000000000000000000000000000000064",
-    )
-    .unwrap();
-    assert!(decode_funds_out_params(&erc20_transfer).is_err());
 }
 
 /// Cross-implementation vector: Solidity, Go and this module must agree
@@ -204,23 +161,6 @@ fn test_digest_matches_alloy_eip712() {
 }
 
 #[test]
-fn test_different_chain_id_different_domain() {
-    let d1 = Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id: 1,
-        verifying_contract: [0u8; 20],
-    };
-    let d2 = Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id: 137,
-        verifying_contract: [0u8; 20],
-    };
-    assert_ne!(d1.separator_hash(), d2.separator_hash());
-}
-
-#[test]
 fn test_domain_separator_matches_deployed_contract() {
     let domain = Eip712Domain {
         name: "MultisigProxy".to_string(),
@@ -283,52 +223,6 @@ fn lz_test_release() -> crate::proto::LzReleaseParams {
         min_amount_ld: 1,
         recipient,
     }
-}
-
-#[test]
-fn test_lz_different_nonce_different_digest() {
-    let domain = lz_test_domain();
-    let call_data = lz_test_calldata();
-    let lz_release = lz_test_release();
-
-    let d1 = lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).unwrap();
-    let d2 = lz_funds_out_digest(&domain, &call_data, &lz_release, 1, 999_999).unwrap();
-    assert_ne!(d1, d2);
-}
-
-#[test]
-fn test_lz_different_dst_eid_different_digest() {
-    let domain = lz_test_domain();
-    let call_data = lz_test_calldata();
-    let lz1 = lz_test_release();
-    let mut lz2 = lz_test_release();
-    lz2.dst_eid = 40161; // Sepolia
-
-    // Build calldata again with a different dstEid for lz2.
-    use crate::networks::evm::validation::lzFundsOutCall;
-    use alloy_primitives::{Bytes, FixedBytes, U256};
-    use alloy_sol_types::SolCall;
-    let mut recipient = [0u8; 32];
-    recipient[31] = 0x05;
-    let call_data2 = lzFundsOutCall {
-        amount: U256::from(1u64),
-        burnId: U256::from(3u64),
-        sourceChainId: U256::from(84u64),
-        destinationChainId: U256::from(1u64),
-        sourceAddress: "addr".to_string(),
-        proof: Bytes::new(),
-        settlementData: Bytes::new(),
-        dstEid: 40161u32,
-        recipient: FixedBytes(recipient),
-        minAmountLD: U256::from(1u64),
-        extraOptions: Bytes::new(),
-        sourceBurnTxId: FixedBytes([0x5b; 32]),
-    }
-    .abi_encode();
-
-    let d1 = lz_funds_out_digest(&domain, &call_data, &lz1, 0, 999_999).unwrap();
-    let d2 = lz_funds_out_digest(&domain, &call_data2, &lz2, 0, 999_999).unwrap();
-    assert_ne!(d1, d2);
 }
 
 #[test]

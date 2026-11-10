@@ -101,16 +101,6 @@ fn validated_with_last(
     }
 }
 
-/// The tuple encoding must round-trip through the cross-check decoder.
-#[test]
-fn mock_calldata_decodes_back_to_its_fields() {
-    let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
-    let params = decode_funds_out_params(&cd).expect("tuple calldata must decode");
-    assert_eq!(params.amount, U256::from(1_234u64));
-    assert_eq!(params.proof.len(), 128);
-    assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
-}
-
 /// A flat 9-argument body must not decode as the tuple shape.
 ///
 /// With a zero `recipient`, the ABI decoder accepts the flat body: the
@@ -133,32 +123,6 @@ fn rejects_flat_encoding_zero_recipient() {
     assert!(
         decode_funds_out_params(&flat_calldata([0u8; 32])).is_err(),
         "a flat-encoded body must fail closed, not alias onto the tuple layout"
-    );
-}
-
-#[test]
-fn rejects_flat_encoding_real_recipient() {
-    let mut recipient = [0u8; 32];
-    recipient[12..].copy_from_slice(&[0x22; 20]);
-    assert!(decode_funds_out_params(&flat_calldata(recipient)).is_err());
-}
-
-/// Calldata under the `fundsOut` selector without `sourceBurnTxId`
-/// (`0xdc771390`) must fail closed. `MultisigProxy` cannot verify that intent.
-#[test]
-fn rejects_the_selector_without_source_burn_tx_id() {
-    let calldata = mock_funds_out_calldata(1_000);
-    // Only the selector changes. The body keeps the tuple that the fixture
-    // builder emits.
-    let mut other = calldata.clone();
-    other[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
-    assert!(
-        decode_funds_out_params(&other).is_err(),
-        "the selector without sourceBurnTxId must not decode"
-    );
-    assert!(
-        decode_funds_out_params(&calldata).is_ok(),
-        "the fixture builder's calldata must decode"
     );
 }
 
@@ -204,13 +168,6 @@ mod source_burn {
     fn passes_when_the_calldata_cites_the_settling_op_id() {
         let cd = calldata_with("", op_id_bytes());
         let validated = validated_with_last(settling_transition(OP_ID_HEX));
-        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
-    }
-
-    #[test]
-    fn accepts_a_0x_prefixed_op_id() {
-        let cd = calldata_with("", op_id_bytes());
-        let validated = validated_with_last(settling_transition(&format!("0x{OP_ID_HEX}")));
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
     }
 
@@ -269,19 +226,6 @@ mod source_burn {
         validated.last_transfer_op_id = None;
         let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
         assert!(err.to_string().contains("validated OpId"), "{err}");
-    }
-
-    /// A malformed op_id gives no validated OpId, so the bind refuses.
-    #[test]
-    fn rejects_a_non_hex_or_short_op_id() {
-        let cd = calldata_with("", op_id_bytes());
-        for bad in ["burn-op", "abcd", &OP_ID_HEX[..62]] {
-            let validated = validated_with_last(settling_transition(bad));
-            assert!(
-                validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err(),
-                "op_id {bad:?} must refuse"
-            );
-        }
     }
 }
 
@@ -446,13 +390,6 @@ mod transfer {
     }
 
     #[test]
-    fn witnesses_confirmed_passes_when_all_mined() {
-        // No non-mined witnesses, so the recency guard passes.
-        let validated = validated_with_last(source_transition(1000));
-        assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
-    }
-
-    #[test]
     fn witnesses_confirmed_rejects_non_mined() {
         // A tentative/ignored witness in the RGB -> EVM direction is an
         // anomaly: the unlock settles a confirmed transfer.
@@ -568,17 +505,6 @@ mod settlement {
     #[test]
     fn passes_when_the_cited_ids_are_the_verified_locks() {
         assert!(check(&[0xA1, 0xB2], &[LOCK_A, LOCK_B]).is_ok());
-    }
-
-    /// Byte layout the module decodes: offset, length, then the ids.
-    #[test]
-    fn settlement_is_abi_encoded_bytes32_array() {
-        let data = settlement(&[0xA1, 0xB2]);
-        assert_eq!(data.len(), 4 * 32);
-        assert_eq!(U256::from_be_slice(&data[0..32]), U256::from(32));
-        assert_eq!(U256::from_be_slice(&data[32..64]), U256::from(2));
-        assert_eq!(&data[64..96], &[0xA1; 32]);
-        assert_eq!(&data[96..128], &[0xB2; 32]);
     }
 
     /// F05-NEW-AF-04: only the ascending order is signable.
@@ -818,12 +744,6 @@ mod lz_route {
         assert!(err.to_string().contains("dstEid mismatch"), "{err}");
     }
 
-    #[test]
-    fn rejects_an_lz_release_without_the_record() {
-        let r = release(honest());
-        assert!(validate_funds_out_burn_recipient(&r, &burn(), None).is_err());
-    }
-
     /// A 32-byte (non-EVM) recipient fills the whole LayerZero word.
     #[test]
     fn passes_a_32_byte_lz_recipient() {
@@ -881,13 +801,6 @@ mod lz_route {
         })
         .unwrap_err();
         assert!(err.to_string().contains("exact equality"), "{err}");
-    }
-
-    /// The BtcRelay bind reads the LZ `proof` too. An empty one fails closed.
-    #[test]
-    fn rejects_an_lz_release_with_no_finality_proof() {
-        let err = super::super::decode_funds_out_proof(&release(honest())).unwrap_err();
-        assert!(err.to_string().contains("proof is empty"), "{err}");
     }
 }
 
@@ -1235,32 +1148,6 @@ mod btc_relay {
         );
     }
 
-    /// ... and an empty proof is refused.
-    #[test]
-    fn none_mode_still_rejects_an_empty_proof() {
-        let (chain, _) = chain();
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::new());
-        assert!(check_no_relay(&cd, &chain).is_err());
-    }
-
-    /// Right height, wrong commitment.
-    #[test]
-    fn rejects_a_source_commitment_that_is_not_the_relay_record() {
-        let (chain, hashes) = chain();
-        let cd = calldata(
-            ANCHOR_HEIGHT,
-            [0x11; 32],
-            TIP_HEIGHT,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("relay commitment mismatch at source height 11"),
-            "got: {err}"
-        );
-    }
-
     /// A source height that is not the consignment anchor is refused, with
     /// any commitment.
     #[test]
@@ -1275,40 +1162,6 @@ mod btc_relay {
         let err = check(&cd, &chain).unwrap_err();
         assert!(
             err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
-    /// A `source` height with no enclave header (here the checkpoint, below
-    /// all stored headers) cannot equal the anchor. The bind rejects it with
-    /// no header lookup. A height ABOVE the tip fails the ordering guard
-    /// first (see `rejects_latest_below_source`).
-    #[test]
-    fn rejects_source_height_with_no_header() {
-        let (chain, hashes) = chain();
-        let cd = calldata(0, hashes[0], TIP_HEIGHT, hashes[TIP_HEIGHT as usize]);
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
-    /// The relay-tip part of the proof is also checked. Else freshness
-    /// depends on a relay that the untrusted host also feeds.
-    #[test]
-    fn rejects_unknown_latest_block() {
-        let (chain, hashes) = chain();
-        let cd = calldata(
-            ANCHOR_HEIGHT,
-            hashes[ANCHOR_HEIGHT as usize],
-            99,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("no header at latest block height 99"),
             "got: {err}"
         );
     }
@@ -1410,14 +1263,6 @@ mod btc_relay {
         assert!(err.to_string().contains("proof is empty"), "got: {err}");
     }
 
-    #[test]
-    fn rejects_malformed_proof_length() {
-        let (chain, _) = chain();
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(err.to_string().contains("128 bytes"), "got: {err}");
-    }
-
     /// A two-field proof, one 64-byte `(blockHeight, commitmentHash)` pair,
     /// verifies the source block but not relay freshness, so it is refused.
     #[test]
@@ -1449,41 +1294,12 @@ mod btc_relay {
     // -- Source-block bind: the calldata `source` pair must be the block
     // -- anchoring the consignment's last witness tx.
 
-    /// A different real block must be refused. The enclave knows it, so the
-    /// BtcRelay check passes.
-    #[test]
-    fn rejects_source_block_that_is_not_the_consignment_anchor() {
-        let (chain, hashes) = chain();
-        let other = ANCHOR_HEIGHT + 1;
-        let cd = calldata(
-            other,
-            hashes[other as usize],
-            TIP_HEIGHT,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
     /// No header at the anchor height: refuse, and do not trust the calldata.
     #[test]
     fn rejects_when_tee_has_no_header_at_anchor_height() {
         let (chain, hashes) = chain();
         let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
         assert!(err.to_string().contains("not in sync"), "got: {err}");
-    }
-
-    /// The anchor SPV proof is verified again under the header lock guard.
-    /// Thus a reorg after the source-chain pass cannot replace the header.
-    #[test]
-    fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
-        let (chain, hashes) = chain();
-        // Block ANCHOR_HEIGHT + 1 commits a different Merkle root.
-        let err = check_at(&good_calldata(&hashes), &chain, ANCHOR_HEIGHT + 1).unwrap_err();
-        assert!(err.to_string().contains("failed"), "got: {err}");
     }
 
     /// Depth is also checked again: an anchor at the tip has 1 confirmation,

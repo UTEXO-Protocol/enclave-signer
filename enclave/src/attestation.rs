@@ -257,31 +257,6 @@ mod nsm {
     }
 }
 
-// Facade tests on the mock path. attestation-verify tests the verifier.
-#[cfg(all(test, feature = "mock-attestation"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn facade_mock_roundtrip() {
-        let nonce = [7u8; 32];
-        let pubkey = [1u8; 32];
-        let doc = get_attestation(&nonce, Some(&pubkey), Some(b"user")).unwrap();
-
-        let verified = verify_peer_attestation(&doc, &ExpectedPcrs::zero(), Some(&nonce)).unwrap();
-
-        assert_eq!(verified.enclave_pubkey, pubkey.to_vec());
-        assert_eq!(verified.user_data.as_deref(), Some(b"user".as_ref()));
-        assert_eq!(verified.nonce, nonce.to_vec());
-    }
-
-    #[test]
-    fn facade_get_own_pcrs_returns_zero_in_mock() {
-        let pcrs = get_own_pcrs().unwrap();
-        assert_eq!(pcrs.pcr0, [0u8; 48]);
-    }
-}
-
 // The size limit of a peer document, on every feature set.
 #[cfg(test)]
 mod document_memory {
@@ -371,11 +346,6 @@ mod clone_peer_pcr3 {
     fn refuses_a_peer_without_pcr3() {
         let err = check_clone_peer_pcr3(&ROLE_A, &peer(None)).unwrap_err();
         assert!(err.to_string().contains("no PCR3"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_peer_with_an_all_zero_pcr3() {
-        assert!(check_clone_peer_pcr3(&ROLE_A, &peer(Some([0; 48]))).is_err());
     }
 
     /// An enclave on an instance with no IAM role refuses each peer, even

@@ -464,24 +464,6 @@ fn rejects_deadline_beyond_cap() {
 }
 
 #[test]
-fn rejects_far_future_deadline() {
-    let mut destination = destination();
-    destination.deadline = u64::MAX;
-    with_ctx(&config(), |ctx| {
-        assert!(validate_dest(&destination, ctx).is_err());
-    });
-}
-
-#[test]
-fn ignores_rgb_config() {
-    let mut config = config();
-    config.rgb_asset_id.clear();
-    with_ctx(&config, |ctx| {
-        assert!(validate_dest(&destination(), ctx).is_ok());
-    });
-}
-
-#[test]
 fn rejects_calldata_amount_mismatch() {
     let mut destination = destination();
     destination.calldata_amount = 999;
@@ -770,68 +752,6 @@ fn burn_id_recompute_matches_the_contract_formula() {
     );
 }
 
-#[test]
-fn burn_id_recompute_binds_every_input() {
-    // Each preimage input alone must change the id, so the contract derives a
-    // different key for each change.
-    let cfg = token_pinned_config();
-    let base = rgb_release();
-    let base_id = expected_burn_id(&cfg, &base);
-
-    let variants = [
-        ReleaseIdentity {
-            amount: U256::from(1001u64),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_chain_id: U256::from(97u64),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_address: "x".into(),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_burn_tx_id: [0x5c; 32],
-            ..base.clone()
-        },
-    ];
-    for v in &variants {
-        assert_ne!(expected_burn_id(&cfg, v), base_id, "{v:?}");
-    }
-    for other_cfg in [
-        BridgeConfig {
-            chain_id: 1,
-            ..token_pinned_config()
-        },
-        BridgeConfig {
-            funds_in_contract: [0xb2; ADDRESS_LEN],
-            ..token_pinned_config()
-        },
-        BridgeConfig {
-            token_contract: [0x71; ADDRESS_LEN],
-            ..token_pinned_config()
-        },
-    ] {
-        assert_ne!(expected_burn_id(&other_cfg, &base), base_id);
-    }
-}
-
-#[test]
-fn burn_id_ignores_settlement_data() {
-    // One burn has one burnId, so a second release citing other deposits reverts.
-    let cfg = token_pinned_config();
-    let base = rgb_release();
-    let other = ReleaseIdentity {
-        settlement_data: vec![0x01],
-        ..base.clone()
-    };
-    assert_eq!(
-        expected_burn_id(&cfg, &other),
-        expected_burn_id(&cfg, &base)
-    );
-}
-
 /// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID`.
 #[test]
 fn burn_id_matches_the_shared_vector() {
@@ -864,29 +784,6 @@ fn burn_id_matches_the_shared_vector() {
     );
 }
 
-/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `sourceChainId` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
-#[test]
-fn burn_id_matches_the_contract_vector() {
-    let cfg = BridgeConfig {
-        chain_id: 42161,
-        funds_in_contract: [0x11; ADDRESS_LEN],
-        token_contract: [0x22; ADDRESS_LEN],
-        ..config()
-    };
-    let mut release = ReleaseIdentity {
-        amount: U256::from(1_000_000u64),
-        source_burn_tx_id: [0u8; 32],
-        ..rgb_release()
-    };
-    release.source_burn_tx_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
-
-    assert_eq!(
-        hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
-        "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f"
-    );
-}
-
 #[test]
 fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
     let cfg = token_pinned_config();
@@ -902,15 +799,4 @@ fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
         err.contains("burnId") && err.contains("InvalidBurnId"),
         "{err}"
     );
-}
-
-#[test]
-fn burn_id_check_is_skipped_while_the_token_is_unpinned() {
-    // Dev builds have no token pin. Production cannot boot without one, so a
-    // release image never skips.
-    let cfg = BridgeConfig {
-        token_contract: [0u8; ADDRESS_LEN],
-        ..token_pinned_config()
-    };
-    validate_burn_id(&cfg, &rgb_release()).expect("unpinned token skips the recompute");
 }

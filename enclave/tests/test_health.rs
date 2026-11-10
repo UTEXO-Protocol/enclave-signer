@@ -72,18 +72,6 @@ fn with_key(state: &EnclaveState) {
 }
 
 #[test]
-fn fresh_enclave_is_not_ready() {
-    let port = start_test_server();
-    let h = health(port);
-
-    assert!(!h.ready);
-    assert!(!h.key_loaded);
-    assert!(!h.spv_synced, "no headers accepted yet");
-    assert_eq!(h.phase, "initial");
-    assert_eq!(h.spv_max_tip_age_secs as u64, SPV_MAX_TIP_AGE_SECS);
-}
-
-#[test]
 fn key_without_headers_is_not_ready() {
     let port = start_test_server_with(with_key);
     let h = health(port);

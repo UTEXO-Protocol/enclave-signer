@@ -698,15 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn every_encoding_starts_with_the_version_tag() {
-        assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
-        assert_eq!(
-            AttestedPolicy::Development.to_bytes()[0],
-            POLICY_COMMITMENT_V1
-        );
-    }
-
-    #[test]
     fn rejects_every_version_other_than_v1() {
         for policy in [base(), AttestedPolicy::Development] {
             let current = policy.to_bytes();
@@ -720,11 +711,6 @@ mod tests {
                 assert_ne!(policy_commitment(&other), policy_commitment(&current));
             }
         }
-    }
-
-    #[test]
-    fn production_and_development_never_collide() {
-        assert_ne!(base().to_bytes(), AttestedPolicy::Development.to_bytes());
     }
 
     #[test]

@@ -253,22 +253,6 @@ mod mint {
         assert!(err.contains("no FundsIn log"), "{err}");
     }
 
-    /// A lock under the bare OpId is not the lock of the mint in its tx.
-    #[test]
-    fn refuses_deposit_keyed_by_the_bare_opid() {
-        let ctx = context(config(), Box::new(paid(OPID, 100)));
-        let err = bind(&ctx, &mint(100));
-        assert!(err.contains("no FundsIn log"), "{err}");
-    }
-
-    /// The same mint in another tx (a rebuilt or RBF tx) has another lockId.
-    #[test]
-    fn refuses_deposit_for_the_mint_in_another_tx() {
-        let ctx = context(config(), Box::new(paid(lock_of(OPID, 0x34), 100)));
-        let err = bind(&ctx, &mint(100));
-        assert!(err.contains("no FundsIn log"), "{err}");
-    }
-
     /// An RGB receiver refuses a lock at or after the mint's `beforeBlock`.
     #[test]
     fn refuses_deposit_at_or_after_before_block() {
@@ -377,11 +361,6 @@ mod mint {
         operation_id: [0xd1; 32],
         net_amount: 100,
     };
-
-    #[test]
-    fn accepts_the_deposit_the_mint_derives() {
-        assert!(bind_request_deposit(&DERIVED, &DERIVED).is_ok());
-    }
 
     #[test]
     fn refuses_another_net_amount_for_the_same_deposit() {

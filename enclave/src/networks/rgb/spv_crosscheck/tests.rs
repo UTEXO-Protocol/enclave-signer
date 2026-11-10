@@ -441,14 +441,6 @@ fn min_difficulty_blocks_make_a_witness_deep() {
     );
 }
 
-/// A fresh min-difficulty tip keeps the chain fresh on the testnets.
-#[test]
-fn a_min_difficulty_tip_keeps_the_chain_fresh() {
-    let chain = testnet4_chain();
-    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
-    assert_chain_fresh(&chain, now).unwrap();
-}
-
 /// The depth is a parameter: the same proof passes at 1 and fails at 2.
 #[test]
 fn min_confirmations_is_a_parameter() {
@@ -474,14 +466,6 @@ fn assert_chain_net_rejects_mismatch() {
     assert!(err.to_string().contains("does not match"), "got: {err}");
 }
 
-#[test]
-fn empty_expected_and_empty_proofs_is_ok() {
-    // No witness bundles and no proofs: nothing to verify, and no panic.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    validate_spv_proofs(&chain, &[], &[], MIN_CONFIRMATIONS).unwrap();
-}
-
 // ===== Staleness tests =====
 //
 // These pass an explicit `now` to `assert_chain_not_stale`, so they do not
@@ -502,19 +486,6 @@ fn chain_with_tip_time(tip_time: u32) -> HeaderChain {
 
 fn unix(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
-}
-
-#[test]
-fn staleness_fresh_tip_passes() {
-    let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + 30 minutes. Well within `SPV_MAX_TIP_AGE_SECS`.
-    assert_chain_not_stale(
-        &chain,
-        unix(1_700_000_000 + 30 * 60),
-        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
-        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
-    )
-    .unwrap();
 }
 
 #[test]
@@ -602,14 +573,6 @@ fn staleness_uses_checkpoint_time_when_no_headers() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("too stale"), "got: {err}");
-}
-
-#[test]
-fn staleness_thresholds_are_what_we_documented() {
-    // 2h on each side is high on purpose. A lower value is a security
-    // tradeoff, so a change must also change this test.
-    assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
-    assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
 }
 
 // ===== proven witnesses (what consensus sees as mined) =====

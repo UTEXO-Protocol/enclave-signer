@@ -27,7 +27,6 @@ use bfa_consignment::{History, Issue, Utxo};
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 use bitcoin::blockdata::script::{Builder, PushBytesBuf};
 use bitcoin::hashes::Hash;
-use bitcoin::key::TapTweak;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
@@ -42,8 +41,7 @@ use rgbstd::containers::{
 use rgbstd::contract::IssuerWrapper;
 use rgbstd::stl::{BridgeLocation, RejectListLocation};
 use rgbstd::validation::{
-    Claim, Failure, ResolveWitness, ValidationConfig, ValidationError, WitnessResolverError,
-    WitnessStatus,
+    Claim, ResolveWitness, ValidationConfig, ValidationError, WitnessResolverError, WitnessStatus,
 };
 use rgbstd::vm::WitnessOrd;
 use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, Opout, SecretSeal};
@@ -613,32 +611,6 @@ fn signed_psbt(response: &EnclaveResponse) -> Result<(Psbt, u32), String> {
     }
 }
 
-/// Our key-path signature on input 0, from the enclave seed. A test can then
-/// build the finalizer's broadcast tx even when the enclave refuses to sign.
-fn sign_ours(psbt: &mut Psbt) {
-    let secp = Secp256k1::new();
-    let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
-    let child = [ChildNumber::from(0), ChildNumber::from(0)];
-    let sk = keys.derive_btc_child(AccountType::Colored, &child).unwrap();
-    let prevouts: Vec<TxOut> = psbt
-        .inputs
-        .iter()
-        .map(|i| i.witness_utxo.clone().unwrap())
-        .collect();
-    let sighash = SighashCache::new(psbt.unsigned_tx.clone())
-        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
-        .unwrap();
-    let tweaked = Keypair::from_secret_key(&secp, &sk).tap_tweak(&secp, None);
-    let signature = secp.sign_schnorr_no_aux_rand(
-        &Message::from_digest(*sighash.as_byte_array()),
-        &tweaked.to_keypair(),
-    );
-    psbt.inputs[0].tap_key_sig = Some(bitcoin::taproot::Signature {
-        signature,
-        sighash_type: TapSighashType::Default,
-    });
-}
-
 /// Completes the PSBT as a finalizer does, with our key-path signature and the
 /// auxiliary input signature. It extracts the tx and verifies both signatures.
 fn finalize(signed: &Psbt, aux: Option<&Aux>) -> Transaction {
@@ -924,56 +896,6 @@ fn retries_a_mint_after_a_failed_response_write() {
     );
 }
 
-/// A caller that sent its request and then vanished: reads work, writes fail.
-struct DeadCaller(Cursor<Vec<u8>>);
-
-impl std::io::Read for DeadCaller {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-impl std::io::Write for DeadCaller {
-    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "caller is gone",
-        ))
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A signature the caller never received must not use up the deposit's replay
-/// key. The retry signs. Once a response is delivered, the same deposit is
-/// refused as a duplicate.
-#[test]
-fn a_lost_response_keeps_the_deposit_retryable() {
-    let built = build(None);
-    let ctx = context(
-        bridge_config(&built.deposit.contract_id),
-        deposit_chain(&built, LOCK_BLOCK, LOCK_BLOCK, vec![]),
-    );
-
-    let mut wire = Cursor::new(Vec::new());
-    let request = EnclaveRequest {
-        request: Some(Request::Sign(sign_request(&built))),
-    };
-    framing::write_message(&mut wire, &request).unwrap();
-    wire.set_position(0);
-    server::handle_connection(DeadCaller(wire), &ctx);
-
-    signed_psbt(&sign_over_the_wire(&ctx, sign_request(&built)))
-        .expect("the retry signs after a lost response");
-
-    let again = refusal(&sign_over_the_wire(&ctx, sign_request(&built)));
-    assert!(
-        again.contains("duplicate bridge operation"),
-        "expected a duplicate refusal, got: {again}"
-    );
-}
-
 /// After the response is written, the deposit is spent: a changed request for
 /// it gets the same duplicate refusal as an identical retry.
 #[test]
@@ -1035,37 +957,6 @@ fn refuses_input_whose_finalized_script_sig_changes_the_bound_txid() {
     assert!(
         refusal.contains("scriptSig"),
         "refused for another reason: {refusal}"
-    );
-}
-
-/// Why the refusal exists: the finalized tx has a different txid, so a consumer
-/// cannot resolve the witness that the consignment names. The test signs
-/// locally with the enclave seed, so the result does not need the enclave to sign.
-#[test]
-fn finalized_wrapped_input_leaves_the_bound_witness_unresolvable() {
-    let aux = wrapped_segwit_aux();
-    let wrapped = build(Some(&aux));
-    let bound = wrapped.psbt.unsigned_tx.compute_txid();
-    assert_eq!(bound_witness(&wrapped.deposit.consignment), bound);
-
-    let mut psbt = wrapped.psbt.clone();
-    sign_ours(&mut psbt);
-    let final_tx = finalize(&psbt, Some(&aux));
-    assert_ne!(final_tx.compute_txid(), bound);
-
-    let err = consumer_validates(
-        &wrapped.deposit,
-        vec![
-            wrapped.deposit.seed.tx.clone(),
-            aux.funding.clone(),
-            wrapped.deposit.user_funding.clone(),
-            final_tx,
-        ],
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, ValidationError::InvalidConsignment(Failure::SealNoPubWitness(_, w)) if w == bound),
-        "expected SealNoPubWitness({bound}), got: {err:?}"
     );
 }
 

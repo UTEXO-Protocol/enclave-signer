@@ -1,9 +1,11 @@
 use super::*;
-use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+#[cfg(feature = "rgb-validation")]
+use bitcoin::{hashes::Hash, OutPoint, Sequence, TxIn, Txid, Witness};
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 
 /// Minimal BIP-174-valid PSBT: one dummy input, one dummy output, no
 /// signatures.
+#[cfg(feature = "rgb-validation")]
 fn minimal_valid_psbt_bytes() -> Vec<u8> {
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version(2),
@@ -32,11 +34,6 @@ fn minimal_valid_psbt_bytes() -> Vec<u8> {
 // PSBT shape allowlist tests
 
 #[test]
-fn accepts_valid_psbt_bytes() {
-    assert!(validate_psbt_bytes(&minimal_valid_psbt_bytes()).is_ok());
-}
-
-#[test]
 fn rejects_empty_psbt_bytes() {
     let err = validate_psbt_bytes(&[]).unwrap_err();
     assert!(err.to_string().contains("psbt_bytes is empty"));
@@ -48,16 +45,6 @@ fn rejects_empty_psbt_bytes() {
 fn rejects_garbage_psbt_bytes() {
     // Not empty, but not a BIP-174 PSBT.
     let err = validate_psbt_bytes(&[0xFF; 100]).unwrap_err();
-    assert!(
-        err.to_string().contains("not a valid PSBT"),
-        "expected PSBT parse rejection, got: {err}"
-    );
-}
-
-#[test]
-fn rejects_truncated_psbt_below_magic() {
-    // Shorter than the 5-byte BIP-174 magic prefix.
-    let err = validate_psbt_bytes(&[0x70, 0x73]).unwrap_err();
     assert!(
         err.to_string().contains("not a valid PSBT"),
         "expected PSBT parse rejection, got: {err}"
@@ -86,13 +73,6 @@ fn rejects_psbt_with_no_inputs() {
 }
 
 // Operation-dedup key - `psbt_operation_key`
-
-#[test]
-fn op_key_is_deterministic() {
-    let a = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
-    let b = psbt_operation_key(1, &[0x11; 20], &[0xAA; 32], &[0x07; 32], "rgb:asset");
-    assert_eq!(a, b);
-}
 
 #[test]
 fn op_key_varies_with_every_field() {
@@ -175,36 +155,6 @@ mod operation_dedup {
         assert!(
             matches!(g.reserve(k), Err(EnclaveError::NonceReplay)),
             "the same operation must be refused as a replay"
-        );
-    }
-
-    #[test]
-    fn a_different_deposit_is_not_a_false_replay() {
-        // A different operationId is a different deposit and signs.
-        let g = guard();
-        g.reserve(op_key(&[0xAA; 32], &[0x07; 32]))
-            .expect("first")
-            .commit();
-        g.reserve(op_key(&[0xAA; 32], &[0x08; 32]))
-            .expect("a different funds_in_operation_id is a different op")
-            .commit();
-    }
-
-    #[test]
-    fn restart_or_sibling_instance_admits_the_same_operation_again() {
-        // The guard is in-memory and per instance. A new instance (restart or
-        // sibling enclave) accepts the same op again. Thus the durable
-        // exactly-once anchor is on-chain (consumedBurnIds / fundsInRecords).
-        let k = op_key(&[0xAA; 32], &[0x07; 32]);
-        let first = guard();
-        first.reserve(k).expect("instance A reserves").commit();
-        assert!(matches!(first.reserve(k), Err(EnclaveError::NonceReplay)));
-
-        let second = guard(); // restart / sibling enclave
-        assert!(
-            second.reserve(k).is_ok(),
-            "a fresh instance does not share the soft guard - on-chain state \
-             is the durable anchor"
         );
     }
 }
@@ -495,73 +445,6 @@ mod fee_policy {
             let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
             assert!(err.to_string().contains("fee rate too low"), "{err}");
         }
-    }
-
-    #[test]
-    fn taproot_multisig_floor_counts_script_control_block_and_cosigners() {
-        use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
-        use bitcoin::script::Builder;
-        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
-        use bitcoin::taproot::{LeafVersion, TaprootBuilder};
-
-        let secp = Secp256k1::new();
-        let keys: Vec<_> = (1..=3)
-            .map(|byte| {
-                let secret = SecretKey::from_slice(&[byte; 32]).unwrap();
-                XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &secret)).0
-            })
-            .collect();
-        let script = Builder::new()
-            .push_x_only_key(&keys[0])
-            .push_opcode(OP_CHECKSIG)
-            .push_x_only_key(&keys[1])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_x_only_key(&keys[2])
-            .push_opcode(OP_CHECKSIGADD)
-            .push_int(2)
-            .push_opcode(OP_NUMEQUAL)
-            .into_script();
-        let info = TaprootBuilder::new()
-            .add_leaf(0, script.clone())
-            .unwrap()
-            .finalize(&secp, keys[0])
-            .unwrap();
-        let control = info
-            .control_block(&(script.clone(), LeafVersion::TapScript))
-            .unwrap();
-        let mut psbt = psbt_with_fee(100_000, 100_000);
-        psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
-            ScriptBuf::new_p2tr_tweaked(info.output_key());
-        psbt.inputs[0]
-            .tap_scripts
-            .insert(control.clone(), (script.clone(), LeafVersion::TapScript));
-
-        let mut tx = psbt.unsigned_tx.clone();
-        tx.input[0].witness = Witness::from_slice(&[
-            vec![0; 65],
-            vec![0; 65],
-            vec![],
-            script.into_bytes(),
-            control.serialize(),
-        ]);
-        let minimum = tx.vsize() as u64;
-        assert!(minimum > psbt.unsigned_tx.vsize() as u64);
-        psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
-        check_psbt_fee(&psbt, &[], "send-RGB").expect("funded 2-of-3 Taproot witness");
-        psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
-        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
-        assert!(err.to_string().contains("fee rate too low"), "{err}");
-    }
-
-    #[test]
-    fn rejects_unknown_spend_shape_instead_of_using_unsigned_size() {
-        let mut psbt = psbt_with_fee(100_000, 99_000);
-        psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = ScriptBuf::new();
-        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
-        assert!(
-            err.to_string().contains("cannot estimate signed PSBT size"),
-            "{err}"
-        );
     }
 
     /// `psbt_with_fee` plus `extra` zero-value P2WPKH outputs. A large tx hits

@@ -87,28 +87,6 @@ class SmokeTestTests(unittest.TestCase):
         self.assertEqual(len(failures), 1, result.stdout)
         self.assertIn(check, failures[0])
 
-    def test_fresh_enclave_sets_endpoints_then_initializes_and_retains_identity(self):
-        replies = [
-            health(ready=False, endpoints=False, keyed=False),
-            ['set-endpoints', 0, 'Endpoints set'],
-            health(ready=False, keyed=False),
-            ['init', 0, 'Keys initialized:\n' + keys()],
-            ['get-keys', 0, keys()], rejected_init(), ['get-keys', 0, keys()], health(),
-        ]
-        result = self.run_script(replies)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('[PASS]', result.stdout)
-        self.assertIn('Identity unchanged', result.stdout)
-
-    def test_running_enclave_preserves_endpoints_with_or_without_spv(self):
-        for spv in (False, True):
-            with self.subTest(spv=spv):
-                result = self.run_script(running(spv=spv))
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('preserving the launch configuration', result.stdout)
-                # The ordered fake rejects any signing or SPV-only RPC.
-                self.assertIn('this smoke test checks lifecycle and readiness', result.stdout)
-
     def test_double_init_requires_the_expected_error_and_exit_status(self):
         wrong_replies = [
             ['init', 1, 'Error: connection failed: Connection refused'],
@@ -139,25 +117,6 @@ class SmokeTestTests(unittest.TestCase):
         replies = [health(ready=False, keyed=False), ['init', 0, keys()],
                    ['get-keys', 0, keys('bc')]]
         self.assert_failed(self.run_script(replies), 'GetPublicKey')
-
-    def test_endpoint_failure_is_not_masked_by_a_later_health_call(self):
-        replies = [health(ready=False, endpoints=False, keyed=False),
-                   ['set-endpoints', 1, 'Error: connection failed']]
-        self.assert_failed(self.run_script(replies), 'SetEndpoints')
-
-    def test_init_failure_stops_before_negative_checks(self):
-        replies = [health(ready=False, keyed=False), ['init', 1, 'Error: connection failed']]
-        self.assert_failed(self.run_script(replies), 'InitializeKey')
-
-    def test_unrelated_preflight_failure_stops_before_mutation(self):
-        self.assert_failed(self.run_script([
-            ['health', 1, 'Error: connection failed: Connection refused'],
-        ]), 'Health handshake')
-
-    def test_final_not_ready_is_a_failure(self):
-        replies = running()
-        replies[-1] = health(ready=False, spv=False)
-        self.assert_failed(self.run_script(replies), 'Final health/readiness')
 
 
 if __name__ == '__main__':

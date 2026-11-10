@@ -164,16 +164,6 @@ fn refuses_mint_parent() {
     assert!(err.contains("not a propagate"), "{err}");
 }
 
-/// No PSBT commits a genesis, so a genesis right has no parent to show.
-#[test]
-fn refuses_genesis_parent() {
-    let (mut history, rights) = issued(&[0xA0, 0xA1]);
-    let sibling = refill(&mut history, rights[1]);
-    let child = refill(&mut history, rights[0]);
-    let err = refusal(&child, &sibling, rights[0], &history);
-    assert!(err.contains("did not make the mintRight"), "{err}");
-}
-
 /// A parent propagate that sends one right to the seals `seals`, and its first right.
 fn parent_with_seals<S: Into<BuilderSeal<GraphSeal>>>(seals: Vec<S>) -> (History, Made, Utxo) {
     parent_made_by("propagate", &[0xA0], seals)

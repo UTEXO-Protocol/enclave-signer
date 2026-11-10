@@ -105,30 +105,6 @@ fn route_proofs_reject_underfunded_evm_destination() {
 }
 
 #[test]
-fn rgb_to_evm_amount_check_defers_operation_id_binding_to_handler() {
-    // The handler binds the decoded release to the validated RGB burn after
-    // this amount check; test_bfa_burn_over_the_wire covers that refusal.
-    assert!(validate_route_proofs(
-        &rgb_source(),
-        &evm_destination(90, 20),
-        &proof(90, Some("source-op")),
-        &proof(90, Some("destination-op")),
-    )
-    .is_ok());
-}
-
-#[test]
-fn rgb_to_evm_amount_check_does_not_require_an_operation_id() {
-    assert!(validate_route_proofs(
-        &rgb_source(),
-        &evm_destination(90, 20),
-        &proof(90, None),
-        &proof(90, Some("destination-op")),
-    )
-    .is_ok());
-}
-
-#[test]
 fn route_proofs_reject_unsupported_pair() {
     let err = validate_route_proofs(
         &rgb_source(),

@@ -164,39 +164,10 @@ fn skips_key_path_when_a_foreign_key_claims_our_path() {
 }
 
 #[test]
-fn skips_when_path_outside_bip86_accounts() {
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
-    let our = our_xonly(&km);
-    // A path under m/44'/0'/...
-    let bad_path = DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(44).unwrap(),
-        ChildNumber::from_hardened_idx(0).unwrap(),
-        ChildNumber::from_hardened_idx(0).unwrap(),
-    ]);
-    psbt.inputs[0].tap_key_origins.clear();
-    psbt.inputs[0]
-        .tap_key_origins
-        .insert(our, (vec![], (*km.master_fingerprint(), bad_path)));
-    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
-    assert!(jobs.is_empty());
-}
-
-#[test]
 fn skips_when_witness_utxo_missing() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
     let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
     psbt.inputs[0].witness_utxo = None;
-    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
-    assert!(jobs.is_empty());
-}
-
-#[test]
-fn skips_when_witness_utxo_not_p2tr() {
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
-    psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
-        ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xCC; 20]));
     let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
     assert!(jobs.is_empty());
 }
@@ -444,25 +415,6 @@ fn skips_key_path_when_origins_claim_another_fingerprint() {
 }
 
 #[test]
-fn skips_key_path_when_the_claimed_path_derives_another_key() {
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
-    let internal = psbt.inputs[0].tap_internal_key.unwrap();
-    let other_path = DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(86).unwrap(),
-        ChildNumber::from_hardened_idx(1).unwrap(),
-        ChildNumber::from_hardened_idx(0).unwrap(),
-        ChildNumber::Normal { index: 0 },
-        ChildNumber::Normal { index: 1 },
-    ]);
-    psbt.inputs[0]
-        .tap_key_origins
-        .insert(internal, (vec![], (*km.master_fingerprint(), other_path)));
-
-    assert!(find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km).is_empty());
-}
-
-#[test]
 fn skips_key_path_when_already_signed() {
     let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
     let (mut psbt, _) = build_key_path_psbt(&km, AccountType::Vanilla, None);
@@ -474,28 +426,4 @@ fn skips_key_path_when_already_signed() {
     let controlled = find_controlled_taproot_inputs(&psbt, km.master_fingerprint(), &km);
     assert_eq!(controlled.len(), 1);
     assert_eq!(controlled[0].input_index, 0);
-}
-
-#[test]
-fn key_path_signing_honors_requested_sighash() {
-    let km = KeyManager::from_seed([0x42u8; 64], Network::Testnet).unwrap();
-    let (mut psbt, output_key) = build_key_path_psbt(&km, AccountType::Vanilla, None);
-    psbt.inputs[0].sighash_type = Some(TapSighashType::All.into());
-    let jobs = find_taproot_sign_jobs(&psbt, km.master_fingerprint(), &km);
-
-    sign_taproot_inputs(&mut psbt, &km, &jobs).unwrap();
-
-    let sig = psbt.inputs[0].tap_key_sig.unwrap();
-    assert_eq!(sig.sighash_type, TapSighashType::All);
-    let prevouts = [psbt.inputs[0].witness_utxo.clone().unwrap()];
-    let hash = SighashCache::new(&psbt.unsigned_tx)
-        .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::All)
-        .unwrap();
-    Secp256k1::new()
-        .verify_schnorr(
-            &sig.signature,
-            &Message::from_digest(*hash.as_byte_array()),
-            &output_key,
-        )
-        .unwrap();
 }

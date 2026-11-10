@@ -368,6 +368,7 @@ impl History {
         self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
     }
 
+    #[cfg(evm_to_rgb)]
     /// A [`Self::mint`] that also passes a new right on to vout 1. The schema
     /// refuses it; a refusal fixture only.
     pub fn mint_keeping_right(

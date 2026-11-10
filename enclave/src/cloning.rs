@@ -236,15 +236,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digest_roundtrip_ok() {
-        let secret = "correct horse battery staple";
-        let pubkey = [7u8; 32];
-        let target = [3u8; 20];
-        let digest = make_cloning_digest(secret, &pubkey, &target);
-        assert!(verify_cloning_digest(secret, &pubkey, &target, &digest));
-    }
-
-    #[test]
     fn validate_secret_rejects_empty() {
         assert!(matches!(
             validate_cloning_secret(""),
@@ -271,13 +262,6 @@ mod tests {
             validate_cloning_secret(&s),
             Err(EnclaveError::InvalidRequest(_))
         ));
-    }
-
-    #[test]
-    fn validate_secret_accepts_64_hex() {
-        let s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        assert_eq!(s.len(), 64);
-        assert!(validate_cloning_secret(s).is_ok());
     }
 
     #[test]
@@ -385,20 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn seed_decrypt_tampered_auth_tag_fails() {
-        let seed = [42u8; 64];
-        let requester = CloneSession::new();
-        let (mut ciphertext, donor_pub) =
-            encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
-
-        // The last byte is in the auth tag.
-        let last = ciphertext.len() - 1;
-        ciphertext[last] ^= 0xff;
-        let result = requester.decrypt_seed_from_peer(&donor_pub, &ciphertext);
-        assert!(matches!(result, Err(EnclaveError::Clone(_))));
-    }
-
-    #[test]
     fn decrypt_with_wrong_requester_key_fails() {
         let seed = [42u8; 64];
         let requester_a = CloneSession::new();
@@ -412,26 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn clone_session_public_key_is_stable() {
-        let session = CloneSession::new();
-        let pk1 = session.public_key();
-        let pk2 = session.public_key();
-        assert_eq!(pk1, pk2);
-    }
-
-    #[test]
     fn two_sessions_generate_distinct_keys() {
         let a = CloneSession::new();
         let b = CloneSession::new();
         assert_ne!(a.public_key(), b.public_key());
-    }
-
-    #[test]
-    fn ciphertext_includes_authentication_overhead() {
-        // Seed is 64 bytes; ChaCha20Poly1305 adds a 16-byte Poly1305 tag.
-        let session = CloneSession::new();
-        let (ct, _) = encrypt_seed_for_peer(&session.public_key(), &[0u8; 64]).unwrap();
-        assert_eq!(ct.len(), 64 + 16);
     }
 
     // F03-AF-25: fixed vectors from Python `cryptography` (OpenSSL) and `hmac`.

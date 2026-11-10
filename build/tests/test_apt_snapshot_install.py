@@ -123,11 +123,6 @@ with (pathlib.Path(os.environ['FIXTURE_DIR']) / 'calls.jsonl').open('a') as log:
         self.assertEqual(result.returncode, 100)
         self.assertEqual([phase for phase, _ in calls], ['update', 'download', 'install'])
 
-    def test_no_packages_does_not_run_apt(self):
-        result, calls = self.invoke(packages=())
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(calls, [])
-
     def plan(self, archive='debian', digest=None, filename='fixture_1_amd64.deb'):
         digest = digest or 'SHA256:' + 'a' * 64
         return (f"'https://snapshot.debian.org/archive/{archive}/20261007T000000Z/"

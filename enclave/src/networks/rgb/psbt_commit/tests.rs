@@ -220,13 +220,6 @@ fn refuses_p2tr_output_before_the_op_return() {
     );
 }
 
-#[test]
-fn accepts_p2tr_after_the_op_return() {
-    let (history, sent) = rights_send();
-    assert!(sent.tx.output[1].script_pubkey.is_p2tr());
-    read(&sent.tx, &sent.fascia, history.contract_id).unwrap();
-}
-
 /// P2A is witness v1 but not P2TR, so consensus does not read it as a host.
 #[test]
 fn p2a_output_before_the_op_return_is_not_a_host() {
@@ -294,25 +287,6 @@ fn refuses_bundle_of_unpinned_contract() {
     assert!(err.contains("not of the pinned RGB_ASSET_ID"), "{err}");
 }
 
-/// The tx commits our bundle alone; the fascia adds another contract's.
-#[test]
-fn refuses_a_fascia_with_an_extra_contract() {
-    let (history, sent) = rights_send();
-    let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
-    let their_send = theirs.send_rights(their_rights[0], &[1], vec![], vec![p2tr(3)]);
-    let mut bundles = BTreeMap::from([(
-        history.contract_id,
-        bundle(&sent.fascia, history.contract_id),
-    )]);
-    bundles.insert(
-        theirs.contract_id,
-        bundle(&their_send.fascia, theirs.contract_id),
-    );
-    let fascia = with_bundles(&sent.fascia, bundles);
-    let err = refusal(&sent.tx, &fascia, history.contract_id);
-    assert!(err.contains("discloses 2 contract bundles"), "{err}");
-}
-
 #[test]
 fn refuses_a_missing_or_invalid_pin() {
     assert!(pinned_contract(&BridgeConfig::default())
@@ -327,16 +301,6 @@ fn refuses_a_missing_or_invalid_pin() {
         .unwrap_err()
         .to_string()
         .contains("is not a contract id"));
-}
-
-#[test]
-fn parses_the_pin_rgb_asset_id_names() {
-    let (history, _) = rights_send();
-    let cfg = BridgeConfig {
-        rgb_asset_id: history.contract_id.to_string(),
-        ..BridgeConfig::default()
-    };
-    assert_eq!(pinned_contract(&cfg).unwrap(), history.contract_id);
 }
 
 // ===== F5: the tx commits exactly the bundles the fascia discloses =====

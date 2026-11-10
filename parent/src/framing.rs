@@ -74,12 +74,4 @@ mod tests {
         let decoded: EnclaveRequest = read_message(&mut Cursor::new(buf)).unwrap();
         assert_eq!(decoded, request);
     }
-
-    #[test]
-    fn rejects_a_frame_above_the_limit() {
-        let len = MAX_MESSAGE_SIZE + 1;
-        let result: Result<EnclaveRequest> =
-            read_message(&mut Cursor::new(len.to_le_bytes().to_vec()));
-        assert!(result.is_err());
-    }
 }

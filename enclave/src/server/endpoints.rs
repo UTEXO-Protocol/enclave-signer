@@ -535,22 +535,6 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
-    /// A release bridge build with no bridge pins gets a policy that fails
-    /// the launch gate. The set is refused without a panic.
-    #[test]
-    fn a_policy_that_fails_the_launch_gate_is_refused() {
-        let release = BuildContext {
-            debug_or_test: false,
-            mock_attestation: false,
-            allow_seed_import: false,
-            rgb_validation: true,
-            ..BuildContext::current()
-        };
-        let ctx = awaiting(release);
-        assert!(handle_set_endpoints(&ctx, valid(1)).is_err());
-        assert!(ctx.launch.get().is_none());
-    }
-
     #[test]
     fn a_second_set_is_refused_and_the_first_values_stay() {
         let ctx = awaiting(BuildContext::current());

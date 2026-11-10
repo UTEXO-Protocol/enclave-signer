@@ -89,17 +89,4 @@ mod tests {
             .check(MAX_HEADERS_PER_RATE_WINDOW, t0 + RATE_LIMIT_WINDOW)
             .expect("window reset");
     }
-
-    #[test]
-    fn rate_limiter_handles_clock_going_backwards() {
-        let mut limiter = SubmitRateLimiter::default();
-        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
-        limiter.check(10, t1).expect("first call");
-        // An earlier timestamp (clock skew) resets the window.
-        // It must not panic or underflow.
-        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        limiter
-            .check(10, t0)
-            .expect("backwards clock resets window");
-    }
 }

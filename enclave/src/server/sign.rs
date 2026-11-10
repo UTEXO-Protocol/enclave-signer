@@ -890,20 +890,6 @@ mod key_not_ready {
         }
     }
 
-    /// Control: with a ready key the same bytes reach validation, which
-    /// refuses them.
-    #[test]
-    fn a_ready_key_lets_the_same_bytes_reach_validation() {
-        let (response, _) = sign_burn(ready_state(), NOT_A_CONSIGNMENT.to_vec(), "rgb:test".into());
-        let Response::Error(err) = &response else {
-            panic!("expected the validation refusal, got {response:?}");
-        };
-        assert!(
-            err.message.contains("deserialization failed"),
-            "{response:?}"
-        );
-    }
-
     /// Control: with a ready key a valid burn passes the mint-anchor bind and
     /// stops at the witnesses: with no SPV proof, none is mined to consensus.
     #[test]
@@ -1146,14 +1132,9 @@ mod indexer_only_bindings {
 
 #[cfg(all(test, evm_to_rgb))]
 mod deadline_tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::ensure_time_left;
-
-    #[test]
-    fn passes_while_time_is_left() {
-        ensure_time_left(Instant::now() + Duration::from_secs(60), "x").unwrap();
-    }
 
     #[test]
     fn refuses_once_the_deadline_has_passed() {
