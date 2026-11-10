@@ -1,4 +1,4 @@
-//! Reads an `IRgbRejectList` contract (bridge-smart-contracts #176) the way
+//! Reads an `IRgbRejectList` contract (bridge-smart-contracts) the way
 //! rgb-lib 98a8af6 does (`api/evm.rs` `reject_list_entries_paged`).
 //!
 //! The list is append-only. `length()` is read at the finalized and at the
@@ -27,13 +27,6 @@ sol! {
     function entries(uint256 start, uint256 end) external view returns (Entry[] memory page);
 }
 
-/// Entries per `entries` call, as rgb-lib reads them.
-pub const PAGE_SIZE: u64 = 1000;
-
-/// A longer list is refused: it bounds the calls and memory of one request.
-/// 20 pages: at about a second each they fit the 30 s request deadline.
-pub const MAX_ENTRIES: u64 = 20_000;
-
 /// Kept free before the request deadline to write the response.
 const RESPONSE_MARGIN: Duration = Duration::from_secs(2);
 
@@ -45,13 +38,16 @@ pub struct RejectListLog {
     pub finalized: usize,
 }
 
-/// Reads the whole list at `contract`. Refuses before an RPC call that would
-/// end past `deadline`, the request's, judged by the slowest call so far.
+/// Reads the whole list at `contract`. Refuses a list over
+/// `max_reject_list_entries`, which bounds the calls and memory of one request.
+/// Refuses before an RPC call that would end past `deadline`, the request's,
+/// judged by the slowest call so far.
 pub fn read_reject_list(
     provider: &dyn EvmReceiptProvider,
     contract: &[u8; 20],
     deadline: Instant,
 ) -> Result<RejectListLog> {
+    let limits = crate::limits::get();
     let mut rpc = Budgeted {
         provider,
         contract,
@@ -72,14 +68,15 @@ pub fn read_reject_list(
             format!("is shorter at the latest block ({len}) than at the finalized one ({finalized_len})"),
         ));
     }
-    if len > MAX_ENTRIES {
+    let max = limits.max_reject_list_entries;
+    if len > max {
         return Err(list_error(
             contract,
-            format!("holds {len} entries, over the {MAX_ENTRIES} this enclave reads"),
+            format!("holds {len} entries, over the {max} this enclave reads"),
         ));
     }
     Ok(RejectListLog {
-        entries: rpc.read_entries(len, latest)?,
+        entries: rpc.read_entries(len, limits.reject_list_page_entries, latest)?,
         finalized: finalized_len as usize,
     })
 }
@@ -107,12 +104,17 @@ impl Budgeted<'_> {
         out
     }
 
-    fn read_entries(&mut self, len: u64, block: u64) -> Result<Vec<RejectListEntry>> {
+    fn read_entries(
+        &mut self,
+        len: u64,
+        page_size: u64,
+        block: u64,
+    ) -> Result<Vec<RejectListEntry>> {
         let contract = self.contract;
         let mut out = Vec::with_capacity(len as usize);
         let mut start = 0;
         while start < len {
-            let end = (start + PAGE_SIZE).min(len);
+            let end = (start + page_size).min(len);
             let data = entriesCall {
                 start: U256::from(start),
                 end: U256::from(end),

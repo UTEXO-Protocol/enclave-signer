@@ -3,7 +3,7 @@
 //! build their own logs, so a wrong event signature or
 //! topic index would pass on both sides.
 //!
-//! Skipped unless `UTEXO_LIVE_EVM_RPC_HOST` is set. The client is the
+//! Ignored by default; explicit runs require live RPC configuration. The client is the
 //! enclave's: TLS to `127.0.0.1:<port>`, under the CA in the DER file. Forward
 //! that port to the RPC first, for example
 //! `socat TCP-LISTEN:8443,fork TCP:<rpc host>:443`:
@@ -13,10 +13,10 @@
 //! UTEXO_LIVE_EVM_RPC_CA_DER_FILE=ca.der \
 //! UTEXO_LIVE_BRIDGE=0x... UTEXO_LIVE_TX=0x... UTEXO_LIVE_OP_ID=0x<64 hex> \
 //! UTEXO_LIVE_AMOUNT=1000000 UTEXO_LIVE_COMMISSION=0 \
-//!     cargo test -p utexo-bridge-enclave --features evm-rpc --test test_evm_event_live
+//!     cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer --test test_evm_event_live -- --ignored
 //! ```
 // FundsIn deposit verification: the EVM -> RGB direction.
-#![cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#![cfg(all(feature = "rgb-validation", evm_to_rgb))]
 
 use attestation_verify::EvmFinalityTag;
 
@@ -38,10 +38,13 @@ fn bytes(var: &str) -> Vec<u8> {
 }
 
 fn num(var: &str, default: u64) -> u64 {
-    std::env::var(var)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(var) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("{var} must be an unsigned integer")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("invalid {var}: {error}"),
+    }
 }
 
 /// `operationId` is a `bytes32` on chain. Accept hex with or without `0x` and
@@ -55,18 +58,22 @@ fn op_id(var: &str) -> Vec<u8> {
     id
 }
 
-/// `None` when the live chain is not configured, so the suite is a no-op in CI.
-fn live() -> Option<Live> {
+/// Explicit live runs fail if their required configuration is missing.
+fn live() -> Live {
     let tls = utexo_bridge_enclave::config::EvmRpcTls {
-        host: std::env::var("UTEXO_LIVE_EVM_RPC_HOST").ok()?,
+        host: std::env::var("UTEXO_LIVE_EVM_RPC_HOST")
+            .expect("UTEXO_LIVE_EVM_RPC_HOST is required"),
         ca_der: std::fs::read(
             std::env::var("UTEXO_LIVE_EVM_RPC_CA_DER_FILE")
                 .expect("UTEXO_LIVE_EVM_RPC_CA_DER_FILE is required"),
         )
         .expect("read the CA"),
-        tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443) as u16,
+        tls_port: num("UTEXO_LIVE_EVM_RPC_TLS_PORT", 443)
+            .try_into()
+            .expect("TLS port must fit u16"),
+        path: "/".into(),
     };
-    Some(Live {
+    Live {
         client: AlloyEvmClient::with_pinned_tls(&tls).expect("build RPC client"),
         finality_tag: match std::env::var("EVM_FINALITY_TAG") {
             Ok(value) => value.parse().expect("EVM_FINALITY_TAG"),
@@ -80,13 +87,14 @@ fn live() -> Option<Live> {
         op_id: op_id("UTEXO_LIVE_OP_ID"),
         amount: num("UTEXO_LIVE_AMOUNT", 0),
         commission: num("UTEXO_LIVE_COMMISSION", 0),
-    })
+    }
 }
 
 /// The real operationId decoded from the chain's own log data must bind.
 #[test]
+#[ignore = "requires an explicitly configured live EVM RPC and deposit"]
 fn live_deposit_binds_operation_id() {
-    let Some(l) = live() else { return };
+    let l = live();
     verify_funds_in_event(
         &l.client,
         &l.bridge,
@@ -102,8 +110,9 @@ fn live_deposit_binds_operation_id() {
 /// A different id must fail. This proves that the comparison runs, not only
 /// the decode.
 #[test]
+#[ignore = "requires an explicitly configured live EVM RPC and deposit"]
 fn live_deposit_rejects_wrong_operation_id() {
-    let Some(l) = live() else { return };
+    let l = live();
     // Flip the last byte so the id is a valid 32-byte value that differs.
     let mut wrong = l.op_id.clone();
     wrong[31] ^= 1;
@@ -124,8 +133,9 @@ fn live_deposit_rejects_wrong_operation_id() {
 /// The amount comes from a different word offset in the same log. A wrong
 /// offset still binds the id but fails this test.
 #[test]
+#[ignore = "requires an explicitly configured live EVM RPC and deposit"]
 fn live_deposit_rejects_wrong_amount() {
-    let Some(l) = live() else { return };
+    let l = live();
     let e = verify_funds_in_event(
         &l.client,
         &l.bridge,

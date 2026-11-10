@@ -40,20 +40,20 @@ sequenceDiagram
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))
-    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is usually a different request; an identical retry gets here when the parent has no reply for it: not read, above the byte limit, dropped at the count or byte limit, or a parent restart)
+    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is usually a different request, and an identical retry gets here when the parent has no reply for it: not read, above the byte limit, dropped at the count or byte limit, or a parent restart)
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
     Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(EVM_FINALITY_TAG, false) / block at receipt height (15 s per call)
     Rpc-->>Evt: receipt / selected head / canonical block
     Evt->>Evt: receipt exists + status success
-    Evt->>Evt: the ONE BridgeFundsIn from FUNDS_IN_CONTRACT with topic1 == funds_in_operation_id<br/>(none or two ⇒ REFUSE; other deposits ignored, no plain FundsIn fallback)
+    Evt->>Evt: the ONE BridgeFundsIn from FUNDS_IN_CONTRACT with topic1 == funds_in_operation_id<br/>(none or two ⇒ REFUSE, other deposits ignored, no plain FundsIn fallback)
     Evt->>Evt: topic1 operationId == funds_in_operation_id<br/>gross == amount, tokenCommission == commission<br/>netAmount ≤ gross − commission, u64 only
-    Evt->>Evt: receipt height ≤ selected head, canonical blockHash matches,<br/>revalidate head snapshot; missing head or receipt above head ⇒ REFUSE
+    Evt->>Evt: receipt height ≤ selected head, canonical blockHash matches,<br/>revalidate head snapshot,<br/>missing head or receipt above head ⇒ REFUSE
     Evt-->>Srv: destinationAddress (may be empty)
 
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
-    Srv->>Core: F1 parse; F2 witness_utxo native SegWit, sighash ALL / DEFAULT
+    Srv->>Core: F1 parse, F2 witness_utxo native SegWit, sighash ALL / DEFAULT
     Srv->>Core: fascia decodes, its witness txid == the PSBT txid<br/>F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 one fascia bundle, of RGB_ASSET_ID (== asset_id)<br/>F5 MPC tree of every fascia bundle + its entropy == opret commitment<br/>F6 one transition, its own id, input map == its inputs
     Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one leg, blinded or a witness seal of this tx
     Srv->>Anchor: F7 one input, Colored key path of this enclave
@@ -63,11 +63,11 @@ sequenceDiagram
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID; the FundsIn with lockId == LockId(mint OpId, PSBT txid) and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated;<br/>deposit == the mint's derived lock
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID, the FundsIn with lockId == LockId(mint OpId, PSBT txid) and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated,<br/>deposit == the mint's derived lock
 
     Note over Srv,Inv: 5 — route and recipient
     Srv->>Srv: amount ≥ minted units + commission
-    alt destinationAddress not empty (legacy deposit)
+    alt destinationAddress not empty (deposit with an RGB invoice)
         Srv->>Inv: RGB invoice, blinded seal only
         Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
     else empty (v2 Bridge)

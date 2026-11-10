@@ -1,4 +1,4 @@
-"""SNS -> Slack relay for enclave-host alerts (TODO §7a Track 2).
+"""SNS -> Slack relay for enclave-host alerts.
 
 Subscribed to the SNS topic `utexo-stage-enclave-alerts`; CloudWatch alarms
 publish here. Formats CloudWatch alarm notifications into a compact Slack

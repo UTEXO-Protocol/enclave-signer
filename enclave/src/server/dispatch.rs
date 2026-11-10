@@ -8,13 +8,12 @@ use super::context::ServerContext;
 use super::endpoints::handle_set_endpoints;
 use super::health::handle_health;
 use super::keys::{handle_get_attested_public_key, handle_get_public_key, handle_initialize};
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+use super::limits::{handle_get_limits, handle_set_limits};
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use super::rights_refill::handle_sign_rights_refill;
 use super::sign::handle_sign;
 #[cfg(evm_to_rgb)]
 use super::signers::handle_sign_btc;
-#[cfg(feature = "ccd")]
-use super::signers::handle_sign_ccd;
 #[cfg(rgb_to_evm)]
 use super::signers::handle_sign_raw_digest;
 #[cfg(feature = "rgb-validation")]
@@ -26,13 +25,14 @@ use crate::proto::*;
 use crate::state::ReplayReservation;
 
 /// Error for a request whose network is not compiled into this build.
-/// Single-network EIFs (RGB-only / CCD-only) return it, so callers see the
-/// refusal. It is not a silent no-op.
+/// Single-network EIFs (RGB-only) return it, so callers see the
+/// refusal. It is not a silent no-op. `features` names the build features
+/// that add the network.
 #[allow(dead_code)]
-pub(super) fn unsupported_build(network: &str) -> EnclaveError {
+pub(super) fn unsupported_build(network: &str, features: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!(
-        "enclave was not built with `{network}` support: this binary does not handle {network} \
-         requests (rebuild with `--features {network}`)"
+        "enclave was not built with {network} support: this binary does not handle {network} \
+         requests (rebuild with {features})"
     ))
 }
 
@@ -100,13 +100,13 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("plain-BTC PSBTs"))
             }
         }
-        // The EIP-191 `personal_sign` path had no feature or policy gate. It
-        // signed any caller bytes with the main bridge key. The proto still has
-        // the variant, so refuse it explicitly.
+        // `SignRawMessage` asks for an EIP-191 `personal_sign` of any caller
+        // bytes with the main bridge key. No feature or policy gate limits such
+        // a signature. The proto has the variant, so refuse it explicitly.
         Some(Request::SignRawMessage(_)) => {
-            tracing::warn!("request: SignRawMessage - removed, refusing");
+            tracing::warn!("request: SignRawMessage - not supported, refusing");
             Err(EnclaveError::InvalidRequest(
-                "SignRawMessage is removed; no replacement".into(),
+                "SignRawMessage is not supported".into(),
             ))
         }
         Some(Request::SignRawDigest(req)) => {
@@ -122,28 +122,16 @@ pub(super) fn dispatch(
                 Err(wrong_signer_role("EVM gas transactions"))
             }
         }
-        Some(Request::SignCcd(req)) => {
-            tracing::info!("request: SignCcd");
-            #[cfg(feature = "ccd")]
-            {
-                ctx.launch().and_then(|_| handle_sign_ccd(&ctx.state, req))
-            }
-            #[cfg(not(feature = "ccd"))]
-            {
-                let _ = req;
-                Err(unsupported_build("ccd"))
-            }
-        }
         Some(Request::SignRightsRefill(req)) => {
             tracing::info!("request: SignRightsRefill");
             // Only the mint signer holds mint rights. Like every signing
             // request it waits for launch; the rule itself reads no network.
-            #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+            #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
             {
                 ctx.launch()
                     .and_then(|_| handle_sign_rights_refill(ctx, req))
             }
-            #[cfg(not(all(feature = "bfa-mint", evm_to_rgb)))]
+            #[cfg(not(all(feature = "rgb-validation", evm_to_rgb)))]
             {
                 let _ = req;
                 Err(wrong_signer_role("rights refills"))
@@ -186,7 +174,10 @@ pub(super) fn dispatch(
             #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
-                Err(unsupported_build("rgb"))
+                Err(unsupported_build(
+                    "rgb",
+                    "`--features mint-signer` or `--features burn-signer`",
+                ))
             }
         }
         Some(Request::GetLastSavedBlock(req)) => {
@@ -198,7 +189,10 @@ pub(super) fn dispatch(
             #[cfg(not(feature = "rgb-validation"))]
             {
                 let _ = req;
-                Err(unsupported_build("rgb"))
+                Err(unsupported_build(
+                    "rgb",
+                    "`--features mint-signer` or `--features burn-signer`",
+                ))
             }
         }
         Some(Request::GetAttestedPublicKey(req)) => {
@@ -208,6 +202,14 @@ pub(super) fn dispatch(
         Some(Request::SetEndpoints(req)) => {
             tracing::info!("request: SetEndpoints");
             handle_set_endpoints(ctx, req)
+        }
+        Some(Request::SetLimits(req)) => {
+            tracing::info!("request: SetLimits");
+            handle_set_limits(ctx, req)
+        }
+        Some(Request::GetLimits(_)) => {
+            tracing::debug!("request: GetLimits");
+            handle_get_limits(ctx)
         }
         // All builds must answer the readiness probe.
         Some(Request::Health(_)) => {
@@ -283,8 +285,9 @@ mod error_text_tests {
 
         for filler in ["a", "\u{00e9}", "\u{1f600}"] {
             let declared = filler.repeat(4 * 1024 * 1024 / filler.len());
-            // The text before the filler is 41 bytes. So byte 1024 is inside a
-            // character of each multibyte filler, and the cut must move back.
+            // The text before the filler puts byte `MAX_ERROR_TEXT_BYTES`
+            // inside a character of each multibyte filler, so the cut must
+            // move back. The assert below checks this.
             let e = EnclaveError::CrossCheck(format!("RGB source declares x{declared}"));
             if filler.len() > 1 {
                 assert!(!e.to_string().is_char_boundary(MAX_ERROR_TEXT_BYTES));

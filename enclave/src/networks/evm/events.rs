@@ -26,7 +26,6 @@ use attestation_verify::EvmFinalityTag;
 use sha3::{Digest, Keccak256};
 
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "bfa-validation")]
 use crate::networks::rgb::validation::VerifiedLock;
 
 /// Reads a uint256 ABI word at a byte offset as u64. Fails if the data is too
@@ -55,8 +54,8 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// `IBridge.sol`. A stale signature matches zero logs, and each deposit then
 /// reports "no FundsIn log in tx".
 ///
-/// The enclave does not decode `bytes settlementData` (bridge PR #152), but it
-/// is part of the signature and thus of `topic0`.
+/// The enclave does not decode `bytes settlementData`, but it is part of the
+/// signature and thus of `topic0`.
 pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
     "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
      uint256,uint256,uint256,uint256,uint256,string,bytes)";
@@ -69,8 +68,8 @@ const BFI_OPERATION_ID_TOPIC: usize = 1;
 /// nativeCommission, sourceChainId, destinationChainId, <string offset>,
 /// <settlementData offset>.
 ///
-/// An older event layout also decodes plausible amounts at these offsets. A
-/// test pins topic0 for this reason.
+/// Another `BridgeFundsIn` signature also decodes plausible amounts at these
+/// offsets, so a test pins topic0.
 const BFI_AMOUNT_OFF: usize = 32;
 const BFI_NET_AMOUNT_OFF: usize = 64;
 const BFI_TOKEN_COMMISSION_OFF: usize = 96;
@@ -165,7 +164,6 @@ fn event_topic0(sig: &str) -> [u8; 32] {
 /// uses them and the BFA path loops over a full mint ancestry.
 static BRIDGE_FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(BRIDGE_FUNDS_IN_SIG));
-#[cfg(feature = "bfa-validation")]
 static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(FUNDS_IN_SIG));
 
@@ -570,15 +568,13 @@ fn check_finality_snapshot(
     Ok(())
 }
 
-/// `FundsIn` topic that holds the indexed lockId (the contract keeps the `rgbOpId` name).
-#[cfg(feature = "bfa-validation")]
+/// `FundsIn` topic that holds the indexed lockId (the contract names it `rgbOpId`).
 const FUNDS_IN_LOCK_ID_TOPIC: usize = 2;
 
 /// Decodes a `FundsIn` log, binds it to `expected_lock_id`, and returns the amount.
 ///
 /// Only one layout is accepted: topic0, the indexed sender and the indexed
 /// `lockId` (the `LockId` digest bytes as a big-endian uint256), then the amount word.
-#[cfg(feature = "bfa-validation")]
 fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
     if log.topics.first() != Some(&*FUNDS_IN_TOPIC0) {
         return Err(EnclaveError::CrossCheck(
@@ -603,14 +599,12 @@ fn decode_funds_in(log: &LogEntry, expected_lock_id: &[u8; 32]) -> Result<u64> {
 }
 
 /// `Bridge.RGB_MINT_DEPOSIT_TYPEHASH` preimage; bridge-utexo derives the same id.
-/// The contract kept the `rgbOpId` label; the word it names is the lockId.
-#[cfg(feature = "bfa-validation")]
+/// The contract names this word `rgbOpId`; it holds the lockId.
 const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,uint256 chainId,\
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
 
 /// The `operationId` of the one deposit that can back a mint. Every input is
-/// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
-#[cfg(feature = "bfa-validation")]
+/// pinned or in the consignment, so no caller or RPC chooses it.
 pub fn rgb_mint_deposit_id(
     cfg: &crate::config::BridgeConfig,
     lock_id: &[u8; 32],
@@ -652,7 +646,6 @@ pub fn rgb_mint_deposit_id(
 }
 
 /// The lock of a mint: its deposit id, with the minted units as net amount.
-#[cfg(feature = "bfa-validation")]
 pub fn derived_lock(
     cfg: &crate::config::BridgeConfig,
     lock_id: [u8; 32],
@@ -672,8 +665,9 @@ pub fn derived_lock(
 /// pinned emitter, canonical inclusion below the configured tag). The
 /// `FundsIn` is selected by the RGB lockId, not by the bridge `operationId` (a
 /// different id-space). `funds_in_contract` and `finality_tag` come from PINNED
-/// config. `lock_id`, `minted` and `before_block` come from the committed mint
-/// (`MintFacts`) and only select the log that must exist.
+/// config. `lock_id` and `minted` select the `FundsIn`, `operation_id` the
+/// `BridgeFundsIn`, and `before_block` bounds their block. All come from the
+/// committed mint and its tx (`MintFacts`).
 ///
 /// The lock must also follow the RGB rule for a mint claim: a block before
 /// `before_block`, with no lower bound (rgb-lib `mint_lock_status`). An RGB
@@ -684,7 +678,6 @@ pub fn derived_lock(
 /// `FundsIn` with `lock_id` and `minted` as amount. Other deposits in the tx
 /// are ignored. A later `fundsOut` must cite its `operationId` in
 /// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
-#[cfg(feature = "bfa-validation")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
@@ -770,7 +763,6 @@ pub fn verify_rgb_funds_in(
 
 /// The node must report the pinned chain. A receipt from a node on another
 /// chain (for example a testnet Bridge at the same address) backs nothing.
-#[cfg(feature = "bfa-validation")]
 pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Result<u64> {
     let node = provider.get_chain_id()?;
     if node != pinned {
@@ -782,12 +774,10 @@ pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Re
     Ok(node)
 }
 
-/// Hard per-call limit for one EVM JSON-RPC round-trip. Without it, a hung RPC
-/// blocks the worker thread forever: `block_on` has no deadline, and
-/// alloy/reqwest set no default timeout. A client-side timeout does not cancel
-/// an in-flight `block_on`, so a few stalls can block all workers. 15s covers a
-/// healthy fetch through loopback -> vsock -> the RPC.
-const EVM_RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The time for one EVM JSON-RPC round-trip (`evm_rpc_timeout_secs`).
+fn rpc_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(crate::limits::get().evm_rpc_timeout_secs)
+}
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
 /// in-enclave loopback that a vsock forwarder tunnels to the EVM RPC. alloy is
@@ -818,14 +808,15 @@ impl AlloyEvmClient {
             // Only the pinned host can redirect. It could still point at a
             // peer the CA never certified.
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(EVM_RPC_CALL_TIMEOUT)
             .build()
             .map_err(err)?;
-        let url = format!("https://{}:{}/", tls.host, tls.tls_port)
+        let mut url: reqwest::Url = format!("https://{}:{}/", tls.host, tls.tls_port)
             .parse()
             .map_err(|e| {
                 EnclaveError::CrossCheck(format!("evm-rpc: invalid host {:?}: {e}", tls.host))
             })?;
+        // Change only the path; never allow credentials to change the TLS authority.
+        url.set_path(&tls.path);
         Ok(Self {
             runtime: Self::runtime()?,
             provider: alloy::providers::ProviderBuilder::default().connect_reqwest(client, url),
@@ -847,10 +838,11 @@ impl AlloyEvmClient {
         number: alloy::rpc::types::BlockNumberOrTag,
     ) -> Result<Option<BlockData>> {
         use alloy::providers::Provider;
+        let timeout = rpc_timeout();
         let block = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, async {
+                tokio::time::timeout(timeout, async {
                     self.provider.get_block_by_number(number).await
                 })
                 .await
@@ -859,12 +851,13 @@ impl AlloyEvmClient {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_getBlockByNumber({number:?}) timed out after {}s \
                      (host RPC path stalled) - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
-            .map_err(|e| {
+            .map_err(|_| {
+                // Transport errors can contain the RPC URL and its API key.
                 EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_getBlockByNumber({number:?}) failed: {e}"
+                    "evm-rpc: eth_getBlockByNumber({number:?}) failed"
                 ))
             })?;
         Ok(block.map(|block| BlockData {
@@ -878,6 +871,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
+        let timeout = rpc_timeout();
         // Outer `?`: the deadline passed (fail closed, free the worker). Inner
         // `?`: the RPC failed. Build the `timeout` future INSIDE the async
         // block. As a `block_on` argument it panics with "there is no reactor
@@ -885,21 +879,17 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let receipt = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(
-                    EVM_RPC_CALL_TIMEOUT,
-                    self.provider.get_transaction_receipt(hash),
-                )
-                .await
+                tokio::time::timeout(timeout, self.provider.get_transaction_receipt(hash)).await
             })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
                      - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
-            .map_err(|e| {
-                EnclaveError::CrossCheck(format!("evm-rpc: eth_getTransactionReceipt failed: {e}"))
+            .map_err(|_| {
+                EnclaveError::CrossCheck("evm-rpc: eth_getTransactionReceipt failed (RPC error details redacted)".into())
             })?;
         receipt.map(map_alloy_receipt).transpose()
     }
@@ -919,17 +909,20 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
     fn get_chain_id(&self) -> Result<u64> {
         use alloy::providers::Provider;
+        let timeout = rpc_timeout();
         self.runtime
-            .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, self.provider.get_chain_id()).await
-            })
+            .block_on(async { tokio::time::timeout(timeout, self.provider.get_chain_id()).await })
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
-            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_chainId failed: {e}")))
+            .map_err(|_| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_chainId failed (RPC error details redacted)".into(),
+                )
+            })
     }
 
     fn call(&self, to: &[u8; 20], data: &[u8], block: u64) -> Result<Vec<u8>> {
@@ -939,10 +932,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let request = TransactionRequest::default()
             .to(Address::from(*to))
             .input(Bytes::copy_from_slice(data).into());
+        let timeout = rpc_timeout();
         let out = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(EVM_RPC_CALL_TIMEOUT, async {
+                tokio::time::timeout(timeout, async {
                     self.provider
                         .call(request)
                         .block(BlockId::number(block))
@@ -953,10 +947,14 @@ impl EvmReceiptProvider for AlloyEvmClient {
             .map_err(|_elapsed| {
                 EnclaveError::CrossCheck(format!(
                     "evm-rpc: eth_call timed out after {}s - refusing to sign",
-                    EVM_RPC_CALL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ))
             })?
-            .map_err(|e| EnclaveError::CrossCheck(format!("evm-rpc: eth_call failed: {e}")))?;
+            .map_err(|_| {
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_call failed (RPC error details redacted)".into(),
+                )
+            })?;
         Ok(out.to_vec())
     }
 }

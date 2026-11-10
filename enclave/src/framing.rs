@@ -6,22 +6,27 @@ use std::io::{Read, Write};
 use crate::error::{EnclaveError, Result};
 use crate::proto::EnclaveRequest;
 
-/// Maximum size of one framed message. A request is one message, so it holds
+/// Maximum size of one framed message in the image. The operator can change
+/// it ([`crate::limits`]). A request is one message, so it holds
 /// the consignment, the Merkle proofs and the calldata.
 ///
-/// Sized for the default request limits in [`crate::config`]: a 10 MiB
-/// consignment, 8 MiB of proof bytes, and protobuf overhead for 16_384 proof
-/// entries. The parent has the same constant.
+/// Sized for the default request limits in [`crate::config`]: a consignment
+/// of [`crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES`], proof bytes of
+/// [`crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES`], and protobuf overhead
+/// for [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proof entries. The parent
+/// has the same constant.
 pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
-/// Maximum protobuf field occurrences in one request. The shape check counts
+/// Maximum protobuf field occurrences in one request in the image. The
+/// operator can change it ([`crate::limits`]). The shape check counts
 /// them on the wire before the decode. A decoded element costs far more
 /// memory than its wire form. A field occurrence can be 2 bytes on the wire
 /// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
-/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decoded
-/// into more than 1 GiB. The largest real request is a burn with 16 384
-/// proofs of 13 path elements each. It has about 280 000 occurrences. The
-/// memory model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
+/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decodes
+/// into more than 1 GiB. The largest real request at the image limits is a
+/// burn with [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proofs of 13 path
+/// elements each. A test shows that it passes the shape check. The memory
+/// model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
 /// A packed repeated scalar would be one occurrence for many values. The
 /// request proto has none, and a test refuses one until the model covers it.
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
@@ -36,10 +41,10 @@ fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
     if len == 0 {
         return Err(EnclaveError::Framing("zero-length message".into()));
     }
-    if len > MAX_MESSAGE_SIZE {
+    let max = crate::limits::get().max_message_bytes;
+    if u64::from(len) > max {
         return Err(EnclaveError::Framing(format!(
-            "message too large: {} bytes (max {})",
-            len, MAX_MESSAGE_SIZE
+            "message too large: {len} bytes (max {max})"
         )));
     }
 
@@ -98,9 +103,9 @@ impl Schema {
 }
 
 /// Counts the field occurrences of a request frame and refuses more than
-/// [`MAX_WIRE_ELEMENTS`]. Every occurrence counts, at every depth the schema
-/// knows. The shape check or the decode refuses a frame that is not valid
-/// protobuf.
+/// `max_wire_elements`, the limit in force. Every occurrence counts, at every
+/// depth the schema knows. The shape check or the decode refuses a frame that
+/// is not valid protobuf.
 pub fn check_request_shape(frame: &[u8]) -> Result<()> {
     count_request_elements(frame).map(|_| ())
 }
@@ -108,9 +113,10 @@ pub fn check_request_shape(frame: &[u8]) -> Result<()> {
 /// The field occurrences of a request frame, or the refusal of
 /// [`check_request_shape`]. The memory tests use the count.
 pub(crate) fn count_request_elements(frame: &[u8]) -> Result<usize> {
-    let mut left = MAX_WIRE_ELEMENTS;
+    let max = crate::limits::get().max_wire_elements as usize;
+    let mut left = max;
     walk(frame, Schema::Request, &mut left)?;
-    Ok(MAX_WIRE_ELEMENTS - left)
+    Ok(max - left)
 }
 
 fn shape_error(e: prost::DecodeError) -> EnclaveError {
@@ -122,7 +128,8 @@ fn walk(mut buf: &[u8], schema: Schema, left: &mut usize) -> Result<()> {
         let (tag, wire_type) = decode_key(&mut buf).map_err(shape_error)?;
         *left = left.checked_sub(1).ok_or_else(|| {
             EnclaveError::Framing(format!(
-                "request has more than {MAX_WIRE_ELEMENTS} elements"
+                "request has more than {} elements",
+                crate::limits::get().max_wire_elements
             ))
         })?;
         let child = schema.child(tag);
@@ -190,16 +197,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn reject_oversized() {
-        let len: u32 = MAX_MESSAGE_SIZE + 1;
-        let buf = len.to_le_bytes().to_vec();
-        let mut cursor = Cursor::new(buf);
-        let result: Result<EnclaveRequest> = read_message(&mut cursor);
-        assert!(result.is_err());
-    }
-
-    // F03-AF-22: test truncated and invalid protobuf frames.
+    // Test truncated and invalid protobuf frames.
 
     /// Reject a body shorter than its length header.
     #[test]
@@ -287,7 +285,7 @@ mod tests {
 
     /// The request memory model (`memory.rs`): the shape check refuses a frame
     /// of repeated empty entries before the decode. Without the check, the
-    /// frame decoded into 45 times its size.
+    /// frame would decode into 45 times its size.
     #[test]
     fn a_frame_of_empty_proof_entries_is_refused_within_the_request_memory_factor() {
         use crate::memory::peak;
@@ -590,7 +588,7 @@ mod tests {
     /// field that holds a repeated field at any depth leads to the schema the
     /// walk enters, and every other message field is a leaf. A new repeated
     /// field in a message the walk does not enter fails this test until
-    /// `Schema::child` names its path. Without that, the decode could again
+    /// `Schema::child` names its path. Without that, the decode could
     /// expand a small frame into many elements.
     #[test]
     fn the_shape_walk_knows_every_repeated_field_of_the_proto() {

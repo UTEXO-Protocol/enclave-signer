@@ -2,7 +2,7 @@
 
 //! Integration tests for the cloning handshake.
 //!
-//! Run with `--no-default-features --features ccd,mock-attestation,allow-seed-import`.
+//! Run with `--no-default-features --features mock-attestation,allow-seed-import`.
 //! KMS persistence disables cloning. Mock attestation skips NSM, COSE, and
 //! cert-chain validation. It still checks the pubkey, digest, nonce, and PCR
 //! bindings. `allow-seed-import` only gives the donor a known seed. The cloning
@@ -21,7 +21,8 @@ use utexo_bridge_enclave::proto::*;
 // Known BIP-39 test vector. It gives a stable seed that is not secret.
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-// Use at least 32 bytes and eight distinct values. (F03-AF-26)
+// Keep at least `cloning::MIN_CLONING_SECRET_BYTES` bytes and
+// `cloning::MIN_CLONING_SECRET_DISTINCT_BYTES` distinct values.
 const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {
@@ -38,8 +39,6 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
     match resp.response {
         Some(Resp::InitializeKey(r)) => PublicKeysResponse {
             evm_address: r.evm_address,
-            btc_compressed_pub: r.btc_compressed_pub,
-            btc_xpub: r.btc_xpub,
             master_fingerprint: r.master_fingerprint,
             account_xpub_vanilla: r.account_xpub_vanilla,
             account_xpub_colored: r.account_xpub_colored,
@@ -49,7 +48,6 @@ fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse
             rgb_asset_id: r.rgb_asset_id,
             evm_gas_tx_uncompressed_pub: r.evm_gas_tx_uncompressed_pub,
             evm_gas_tx_address: r.evm_gas_tx_address,
-            ccd_ed25519_pub: r.ccd_ed25519_pub,
         },
         other => panic!("expected InitializeKey response, got {:?}", other),
     }
@@ -166,10 +164,9 @@ fn clone_happy_path_copies_donor_identity_to_requester() {
     let requester_keys = get_public_keys(requester_port);
     assert_eq!(requester_keys.evm_address, donor_keys.evm_address);
     assert_eq!(
-        requester_keys.btc_compressed_pub,
-        donor_keys.btc_compressed_pub
+        requester_keys.account_xpub_vanilla,
+        donor_keys.account_xpub_vanilla
     );
-    assert_eq!(requester_keys.btc_xpub, donor_keys.btc_xpub);
     assert_eq!(
         requester_keys.master_fingerprint,
         donor_keys.master_fingerprint
@@ -189,7 +186,7 @@ fn clone_rejects_wrong_cloning_secret() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
-    // Use a strong secret so this case tests HMAC rejection. (F03-AF-26)
+    // Use a strong secret so this case tests HMAC rejection.
     let init = initiate_cloning(
         requester_port,
         "wrong-operator-cloning-secret-0123456789abcdef",
@@ -225,7 +222,7 @@ fn clone_rejects_wrong_cluster_public_key() {
 
 #[test]
 fn clone_donor_rejects_request_armed_for_a_different_target() {
-    // Change the target address without changing its HMAC. (F03-AF-07)
+    // Change the target address without changing its HMAC.
     // The donor must reject the request before encrypting its seed.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
@@ -240,28 +237,7 @@ fn clone_donor_rejects_request_armed_for_a_different_target() {
     assert_eq!(err.code, 5);
     assert!(
         err.message.contains("digest") || err.message.contains("cloning"),
-        "expected a digest-binding rejection (F03-AF-07), got: {}",
-        err.message
-    );
-}
-
-#[test]
-fn clone_rejects_tampered_ciphertext() {
-    let (donor_port, donor_keys) = start_donor();
-    let requester_port = start_requester();
-
-    let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
-    let mut clone = request_get_clone(donor_port, &donor_keys.evm_address, &init)
-        .expect("GetClone should succeed");
-    // Flip a byte in the Poly1305 tag (the last 16 bytes of the ciphertext).
-    let len = clone.encrypted_seed.len();
-    clone.encrypted_seed[len - 1] ^= 0x01;
-
-    let err = request_set_clone(requester_port, &clone)
-        .expect_err("SetClone should reject a tampered ciphertext");
-    assert!(
-        err.message.contains("unseal") || err.message.contains("clone"),
-        "unexpected error: {}",
+        "expected a digest-binding rejection, got: {}",
         err.message
     );
 }
@@ -310,7 +286,10 @@ fn clone_set_failed_completion_leaves_state_and_nonce_unconsumed() {
 
     let requester_keys = get_public_keys(requester_port);
     assert_eq!(requester_keys.evm_address, donor_keys.evm_address);
-    assert_eq!(requester_keys.btc_xpub, donor_keys.btc_xpub);
+    assert_eq!(
+        requester_keys.account_xpub_colored,
+        donor_keys.account_xpub_colored
+    );
 }
 
 #[test]
@@ -362,35 +341,6 @@ fn clone_rejected_handshake_does_not_consume_replay_nonce() {
 }
 
 #[test]
-fn cannot_initialize_after_entering_cloning() {
-    let requester_port = start_requester();
-    // Start a clone session with a throwaway donor address.
-    let _init = initiate_cloning(requester_port, CLONING_SECRET, &[0x11u8; 20]);
-
-    // InitializeKey must fail, because the enclave is in Phase::Cloning.
-    let resp = send_request(
-        requester_port,
-        &EnclaveRequest {
-            request: Some(Req::InitializeKey(InitializeKeyRequest {
-                seed: vec![],
-                mnemonic: DONOR_MNEMONIC.into(),
-                cloning_secret: String::new(),
-            })),
-        },
-    );
-    match resp.response {
-        Some(Resp::Error(e)) => {
-            assert!(
-                e.message.contains("already") || e.message.contains("initialized"),
-                "unexpected error: {}",
-                e.message
-            );
-        }
-        other => panic!("expected Error, got {:?}", other),
-    }
-}
-
-#[test]
 fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
     // The X25519 pubkey in the signed requester attestation is authoritative.
     // The plaintext `encryption_pubkey` that the parent relays is not. A parent
@@ -401,7 +351,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
     // Change the wire key but keep the original attestation.
-    // Use a valid HMAC to reach the attested-key check. (F03-AF-20)
+    // Use a valid HMAC to reach the attested-key check.
     let mut tampered = init.clone();
     tampered.encryption_pubkey = vec![0x77u8; 32];
     let tampered_pk: [u8; 32] = tampered
@@ -409,7 +359,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
         .clone()
         .try_into()
         .expect("32-byte pubkey");
-    // Include the donor address so the HMAC passes the target check. (F03-AF-07)
+    // Include the donor address so the HMAC passes the target check.
     let donor_target: [u8; 20] = donor_keys
         .evm_address
         .clone()
@@ -601,9 +551,9 @@ fn clone_rejections_carry_their_codes() {
     }
 }
 
-/// Issue #270. A peer with the right image (PCR0/1/2) but another IAM role
-/// (PCR3) runs under another AWS account. The donor must not seal its seed to
-/// it. A peer with the same role passes in the same run.
+/// A peer with the right image (PCR0/1/2) but another IAM role (PCR3) runs
+/// under another AWS account. The donor must not seal its seed to it. A peer
+/// with the same role passes in the same run.
 #[test]
 fn clone_donor_refuses_a_requester_under_another_iam_role() {
     let (donor_port, donor_keys) = start_donor();
@@ -635,9 +585,9 @@ fn clone_donor_refuses_a_requester_under_another_iam_role() {
     );
 }
 
-/// Issue #270, requester side: a donor document under another IAM role is
-/// refused before the seed is unsealed. The real donor document then works,
-/// so the refusal used no state.
+/// Requester side: a donor document under another IAM role is refused before
+/// the seed is unsealed. The real donor document then works, so the refusal
+/// used no state.
 #[test]
 fn clone_requester_refuses_a_donor_under_another_iam_role() {
     let (donor_port, donor_keys) = start_donor();

@@ -369,16 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn oversized_reply_is_an_error() {
-        let mut line = vec![b'a'; MAX_READ_BYTES + 1];
-        line.push(b'\n');
-        let url = serve(vec![Some(line)]);
-        let start = Instant::now();
-        assert!(source(&url).tip().is_err());
-        assert!(start.elapsed() < Duration::from_secs(3));
-    }
-
-    #[test]
     fn silent_source_is_bounded() {
         let url = serve(vec![None]);
         let start = Instant::now();

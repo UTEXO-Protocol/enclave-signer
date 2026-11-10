@@ -2,7 +2,7 @@
 # Host-prep for the enclave evm-rpc egress path (run as root, e.g. via SSM).
 #
 # Stands up, idempotently and reboot-safe, the host side of the in-enclave EVM
-# FundsIn verification (evm-rpc feature):
+# FundsIn verification:
 #
 #   enclave https://<EVM_RPC_HOST> via 127.0.0.1:<EVM_RPC_TLS_PORT> (TLS ends in the enclave)
 #     -> in-enclave vsock forwarder -> vsock port 8002

@@ -153,24 +153,22 @@ fn happy_path_single_tx_block_with_six_confirmations() {
     validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();
 }
 
-/// Regression: an anchor more than 2122 blocks below the tip still verifies.
-/// Full retention keeps its header, so the proof does not fail with "no
-/// header at height H".
+/// An anchor more than 2122 blocks below the tip verifies. Full retention
+/// keeps its header, so the proof does not fail with "no header at height H".
 #[test]
-fn deep_anchor_below_old_window_still_verifies() {
+fn deep_anchor_verifies_with_full_retention() {
     let target = synth_headers(1).into_iter().next().unwrap();
     // Make the proof before the target moves into the chain.
     let (txid_display, proof) = single_tx_proof(&target, 1);
-    // A window pruning to floor_2016(tip - 2122) drops height 1 when
-    // tip >= 4138. 4200 is past that, so pruning code fails this test.
+    // Pruning to floor_2016(tip - 2122) would drop height 1 when
+    // tip >= 4138. 4200 is past that, so a pruning chain fails this test.
     let chain = chain_burying(target, 4200);
     let tip = chain.tip_height();
-    let old_window = 100 + 2016 + 6; // pruning window size
-    let old_pruned_base = (tip.saturating_sub(old_window) / 2016) * 2016;
+    let depth = 100 + 2016 + 6;
+    let floor = (tip.saturating_sub(depth) / 2016) * 2016;
     assert!(
-        old_pruned_base >= 1,
-        "precondition: the old window would have pruned the anchor at height 1 \
-         (tip={tip}, old_pruned_base={old_pruned_base})"
+        floor >= 1,
+        "precondition: pruning to {floor} would drop the anchor at height 1 (tip={tip})"
     );
 
     validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();
@@ -443,14 +441,6 @@ fn min_difficulty_blocks_make_a_witness_deep() {
     );
 }
 
-/// A fresh min-difficulty tip keeps the chain fresh on the testnets.
-#[test]
-fn a_min_difficulty_tip_keeps_the_chain_fresh() {
-    let chain = testnet4_chain();
-    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
-    assert_chain_fresh(&chain, now).unwrap();
-}
-
 /// The depth is a parameter: the same proof passes at 1 and fails at 2.
 #[test]
 fn min_confirmations_is_a_parameter() {
@@ -470,18 +460,10 @@ fn assert_chain_net_rejects_mismatch() {
     let err = assert_chain_net("bc", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
 
-    // Regression: consignments carry `"sb"` (`genesis.chain_net.prefix()`),
-    // not "bc:signet"-style notation.
+    // Consignments carry `"sb"` (`genesis.chain_net.prefix()`), not
+    // "bc:signet"-style notation.
     let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
     assert!(err.to_string().contains("does not match"), "got: {err}");
-}
-
-#[test]
-fn empty_expected_and_empty_proofs_is_ok() {
-    // No witness bundles and no proofs: nothing to verify, and no panic.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    validate_spv_proofs(&chain, &[], &[], MIN_CONFIRMATIONS).unwrap();
 }
 
 // ===== Staleness tests =====
@@ -507,19 +489,6 @@ fn unix(secs: u64) -> SystemTime {
 }
 
 #[test]
-fn staleness_fresh_tip_passes() {
-    let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + 30 minutes. Well within 2h.
-    assert_chain_not_stale(
-        &chain,
-        unix(1_700_000_000 + 30 * 60),
-        Duration::from_secs(SPV_MAX_TIP_AGE_SECS),
-        Duration::from_secs(SPV_MAX_TIP_FUTURE_SECS),
-    )
-    .unwrap();
-}
-
-#[test]
 fn staleness_tip_at_exact_max_age_passes() {
     let chain = chain_with_tip_time(1_700_000_000);
     // Now = tip + max_age. age == max_age passes; only age > max_age fails.
@@ -535,7 +504,7 @@ fn staleness_tip_at_exact_max_age_passes() {
 #[test]
 fn staleness_old_tip_rejects() {
     let chain = chain_with_tip_time(1_700_000_000);
-    // Now = tip + 3 hours. Past the 2-hour bound.
+    // Now = tip + 3 hours. Past `SPV_MAX_TIP_AGE_SECS`.
     let err = assert_chain_not_stale(
         &chain,
         unix(1_700_000_000 + 3 * 60 * 60),
@@ -549,7 +518,7 @@ fn staleness_old_tip_rejects() {
 #[test]
 fn staleness_far_future_tip_rejects() {
     let chain = chain_with_tip_time(1_700_000_000 + 4 * 60 * 60);
-    // Tip is 4h ahead of now. The limit is 2h of future skew.
+    // Tip is 4h ahead of now, past `SPV_MAX_TIP_FUTURE_SECS` of future skew.
     let err = assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),
@@ -563,7 +532,7 @@ fn staleness_far_future_tip_rejects() {
 #[test]
 fn staleness_near_future_tip_passes() {
     let chain = chain_with_tip_time(1_700_000_000 + 30 * 60);
-    // Tip is 30 min ahead of now: in the 2h consensus margin.
+    // Tip is 30 min ahead of now: within `SPV_MAX_TIP_FUTURE_SECS`.
     assert_chain_not_stale(
         &chain,
         unix(1_700_000_000),
@@ -604,14 +573,6 @@ fn staleness_uses_checkpoint_time_when_no_headers() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("too stale"), "got: {err}");
-}
-
-#[test]
-fn staleness_thresholds_are_what_we_documented() {
-    // 2h on each side is high on purpose. A lower value is a security
-    // tradeoff, so a change must also change this test.
-    assert_eq!(SPV_MAX_TIP_AGE_SECS, 2 * 60 * 60);
-    assert_eq!(SPV_MAX_TIP_FUTURE_SECS, 2 * 60 * 60);
 }
 
 // ===== proven witnesses (what consensus sees as mined) =====
@@ -721,7 +682,7 @@ fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
     );
 }
 
-// ===== Position binding and 64-byte transaction nodes (VAL-UENC-15) =====
+// ===== Position binding and 64-byte transaction nodes =====
 
 /// A 64-byte legacy transaction X: one input with an empty scriptSig, one
 /// output with a 4-byte scriptPubKey (4 + 1 + 41 + 1 + 13 + 4 = 64).

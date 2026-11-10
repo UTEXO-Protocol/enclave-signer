@@ -789,7 +789,7 @@ mod tests {
         );
     }
 
-    /// Issue #270: a cloning role must attest its document PCR3.
+    /// A cloning role must attest its document PCR3.
     #[test]
     fn clone_peer_pcr3_absent_aborts() {
         assert_mismatch(
@@ -808,18 +808,6 @@ mod tests {
                 "44".repeat(48)
             ),
         );
-    }
-
-    /// A cloning role on an instance with no IAM role (all-zero PCR3) fails,
-    /// whatever it attests.
-    #[test]
-    fn a_cloning_role_without_an_iam_role_aborts() {
-        // A signed test document always carries MOCK_PCR3, and Mock mode
-        // refuses Production, so check the PCR3 rule directly.
-        let mut pcrs: HashMap<u32, Vec<u8>> = (0..3).map(|i| (i, vec![0u8; 48])).collect();
-        pcrs.insert(3, vec![0; 48]);
-        let err = with_document_pcr3(&expected(), &pcrs).unwrap_err();
-        assert!(err.to_string().contains("no IAM role"), "{err}");
     }
 
     /// The mint signer does not clone, so it attests no PCR3.

@@ -55,7 +55,7 @@ pub fn start_test_server_with_policy(
         configure,
         bridge_config,
         policy,
-        #[cfg(feature = "evm-rpc")]
+        #[cfg(feature = "rgb-validation")]
         None,
     )
 }
@@ -63,7 +63,7 @@ pub fn start_test_server_with_policy(
 /// Same, with an EVM receipt provider. The enclave refuses a bridge-mode PSBT
 /// unless it can verify the FundsIn deposit. A test that must reach the RGB
 /// checks supplies a provider.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub fn start_test_server_with_evm_rpc(
     client: Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
@@ -83,7 +83,7 @@ fn start_test_server_inner(
     configure: impl FnOnce(&EnclaveState),
     bridge_config: BridgeConfig,
     policy: SecurityPolicy,
-    #[cfg(feature = "evm-rpc")] evm_rpc_client: Option<
+    #[cfg(feature = "rgb-validation")] evm_rpc_client: Option<
         Box<dyn utexo_bridge_enclave::networks::evm::events::EvmReceiptProvider + Send + Sync>,
     >,
 ) -> u16 {
@@ -106,7 +106,7 @@ fn start_test_server_inner(
     let mut ctx = ServerContext::new(state, bridge_config);
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     {
         launch.evm_rpc_client = evm_rpc_client;
     }
@@ -184,7 +184,7 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
 /// The enclave refuses a bridge-mode PSBT before RGB work unless it can verify
 /// the deposit. The log carries the gross and commission that the request
 /// declares. The deposit gate passes, so only the later checks can reject.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 #[allow(dead_code)]
 pub mod deposit_stub {
     use alloy_primitives::U256;

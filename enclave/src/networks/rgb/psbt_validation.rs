@@ -4,13 +4,13 @@ use crate::error::{EnclaveError, Result};
 
 // The mint signer's rules, on the transition its PSBT commits. Only it holds
 // mint rights to mint with or refill.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 mod mint;
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 mod refill;
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 pub use mint::*;
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 pub use refill::*;
 
 /// Soft-dedup key for an EVM->RGB bridge PSBT operation.
@@ -128,7 +128,7 @@ fn assert_sighash_all(psbt: &Psbt) -> Result<()> {
 
 /// F7 and RR10: every input is one of `colored`, our Colored key-path inputs.
 /// The sats rules see only our inputs' value.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 pub fn assert_only_colored_inputs(psbt: &Psbt, colored: &[usize], path: &str) -> Result<()> {
     if let Some(i) = (0..psbt.inputs.len()).find(|i| !colored.contains(i)) {
         return Err(EnclaveError::CrossCheck(format!(
@@ -141,7 +141,7 @@ pub fn assert_only_colored_inputs(psbt: &Psbt, colored: &[usize], path: &str) ->
 
 /// M8 of a blinded mint and RR12: no sat leaves. With no rule A exemption, each
 /// output must be a rule C output of ours or carry 0 sat, as the OP_RETURN must.
-#[cfg(feature = "bfa-mint")]
+#[cfg(feature = "rgb-validation")]
 pub fn assert_keeps_all_sats(
     psbt: &Psbt,
     keys: &crate::keys::KeyManager,
@@ -172,10 +172,9 @@ pub const MAX_FEE_RATE_SAT_VB: u64 = 200;
 /// It bounds the fee of one request at any transaction size.
 ///
 /// At the maximum rate, this cap applies first above
-/// [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned vB (one key-path input and approx ten
-/// P2TR outputs). A wider `create_utxos` batch at a high rate must be split.
-/// The error names the crossover, so the operator can tell a size problem from
-/// a rate problem.
+/// [`MAX_FEE_CAP_CROSSOVER_VB`] unsigned vB. A `create_utxos` batch above that
+/// size at a high rate must be split. The error names the crossover, so the
+/// operator can tell a size problem from a rate problem.
 pub const MAX_FEE_SATS: u64 = 100_000;
 
 /// Unsigned vsize above which [`MAX_FEE_SATS`] applies before

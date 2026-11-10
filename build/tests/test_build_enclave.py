@@ -24,7 +24,12 @@ MEASURED_PINS = dict(
     BITCOIN_NETWORK='signet', BTC_RELAY_MODE='none', EVM_CHAIN_ID='42161',
     EVM_PROXY_CONTRACT_ADDRESS='0x' + '11' * 20,
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
-    ENDPOINTS_SHA256='12' * 32,
+)
+MEMBER_INPUT_NAMES = (
+    'ENDPOINTS_SHA256', 'ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_PORT',
+    'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_TLS_CA_DER_HEX', 'EVM_RPC_URL',
+    'EVM_RPC_PATH', 'EVM_RPC_PATH_FILE', 'EVM_RPC_API_KEY',
+    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
 )
 
 
@@ -53,13 +58,12 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.write_text('#!/bin/sh\nexit 99\n')
             stub.chmod(0o700)
         self.env = dict(os.environ)
-        for key in ('RGB_ASSET_ID', 'ENCLAVE_DEBUG_FEATURES', 'PRIVATE_DEPS_DIR',
+        for key in ('RGB_ASSET_ID', 'PRIVATE_DEPS_DIR',
                     'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
+                    'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
                     'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
                     'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
-                    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
-                    'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS):
+                    'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS, *MEMBER_INPUT_NAMES):
             self.env.pop(key, None)
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
@@ -156,31 +160,49 @@ class BuildArgumentsTests(unittest.TestCase):
                     [f'build override: {key}={value}' for key, value in applied.items()],
                 )
 
-    def test_kms_account_pin_reaches_only_the_recipe_that_declares_it(self):
-        for role, forwarded in (('mint', True), ('burn', False)):
-            with self.subTest(role=role):
-                result = self.invoke(f'Dockerfile.enclave.{role}',
-                                     RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES=f'vsock,{role}-signer',
-                                     BITCOIN_NETWORK='signet',
-                                     KMS_ALLOWED_ACCOUNT_IDS='123456789012')
-                self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(
-                    'KMS_ALLOWED_ACCOUNT_IDS=123456789012' in self.captured_build_args(),
-                    forwarded)
-
-    def test_optional_overrides_do_not_leak_into_legacy_or_ccd_recipes(self):
-        for recipe in ('Dockerfile.enclave', 'Dockerfile.enclave.rgb', 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev', 'Dockerfile.enclave-dev.bfa'):
-            with self.subTest(recipe=recipe):
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES='vsock,mint-signer', **MEASURED_PINS)
-                self.assertEqual(result.returncode, 42, result.stderr)
-                expected = ['SOURCE_DATE_EPOCH=1700000000']
-                if recipe in RGB_RECIPES:
-                    expected = self.base_args(recipe)
-                self.assertEqual(self.captured_build_args(), expected)
-                self.assertNotIn('build override:', result.stdout)
+    def test_member_settings_do_not_change_role_build_arguments(self):
+        # Capture the real wrapper's full Docker command for both feature profiles.
+        # No Docker/Nitro build runs here; ImageInputsTests separately checks that
+        # the recipes cannot bake these member settings into ARG or ENV.
+        for role in ('mint', 'burn'):
+            for spv in (True, False):
+                with self.subTest(role=role, spv=spv):
+                    recipe = f'Dockerfile.enclave.{role}'
+                    pins = dict(
+                        RGB_ASSET_ID='rgb:test-bfa-asset',
+                        ENCLAVE_FEATURES=f'vsock,{"spv," if spv else ""}{role}-signer',
+                        BITCOIN_NETWORK='bitcoin' if spv else 'signet',
+                        BTC_RELAY_MODE='required' if spv else 'none',
+                    )
+                    baseline = self.invoke(recipe, **pins)
+                    self.assertEqual(baseline.returncode, 42, baseline.stderr)
+                    baseline_argv = json.loads(self.argv.read_text())
+                    for member in ('a', 'b'):
+                        # Some of these inputs are not read anywhere. Neither
+                        # credentials nor an endpoint digest may enter a measured build.
+                        settings = dict(
+                            ENDPOINTS_SHA256=('12' if member == 'a' else '34') * 32,
+                            ELECTRUM_URL=f'ssl://electrum-{member}.test:50002',
+                            EVM_RPC_HOST=f'rpc-{member}.test',
+                            EVM_RPC_TLS_PORT='443' if member == 'a' else '8443',
+                            EVM_RPC_TLS_CA_DER_FILE=f'/member-{member}/ca.der',
+                            EVM_RPC_TLS_CA_DER_HEX='aa' if member == 'a' else 'bb',
+                            EVM_RPC_URL=f'https://rpc-{member}.test/v2/secret-{member}',
+                            EVM_RPC_PATH=f'/v2/secret-{member}',
+                            EVM_RPC_PATH_FILE=f'/member-{member}/rpc-path',
+                            EVM_RPC_API_KEY=f'secret-{member}',
+                            **dict(KMS_PINS, KMS_SEED_ID=f'member-{member}',
+                                   KMS_EXPECTED_EVM_ADDRESS='0x' + ('11' if member == 'a' else '22') * 20),
+                        )
+                        self.assertCountEqual(settings, MEMBER_INPUT_NAMES)
+                        result = self.invoke(recipe, **pins, **settings)
+                        self.assertEqual(result.returncode, 42, result.stderr)
+                        self.assertEqual(json.loads(self.argv.read_text()), baseline_argv)
+                        self.assertEqual(result.stdout, baseline.stdout)
+                        self.assertEqual(result.stderr, baseline.stderr)
+                        build_arg_names = {arg.split('=', 1)[0]
+                                           for arg in self.captured_build_args()}
+                        self.assertTrue(build_arg_names.isdisjoint(MEMBER_INPUT_NAMES))
 
     def test_empty_role_overrides_keep_recipe_defaults(self):
         for role in ('mint', 'burn'):
@@ -193,7 +215,7 @@ class BuildArgumentsTests(unittest.TestCase):
                                  self.base_args(f'Dockerfile.enclave.{role}'))
                 self.assertNotIn('build override:', result.stdout)
 
-    def test_non_signet_roles_require_rgb_before_docker(self):
+    def test_non_signet_roles_require_spv_before_docker(self):
         for role in ('mint', 'burn'):
             for network in (None, '', 'bitcoin', 'testnet', 'testnet4', 'regtest'):
                 with self.subTest(role=role, network=network):
@@ -202,41 +224,19 @@ class BuildArgumentsTests(unittest.TestCase):
                                          RGB_ASSET_ID='rgb:test-bfa-asset',
                                          ENCLAVE_FEATURES=f'vsock,{role}-signer', **overrides)
                     self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn('requires the rgb feature', result.stderr)
+                    self.assertIn('requires the spv feature', result.stderr)
                     self.assertFalse(self.argv.exists())
 
-    def test_related_feature_names_do_not_satisfy_rgb_guard(self):
-        for feature in ('rgb-validation', 'bfa-mint'):
-            with self.subTest(feature=feature):
-                result = self.invoke('Dockerfile.enclave.burn',
-                                     RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ENCLAVE_FEATURES=f'vsock,{feature},burn-signer')
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn('requires the rgb feature', result.stderr)
-                self.assertFalse(self.argv.exists())
-
-    def test_non_signet_roles_accept_explicit_rgb(self):
+    def test_non_signet_roles_accept_explicit_spv(self):
         for role in ('mint', 'burn'):
-            for features in (f'rgb,vsock,{role}-signer', f'vsock,rgb,{role}-signer',
-                             f'vsock,{role}-signer,rgb', f'vsock rgb {role}-signer'):
+            for features in (f'spv,vsock,{role}-signer', f'vsock,spv,{role}-signer',
+                             f'vsock,{role}-signer,spv', f'vsock spv {role}-signer'):
                 with self.subTest(role=role, features=features):
                     result = self.invoke(f'Dockerfile.enclave.{role}',
                                          RGB_ASSET_ID='rgb:test-bfa-asset',
                                          BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES=features)
                     self.assertEqual(result.returncode, 42, result.stderr)
                     self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
-
-    def test_no_recipe_forwards_kms_pins(self):
-        pins = dict(KMS_PINS, KMS_EXPECTED_EVM_ADDRESS='0x' + '12' * 20)
-        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev.bfa'):
-            with self.subTest(recipe=recipe):
-                result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset', **pins)
-                self.assertEqual(result.returncode, 42, result.stderr)
-                expected = ['SOURCE_DATE_EPOCH=1700000000']
-                if recipe in RGB_RECIPES:
-                    expected = self.base_args(recipe)
-                self.assertEqual(self.captured_build_args(), expected)
 
     def invoke_make(self, target, **extra):
         self.argv.unlink(missing_ok=True)
@@ -274,15 +274,6 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertIn('KMS_ALLOWED_ACCOUNT_IDS required', result.stderr)
         self.assertFalse(self.argv.exists())
 
-    def test_make_old_targets_have_no_kms_dependency_or_arguments(self):
-        for target in ('build_enclave_ccd',):
-            with self.subTest(target=target):
-                result = self.invoke_make(target)
-                self.assertEqual(result.returncode, 2, result.stderr)  # Reaches Docker.
-                argv = json.loads(self.argv.read_text())
-                self.assertEqual(argv[0], 'build')
-                self.assertFalse(any('KMS_' in value for value in argv))
-
     def test_the_measured_image_env_is_published(self):
         stubs = {
             'docker': ('#!/bin/sh\n[ "$1 $2" = "image inspect" ] && '
@@ -303,8 +294,7 @@ class BuildArgumentsTests(unittest.TestCase):
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
 
     def test_every_recipe_takes_the_deploy_key_and_the_mirror_token_as_secrets(self):
-        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave.ccd',
-                       'Dockerfile.enclave-dev.bfa'):
+        for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
@@ -318,7 +308,7 @@ class BuildArgumentsTests(unittest.TestCase):
         deps.mkdir()
         (deps / 'lib_key').write_text('fixture-deploy-key-file')
         (deps / 'rgb_deps_token').write_text('fixture-mirror-token-file')
-        result = self.invoke('Dockerfile.enclave.ccd', PRIVATE_DEPS_DIR=str(deps))
+        result = self.invoke('Dockerfile.enclave-dev.bfa', PRIVATE_DEPS_DIR=str(deps))
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(self.captured_secrets(), [
             f'id=lib_key,src={deps}/lib_key',
@@ -338,7 +328,7 @@ class BuildArgumentsTests(unittest.TestCase):
         )
         for unset, missing_file, named in cases:
             with self.subTest(unset=unset, missing_file=missing_file):
-                env = dict(self.env, DOCKERFILE='Dockerfile.enclave.ccd')
+                env = dict(self.env, DOCKERFILE='Dockerfile.enclave-dev.bfa')
                 if unset:
                     env.pop(unset)
                 else:
@@ -352,41 +342,27 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertIn(named, result.stderr)
                 self.assertFalse(self.argv.exists())
 
-    def test_ccd_does_not_require_asset(self):
-        result = self.invoke('Dockerfile.enclave.ccd')
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
-
-    def test_ccd_ignores_workflow_asset(self):
-        result = self.invoke('Dockerfile.enclave.ccd', RGB_ASSET_ID='rgb:test-bfa-asset')
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_build_args(), ['SOURCE_DATE_EPOCH=1700000000'])
-
     def stage_inputs(self):
-        return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:new-signet-asset',
+        return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:stage-signet-asset',
                     STAGE_TOKEN_CONTRACT='0x' + '33' * 20,
-                    STAGE_ENDPOINTS_SHA256='12' * 32,
                     STAGE_GAS_TX_ALLOWED_SELECTORS='0x12345678,0xabcdef01')
 
     def test_stage_profile_requires_dedicated_pins_before_docker(self):
         for key in ('STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_ENDPOINTS_SHA256', 'STAGE_GAS_TX_ALLOWED_SELECTORS'):
+                    'STAGE_GAS_TX_ALLOWED_SELECTORS'):
             with self.subTest(key=key):
                 inputs = self.stage_inputs()
                 inputs[key] = ''
                 result = self.invoke('Dockerfile.enclave.burn',
-                                     RGB_ASSET_ID='rgb:old-asset', **inputs)
+                                     RGB_ASSET_ID='rgb:other-asset', **inputs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(key, result.stderr)
                 self.assertFalse(self.argv.exists())
 
-    def test_stage_profile_rejects_bad_pins_and_debug_features(self):
+    def test_stage_profile_rejects_bad_pins(self):
         for key, value in (('STAGE_TOKEN_CONTRACT', '0x' + '00' * 20),
                            ('STAGE_TOKEN_CONTRACT', 'not-an-address'),
-                           ('STAGE_ENDPOINTS_SHA256', '00' * 32),
-                           ('STAGE_ENDPOINTS_SHA256', 'bad-digest'),
-                           ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
-                           ('ENCLAVE_DEBUG_FEATURES', 'allow-debug-pcrs')):
+                           ('STAGE_GAS_TX_ALLOWED_SELECTORS', '0x1234')):
             with self.subTest(key=key, value=value):
                 inputs = self.stage_inputs()
                 inputs[key] = value
@@ -401,14 +377,14 @@ class BuildArgumentsTests(unittest.TestCase):
                 if role == 'mint':
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
-                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,rgb',
-                                     RGB_ASSET_ID='rgb:old-asset', RUST_LOG='trace', **inputs)
+                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,spv',
+                                     RGB_ASSET_ID='rgb:other-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
                 self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
                 self.assertEqual(args['RGB_ASSET_ID'], inputs['STAGE_RGB_ASSET_ID'])
                 self.assertEqual(args['TOKEN_CONTRACT'], inputs['STAGE_TOKEN_CONTRACT'])
-                self.assertEqual(args['ENDPOINTS_SHA256'], inputs['STAGE_ENDPOINTS_SHA256'])
+                self.assertNotIn('ENDPOINTS_SHA256', args)
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
                 self.assertEqual(args['RUST_LOG'], 'debug,alloy_transport_http=off')
@@ -423,17 +399,9 @@ class BuildArgumentsTests(unittest.TestCase):
                 else:
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
 
-    def test_stage_profile_refuses_legacy_recipe_and_unknown_profile(self):
-        for recipe, profile in (('Dockerfile.enclave', 'stage-signet'),
-                                ('Dockerfile.enclave.burn', 'typo')):
-            with self.subTest(recipe=recipe, profile=profile):
-                result = self.invoke(recipe, BUILD_PROFILE=profile)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(self.argv.exists())
-
 
 class ImageInputsTests(unittest.TestCase):
-    RECIPES = RGB_RECIPES + ('Dockerfile.enclave.ccd',)
+    RECIPES = RGB_RECIPES
 
     def test_every_rgb_recipe_fixes_the_finality_tag_and_the_depth(self):
         # Every image uses `finalized` and 3. With no ARG, no build can change them.
@@ -482,10 +450,28 @@ class ImageInputsTests(unittest.TestCase):
                   ROOT / 'Makefile']
         for path in files:
             text = path.read_text()
-            for name in ('ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_CA', 'EVM_RPC_URL',
-                         'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS'):
+            for name in (*MEMBER_INPUT_NAMES, 'EVM_RPC_TLS_CA', 'EVM_RPC_CA'):
                 with self.subTest(file=path.name, name=name):
                     self.assertNotIn(name, text)
+
+    def test_no_member_setting_in_measured_image_environment(self):
+        # Inspect real ENV declarations, including multiline ones, in all EIF
+        # recipes. A wrapper-only test misses values baked directly in a recipe.
+        for recipe in self.RECIPES:
+            text = (ROOT / 'build' / recipe).read_text().replace('\\\n', ' ')
+            for line in text.splitlines():
+                if not line.startswith('ENV '):
+                    continue
+                for assignment in shlex.split(line[4:]):
+                    name = assignment.split('=', 1)[0]
+                    # A release pin, not a member setting: a host that chose
+                    # this list could name a key in its own account.
+                    if name == 'KMS_ALLOWED_ACCOUNT_IDS':
+                        continue
+                    with self.subTest(recipe=recipe, name=name):
+                        self.assertNotEqual(name, 'ENDPOINTS_SHA256')
+                        self.assertFalse(name.startswith(('ELECTRUM_', 'ESPLORA_',
+                                                          'EVM_RPC_', 'KMS_')))
 
 
 if __name__ == '__main__':

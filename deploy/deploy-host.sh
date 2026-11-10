@@ -8,7 +8,11 @@
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
 #   EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
+#   EVM_RPC_PATH_FILE=<restricted file with a private RPC path, for example /v2/<key>>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
+# The private RPC path can hold a provider API key. The script keeps a copy in
+# /etc/utexo/evm-rpc-path that only the service user can read. A deploy without
+# EVM_RPC_PATH_FILE keeps that copy. To go back to the path /, delete the copy.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
 # set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not
 # copied from ELECTRUM_URL, whose enclave-side rules differ. An invalid header
@@ -16,6 +20,9 @@
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
+# ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
+# (docs/runtime-limits.md). The script writes it into enclave.env. It stops
+# before it changes anything when that file exists and ubuntu cannot read it.
 #
 # After set-endpoints, verify each enclave's attested launch policy.
 # ENCLAVE_DEBUG_MODE=1 skips this check, because the PCRs are zero.
@@ -58,7 +65,7 @@ if [ $((ENCLAVE_MEMORY % 1024)) -ne 0 ]; then
   echo "ENCLAVE_MEMORY=$ENCLAVE_MEMORY MiB is not a whole number of GiB (enclave/src/memory.rs)" >&2
   exit 1
 fi
-# DEBUG-MODE (op13 crash hunt): when set to 1, enclaves run with --debug-mode so
+# DEBUG-MODE: when set to 1, enclaves run with --debug-mode so
 # `nitro-cli console` can attach. This ZEROES runtime PCR0/1/2, so the step-6
 # runtime-PCR check is skipped (the static describe-eif measurement in step 3
 # still verifies the EIF file). Default 0 keeps the normal production path.
@@ -66,6 +73,11 @@ ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
 ELECTRUM_URL="${ELECTRUM_URL:-}"
 HEADER_ELECTRUM_URL="${HEADER_ELECTRUM_URL:-}"
 EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
+EVM_RPC_PATH_FILE="${EVM_RPC_PATH_FILE:-}"
+if [ -n "$EVM_RPC_PATH_FILE" ] && [ ! -s "$EVM_RPC_PATH_FILE" ]; then
+  echo "EVM_RPC_PATH_FILE must name a file that is not empty" >&2
+  exit 1
+fi
 KMS_KEY_ARN="${KMS_KEY_ARN:-}"
 KMS_REGION="${KMS_REGION:-}"
 KMS_SEED_ID="${KMS_SEED_ID:-}"
@@ -73,6 +85,13 @@ KMS_EXPECTED_EVM_ADDRESS="${KMS_EXPECTED_EVM_ADDRESS:-}"
 if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   && { [ -z "$KMS_KEY_ARN" ] || [ -z "$KMS_REGION" ] || [ -z "$KMS_SEED_ID" ]; }; then
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
+  exit 1
+fi
+# The path goes into enclave.env and into a shell command below, so it has only
+# plain characters.
+ENCLAVE_LIMITS_FILE="${ENCLAVE_LIMITS_FILE:-/etc/utexo/enclave-limits.conf}"
+if ! [[ "$ENCLAVE_LIMITS_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
+  echo "ENCLAVE_LIMITS_FILE must be an absolute path of letters, digits, '_', '.', '/' and '-', got '$ENCLAVE_LIMITS_FILE'" >&2
   exit 1
 fi
 # Deploy exactly one enclave per invocation. Run the command again with another
@@ -140,7 +159,7 @@ asubuntu(){ runuser -u ubuntu -- env HOME=/home/ubuntu bash -c "$1"; }
 DESC_JSON=$(mktemp)
 trap 'rm -f "$DESC_JSON"' EXIT
 
-# Bind Parent gRPC to the private host address. (F03-AF-13)
+# Bind Parent gRPC to the private host address.
 # Set GRPC_HOST to override the address.
 if [ -z "${GRPC_HOST:-}" ]; then
   _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
@@ -151,6 +170,16 @@ if [ -z "${GRPC_HOST:-}" ]; then
   [ -n "$GRPC_HOST" ] || { log "FATAL: empty private IPv4 from IMDS"; exit 1; }
 fi
 log "parent gRPC bind GRPC_HOST=$GRPC_HOST (private ENI)"
+
+# Each launch sends the runtime limits file as ubuntu. When it cannot read the
+# file, the enclave keeps the image values. Stop here instead, before anything
+# changes. With no file there is nothing to send.
+if [ -e "$ENCLAVE_LIMITS_FILE" ] || [ -L "$ENCLAVE_LIMITS_FILE" ]; then
+  su -s /bin/sh ubuntu -c "test -r '$ENCLAVE_LIMITS_FILE'" || {
+    log "FATAL: user ubuntu cannot read $ENCLAVE_LIMITS_FILE. Make it readable for ubuntu, or remove it to launch with the image values (docs/runtime-limits.md)"
+    exit 1
+  }
+fi
 
 # Check each CID certificate and ACL before stopping services.
 # Keep private keys out of build artifacts.
@@ -303,6 +332,21 @@ enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
+# Send the limits of the operator. They do not survive a restart, so each launch
+# sends them again. The file is optional: with no file, nothing is sent or said.
+# If this user cannot read the file, or the enclave refuses it, the enclave keeps
+# the image values. The launch says so and goes on.
+send_limits() {
+  LIMITS_FILE="${ENCLAVE_LIMITS_FILE:-/etc/utexo/enclave-limits.conf}"
+  if [ ! -r "$LIMITS_FILE" ]; then
+    if [ -e "$LIMITS_FILE" ] || [ -L "$LIMITS_FILE" ]; then
+      echo "cannot read $LIMITS_FILE as user $(id -un): CID $CID keeps the image values" >&2
+    fi
+    return 0
+  fi
+  "$CLI" --addr "vsock://$CID:5000" limits set --file "$LIMITS_FILE" >/dev/null \
+    || echo "CID $CID refused $LIMITS_FILE and keeps the image values" >&2
+}
 # Set endpoints and KMS values once from the unit env.
 set_endpoints() {
   : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
@@ -314,7 +358,11 @@ set_endpoints() {
   for _ in $(seq 30); do
     # `health` exits 1 until the enclave is ready. Any answer will do.
     case "$("$CLI" --addr "vsock://$CID:5000" health 2>/dev/null)" in
-      *"Endpoints set:"*) "$CLI" --addr "vsock://$CID:5000" set-endpoints; return ;;
+      *"Endpoints set:"*)
+        send_limits
+        "$CLI" --addr "vsock://$CID:5000" set-endpoints
+        return
+        ;;
     esac
     sleep 2
   done
@@ -520,6 +568,19 @@ if [ -n "$EVM_RPC_TLS_CA_DER_FILE" ]; then
   install -m 0644 "$EVM_RPC_TLS_CA_DER_FILE" /etc/utexo/evm-rpc-ca.der
   EVM_RPC_TLS_CA_DER_FILE=/etc/utexo/evm-rpc-ca.der
 fi
+# The private RPC path can hold a provider API key, so only the service user
+# can read this copy. A deploy without EVM_RPC_PATH_FILE keeps the copy.
+if [ -n "$EVM_RPC_PATH_FILE" ] && [ "$EVM_RPC_PATH_FILE" != /etc/utexo/evm-rpc-path ]; then
+  install -m 0600 -o ubuntu -g ubuntu "$EVM_RPC_PATH_FILE" /etc/utexo/evm-rpc-path
+fi
+if [ -e /etc/utexo/evm-rpc-path ]; then
+  if [ -z "$EVM_RPC_PATH_FILE" ]; then
+    echo "NOTICE: reusing /etc/utexo/evm-rpc-path from an earlier deploy." >&2
+    echo "  If the RPC provider changed, pass EVM_RPC_PATH_FILE, or delete that file" >&2
+    echo "  to use the path /. Else the old provider key goes to the new provider." >&2
+  fi
+  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path
+fi
 cat > /etc/utexo/enclave.env <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
@@ -530,9 +591,11 @@ ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
 CLI=$DIR/utexo-bridge-parent-cli
 PCR_FILE=$DIR/PCR.json
 IMAGE_ENV=$DIR/IMAGE-ENV.json
+ENCLAVE_LIMITS_FILE=$ENCLAVE_LIMITS_FILE
 SIGNER_ROLE=$SIGNER_ROLE
 ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
+EVM_RPC_PATH_FILE=$EVM_RPC_PATH_FILE
 KMS_KEY_ARN=$KMS_KEY_ARN
 KMS_REGION=$KMS_REGION
 KMS_SEED_ID=$KMS_SEED_ID
@@ -564,8 +627,8 @@ systemd-tmpfiles --create /etc/tmpfiles.d/10-nitro-enclaves.conf || true
 systemctl daemon-reload
 
 # --- 5. (re)start enclaves via systemd -------------------------------------
-# Stop any prior unit instances, and kill stray setsid parents from pre-systemd
-# deploys (they would hold the gRPC ports). Enclave ctl `start` also terminates a
+# Stop the unit instances, and kill any parent process left outside systemd
+# (it would hold the gRPC ports). Enclave ctl `start` also terminates a
 # stale same-named enclave (anti-E39), so a leftover enclave is replaced cleanly.
 for CID in "${CIDS[@]}"; do
   systemctl stop "utexo-parent@$CID" "utexo-enclave@$CID" 2>/dev/null || true
@@ -609,9 +672,8 @@ print(f"OK (debug): exactly {len(want)} enclaves RUNNING")
 PY
 else
 asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
-# F09-AF-07: require the EXACT expected CID set, all in RUNNING state, each with a
-# matching PCR0. Previously an empty enclave list passed silently (no mismatch to
-# find), so a host with zero/partial enclaves could report a "successful" deploy.
+# Require the EXACT expected CID set, all in RUNNING state, each with a
+# matching PCR0, so a host with zero or partial enclaves fails the deploy.
 python3 - "$MAN_PCR" "${CIDS[*]}" "$DESC_JSON" <<'PY'
 import json, sys
 man  = sys.argv[1]
@@ -636,7 +698,7 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-# F09-AF-07: require ALL expected ports to be listening, not "at least one"
+# Require ALL expected ports to be listening
 # (a single surviving parent must not make a partial cluster look healthy).
 # Health ports too: a parent without its health endpoint would leave the next
 # rolling deploy polling a dead port. Liveness only - readiness stays false

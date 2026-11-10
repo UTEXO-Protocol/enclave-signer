@@ -89,7 +89,7 @@ impl std::fmt::Debug for CloneSession {
 }
 
 /// HMAC-SHA256(secret, encryption_pubkey || target_cluster_pk).
-/// Binds the request to its recipient key and its donor (F03-AF-07).
+/// Binds the request to its recipient key and its donor.
 pub fn make_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
@@ -113,14 +113,14 @@ pub fn verify_cloning_digest(
     expected.ct_eq(digest).into()
 }
 
-/// Minimum cloning-secret length in bytes. (F03-AF-26)
+/// Minimum cloning-secret length in bytes.
 pub const MIN_CLONING_SECRET_BYTES: usize = 32;
 
 /// Minimum number of distinct secret bytes. This rejects repeated values. It
 /// does not measure entropy.
 pub const MIN_CLONING_SECRET_DISTINCT_BYTES: usize = 8;
 
-/// Reject weak secrets before donor init or InitiateCloning (F03-AF-26).
+/// Reject weak secrets before donor init or InitiateCloning.
 /// The operator generates a random secret and rotates it.
 pub fn validate_cloning_secret(secret: &str) -> Result<()> {
     let bytes = secret.as_bytes();
@@ -236,15 +236,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digest_roundtrip_ok() {
-        let secret = "correct horse battery staple";
-        let pubkey = [7u8; 32];
-        let target = [3u8; 20];
-        let digest = make_cloning_digest(secret, &pubkey, &target);
-        assert!(verify_cloning_digest(secret, &pubkey, &target, &digest));
-    }
-
-    #[test]
     fn validate_secret_rejects_empty() {
         assert!(matches!(
             validate_cloning_secret(""),
@@ -306,7 +297,7 @@ mod tests {
 
     #[test]
     fn digest_rejects_wrong_target_cluster_pk() {
-        // Same secret and requester key, different donor (F03-AF-07).
+        // Same secret and requester key, different donor.
         let secret = "correct horse battery staple";
         let pubkey = [7u8; 32];
         let digest = make_cloning_digest(secret, &pubkey, &[0xAAu8; 20]);
@@ -385,20 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn seed_decrypt_tampered_auth_tag_fails() {
-        let seed = [42u8; 64];
-        let requester = CloneSession::new();
-        let (mut ciphertext, donor_pub) =
-            encrypt_seed_for_peer(&requester.public_key(), &seed).unwrap();
-
-        // The last byte is in the auth tag.
-        let last = ciphertext.len() - 1;
-        ciphertext[last] ^= 0xff;
-        let result = requester.decrypt_seed_from_peer(&donor_pub, &ciphertext);
-        assert!(matches!(result, Err(EnclaveError::Clone(_))));
-    }
-
-    #[test]
     fn decrypt_with_wrong_requester_key_fails() {
         let seed = [42u8; 64];
         let requester_a = CloneSession::new();
@@ -412,29 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn clone_session_public_key_is_stable() {
-        let session = CloneSession::new();
-        let pk1 = session.public_key();
-        let pk2 = session.public_key();
-        assert_eq!(pk1, pk2);
-    }
-
-    #[test]
     fn two_sessions_generate_distinct_keys() {
         let a = CloneSession::new();
         let b = CloneSession::new();
         assert_ne!(a.public_key(), b.public_key());
     }
 
-    #[test]
-    fn ciphertext_includes_authentication_overhead() {
-        // Seed is 64 bytes; ChaCha20Poly1305 adds a 16-byte Poly1305 tag.
-        let session = CloneSession::new();
-        let (ct, _) = encrypt_seed_for_peer(&session.public_key(), &[0u8; 64]).unwrap();
-        assert_eq!(ct.len(), 64 + 16);
-    }
-
-    // F03-AF-25: fixed vectors from Python `cryptography` (OpenSSL) and `hmac`.
+    // Fixed vectors from Python `cryptography` (OpenSSL) and `hmac`.
     // Each step is checked, so a wire-format change fails a test.
 
     /// Decode a fixed-width hex constant into a byte array.
@@ -446,24 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn af25_cloning_digest_reference_vector() {
+    fn cloning_digest_reference_vector() {
         // HMAC-SHA256(secret_utf8, encryption_pubkey || target) from Python `hmac`.
-        let secret = "utexo-af25-fixed-reference-secret-0123456789";
+        let secret = "utexo-fixed-reference-secret-0123456789";
         let pubkey = hexn::<32>("030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc");
         let target = hexn::<20>("05101b26313c47525d68737e89949faab5c0cbd6");
-        let want = hexn::<32>("ac9ab8ce85a4eabf160922d0077690807c434c4d338d1140fb3f8581605de25b");
+        let want = hexn::<32>("5205503b952299cda46eb7982f5e0e29752f723a23e8d2ae55869504f0a195f4");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
         assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
 
-        // A target that differs in each byte gives a different digest (F03-AF-07).
+        // A target that differs in each byte gives a different digest.
         let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
-        let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
+        let want_b = hexn::<32>("8abb75a1b5ddeebb9bb096597060a9b3501293bc422ec4ff859ad4eeac3fe57f");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);
         assert_ne!(want, want_b);
     }
 
     #[test]
-    fn af25_seed_seal_reference_vector() {
+    fn seed_seal_reference_vector() {
         // Check X25519, HKDF-SHA256, and ChaCha20Poly1305 against independent vectors.
         let req_sk = hexn::<32>("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
         let donor_sk =

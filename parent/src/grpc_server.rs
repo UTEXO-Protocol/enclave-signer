@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -12,12 +13,20 @@ use crate::framing;
 
 use crate::signed_responses::{Claim, Lead, SignedResponses};
 
-/// Longer than the enclave's own 30 s socket deadline (`conn::TOTAL_REQUEST_TIMEOUT`),
-/// which starts at accept while this timer starts before the worker is queued.
-/// The enclave must give up first: its failed write then rolls its replay key
-/// back, while a parent that gives up first leaves a committed key and a
-/// response nobody read.
-const ENCLAVE_TIMEOUT: Duration = Duration::from_secs(40);
+/// How much longer the parent and the CLI wait for a reply than the socket
+/// deadline of the enclave. The enclave must give up first: its failed write
+/// then rolls its replay key back, while a parent that gives up first leaves a
+/// committed key and a response nobody read. The deadline starts at accept,
+/// while the wait of the parent starts before the worker is queued.
+pub(crate) const ENCLAVE_WAIT_MARGIN_SECS: u64 = 10;
+
+/// The socket deadline of the image. The parent uses it until it has read the
+/// deadline in force, and the CLI uses it when the enclave does not say it.
+pub(crate) const IMAGE_DEADLINE_SECS: u64 = 90;
+
+/// How often the parent reads the deadline in force. The operator changes it
+/// with the CLI, which goes straight to the enclave.
+const DEADLINE_READ_INTERVAL: Duration = Duration::from_secs(5);
 use crate::grpc_proto::parent_service_server::ParentService;
 use crate::grpc_proto::{
     self, sign_request, source_proof, AttestedPublicKeyRequest, AttestedPublicKeyResponse,
@@ -119,13 +128,10 @@ fn exchange(
 }
 
 fn timed_out() -> Status {
-    Status::deadline_exceeded(format!(
-        "enclave request timed out ({}s)",
-        ENCLAVE_TIMEOUT.as_secs()
-    ))
+    Status::deadline_exceeded("enclave request timed out")
 }
 
-fn is_timeout(e: &io::Error) -> bool {
+pub(crate) fn is_timeout(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
@@ -189,6 +195,8 @@ pub struct ParentAdapterService {
     target: EnclaveTarget,
     /// Replies of EVM->RGB bridge signs, kept for a retry of the same request.
     signed: std::sync::Arc<SignedResponses>,
+    /// The socket deadline of the enclave, in seconds.
+    deadline_secs: std::sync::Arc<AtomicU64>,
 }
 
 impl ParentAdapterService {
@@ -208,7 +216,50 @@ impl ParentAdapterService {
         target: EnclaveTarget,
         signed: std::sync::Arc<SignedResponses>,
     ) -> Self {
-        Self { target, signed }
+        Self {
+            target,
+            signed,
+            deadline_secs: std::sync::Arc::new(AtomicU64::new(IMAGE_DEADLINE_SECS)),
+        }
+    }
+
+    /// Sets the socket deadline that the parent assumes.
+    pub fn with_enclave_deadline_secs(self, secs: u64) -> Self {
+        self.deadline_secs.store(secs, Ordering::Relaxed);
+        self
+    }
+
+    /// The wait for a reply of the enclave.
+    fn enclave_wait(&self) -> Duration {
+        let deadline = self.deadline_secs.load(Ordering::Relaxed);
+        Duration::from_secs(deadline.saturating_add(ENCLAVE_WAIT_MARGIN_SECS))
+    }
+
+    /// Reads the socket deadline in force. A failed read keeps the last value.
+    async fn read_enclave_deadline(&self) {
+        let request = EnclaveRequest {
+            request: Some(enclave_request::Request::GetLimits(
+                enclave_proto::GetLimitsRequest {},
+            )),
+        };
+        let response = self.send_to_enclave(request).await.ok();
+        if let Some(enclave_response::Response::Limits(limits)) = response.and_then(|r| r.response)
+        {
+            let current = limits.current.map(|c| c.total_request_timeout_secs);
+            if let Some(secs) = current.filter(|&secs| secs != 0) {
+                self.deadline_secs.store(secs, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Keeps the wait of the parent above the socket deadline in force, for
+    /// the life of the parent.
+    pub async fn follow_enclave_deadline(self) {
+        let mut interval = tokio::time::interval(DEADLINE_READ_INTERVAL);
+        loop {
+            interval.tick().await;
+            self.read_enclave_deadline().await;
+        }
     }
 
     /// Send an `EnclaveRequest` and read the `EnclaveResponse`.
@@ -219,7 +270,7 @@ impl ParentAdapterService {
         &self,
         req: EnclaveRequest,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, None).await
+        send_within(self.target.clone(), req, self.enclave_wait(), None).await
     }
 
     /// Like [`Self::send_to_enclave`], and a signed-PSBT reply completes `lead`.
@@ -228,13 +279,13 @@ impl ParentAdapterService {
         req: EnclaveRequest,
         lead: Option<Lead>,
     ) -> Result<EnclaveResponse, Status> {
-        send_within(self.target.clone(), req, ENCLAVE_TIMEOUT, lead).await
+        send_within(self.target.clone(), req, self.enclave_wait(), lead).await
     }
 
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
-            // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
+            // Report NotReady as unavailable so the caller can retry.
             2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             // Codes 4-7 come from GetClone only.
@@ -342,15 +393,9 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
-            // CCD source (fundsIn burn) for an EVM release. The listener
-            // checked finality and structure on-chain. The enclave trusts it and
-            // checks the release amount against the destination.
-            Some(source_proof::Chain::Ccd(ccd)) => Ok(
-                enclave_proto::sign_request::SourceNetwork::CcdSource(enclave_proto::CcdSource {
-                    tx_hash: ccd.tx_hash,
-                    commission: source.commission,
-                }),
-            ),
+            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
+                "Concordium sources are not supported",
+            )),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -405,9 +450,9 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // `sign` handles CCD before destination dispatch.
+            // `sign` refuses Concordium data before destination dispatch.
             sign_request::Data::CcdData(_) => {
-                unreachable!("CCD sign requests are handled before destination dispatch")
+                unreachable!("Concordium sign requests are refused before destination dispatch")
             }
         }
     }
@@ -510,50 +555,10 @@ impl ParentService for ParentAdapterService {
         })?;
         let signer_network_id = common.dst_network_id;
 
-        // Concordium: the listener validated the operation and derived the
-        // transaction hash. The enclave signs the hash. There is no
-        // source/destination check or amount check here.
-        if let Some(sign_request::Data::CcdData(payload)) = inner.data.as_ref() {
-            if data_type != DataType::Transaction {
-                return Err(Status::invalid_argument(
-                    "CCD signing requires TRANSACTION data_type",
-                ));
-            }
-            tracing::info!(
-                src_network_id = common.src_network_id,
-                dst_network_id = common.dst_network_id,
-                hash_len = payload.hash.len(),
-                "gRPC Sign: Concordium transaction"
-            );
-
-            let enclave_req = EnclaveRequest {
-                request: Some(enclave_request::Request::SignCcd(
-                    enclave_proto::SignCcdRequest {
-                        hash: payload.hash.clone(),
-                    },
-                )),
-            };
-            let resp = self.send_to_enclave(enclave_req).await?;
-            return match resp.response {
-                Some(enclave_response::Response::CcdSignature(r)) => {
-                    Ok(Response::new(SignatureResponse {
-                        signer_network_id,
-                        signature: r.signature,
-                        identifier: None,
-                        call_data: Vec::new(),
-                        // Ed25519: the signer cannot be recovered from the signature,
-                        // so the key travels with it.
-                        public_key: r.public_key,
-                    }))
-                }
-                Some(enclave_response::Response::Error(e)) => {
-                    Err(Self::enclave_error_to_status(&e))
-                }
-                other => Err(Status::internal(format!(
-                    "unexpected enclave response for CCD Sign: {:?}",
-                    other
-                ))),
-            };
+        if let Some(sign_request::Data::CcdData(_)) = inner.data.as_ref() {
+            return Err(Status::invalid_argument(
+                "Concordium signing is not supported",
+            ));
         }
 
         match data_type {
@@ -593,7 +598,7 @@ impl ParentService for ParentAdapterService {
                     }
                     Some(sign_request::Data::CcdData(_)) => {
                         return Err(Status::internal(
-                            "CCD sign request should have been handled before destination dispatch",
+                            "Concordium sign request should have been refused before destination dispatch",
                         ));
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
@@ -790,10 +795,7 @@ impl ParentService for ParentAdapterService {
     /// Return an enclave public key, selected by `data_type`:
     /// - EVM_GAS_TX: 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1).
     /// - TRANSACTION, UNSPENDABLE: 33-byte compressed BTC public key.
-    /// - CCD_GOVERNANCE: 32-byte Concordium Ed25519 governance key
-    ///   (m/44'/919'/0'/0'/0').
     ///
-    /// `CCD_GOVERNANCE` reads the governance key without attestation.
     /// For Nitro evidence binding these public keys to approved measured code,
     /// use `AttestedPublicKey` with a trusted Real verifier. Genuine Nitro
     /// evidence requires a Nitro Security Module. See docs/pubkey-attestation.md
@@ -824,8 +826,6 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::PublicKeys(r)) => {
                 let public_key = match data_type {
                     DataType::EvmGasTx => r.evm_gas_tx_uncompressed_pub,
-                    DataType::CcdGovernance => r.ccd_ed25519_pub,
-                    DataType::Transaction | DataType::Unspendable => r.btc_compressed_pub,
                     other => {
                         return Err(Status::invalid_argument(format!(
                             "PublicKey not supported for data_type {:?}",
@@ -847,7 +847,7 @@ impl ParentService for ParentAdapterService {
     }
 
     /// Generate fresh enclave keys and set the optional donor secret.
-    /// Map cloning_secret to the enclave cloning_secret field. (F03-AF-27)
+    /// Map cloning_secret to the enclave cloning_secret field.
     /// This RPC does not import a mnemonic or seed.
     async fn initialize(
         &self,
@@ -871,10 +871,11 @@ impl ParentService for ParentAdapterService {
         let resp = self.send_to_enclave(enclave_req).await?;
 
         match resp.response {
-            Some(enclave_response::Response::InitializeKey(r)) => {
+            Some(enclave_response::Response::InitializeKey(_)) => {
                 Ok(Response::new(InitializeResponse {
-                    attestation: vec![], // Attestation not yet implemented
-                    public_key: r.btc_compressed_pub,
+                    attestation: vec![], // Initialize returns no attestation
+                    // The BTC key is retired, so no public key is returned.
+                    public_key: Vec::new(),
                 }))
             }
             Some(enclave_response::Response::Error(e)) => Err(Self::enclave_error_to_status(&e)),
@@ -1213,9 +1214,49 @@ mod tests {
         assert_eq!(err.code(), Code::Unavailable, "{err:?}");
     }
 
-    /// The enclave must give up before the parent (see `ENCLAVE_TIMEOUT`).
+    /// The enclave must give up before the parent. The parent starts from the
+    /// deadline of the image.
     #[test]
-    fn the_parent_waits_longer_than_the_enclave_socket_deadline() {
-        assert!(ENCLAVE_TIMEOUT > utexo_bridge_enclave::conn::TOTAL_REQUEST_TIMEOUT);
+    fn the_parent_starts_from_the_deadline_of_the_image() {
+        let image = utexo_bridge_enclave::limits::Limits::DEFAULTS.total_request_timeout_secs;
+        assert_eq!(IMAGE_DEADLINE_SECS, image);
+        let service = ParentAdapterService::new(EnclaveTarget::Tcp("127.0.0.1:1".into()));
+        assert!(service.enclave_wait() > Duration::from_secs(image));
+    }
+
+    /// One enclave answer with `limits`, then each connection fails.
+    fn answer_limits(listener: TcpListener, deadline: u64) {
+        thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let _: EnclaveRequest = framing::read_message(&mut peer).unwrap();
+            let current = enclave_proto::Limits {
+                total_request_timeout_secs: deadline,
+                ..Default::default()
+            };
+            let response = EnclaveResponse {
+                response: Some(enclave_response::Response::Limits(
+                    enclave_proto::LimitsResponse {
+                        current: Some(current),
+                        image: None,
+                    },
+                )),
+            };
+            framing::write_message(&mut peer, &response).unwrap();
+        });
+    }
+
+    /// The operator changes the deadline with the CLI, so the wait must follow
+    /// the enclave, at any value. A failed read must not lower the wait.
+    #[tokio::test]
+    async fn the_wait_follows_the_deadline_in_force() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let service = ParentAdapterService::new(tcp(listener.local_addr().unwrap()));
+        answer_limits(listener, 3_600);
+
+        service.read_enclave_deadline().await;
+        assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
+
+        service.read_enclave_deadline().await;
+        assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
     }
 }

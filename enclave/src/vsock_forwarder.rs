@@ -207,8 +207,8 @@ mod tests {
         client.write_all(b"request").unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut request = Vec::new();
-        // Before the fix, this timed out: the reverse relay held a clone of
-        // the upstream socket open after the request copy had finished.
+        // The reverse relay holds a clone of the upstream socket. Upstream
+        // still sees EOF, because `copy_half` shuts down the write half.
         upstream.read_to_end(&mut request).unwrap();
         assert_eq!(request, b"request");
         upstream.write_all(b"reply after request EOF").unwrap();

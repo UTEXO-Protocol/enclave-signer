@@ -25,28 +25,30 @@ fn config() -> BridgeConfig {
         funds_in_contract: [2; 20],
         token_contract: [3; 20],
         rgb_asset_id: "test-asset".into(),
-        endpoints_sha256: Some(utexo_bridge_enclave::config::chain_endpoints_sha256(
-            &endpoints(),
-        )),
         ..BridgeConfig::default()
     }
 }
 
 fn start() -> u16 {
+    start_with_config(config()).0
+}
+
+fn start_with_config(config: BridgeConfig) -> (u16, Arc<ServerContext>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let ctx = Arc::new(ServerContext::awaiting_launch(
         EnclaveState::new(bitcoin::Network::Signet),
-        config(),
+        config,
         bootstrap::build_header_chain(Network::Signet),
         BuildContext::current(),
     ));
+    let server_ctx = Arc::clone(&ctx);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            server::handle_connection(stream.unwrap(), &ctx);
+            server::handle_connection(stream.unwrap(), &server_ctx);
         }
     });
-    port
+    (port, ctx)
 }
 
 fn send(port: u16, request: Request) -> Response {
@@ -110,9 +112,9 @@ fn indexer_only_generates_distinct_keys_and_refuses_reinitialization() {
     let a = initialize(first);
     let b = initialize(start());
     assert_ne!(a.evm_address, b.evm_address);
-    assert_ne!(a.btc_compressed_pub, b.btc_compressed_pub);
+    assert_ne!(a.account_xpub_vanilla, b.account_xpub_vanilla);
     assert_eq!(a.evm_address.len(), 20);
-    assert!(a.btc_xpub.starts_with("tpub"));
+    assert!(a.account_xpub_vanilla.starts_with("tpub"));
     assert!(matches!(
         send(
             first,
@@ -184,6 +186,7 @@ fn indexer_only_burn_refuses_kms_fields() {
         .unwrap()
         .kms
         .is_none());
+    let (port, ctx) = start_with_config(config());
     for field in 0..4 {
         let mut request = endpoints();
         match field {
@@ -193,7 +196,20 @@ fn indexer_only_burn_refuses_kms_fields() {
             _ => request.kms_expected_evm_address = "ab".repeat(20),
         }
         assert!(Endpoints::parse(&request, &[], true).is_err());
+        let Response::Error(error) = send(port, Request::SetEndpoints(request)) else {
+            panic!("burn must refuse mint custody settings");
+        };
+        assert_eq!(error.code, 1);
+        assert!(
+            error.message.contains("this build does not use it"),
+            "{error:?}"
+        );
+        assert!(ctx.launch.get().is_none());
     }
+    assert!(matches!(
+        send(port, Request::SetEndpoints(endpoints())),
+        Response::SetEndpoints(_)
+    ));
 }
 
 #[test]
@@ -230,26 +246,112 @@ fn indexer_only_cloning_entrypoints_match_production_custody() {
 }
 
 #[test]
-fn indexer_only_chain_endpoint_pin_refuses_substitution_without_installing_launch() {
-    let port = start();
-    let mutations: [fn(&mut SetEndpointsRequest); 6] = [
-        |r| r.electrum_url = "ssl://attacker.test:50002".into(),
-        |r| r.electrum_url = "tcp://electrum.test:50002".into(),
-        |r| r.electrum_url = "ssl://electrum.test:50003".into(),
-        |r| r.evm_rpc_host = "attacker.test".into(),
-        |r| {
-            r.evm_rpc_ca_der =
-                hex::decode(include_str!("fixtures/evm_rpc_tls/ca_b.der.hex").trim()).unwrap()
-        },
-        |r| r.evm_rpc_tls_port = 8443,
+fn indexer_only_accepts_independent_runtime_endpoints_without_changing_the_build_config() {
+    let first = SetEndpointsRequest {
+        evm_rpc_path: "/v2/member-one-key".into(),
+        ..endpoints()
+    };
+    let second = SetEndpointsRequest {
+        electrum_url: "ssl://member-two-indexer.test:50003".into(),
+        evm_rpc_host: "member-two-rpc.test".into(),
+        evm_rpc_ca_der: hex::decode(include_str!("fixtures/evm_rpc_tls/ca_b.der.hex").trim())
+            .unwrap(),
+        evm_rpc_tls_port: 8443,
+        evm_rpc_path: "/v3/member-two-key".into(),
+        ..first.clone()
+    };
+    let rotated = SetEndpointsRequest {
+        evm_rpc_path: "/v2/rotated-member-one-key".into(),
+        ..first.clone()
+    };
+    let bridge = config();
+    // Each context uses the same compiled role and identical bridge pins.
+    // Only the runtime request varies, including the TLS trust root.
+    for (request, replacement) in [
+        (&first, &second),
+        (&second, &first),
+        (&first, &rotated),
+        (&rotated, &first),
+    ] {
+        let (port, ctx) = start_with_config(bridge.clone());
+        assert!(matches!(
+            send(port, Request::SetEndpoints(request.clone())),
+            Response::SetEndpoints(_)
+        ));
+        let installed = Endpoints::parse(request, &[], true).unwrap();
+        let launch = ctx.launch().unwrap();
+        assert_eq!(launch.endpoints, installed);
+        assert!(launch.rgb_validator.is_some());
+        assert!(launch.evm_rpc_client.is_some());
+        assert!(health(port).endpoints_set);
+
+        // A new launch can choose another provider. An active launch cannot
+        // change its endpoint or silently accept a repeated installation.
+        for duplicate in [replacement, request] {
+            let Response::Error(error) = send(port, Request::SetEndpoints(duplicate.clone()))
+            else {
+                panic!("a second endpoint installation must fail");
+            };
+            assert_eq!(error.code, 1);
+            assert_eq!(error.message, "invalid request: endpoints are already set");
+            assert_eq!(ctx.launch().unwrap().endpoints, installed);
+        }
+    }
+}
+
+#[test]
+fn indexer_only_rejects_malformed_endpoints_without_consuming_the_launch_slot() {
+    let (port, ctx) = start_with_config(config());
+    type MalformedEndpoint = (fn(&mut SetEndpointsRequest), &'static str);
+    let malformed: [MalformedEndpoint; 11] = [
+        (
+            |r| r.evm_rpc_path = "/v2/../private-api-key".into(),
+            "evm_rpc_path must be an absolute ASCII path",
+        ),
+        (
+            |r| r.electrum_url = "ftp://indexer.test:50002".into(),
+            "is not ssl://",
+        ),
+        (
+            |r| r.electrum_url = "ssl://indexer.test:0".into(),
+            "electrum_url port 0 is not in 1-65535",
+        ),
+        (
+            |r| r.electrum_url = "ssl://indexer.test:65536".into(),
+            "electrum_url port 65536 is not in 1-65535",
+        ),
+        (|r| r.evm_rpc_host.clear(), "evm_rpc_host"),
+        (
+            |r| r.evm_rpc_host = "rpc.test:443".into(),
+            "is not a host name",
+        ),
+        (
+            |r| r.evm_rpc_ca_der.clear(),
+            "evm_rpc_ca_der is not a valid CA certificate",
+        ),
+        (
+            |r| r.evm_rpc_ca_der = b"not DER".to_vec(),
+            "evm_rpc_ca_der is not a valid CA certificate",
+        ),
+        (
+            |r| r.evm_rpc_tls_port = 0,
+            "evm_rpc_tls_port 0 is not in 1-65535",
+        ),
+        (
+            |r| r.evm_rpc_tls_port = 65536,
+            "evm_rpc_tls_port 65536 is not in 1-65535",
+        ),
+        (|r| r.evm_rpc_tls_port = 50002, "is also the Electrum port"),
     ];
-    for mutate in mutations {
+    for (mutate, expected) in malformed {
         let mut request = endpoints();
         mutate(&mut request);
         let Response::Error(error) = send(port, Request::SetEndpoints(request)) else {
-            panic!("an unapproved chain endpoint must be refused");
+            panic!("malformed endpoint must be refused: {expected}");
         };
-        assert!(error.message.contains("ENDPOINTS_SHA256"), "{error:?}");
+        assert_eq!(error.code, 1);
+        assert!(error.message.contains(expected), "{error:?}");
+        assert!(ctx.launch.get().is_none());
         assert!(!health(port).endpoints_set);
     }
     assert!(matches!(
@@ -257,6 +359,10 @@ fn indexer_only_chain_endpoint_pin_refuses_substitution_without_installing_launc
         Response::SetEndpoints(_)
     ));
     assert!(health(port).endpoints_set);
+    assert_eq!(
+        ctx.launch().unwrap().endpoints,
+        Endpoints::parse(&endpoints(), &[], true).unwrap()
+    );
 }
 
 #[test]
@@ -311,10 +417,6 @@ fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
     }
     let mut pinned = endpoints();
     pinned.kms_expected_evm_address = "ab".repeat(20);
-    assert_eq!(
-        utexo_bridge_enclave::config::chain_endpoints_sha256(&pinned),
-        utexo_bridge_enclave::config::chain_endpoints_sha256(&endpoints()),
-    );
     assert_eq!(
         Endpoints::parse(&pinned, &[], true)
             .unwrap()
@@ -465,11 +567,6 @@ fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
     let mut cfg = config();
     cfg.spv_min_confirmations = 0;
     invalid.push(cfg);
-    for pin in [None, Some([0; 32])] {
-        let mut cfg = config();
-        cfg.endpoints_sha256 = pin;
-        invalid.push(cfg);
-    }
     for cfg in invalid {
         assert!(cfg.validate_indexer_only().is_err());
         let build = BuildContext::current();

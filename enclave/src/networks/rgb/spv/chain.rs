@@ -65,13 +65,16 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 /// compile-time checkpoint forward.
 ///
 /// Worst case is approx 112 MB (x 112 B per header). The real chain reaches it
-/// in approx 11 months on 30s-block signet and 19 years on mainnet. Tune it to
-/// the enclave memory reservation.
+/// in approx 19 years on mainnet. The UTEXO signet reaches it far sooner: it
+/// makes a block each [`super::UTEXO_SIGNET_BLOCK_TIME_SECS`] seconds. Tune it
+/// to the enclave memory reservation.
 pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
-/// Maximum headers in one `submit_headers` call. It bounds per-call work. The
-/// 24 MiB `framing` cap alone allows approx 314k headers per message.
-pub const MAX_HEADERS_PER_SUBMIT: usize = 10_000;
+/// The image value of `max_headers_per_submit`: the most headers in one
+/// `submit_headers` call. It bounds per-call work. The frame size limit
+/// (`max_message_bytes`) alone allows about one header for each 80 bytes.
+pub const MAX_HEADERS_PER_SUBMIT: usize =
+    crate::limits::Limits::DEFAULTS.max_headers_per_submit as usize;
 
 /// Outcome of pushing a batch of headers.
 #[derive(Debug, Clone, Copy)]
@@ -220,11 +223,13 @@ impl HeaderChain {
     ) -> Result<SubmitOutcome> {
         let tip = self.tip_height();
 
-        // Per-call cap. The 24 MiB `framing` cap alone allows approx 314k headers.
-        if raw_headers.len() > MAX_HEADERS_PER_SUBMIT {
+        // Per-call cap. The frame size limit (`max_message_bytes`) alone
+        // allows about one header for each 80 bytes.
+        let max = crate::limits::get().max_headers_per_submit as usize;
+        if raw_headers.len() > max {
             return Err(SpvError::BatchTooLarge {
                 len: raw_headers.len(),
-                max: MAX_HEADERS_PER_SUBMIT,
+                max,
             });
         }
 

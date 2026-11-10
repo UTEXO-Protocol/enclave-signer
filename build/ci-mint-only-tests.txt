@@ -1,0 +1,21 @@
+# Unit-test modules that CI runs in the mint-signer job only.
+#
+# The mint and burn test builds both compile these modules. A module here has
+# no role code: no `mint-signer`, `burn-signer` or `kms-persistence` cfg, no
+# `evm_to_rgb` or `rgb_to_evm` direction cfg, and no path to a module that has
+# one (the error type excepted). Their tests run the same code in both builds,
+# so the burn-signer job skips them (`cargo test -- --skip <line>`).
+#
+# build/tests/test_ci_mint_only_tests.py checks each line. Remove a module
+# from this list when it gains role code.
+attestation::clone_peer_pcr3::
+attestation::document_memory::
+clocksync::tests::
+cloning::tests::
+conn::tests::
+egress::tests::
+networks::rgb::spv::chain::tests::
+networks::rgb::spv::checkpoint::tests::
+networks::rgb::spv::merkle::tests::
+networks::rgb::spv::validation::tests::
+server::rate_limit::tests::

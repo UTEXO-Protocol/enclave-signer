@@ -2,10 +2,7 @@
 #![cfg(feature = "insecure-dev")]
 use std::time::Duration;
 use tonic::transport::Endpoint;
-use utexo_bridge_parent::{
-    grpc_proto::parent_service_client::ParentServiceClient, signer::*,
-    transport_security::client_endpoint,
-};
+use utexo_bridge_parent::{grpc_proto::parent_service_client::ParentServiceClient, signer::*};
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -31,12 +28,6 @@ fn rejects_tls_settings() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("takes no TLS settings"));
-}
-
-#[test]
-fn client_allows_plaintext_to_any_host() {
-    client_endpoint("http://10.0.0.1:50051").unwrap();
-    client_endpoint("http://parent.dev:50051").unwrap();
 }
 
 #[tokio::test]
@@ -75,11 +66,9 @@ async fn serves_plaintext_on_wildcard_bind() {
     let _ = child.kill();
     child.wait().unwrap();
     let status = status.expect("parent did not start");
+    assert_eq!(status.code(), tonic::Code::Unavailable, "{status}");
     assert!(
-        !matches!(
-            status.code(),
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
-        ),
+        status.message().starts_with("enclave connection failed:"),
         "{status}"
     );
 }

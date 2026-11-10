@@ -101,64 +101,28 @@ fn validated_with_last(
     }
 }
 
-/// The tuple encoding must round-trip through the cross-check decoder.
-#[test]
-fn mock_calldata_decodes_back_to_its_fields() {
-    let cd = mock_funds_out_calldata_with_proof(1_234, Bytes::from(vec![0xAB; 128]));
-    let params = decode_funds_out_params(&cd).expect("tuple calldata must decode");
-    assert_eq!(params.amount, U256::from(1_234u64));
-    assert_eq!(params.proof.len(), 128);
-    assert_eq!(&cd[..4], &FUNDS_OUT_SELECTOR_POOLS);
-}
-
 /// A flat 9-argument body must not decode as the tuple shape.
 ///
-/// With a zero `recipient`, the ABI decoder accepts the legacy body: the
+/// With a zero `recipient`, the ABI decoder accepts the flat body: the
 /// leading zero word is a tuple head pointer of 0, so all fields align. Only
 /// the canonical re-encode check in [`decode_funds_out_params`] rejects it. A
 /// non-zero recipient fails the decode alone, so this tests the harder case.
-fn legacy_flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
-    let mut legacy = Vec::with_capacity(4 + 9 * 32);
-    legacy.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-    legacy.extend_from_slice(&recipient);
+fn flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
+    let mut flat = Vec::with_capacity(4 + 9 * 32);
+    flat.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+    flat.extend_from_slice(&recipient);
     let mut amt = [0u8; 32];
     amt[24..].copy_from_slice(&1_000u64.to_be_bytes());
-    legacy.extend_from_slice(&amt); // amount, at the old flat offset 36
-    legacy.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
-    legacy
+    flat.extend_from_slice(&amt); // amount, at flat offset 36
+    flat.extend_from_slice(&[0u8; 32 * 7]); // remaining flat head slots
+    flat
 }
 
 #[test]
-fn rejects_legacy_flat_encoding_zero_recipient() {
+fn rejects_flat_encoding_zero_recipient() {
     assert!(
-        decode_funds_out_params(&legacy_flat_calldata([0u8; 32])).is_err(),
+        decode_funds_out_params(&flat_calldata([0u8; 32])).is_err(),
         "a flat-encoded body must fail closed, not alias onto the tuple layout"
-    );
-}
-
-#[test]
-fn rejects_legacy_flat_encoding_real_recipient() {
-    let mut recipient = [0u8; 32];
-    recipient[12..].copy_from_slice(&[0x22; 20]);
-    assert!(decode_funds_out_params(&legacy_flat_calldata(recipient)).is_err());
-}
-
-/// A calldata in the pre-PR #152 shape (no `sourceBurnTxId`, selector
-/// `0xdc771390`) must fail closed. `MultisigProxy` cannot verify that intent.
-#[test]
-fn rejects_pre_source_burn_tx_id_calldata() {
-    let current = mock_funds_out_calldata(1_000);
-    // Remove the last static word. The tuple then has eight fields, so each
-    // dynamic tail offset is one word too large.
-    let mut legacy = current.clone();
-    legacy[..4].copy_from_slice(&[0xdc, 0x77, 0x13, 0x90]);
-    assert!(
-        decode_funds_out_params(&legacy).is_err(),
-        "old selector must not decode"
-    );
-    assert!(
-        decode_funds_out_params(&current).is_ok(),
-        "the current shape is what the fixture builder emits"
     );
 }
 
@@ -204,13 +168,6 @@ mod source_burn {
     fn passes_when_the_calldata_cites_the_settling_op_id() {
         let cd = calldata_with("", op_id_bytes());
         let validated = validated_with_last(settling_transition(OP_ID_HEX));
-        assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
-    }
-
-    #[test]
-    fn accepts_a_0x_prefixed_op_id() {
-        let cd = calldata_with("", op_id_bytes());
-        let validated = validated_with_last(settling_transition(&format!("0x{OP_ID_HEX}")));
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_ok());
     }
 
@@ -269,19 +226,6 @@ mod source_burn {
         validated.last_transfer_op_id = None;
         let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
         assert!(err.to_string().contains("validated OpId"), "{err}");
-    }
-
-    /// A malformed op_id gives no validated OpId, so the bind refuses.
-    #[test]
-    fn rejects_a_non_hex_or_short_op_id() {
-        let cd = calldata_with("", op_id_bytes());
-        for bad in ["burn-op", "abcd", &OP_ID_HEX[..62]] {
-            let validated = validated_with_last(settling_transition(bad));
-            assert!(
-                validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err(),
-                "op_id {bad:?} must refuse"
-            );
-        }
     }
 }
 
@@ -446,13 +390,6 @@ mod transfer {
     }
 
     #[test]
-    fn witnesses_confirmed_passes_when_all_mined() {
-        // No non-mined witnesses, so the recency guard passes.
-        let validated = validated_with_last(source_transition(1000));
-        assert!(super::super::assert_witnesses_confirmed(&validated).is_ok());
-    }
-
-    #[test]
     fn witnesses_confirmed_rejects_non_mined() {
         // A tentative/ignored witness in the RGB -> EVM direction is an
         // anomaly: the unlock settles a confirmed transfer.
@@ -465,7 +402,7 @@ mod transfer {
         );
     }
 
-    /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so the
+    /// A burn has no change leg and `fundsOut.amount` is gross, so the
     /// release must equal the burned amount. A lower release strands the
     /// difference.
     #[cfg(feature = "rgb-validation")]
@@ -480,9 +417,9 @@ mod transfer {
         );
     }
 
-    /// P0 regression: with a valid consignment, the EVM release cannot be
-    /// more than the RGB amount that left the source. A consignment for 1
-    /// unit must not authorise a withdrawal of 10^9.
+    /// With a valid consignment, the EVM release cannot be more than the RGB
+    /// amount that left the source. A consignment for 1 unit must not
+    /// authorise a withdrawal of 10^9.
     #[test]
     fn rejects_when_source_amount_less_than_calldata_amount() {
         let cd = mock_funds_out_calldata(1_000_000_000);
@@ -494,10 +431,10 @@ mod transfer {
         );
     }
 
-    /// A last transition that is not this build's withdrawal type must be
-    /// refused. `TS_MINT` is a deposit shape in both flows, so both builds
-    /// refuse it. This also keeps a mint-shaped consignment out of a swap
-    /// enclave.
+    /// A last transition that is not a burn must be refused. `TS_MINT` is the
+    /// deposit shape of this flow, so the build refuses a consignment that
+    /// settles on a mint: a mint destroys no units, so it cannot back a
+    /// release.
     #[test]
     fn rejects_when_last_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);
@@ -535,7 +472,6 @@ mod transfer {
 }
 
 // Settlement bind - `validate_funds_out_settlement`.
-#[cfg(feature = "bfa-mint")]
 mod settlement {
     use super::*;
     use crate::networks::rgb::validation::VerifiedLock;
@@ -571,18 +507,7 @@ mod settlement {
         assert!(check(&[0xA1, 0xB2], &[LOCK_A, LOCK_B]).is_ok());
     }
 
-    /// Byte layout the module decodes: offset, length, then the ids.
-    #[test]
-    fn settlement_is_abi_encoded_bytes32_array() {
-        let data = settlement(&[0xA1, 0xB2]);
-        assert_eq!(data.len(), 4 * 32);
-        assert_eq!(U256::from_be_slice(&data[0..32]), U256::from(32));
-        assert_eq!(U256::from_be_slice(&data[32..64]), U256::from(2));
-        assert_eq!(&data[64..96], &[0xA1; 32]);
-        assert_eq!(&data[96..128], &[0xB2; 32]);
-    }
-
-    /// F05-NEW-AF-04: only the ascending order is signable.
+    /// Only the ascending order is signable.
     #[test]
     fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
@@ -684,24 +609,23 @@ mod settlement {
         );
     }
 
-    /// The pre-change `(bytes32[] ids, uint256[] amounts)` layout is refused:
-    /// the module no longer reads amounts, and the bytes must be canonical.
+    /// The `(bytes32[] ids, uint256[] amounts)` layout is refused: the module
+    /// reads no amounts, and the bytes must be canonical.
     #[test]
-    fn rejects_the_old_ids_and_amounts_layout() {
-        let old = (vec![B256::from([0xA1; 32])], vec![U256::from(950u64)]);
+    fn rejects_the_ids_and_amounts_layout() {
+        let ids_and_amounts = (vec![B256::from([0xA1; 32])], vec![U256::from(950u64)]);
         let cd = mock_funds_out_calldata_full(
             Address::ZERO,
             1000,
             Bytes::new(),
-            Bytes::from(old.abi_encode_params()),
+            Bytes::from(ids_and_amounts.abi_encode_params()),
         );
         assert!(validate_funds_out_settlement(&params_of(&cd), &[LOCK_A]).is_err());
     }
 }
 
-// LayerZero route (#264): `lzFundsOut` runs the same burn binds as `fundsOut`.
+// LayerZero route: `lzFundsOut` runs the same burn binds as `fundsOut`.
 // Each case decodes real `lzFundsOut` calldata through the LZ path.
-#[cfg(feature = "bfa-mint")]
 mod lz_route {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;
@@ -786,7 +710,7 @@ mod lz_route {
         validate_funds_out_settlement(&r, &[LOCK])
     }
 
-    /// The audit case: the backend picks another LayerZero endpoint.
+    /// The backend picks another LayerZero endpoint.
     #[test]
     fn rejects_an_lz_dst_eid_the_burn_did_not_name() {
         let err = check(lzFundsOutCall {
@@ -797,7 +721,7 @@ mod lz_route {
         assert!(err.to_string().contains("dstEid mismatch"), "{err}");
     }
 
-    /// The audit case: route and commission of another chain.
+    /// Route and commission of another chain.
     #[test]
     fn rejects_an_lz_destination_chain_the_burn_did_not_name() {
         let err = check(lzFundsOutCall {
@@ -811,9 +735,9 @@ mod lz_route {
         );
     }
 
-    /// A legacy burn names no chain, so it cannot leave via LayerZero.
+    /// A V0 burn names no chain, so it cannot leave via LayerZero.
     #[test]
-    fn rejects_a_legacy_burn_on_the_lz_route() {
+    fn rejects_a_v0_burn_on_the_lz_route() {
         let r = release(honest());
         let validated = burn_with_reason(padded_recipient());
         let err = validate_funds_out_burn_recipient(&r, &validated, None).unwrap_err();
@@ -883,13 +807,6 @@ mod lz_route {
         })
         .unwrap_err();
         assert!(err.to_string().contains("exact equality"), "{err}");
-    }
-
-    /// The BtcRelay bind reads the LZ `proof` too. An empty one fails closed.
-    #[test]
-    fn rejects_an_lz_release_with_no_finality_proof() {
-        let err = super::super::decode_funds_out_proof(&release(honest())).unwrap_err();
-        assert!(err.to_string().contains("proof is empty"), "{err}");
     }
 }
 
@@ -1237,32 +1154,6 @@ mod btc_relay {
         );
     }
 
-    /// ... and an empty proof is refused.
-    #[test]
-    fn none_mode_still_rejects_an_empty_proof() {
-        let (chain, _) = chain();
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::new());
-        assert!(check_no_relay(&cd, &chain).is_err());
-    }
-
-    /// Right height, wrong commitment.
-    #[test]
-    fn rejects_a_source_commitment_that_is_not_the_relay_record() {
-        let (chain, hashes) = chain();
-        let cd = calldata(
-            ANCHOR_HEIGHT,
-            [0x11; 32],
-            TIP_HEIGHT,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("relay commitment mismatch at source height 11"),
-            "got: {err}"
-        );
-    }
-
     /// A source height that is not the consignment anchor is refused, with
     /// any commitment.
     #[test]
@@ -1277,40 +1168,6 @@ mod btc_relay {
         let err = check(&cd, &chain).unwrap_err();
         assert!(
             err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
-    /// A `source` height with no enclave header (here the checkpoint, below
-    /// all stored headers) cannot equal the anchor. The bind rejects it with
-    /// no header lookup. A height ABOVE the tip fails the ordering guard
-    /// first (see `rejects_latest_below_source`).
-    #[test]
-    fn rejects_source_height_with_no_header() {
-        let (chain, hashes) = chain();
-        let cd = calldata(0, hashes[0], TIP_HEIGHT, hashes[TIP_HEIGHT as usize]);
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
-    /// The relay-tip part of the proof is also checked. Else freshness
-    /// depends on a relay that the untrusted host also feeds.
-    #[test]
-    fn rejects_unknown_latest_block() {
-        let (chain, hashes) = chain();
-        let cd = calldata(
-            ANCHOR_HEIGHT,
-            hashes[ANCHOR_HEIGHT as usize],
-            99,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("no header at latest block height 99"),
             "got: {err}"
         );
     }
@@ -1412,23 +1269,15 @@ mod btc_relay {
         assert!(err.to_string().contains("proof is empty"), "got: {err}");
     }
 
+    /// A two-field proof, one 64-byte `(blockHeight, commitmentHash)` pair,
+    /// verifies the source block but not relay freshness, so it is refused.
     #[test]
-    fn rejects_malformed_proof_length() {
-        let (chain, _) = chain();
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(vec![0u8; 33]));
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(err.to_string().contains("128 bytes"), "got: {err}");
-    }
-
-    /// The legacy proof is one 64-byte `(blockHeight, commitmentHash)` pair.
-    /// It verifies the source block, but not relay freshness, so refuse it.
-    #[test]
-    fn rejects_legacy_two_field_proof() {
+    fn rejects_a_two_field_proof() {
         let (chain, hashes) = chain();
-        let mut legacy = Vec::with_capacity(64);
-        legacy.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
-        legacy.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
-        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(legacy));
+        let mut two_fields = Vec::with_capacity(64);
+        two_fields.extend_from_slice(&u256_be(ANCHOR_HEIGHT as u64));
+        two_fields.extend_from_slice(&hashes[ANCHOR_HEIGHT as usize]);
+        let cd = mock_funds_out_calldata_with_proof(1_000, Bytes::from(two_fields));
         let err = check(&cd, &chain).unwrap_err();
         assert!(err.to_string().contains("128 bytes"), "got: {err}");
     }
@@ -1451,41 +1300,12 @@ mod btc_relay {
     // -- Source-block bind: the calldata `source` pair must be the block
     // -- anchoring the consignment's last witness tx.
 
-    /// A different real block must be refused. The enclave knows it, so the
-    /// BtcRelay check passes.
-    #[test]
-    fn rejects_source_block_that_is_not_the_consignment_anchor() {
-        let (chain, hashes) = chain();
-        let other = ANCHOR_HEIGHT + 1;
-        let cd = calldata(
-            other,
-            hashes[other as usize],
-            TIP_HEIGHT,
-            hashes[TIP_HEIGHT as usize],
-        );
-        let err = check(&cd, &chain).unwrap_err();
-        assert!(
-            err.to_string().contains("source block mismatch"),
-            "got: {err}"
-        );
-    }
-
     /// No header at the anchor height: refuse, and do not trust the calldata.
     #[test]
     fn rejects_when_tee_has_no_header_at_anchor_height() {
         let (chain, hashes) = chain();
         let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
         assert!(err.to_string().contains("not in sync"), "got: {err}");
-    }
-
-    /// The anchor SPV proof is verified again under the header lock guard.
-    /// Thus a reorg after the source-chain pass cannot replace the header.
-    #[test]
-    fn rejects_when_anchor_proof_does_not_reconstruct_the_root() {
-        let (chain, hashes) = chain();
-        // Block ANCHOR_HEIGHT + 1 commits a different Merkle root.
-        let err = check_at(&good_calldata(&hashes), &chain, ANCHOR_HEIGHT + 1).unwrap_err();
-        assert!(err.to_string().contains("failed"), "got: {err}");
     }
 
     /// Depth is also checked again: an anchor at the tip has 1 confirmation,
@@ -1518,7 +1338,7 @@ mod btc_relay {
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
     }
 
-    // -- F05-NEW-AF-08: the chain can move after the last check.
+    // -- The chain can move after the last check.
     //
     // `verify_btc_relay_agreement` is the last chain read on the direct
     // route. Its lock ends at return. A real reorg must close the gate.

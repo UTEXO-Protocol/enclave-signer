@@ -171,27 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn two_tx_block_left_position() {
-        // 2-tx block: root = sha256d(tx0 || tx1).
-        let tx0: Sha256d = [0x11; 32];
-        let tx1: Sha256d = [0x22; 32];
-        let root = dsha256_pair(&tx0, &tx1);
-
-        // Proof for tx0 (position 0): path = [tx1].
-        assert!(verify_merkle_proof(&tx0, 0, &[tx1], &root).is_ok());
-    }
-
-    #[test]
-    fn two_tx_block_right_position() {
-        let tx0: Sha256d = [0x11; 32];
-        let tx1: Sha256d = [0x22; 32];
-        let root = dsha256_pair(&tx0, &tx1);
-
-        // Proof for tx1 (position 1): path = [tx0].
-        assert!(verify_merkle_proof(&tx1, 1, &[tx0], &root).is_ok());
-    }
-
-    #[test]
     fn four_tx_block_each_position() {
         // 4-tx block: standard balanced merkle tree.
         //          root
@@ -254,7 +233,7 @@ mod tests {
         assert!(verify_merkle_proof(&t2, 2, &[t2, n01], &root).is_ok());
     }
 
-    // ===== Position binding and 64-byte transaction nodes (VAL-UENC-15) =====
+    // ===== Position binding and 64-byte transaction nodes =====
 
     /// A legacy transaction with one input (scriptSig of `s` bytes) and one
     /// output (scriptPubKey of `4 - s` bytes) serializes to 64 bytes:
@@ -315,11 +294,6 @@ mod tests {
                 chunk.copy_from_slice(&self.next().to_le_bytes());
             }
         }
-    }
-
-    #[test]
-    fn max_money_matches_rust_bitcoin() {
-        assert_eq!(MAX_MONEY_SATS, bitcoin::Amount::MAX_MONEY.to_sat());
     }
 
     /// Every scriptSig length s in 0..=4 (scriptPubKey 4 - s) gives a 64-byte

@@ -49,7 +49,7 @@ const RECIPIENT_RSA_BITS: usize = 2048;
 /// KMS HTTPS port. A vsock build forwards it to the parent.
 pub const KMS_PORT: u16 = 443;
 /// Loopback address of the KMS forwarder. It is not `127.0.0.1`, so it does
-/// not collide with an EVM RPC forwarder on `127.0.0.1:443`.
+/// not collide with the EVM RPC forwarder there, which can use [`KMS_PORT`].
 pub const KMS_LOOPBACK: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 2);
 /// Parent `vsock-proxy` port for KMS (`KMS_VSOCK_PORT` overrides it).
 pub const DEFAULT_KMS_VSOCK_PORT: u32 = 8003;

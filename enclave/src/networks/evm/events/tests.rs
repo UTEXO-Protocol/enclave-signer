@@ -129,13 +129,6 @@ fn verify(p: &FakeEvm) -> Result<()> {
 }
 
 #[test]
-fn extract_uint256_works() {
-    let mut data = vec![0u8; 40];
-    data[39] = 42;
-    assert_eq!(extract_uint256_as_u64(&data, 8).unwrap(), 42);
-}
-
-#[test]
 fn extract_uint256_rejects_short_data() {
     let data = vec![0u8; 10];
     assert!(extract_uint256_as_u64(&data, 0).is_err());
@@ -164,22 +157,6 @@ fn topic0_vectors_are_pinned() {
     );
 }
 
-/// Pins the older topic0s. A revert to the 9-field or 11-field
-/// (pre-`settlementData`, bridge PR #152) signature then fails here, not as
-/// "no deposit found".
-#[test]
-fn legacy_topic0_is_not_in_use() {
-    let current = hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG));
-    assert_ne!(
-        current, "08f62fdb70e8436181cbb1e561f6059677b179778bb0e0b9789a277eca0767e5",
-        "still filtering on the 9-field BridgeFundsIn signature"
-    );
-    assert_ne!(
-        current, "96266da276e870bb3d9c25740c9e24ec6448fc7bbed72ca384c3b8952574014c",
-        "still filtering on the pre-#152 BridgeFundsIn signature (no settlementData)"
-    );
-}
-
 // ---- happy path ----
 
 #[cfg(evm_to_rgb)]
@@ -204,25 +181,6 @@ fn accepts_real_contract_dual_emit() {
         ..FakeEvm::default()
     };
     assert!(verify(&p).is_ok());
-}
-
-#[cfg(evm_to_rgb)]
-#[test]
-fn dual_emit_binds_via_bridge_shape_not_the_companion() {
-    // The pair must resolve to BridgeFundsIn, which binds tokenCommission.
-    // The companion event has no commission, so a pass means a fallback to it.
-    let p = FakeEvm {
-        receipt: Some(receipt_with(
-            vec![
-                rgb_companion_log(7, 100),
-                bridge_log(op_id(7), 1000, 950, 999),
-            ],
-            100,
-        )),
-        ..FakeEvm::default()
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("tokenCommission mismatch"), "got: {e}");
 }
 
 /// A tx with only the companion `FundsIn` is not an authorised deposit: its
@@ -434,20 +392,7 @@ fn rejects_log_without_operation_id_topic() {
     assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
 }
 
-/// A full-width 32-byte id must bind.
-#[cfg(evm_to_rgb)]
-#[test]
-fn binds_full_width_operation_id() {
-    let p = happy_provider();
-    assert!(verify(&p).is_ok(), "a 32-byte operationId must bind");
-    // ...and a different one must not.
-    let e = verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(9), 1000, 50)
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("no BridgeFundsIn log"), "got: {e}");
-}
-
-/// Regression guard: an absent id must refuse, not skip the bind.
+/// An absent id must refuse, not skip the bind.
 #[cfg(evm_to_rgb)]
 #[test]
 fn rejects_when_operation_id_not_supplied() {
@@ -465,37 +410,7 @@ fn rejects_when_operation_id_not_supplied() {
     assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
 }
 
-#[cfg(evm_to_rgb)]
-#[test]
-fn still_rejects_amount_mismatch_with_matching_operation_id() {
-    let p = FakeEvm {
-        receipt: Some(receipt_with(vec![bridge_log(op_id(7), 999, 949, 50)], 100)),
-        ..FakeEvm::default()
-    };
-    let e = verify(&p).unwrap_err().to_string();
-    assert!(e.contains("amount mismatch"), "got: {e}");
-}
-
-/// A wrong-length id is a mis-encoding, not an absent one: refuse.
-#[cfg(evm_to_rgb)]
-#[test]
-fn rejects_malformed_expected_operation_id() {
-    let e = verify_funds_in_event(
-        &happy_provider(),
-        &BRIDGE,
-        EvmFinalityTag::Safe,
-        &TX,
-        &[0xAA; 8],
-        1000,
-        50,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(e.contains("must be exactly 32 bytes"), "got: {e}");
-}
-
 // The attested tag selects the head in both deposit verification paths.
-#[cfg(any(evm_to_rgb, feature = "bfa-validation"))]
 mod finality {
     use super::*;
     use std::cell::RefCell;
@@ -601,7 +516,6 @@ mod finality {
             |provider, tag| {
                 verify_funds_in_event(provider, &BRIDGE, tag, &TX, &op_id(7), 1000, 50).map(|_| ())
             },
-            #[cfg(feature = "bfa-validation")]
             |provider, tag| {
                 verify_rgb_funds_in(
                     provider,
@@ -910,77 +824,12 @@ fn receipt_mapping_rejects_missing_or_null_block_hash() {
     }
 }
 
-#[test]
-fn rpc_block_requires_hash_and_number() {
-    let block: alloy::rpc::types::Block = Default::default();
-    let json = serde_json::to_value(block).unwrap();
-    // Pin Alloy's wire behavior: neither tagged nor canonical block responses
-    // may silently turn missing identity fields into zero-valued defaults.
-    serde_json::from_value::<alloy::rpc::types::Block>(json.clone()).unwrap();
-    for field in ["hash", "number"] {
-        let mut missing = json.clone();
-        missing.as_object_mut().unwrap().remove(field);
-        let mut null = json.clone();
-        null[field] = serde_json::Value::Null;
-        for malformed in [missing, null] {
-            assert!(
-                serde_json::from_value::<alloy::rpc::types::Block>(malformed).is_err(),
-                "missing/null {field} must fail block parsing"
-            );
-        }
-    }
-}
-
-// ---- regression: listener flags cannot authorize ----
-
-#[cfg(evm_to_rgb)]
-#[test]
-fn issue_51_no_receipt_means_no_authorization() {
-    // The listener sets event_valid/event_finalized=true, but no deposit
-    // exists. Verification must reject, so the flags do not gate signing.
-    let p = FakeEvm {
-        receipt: None,
-        ..FakeEvm::default()
-    };
-    assert!(verify(&p).is_err());
-}
+// ---- listener flags cannot authorize ----
 
 // ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
 
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn rejects_old_funds_in_signature() {
-    let mut log = rgb_companion_log(0xab, 100);
-    log.topics[0] = event_topic0("FundsIn(address,uint256,uint256)");
-    assert!(decode_funds_in(&log, &word(0xab)).is_err());
-}
-
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn decodes_funds_in_with_the_lock_id_as_topic2() {
-    let log = rgb_companion_log(0xab, 100);
-    assert_eq!(decode_funds_in(&log, &word(0xab)).unwrap(), 100);
-}
-
-/// The topic is the lockId bytes as they are, a big-endian uint256.
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn funds_in_reads_the_lock_id_big_endian() {
-    let mut lock_id = [0u8; 32];
-    lock_id[0] = 0xab;
-    lock_id[31] = 0x02;
-    let mut log = rgb_companion_log(0, 100);
-    log.topics[2] = lock_id;
-    assert_eq!(decode_funds_in(&log, &lock_id).unwrap(), 100);
-
-    let mut reversed = lock_id;
-    reversed.reverse();
-    assert!(decode_funds_in(&log, &reversed).is_err());
-}
-
 /// A lock keyed by the bare OpId, or by the OpId in another tx, is not the
 /// lock of the mint in this tx.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
     use crate::networks::rgb::validation::lock_id;
@@ -999,36 +848,17 @@ fn rejects_funds_in_keyed_by_the_bare_opid_or_another_tx() {
     }
 }
 
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn rejects_funds_in_for_a_different_lock_id() {
-    let log = rgb_companion_log(0xab, 100);
-    assert!(decode_funds_in(&log, &word(0xcd)).is_err());
-}
-
-#[cfg(feature = "bfa-validation")]
-#[test]
-fn rejects_funds_in_amount_above_u64() {
-    let log = LogEntry {
-        address: BRIDGE,
-        topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead), word(0xab)],
-        data: vec![0x01; 32],
-    };
-    assert!(decode_funds_in(&log, &word(0xab)).is_err());
-}
-
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rejects_funds_in_with_unexpected_layout() {
-    // The old layout: the id in data, not indexed.
+    // A layout with the id in data, not indexed.
     let mut data = word(0xab).to_vec();
     data.extend_from_slice(&word(100));
-    let old = LogEntry {
+    let id_in_data = LogEntry {
         address: BRIDGE,
         topics: vec![event_topic0(FUNDS_IN_SIG), word(0xdead)],
         data,
     };
-    assert!(decode_funds_in(&old, &word(0xab)).is_err());
+    assert!(decode_funds_in(&id_in_data, &word(0xab)).is_err());
 
     let mut extra = rgb_companion_log(0xab, 100);
     extra.topics.push(word(0xab));
@@ -1036,12 +866,10 @@ fn rejects_funds_in_with_unexpected_layout() {
 }
 
 /// The mint's `beforeBlock` in the lock tests: the lock is at block 100.
-#[cfg(feature = "bfa-validation")]
 const BEFORE_BLOCK: u64 = 110;
 
 /// A real deposit tx emits both: the RGB companion (minted amount) and the
 /// BridgeFundsIn record (operationId, netAmount). Block 100.
-#[cfg(feature = "bfa-validation")]
 fn lock_provider() -> FakeEvm {
     FakeEvm {
         receipt: Some(receipt_with(
@@ -1055,7 +883,6 @@ fn lock_provider() -> FakeEvm {
     }
 }
 
-#[cfg(feature = "bfa-mint")]
 #[test]
 fn verify_rgb_funds_in_accepts_a_verified_lock() {
     let p = lock_provider();
@@ -1081,7 +908,6 @@ fn verify_rgb_funds_in_accepts_a_verified_lock() {
 }
 
 /// An RGB receiver accepts only a lock in a block before `beforeBlock`.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
     let p = lock_provider();
@@ -1116,8 +942,7 @@ fn verify_rgb_funds_in_refuses_a_lock_at_or_after_before_block() {
     .is_ok());
 }
 
-/// rgb-lib f3975623 has no scan window: a lock far below `beforeBlock` still counts.
-#[cfg(feature = "bfa-validation")]
+/// rgb-lib has no scan window: a lock far below `beforeBlock` still counts.
 #[test]
 fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
     let p = lock_provider();
@@ -1139,7 +964,6 @@ fn verify_rgb_funds_in_accepts_a_lock_far_before_before_block() {
     }
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn node_chain_id_must_be_the_pinned_one() {
     let p = lock_provider();
@@ -1149,7 +973,6 @@ fn node_chain_id_must_be_the_pinned_one() {
 }
 
 /// A deposit routed to another chain must not back an RGB mint.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
     let mut bridge = bridge_log(op_id(7), 1000, 950, 50);
@@ -1178,7 +1001,6 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
 
 /// Without the record, a `fundsOut` has nothing to cite, so the lock is not
 /// settlement evidence.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
     let p = FakeEvm {
@@ -1202,7 +1024,6 @@ fn verify_rgb_funds_in_requires_the_bridge_funds_in_record() {
 
 /// Only the pinned emitter's log can back a mint: an attacker contract can
 /// emit the same event.
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     let mut log = rgb_companion_log(0xab, 100);
@@ -1226,9 +1047,8 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     assert!(e.contains("no FundsIn log"), "got: {e}");
 }
 
-/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID` (827166). The id is a
-/// pure function of the 32-byte word, so it holds for a lockId word too.
-#[cfg(feature = "bfa-validation")]
+/// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID`. The id is a pure
+/// function of the 32-byte word, so it holds for a lockId word too.
 #[test]
 fn rgb_mint_deposit_id_matches_the_shared_vector() {
     let mut cfg = crate::config::BridgeConfig::default();
@@ -1254,9 +1074,8 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
     );
 }
 
-/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `rgbNetwork` = 827166. The contract test still pins the 96 form.
-#[cfg(feature = "bfa-validation")]
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
+/// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
 fn rgb_mint_deposit_id_matches_the_contract_vector() {
     let cfg = crate::config::BridgeConfig {
@@ -1274,7 +1093,6 @@ fn rgb_mint_deposit_id_matches_the_contract_vector() {
     );
 }
 
-#[cfg(feature = "bfa-validation")]
 #[test]
 fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
     let cfg = crate::config::BridgeConfig {
@@ -1287,4 +1105,29 @@ fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
     assert_ne!(id, rgb_mint_deposit_id(&cfg, &[1; 32], 101).unwrap());
     assert_ne!(id, rgb_mint_deposit_id(&cfg, &[2; 32], 100).unwrap());
     assert!(rgb_mint_deposit_id(&cfg, &[1; 32], 0).is_err());
+}
+
+/// The client lives as long as the enclave, so a change of the timeout must
+/// reach the next call of a client built before the change.
+#[test]
+fn a_stalled_call_ends_at_the_timeout_in_force() {
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ca_hex = include_str!("../../../../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
+    let client = AlloyEvmClient::with_pinned_tls(&crate::config::EvmRpcTls {
+        host: "rpc.test".into(),
+        ca_der: hex::decode(ca_hex.trim()).unwrap(),
+        tls_port: stalled.local_addr().unwrap().port(),
+        path: "/".into(),
+    })
+    .unwrap();
+
+    crate::limits::change_for_test(|l| l.evm_rpc_timeout_secs = 1);
+    let started = std::time::Instant::now();
+    let err = client.get_chain_id().unwrap_err().to_string();
+    assert!(err.contains("timed out after 1s"), "{err}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
 }

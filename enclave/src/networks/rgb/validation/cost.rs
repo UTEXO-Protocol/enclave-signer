@@ -2,11 +2,13 @@
 //! before any witness is checked, it checks each BFA transition against the
 //! whole witness tx, anchor and input map of its bundle, hashes every opout
 //! into its operation id more than once, and the whole genesis once per
-//! operation. For a listed asset it walks the operations DAG once per origin.
+//! operation. For a listed asset it walks the operations DAG, once for a history
+//! its origins share.
 //! Once validation passed, its inspection reads the summary from the same file:
 //! it hashes each operation id three times more and each witness tx once per
-//! transition. Each superlinear part has its cap, and all of them with the
-//! file, its opouts, operations and genesis hashes have one time budget.
+//! transition. Each superlinear part has its cap, the walk has a cap on a
+//! per-origin count of it, and all of them with the file, its opouts,
+//! operations and genesis hashes have one time budget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -16,22 +18,17 @@ use rgbstd::validation::DbcProof;
 use rgbstd::{Anchor, KnownTransition, OpId, Opout};
 
 use crate::error::{EnclaveError, Result};
+use crate::limits::Limits;
 
-/// Forged bundles at the cap take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
-/// costs 8.5M (`tests/caps.rs`, docs/burn-flow.md).
-pub(super) const MAX_WITNESS_CHECK_COST: u64 = 128 * 1_024 * 1_024;
-
-/// 512 transitions in one bundle (one over) take rgb-lib 1.2 s, 2048 take 15.5 s.
-/// The burn of 2810 mints costs 11k (`tests/caps.rs`, docs/burn-flow.md).
-pub(super) const MAX_BUNDLE_ID_COST: u64 = 256 * 1_024;
-
-/// About 5 s of rgb-lib walk at the measured 45 to 73 ns per step. The burn of
-/// 2810 mints costs 14k (`tests/caps.rs`, docs/burn-flow.md).
-pub(super) const MAX_REJECT_WALK_COST: u64 = 64 * 1_024 * 1_024;
-
-/// A 12 MiB history of transfers takes rgb-lib 15 s to validate alone, and the
-/// caps add up. So the modeled time of validation and inspection is held to 18 s.
-pub(super) const MAX_RGB_LIB_NS: u64 = 18_000_000_000;
+// The caps of the image, for the tests. `Limits` holds them and says why.
+#[cfg(test)]
+pub(super) const MAX_WITNESS_CHECK_COST: u64 = Limits::DEFAULTS.max_witness_check_cost;
+#[cfg(test)]
+pub(super) const MAX_BUNDLE_ID_COST: u64 = Limits::DEFAULTS.max_bundle_id_cost;
+#[cfg(test)]
+pub(super) const MAX_REJECT_WALK_COST: u64 = Limits::DEFAULTS.max_reject_walk_cost;
+#[cfg(test)]
+pub(super) const MAX_RGB_LIB_NS: u64 = Limits::DEFAULTS.max_rgb_lib_ms * 1_000_000;
 
 /// rgb-lib validation's ns per file byte, per opout, per genesis leaf hashed and per
 /// step of each cost, rounded up from release timings on an M-series Mac (`tests/caps.rs`).
@@ -56,10 +53,11 @@ pub(super) fn assert_bounded_for_rgb_lib(
     file_len: usize,
     listed: bool,
 ) -> Result<()> {
-    let costs = capped_costs(transfer, listed)?;
+    let limits = crate::limits::get();
+    let costs = capped_costs(transfer, listed, &limits)?;
     assert_within(
         rgb_lib_ns(file_len, uncapped_costs(transfer), costs),
-        MAX_RGB_LIB_NS,
+        limits.max_rgb_lib_ns(),
         "ns of rgb-lib time on its file and work together",
         "its file is too large for the work it also asks",
     )
@@ -67,28 +65,28 @@ pub(super) fn assert_bounded_for_rgb_lib(
 
 /// The witness, bundle id and walk costs, each refused above its cap. The
 /// walk is 0 when not `listed`.
-fn capped_costs(transfer: &Transfer, listed: bool) -> Result<[u64; 3]> {
+fn capped_costs(transfer: &Transfer, listed: bool, limits: &Limits) -> Result<[u64; 3]> {
     let witness = witness_check_cost(transfer);
     assert_within(
         witness,
-        MAX_WITNESS_CHECK_COST,
+        limits.max_witness_check_cost,
         "steps to check its transitions against their witness txs",
         "a bundle carries too many transitions or seals for the size of its tx and anchor",
     )?;
     let ids = bundle_id_cost(transfer);
     assert_within(
         ids,
-        MAX_BUNDLE_ID_COST,
+        limits.max_bundle_id_cost,
         "steps to hash its bundle ids",
         "a bundle carries too many transitions for the size of its input map",
     )?;
     if !listed {
         return Ok([witness, ids, 0]);
     }
-    let walk = reject_walk_cost(transfer, MAX_REJECT_WALK_COST);
+    let walk = reject_walk_cost(transfer, limits.max_reject_walk_cost);
     assert_within(
         walk,
-        MAX_REJECT_WALK_COST,
+        limits.max_reject_walk_cost,
         "steps to check against its reject list",
         "too many origins over too long a history",
     )?;
@@ -234,8 +232,9 @@ pub(super) fn bundle_id_cost(transfer: &Transfer) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// rgb-lib's walk (`rejected_opouts`) with no list entry to cut it short:
-/// one walk per origin, with its own visited set. Counts up to just past `cap`.
+/// One walk per origin with no list entry to cut it short. A model: rgb-lib
+/// (`rejected_opouts`) shares a walk across origins, so a shared history counts
+/// once per origin here. Counts up to just past `cap`.
 pub(super) fn reject_walk_cost(transfer: &Transfer, cap: u64) -> u64 {
     let mut graph = OpGraph::of(transfer);
     // Origins of one operation walk the same way, so each operation walks once.
@@ -291,8 +290,8 @@ impl OpGraph {
         node
     }
 
-    /// The steps of one depth-first walk from `from`, as rgb-lib takes them:
-    /// each node popped and each opout it spends. Stops past `budget`.
+    /// The steps of one depth-first walk from `from`: each node popped and each
+    /// opout it spends. Stops past `budget`.
     fn walk_steps(&self, from: usize, walk: u32, seen: &mut [u32], budget: u64) -> u64 {
         let mut stack = vec![from];
         let mut steps = 0u64;

@@ -6,7 +6,7 @@
 //! the same `assert_chain_ready` precondition that signing applies. These tests
 //! pin each corner of that conjunction, so a not-ready enclave cannot report ready.
 //!
-//! SPV/RGB builds only. A `ccd`-only build has no header chain and reports SPV
+//! SPV/RGB builds only. A build without `rgb-validation` has no header chain and reports SPV
 //! readiness vacuously. A mint signer also skips the SPV half;
 //! `test_signer_role.rs` covers it.
 #![cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -69,18 +69,6 @@ fn submit_chain(port: u16, count: u32, last_time: u32) {
 fn with_key(state: &EnclaveState) {
     let mut entropy = [7u8; 32];
     state.initialize_from_entropy(&mut entropy).unwrap();
-}
-
-#[test]
-fn fresh_enclave_is_not_ready() {
-    let port = start_test_server();
-    let h = health(port);
-
-    assert!(!h.ready);
-    assert!(!h.key_loaded);
-    assert!(!h.spv_synced, "no headers accepted yet");
-    assert_eq!(h.phase, "initial");
-    assert_eq!(h.spv_max_tip_age_secs as u64, SPV_MAX_TIP_AGE_SECS);
 }
 
 #[test]

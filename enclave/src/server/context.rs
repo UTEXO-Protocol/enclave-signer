@@ -19,8 +19,8 @@ pub struct Launch {
     /// The enclave security policy, resolved once at launch.
     /// The attestation `user_data` commits to it through
     /// [`crate::policy::SecurityPolicy::commitment_bytes`].
-    /// Signing handlers read it. They do not derive the policy from build
-    /// features or empty request fields.
+    /// `SignBtc` reads it. The other signing handlers enforce the pins in
+    /// `BridgeConfig`. No handler derives a policy from request fields.
     pub policy: SecurityPolicy,
     /// `SetEndpoints` always sets it. Tests can leave it `None`.
     /// Then the handlers refuse.
@@ -31,7 +31,7 @@ pub struct Launch {
     /// Then `handle_sign` fails closed in bridge mode.
     /// The host relays the RPC traffic through the loopback vsock forwarder.
     /// TLS ends inside the enclave. See [`crate::networks::evm::events`].
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     pub evm_rpc_client:
         Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>>,
 }
@@ -50,7 +50,7 @@ pub struct ServerContext {
     /// In-enclave Bitcoin header chain for SPV verification.
     /// It starts from the compile-time checkpoint. SubmitHeaders changes it.
     ///
-    /// A `ccd`-only build has no chain and refuses
+    /// A build without `rgb-validation` has no chain and refuses
     /// `SubmitHeaders` / `GetLastSavedBlock`.
     #[cfg(feature = "rgb-validation")]
     pub header_chain: std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
@@ -101,7 +101,7 @@ impl ServerContext {
         ctx
     }
 
-    /// `ccd`-only variant without an SPV header chain.
+    /// Variant without an SPV header chain.
     #[cfg(not(feature = "rgb-validation"))]
     pub fn new(state: EnclaveState, bridge_config: BridgeConfig) -> Self {
         let ctx = Self::awaiting_launch(state, bridge_config, BuildContext::current());
@@ -123,7 +123,7 @@ impl ServerContext {
             policy,
             #[cfg(feature = "rgb-validation")]
             rgb_validator: None,
-            #[cfg(feature = "evm-rpc")]
+            #[cfg(feature = "rgb-validation")]
             evm_rpc_client: None,
         });
     }

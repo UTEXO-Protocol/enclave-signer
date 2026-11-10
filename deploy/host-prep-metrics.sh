@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Host-prep for enclave-host LIVENESS METRICS (run as root, e.g. via SSM).
 #
-# TODO §7a Track 2. Track 1 (host-prep-observability.sh) ships journald logs;
-# this ships the "is it alive?" SIGNAL that actually drives alarms. A systemd
+# host-prep-observability.sh ships journald logs; this script ships the
+# "is it alive?" SIGNAL that drives alarms. A systemd
 # timer runs a tiny reporter every 60s and publishes 3 custom CloudWatch metrics
 # per CID (namespace `Utexo/EnclaveHost`, dims Host=<instance-id>, Cid=<16|18|20>):
 #

@@ -14,8 +14,9 @@
 //! of [`MAX_QUEUED_CONNECTIONS`].
 //!
 //! The only ingress is the untrusted parent, which can stop the enclave anyway.
-//! These limits are availability defense in depth. They are compile-time
-//! constants (PCR-attested), not env settings.
+//! These limits are availability defense in depth. The two timeouts here are
+//! the values of the image. The operator can change them at run time
+//! ([`crate::limits`]). The worker pool and the queue are set up at boot.
 
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Socket deadline measured from accept, including time in the worker queue.
 /// This does not cancel work inside a handler.
-pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Connection worker threads. The only peer is the parent, so a small pool is
 /// sufficient. One slow request does not block the others.

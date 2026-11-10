@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(feature = "ccd")]
-use crate::proto::CcdSource;
 use crate::proto::{EvmDestination, EvmSource, RgbDestination, RgbSource};
 
 fn evm_source(commission: u64) -> SourceNetwork {
@@ -39,14 +37,6 @@ fn rgb_source() -> SourceNetwork {
     })
 }
 
-#[cfg(feature = "ccd")]
-fn ccd_source(commission: u64) -> SourceNetwork {
-    SourceNetwork::CcdSource(CcdSource {
-        tx_hash: vec![0xCC; 32],
-        commission,
-    })
-}
-
 fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwork {
     DestinationNetwork::EvmDestination(EvmDestination {
         call_data: vec![0x00; 4],
@@ -77,57 +67,6 @@ fn route_proofs_accept_exact_match_to_rgb_destination() {
         &proof(90, None),
     )
     .is_ok());
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn route_proofs_accept_ccd_source_to_evm_destination() {
-    assert!(validate_route_proofs(
-        &ccd_source(10),
-        &evm_destination(990, 10),
-        &proof(990, None),
-        &proof(990, None),
-    )
-    .is_ok());
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn route_proofs_reject_underfunded_ccd_to_evm_destination() {
-    let err = validate_route_proofs(
-        &ccd_source(10),
-        &evm_destination(990, 10),
-        &proof(980, None), // source amount < destination amount
-        &proof(990, None),
-    );
-    assert!(err.is_err());
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn ccd_validate_source_trusts_and_binds_amount() {
-    let proof = ccd::validate_source(
-        990,
-        &CcdSource {
-            tx_hash: vec![0xCC; 32],
-            commission: 10,
-        },
-    )
-    .expect("trusted CCD source");
-    assert_eq!(proof.amount, 990);
-}
-
-#[cfg(feature = "ccd")]
-#[test]
-fn ccd_validate_source_rejects_bad_tx_hash() {
-    let err = ccd::validate_source(
-        990,
-        &CcdSource {
-            tx_hash: vec![0xCC; 31],
-            commission: 10,
-        },
-    );
-    assert!(err.is_err());
 }
 
 #[test]
@@ -163,28 +102,6 @@ fn route_proofs_reject_underfunded_evm_destination() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("amount mismatch"));
-}
-
-#[test]
-fn route_proofs_do_not_compare_rgb_to_evm_operation_id_yet() {
-    assert!(validate_route_proofs(
-        &rgb_source(),
-        &evm_destination(90, 20),
-        &proof(90, Some("source-op")),
-        &proof(90, Some("destination-op")),
-    )
-    .is_ok());
-}
-
-#[test]
-fn route_proofs_accept_rgb_to_evm_missing_operation_id_for_now() {
-    assert!(validate_route_proofs(
-        &rgb_source(),
-        &evm_destination(90, 20),
-        &proof(90, None),
-        &proof(90, Some("destination-op")),
-    )
-    .is_ok());
 }
 
 #[test]

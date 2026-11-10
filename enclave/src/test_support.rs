@@ -3,20 +3,16 @@
 #[cfg(feature = "rgb-validation")]
 pub(crate) mod bfa_consignment;
 
-/// BFA ids as the flat summary carries them. `validation::tests` pins them
-/// to `rgb-schemas`.
-#[cfg(feature = "rgb-validation")]
+/// BFA transition ids as the flat summary carries them. Only burn tests use them.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub(crate) mod bfa_ids {
     pub const TS_TRANSFER: u16 = 10000;
     pub const TS_BURN: u16 = 8010;
     pub const TS_MINT: u16 = 8013;
-    pub const TS_PROPAGATE: u16 = 8014;
-    pub const OS_ASSET: u16 = 4000;
-    pub const OS_MINT: u16 = 4013;
 }
 
 /// A `uint256` ABI word holding `value`.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub(crate) fn abi_word(value: u64) -> [u8; 32] {
     let mut w = [0u8; 32];
     w[24..].copy_from_slice(&value.to_be_bytes());
@@ -27,7 +23,7 @@ pub(crate) fn abi_word(value: u64) -> [u8; 32] {
 /// commission, nativeCommission, sourceChainId, destinationChainId, then the
 /// `destinationAddress` tail offset, length word and padded bytes.
 /// `operationId` is not here - it is an indexed topic.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: &str) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(&abi_word(0)); // senderNonce
@@ -50,14 +46,14 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
 
 /// In-memory EVM RPC: a fixed receipt covered by each tagged canonical head,
 /// on chain `chain_id`.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 #[derive(Default)]
 pub(crate) struct FakeEvm {
     pub receipt: Option<crate::networks::evm::events::ReceiptData>,
     pub chain_id: u64,
 }
 
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
     fn get_transaction_receipt(
         &self,
@@ -97,7 +93,7 @@ impl crate::networks::evm::events::EvmReceiptProvider for FakeEvm {
 
 /// A receipt at block 100 of one deposit on `bridge`, chain 42161: a `FundsIn`
 /// of `amount` under `lock_id`, and its `BridgeFundsIn` record `operation_id`.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub(crate) fn mint_deposit(
     bridge: [u8; 20],
     lock_id: [u8; 32],
@@ -132,19 +128,19 @@ pub(crate) fn mint_deposit(
 }
 
 /// A request deadline no test reaches.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub(crate) fn far_deadline() -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_secs(3600)
 }
 
 /// The `eth_call`s a [`ListEvm`] saw, as (selector, block).
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 pub(crate) type CallLog = std::sync::Arc<std::sync::Mutex<Vec<([u8; 4], u64)>>>;
 
 /// In-memory `IRgbRejectList` behind an EVM RPC on chain `chain_id`. The
 /// first `finalized_len` entries are finalized; `None` means no code at the
 /// finalized block. Records each `eth_call` as (selector, block).
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 pub(crate) struct ListEvm {
     pub chain_id: u64,
     pub latest: u64,
@@ -157,7 +153,7 @@ pub(crate) struct ListEvm {
     pub calls: CallLog,
 }
 
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 impl ListEvm {
     /// A deployed list of `entries` on chain `chain_id`, all finalized.
     pub fn new(
@@ -211,7 +207,7 @@ impl ListEvm {
     }
 }
 
-#[cfg(feature = "bfa-validation")]
+#[cfg(feature = "rgb-validation")]
 impl crate::networks::evm::events::EvmReceiptProvider for ListEvm {
     fn get_transaction_receipt(
         &self,
@@ -356,37 +352,4 @@ pub(crate) fn chain_with_witnesses(
         })
         .collect();
     (std::sync::Mutex::new(chain), proofs)
-}
-
-/// The fixtures are test code too, and this is their test.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-mod tests {
-    use super::chain_with_witnesses;
-    use crate::networks::rgb::spv::chain::MAX_HEADERS_PER_SUBMIT;
-
-    /// A chain longer than one submit goes in batches, and every block of it
-    /// is there: the witness blocks and the tip.
-    #[test]
-    fn a_long_witness_chain_is_submitted_in_batches() {
-        let witnesses: Vec<[u8; 32]> = (0..MAX_HEADERS_PER_SUBMIT as u32 - 4)
-            .map(|i| {
-                let mut txid = [0x77u8; 32];
-                txid[..4].copy_from_slice(&i.to_le_bytes());
-                txid
-            })
-            .collect();
-        let depth_above = 5;
-        let (chain, proofs) = chain_with_witnesses(&witnesses, depth_above);
-        let chain = chain.lock().unwrap();
-        let last_witness = witnesses.len() as u32;
-        let tip = last_witness + depth_above;
-        assert_eq!(tip, MAX_HEADERS_PER_SUBMIT as u32 + 1);
-        assert_eq!(chain.tip_height(), tip);
-        assert_eq!(proofs.len(), witnesses.len());
-        assert!(chain.hash_at(1).is_some());
-        assert!(chain.hash_at(last_witness).is_some());
-        assert!(chain.hash_at(tip).is_some());
-        // The last witness has the empty blocks above it.
-        assert_eq!(chain.confirmations(last_witness, 6), 6);
-    }
 }

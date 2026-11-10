@@ -1,7 +1,8 @@
 #!/bin/sh
-# Maps the private RGB protocol crates of the [patch.crates-io] in Cargo.toml
-# (ssh://git@github.com/rgb-tools-devs/<repo>.git) to our UTEXO-Protocol/<repo>-s-bfa
-# mirrors in the global git config ($GIT_CONFIG_GLOBAL when set). A credential
+# Maps ssh://git@github.com/rgb-tools-devs/<repo>.git to our UTEXO-Protocol/<repo>-s-bfa
+# mirrors in the global git config ($GIT_CONFIG_GLOBAL when set). The
+# [patch.crates-io] in Cargo.toml uses public repos, so no lock entry matches this
+# mapping. with-private-deps.sh and ci-rgb-lib-access.sh run it. A credential
 # helper reads the token from a file, so it is never in a URL cargo can print.
 # Usage: map-rgb-mirrors.sh <token-file> <helper-path>
 set -eu

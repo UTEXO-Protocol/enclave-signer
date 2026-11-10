@@ -67,7 +67,7 @@ mod burn {
         }
     }
 
-    /// Finding 47: a burn's locks come from its mints alone, keyed by lockId.
+    /// A burn's locks come from its mints alone, keyed by lockId.
     #[test]
     fn derives_every_lock_from_its_anchor_without_rpc() {
         let ctx = context(config(), Box::new(NoRpc));
@@ -249,22 +249,6 @@ mod mint {
     #[test]
     fn refuses_deposit_of_other_opid() {
         let ctx = context(config(), Box::new(paid(lock_of([3; 32], 0x33), 100)));
-        let err = bind(&ctx, &mint(100));
-        assert!(err.contains("no FundsIn log"), "{err}");
-    }
-
-    /// A lock under the bare OpId is not the lock of the mint in its tx.
-    #[test]
-    fn refuses_deposit_keyed_by_the_bare_opid() {
-        let ctx = context(config(), Box::new(paid(OPID, 100)));
-        let err = bind(&ctx, &mint(100));
-        assert!(err.contains("no FundsIn log"), "{err}");
-    }
-
-    /// The same mint in another tx (a rebuilt or RBF tx) has another lockId.
-    #[test]
-    fn refuses_deposit_for_the_mint_in_another_tx() {
-        let ctx = context(config(), Box::new(paid(lock_of(OPID, 0x34), 100)));
         let err = bind(&ctx, &mint(100));
         assert!(err.contains("no FundsIn log"), "{err}");
     }

@@ -2,7 +2,7 @@
 //! Nothing in this module handles a request.
 
 use crate::config::BridgeConfig;
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 use crate::config::EvmRpcTls;
 use crate::networks::rgb::spv::Network;
 #[cfg(feature = "spv")]
@@ -12,15 +12,40 @@ use crate::networks::rgb::spv::{
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
 use crate::policy::SecurityPolicy;
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
 use crate::state::EnclaveState;
 
-/// Install the tracing subscriber. `RUST_LOG` picks the filter.
+/// Install the tracing subscriber. `RUST_LOG` picks the filter, but Alloy HTTP
+/// logs stay off at any level: they can carry the RPC URL, and its path is a
+/// secret.
 pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let filter = alloy_http_off(tracing_subscriber::EnvFilter::from_default_env());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// `filter` with Alloy HTTP logging forced off.
+fn alloy_http_off(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    filter.add_directive(
+        "alloy_transport_http=off"
+            .parse()
+            .expect("a fixed, valid directive"),
+    )
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::alloy_http_off;
+    use tracing_subscriber::EnvFilter;
+
+    #[test]
+    fn a_trace_filter_still_turns_alloy_http_off() {
+        for level in ["trace", "debug", "alloy_transport_http=trace"] {
+            let filter = alloy_http_off(EnvFilter::new(level)).to_string();
+            assert!(filter.contains("alloy_transport_http=off"), "{filter}");
+            assert!(!filter.contains("alloy_transport_http=trace"), "{filter}");
+        }
+    }
 }
 
 /// Add each missing `addr host` line to the hosts file at `path`, so the
@@ -118,7 +143,7 @@ pub fn log_bridge_config(bridge_config: &BridgeConfig) {
 /// The EVM `FundsIn` verification source and its TLS pin.
 ///
 /// Uses the same rule as [`build_evm_rpc_client`]: the pinned TLS of `tls`.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub fn resolve_evm_data_source(tls: &EvmRpcTls) -> (EvmDataSource, Option<EvmRpcTlsPin>) {
     use sha2::Digest;
     let pin = EvmRpcTlsPin {
@@ -163,7 +188,7 @@ pub fn install_env_cloning_secret(state: &EnclaveState) {
             } else {
                 tracing::warn!(
                     "donor cloning secret configured from UTEXO_CLONING_SECRET env \
-                 (legacy fallback; prefer the InitializeKey cloning_secret field)"
+                 (dev fallback; prefer the InitializeKey cloning_secret field)"
                 );
             }
         }
@@ -275,7 +300,7 @@ pub fn build_header_chain(
 /// The client reaches the RPC through the loopback forwarder, with TLS to the
 /// pinned host and CA. `None` makes the launch fail. There is no fallback to an
 /// unverified path.
-#[cfg(feature = "evm-rpc")]
+#[cfg(feature = "rgb-validation")]
 pub fn build_evm_rpc_client(
     tls: &EvmRpcTls,
 ) -> Option<Box<dyn crate::networks::evm::events::EvmReceiptProvider + Send + Sync>> {

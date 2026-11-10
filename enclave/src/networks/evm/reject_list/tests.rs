@@ -1,4 +1,5 @@
 use super::*;
+use crate::limits::{change_for_test, Limits};
 use crate::test_support::{far_deadline, ListEvm};
 
 const LIST: [u8; 20] = [0x4e; 20];
@@ -58,14 +59,6 @@ fn reads_length_at_finalized_then_latest() {
         .map(|(_, block)| block)
         .collect();
     assert_eq!(lengths, vec![100, 200]);
-}
-
-#[test]
-fn an_empty_list_reads_no_page() {
-    let rpc = ListEvm::new(1, vec![]);
-    let log = read_reject_list(&rpc, &LIST, far_deadline()).unwrap();
-    assert!(log.entries.is_empty());
-    assert_eq!(rpc.calls().len(), 2);
 }
 
 /// No code returns no data: refused, not read as an empty list.
@@ -146,7 +139,8 @@ fn no_finalized_block_fails_closed() {
 #[test]
 fn list_over_cap_fails_closed() {
     let mut rpc = ListEvm::new(1, vec![]);
-    rpc.entries = vec![entry_no(0, true); MAX_ENTRIES as usize + 1];
+    let max = Limits::DEFAULTS.max_reject_list_entries;
+    rpc.entries = vec![entry_no(0, true); max as usize + 1];
     rpc.finalized_len = Some(0);
     assert!(err_of(&rpc).contains("over the 20000"));
     assert!(rpc
@@ -183,4 +177,77 @@ fn a_read_past_the_request_deadline_is_refused() {
         assert!(err.contains("exceeded the request budget"), "{err}");
     }
     assert!(rpc.calls().is_empty());
+}
+
+/// A change reaches the next read. The limit decides which list is refused.
+/// The page decides how many calls a read takes, and not what it reads.
+#[test]
+fn the_limit_and_the_page_are_the_values_in_force() {
+    let rpc = ListEvm::new(1, list_of(2500));
+    change_for_test(|l| l.max_reject_list_entries = 2499);
+    assert!(err_of(&rpc).contains("over the 2499"));
+
+    change_for_test(|l| {
+        l.max_reject_list_entries = 2500;
+        l.reject_list_page_entries = 300;
+    });
+    let log = read_reject_list(&rpc, &LIST, far_deadline()).unwrap();
+    assert_eq!(log.entries, list_of(2500));
+    let pages = rpc
+        .calls()
+        .into_iter()
+        .filter(|(selector, _)| *selector == entriesCall::SELECTOR)
+        .count();
+    assert_eq!(pages, 9, "2500 entries at 300 for each page");
+}
+
+/// One list from the read to the set that rgb-lib walks with stays within the
+/// rate that `Limits::check` counts. Each size is just past a hash table
+/// growth, the worst point of the rate. The rate is the same for a list of
+/// rejects and for a list of allows, and a mixed list takes less.
+#[test]
+fn a_list_fits_the_heap_that_the_limits_count() {
+    use crate::limits::REJECT_LIST_ENTRY_BYTES;
+    use crate::memory::peak;
+    use crate::networks::rgb::validation::decisions;
+    use rgb_lib::no_wallet::RejectList;
+
+    change_for_test(|l| {
+        l.max_reject_list_entries = 1 << 20;
+        l.max_consignment_bytes = 1 << 20;
+    });
+    for len in [28_673u32, 229_377] {
+        let entries: Vec<_> = (0..len)
+            .map(|i| {
+                let mut op = [0xab; 32];
+                op[..4].copy_from_slice(&i.to_be_bytes());
+                RejectListEntry {
+                    opout: OpoutKey {
+                        op,
+                        ty: 4000,
+                        no: 0,
+                    },
+                    reject: true,
+                }
+            })
+            .collect();
+        let (_, _, used) = peak::measure(
+            || ListEvm::new(1, entries),
+            |rpc| {
+                // `server::reject_list::read_decisions`, then `ListResolver`.
+                let decided = {
+                    let log = read_reject_list(rpc, &LIST, far_deadline()).unwrap();
+                    decisions(&log.entries, log.finalized)
+                };
+                let rejected = decided.reject.into_iter().map(|o| (o.into(), false));
+                let allowed = decided.allow.into_iter().map(|o| (o.into(), true));
+                RejectList::from_decisions(rejected.chain(allowed))
+            },
+        );
+        let budget = u64::from(len) * REJECT_LIST_ENTRY_BYTES;
+        assert!(
+            used as u64 <= budget,
+            "a list of {len} entries took {used} bytes, over {budget}"
+        );
+    }
 }

@@ -8,15 +8,13 @@ use crate::error::{EnclaveError, Result};
 use crate::networks::evm::signing::{build_evm_domain, funds_out_digest, lz_funds_out_digest};
 use crate::proto::enclave_response::Response;
 use crate::proto::*;
-#[cfg(feature = "ccd")]
-use crate::state::EnclaveState;
 
 /// Check that all pinned Bitcoin blocks still have the same hash and at least
 /// the depth their check required. Then run `sign` with the header-chain lock
 /// still held.
 ///
 /// Each SPV check releases the lock at return. Another worker can accept a
-/// reorg in that gap (F05-NEW-AF-08). An extension does not change the pinned
+/// reorg in that gap. An extension does not change the pinned
 /// heights, so signing continues. This function refuses a reorg that replaces
 /// a pin, or that leaves a pinned block shallower than its check required.
 /// The lock is held until `sign` returns, so no header update can land between
@@ -58,7 +56,7 @@ pub(super) fn handle_sign_evm(
 
     let domain_sep = domain.separator_hash();
 
-    // Validation picks the route (F05-NEW-AF-12): `params` is `Some` on the
+    // Validation picks the route: `params` is `Some` on the
     // direct route, and `None` on the LayerZero route, which has `lz_release`.
     // The digest commits to the LZ fields of `lzFundsOutCall`.
     let digest = match (params, req.lz_release.as_ref()) {
@@ -131,7 +129,7 @@ pub(super) fn handle_sign_psbt(
 
 /// Signs the Colored inputs of a PSBT the caller validated: a rights refill.
 /// It has no chain pins to hold. Refuses a no-op.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub(super) fn sign_colored_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
     // Colored account only. An unscoped sign co-signs all inputs with a known
     // key, including vanilla inputs that no send-RGB bind checks.
@@ -170,7 +168,8 @@ fn signed_psbt_response((signed_psbt, inputs_signed): (Vec<u8>, usize)) -> Resul
 /// the pinned fee policy passes, and the operator amount cap holds
 /// ([`crate::networks::rgb::btc_crosscheck`]).
 /// A production build refuses to sign when the cap is not set.
-/// The separate request type is the structural part of the vanilla-bypass fix.
+/// Only this request type signs Vanilla inputs. The other PSBT paths sign
+/// only Colored inputs.
 #[cfg(evm_to_rgb)]
 pub(super) fn handle_sign_btc(ctx: &ServerContext, req: SignBtcRequest) -> Result<EnclaveResponse> {
     // In production, the plain-BTC path runs only if the attested policy
@@ -243,40 +242,6 @@ pub(super) fn handle_sign_raw_digest(
     })
 }
 
-/// Sign a 32-byte Concordium account-transaction hash with the governance
-/// Ed25519 key. The listener derives the hash and checks the transaction
-/// structure and amounts. The enclave signs the hash directly.
-/// Returns the 64-byte signature and the public key.
-#[cfg(feature = "ccd")]
-pub(super) fn handle_sign_ccd(
-    state: &EnclaveState,
-    req: SignCcdRequest,
-) -> Result<EnclaveResponse> {
-    if req.hash.len() != 32 {
-        return Err(EnclaveError::InvalidRequest(format!(
-            "hash must be exactly 32 bytes, got {}",
-            req.hash.len()
-        )));
-    }
-
-    let hash: [u8; 32] = req.hash.as_slice().try_into().unwrap();
-    let (signature, public_key) = state.sign_ccd(&hash)?;
-
-    tracing::info!(
-        hash_hex = %hex::encode(hash),
-        "concordium signature produced (ed25519 governance key)"
-    );
-
-    Ok(EnclaveResponse {
-        response: Some(Response::CcdSignature(CcdSignatureResponse {
-            signature: signature.to_vec(),
-            // Ed25519 signatures are not recoverable. The consumer needs the key
-            // to find the signer index on the governance account.
-            public_key: public_key.to_vec(),
-        })),
-    })
-}
-
 #[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod tests {
     use super::*;
@@ -300,7 +265,7 @@ mod tests {
         (ctx, pins)
     }
 
-    // F05-NEW-AF-08: no header update can land between the check and the key.
+    // No header update can land between the check and the key.
     #[test]
     fn header_chain_stays_locked_until_sign_returns() {
         let (ctx, pins) = pinned_context();

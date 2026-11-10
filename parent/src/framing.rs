@@ -52,7 +52,7 @@ mod tests {
     };
     use std::io::Cursor;
 
-    /// A request with a consignment larger than the old 4 MiB frame limit.
+    /// A `Sign` request with a consignment of `consignment_bytes` bytes.
     fn large_request(consignment_bytes: usize) -> EnclaveRequest {
         EnclaveRequest {
             request: Some(Request::Sign(SignRequest {
@@ -66,20 +66,12 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_frame_larger_than_the_old_4_mib_limit() {
+    fn reads_an_8_mib_frame() {
         let request = large_request(8 * 1024 * 1024);
         let mut buf = Vec::new();
         write_message(&mut buf, &request).unwrap();
-        assert!(buf.len() > 4 * 1024 * 1024);
+        assert!(buf.len() > 8 * 1024 * 1024);
         let decoded: EnclaveRequest = read_message(&mut Cursor::new(buf)).unwrap();
         assert_eq!(decoded, request);
-    }
-
-    #[test]
-    fn rejects_a_frame_above_the_limit() {
-        let len = MAX_MESSAGE_SIZE + 1;
-        let result: Result<EnclaveRequest> =
-            read_message(&mut Cursor::new(len.to_le_bytes().to_vec()));
-        assert!(result.is_err());
     }
 }

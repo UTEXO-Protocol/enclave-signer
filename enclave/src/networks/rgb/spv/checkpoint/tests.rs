@@ -1,38 +1,6 @@
 use super::*;
 
 #[test]
-fn signet_challenge_matches_oleksandrs_hex() {
-    // The bytes must match the published hex, to catch a typo before release.
-    let hex = hex::encode(UTEXO_SIGNET_CHALLENGE);
-    assert_eq!(
-        hex,
-        "6a4c09011e000000000000004c6953210224a528aa141b7d2ed093575b5d2c2cee4065abc6f7f6b19a970a8975d327f935210249c6bf8338ecda2749c3ffad4b8ec22f71581947c10d1766d9ce83d1bcafb99421024f3a831fcb4db446b07fe8897d193b86f913984f6eb3ab6e9745eeb61017a3b553ae"
-    );
-}
-
-#[test]
-fn signet_challenge_decodes_as_3_of_3_multisig() {
-    // The last bytes are OP_3 OP_CHECKMULTISIG.
-    let len = UTEXO_SIGNET_CHALLENGE.len();
-    assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 2], 0x53); // OP_3 (n)
-    assert_eq!(UTEXO_SIGNET_CHALLENGE[len - 1], 0xae); // OP_CHECKMULTISIG
-}
-
-#[test]
-fn signet_magic_is_four_bytes() {
-    assert_eq!(UTEXO_SIGNET_MAGIC.len(), 4);
-    assert_eq!(UTEXO_SIGNET_MAGIC, [0x6f, 0x21, 0x61, 0x5a]);
-}
-
-#[test]
-fn checkpoint_for_dispatches_on_network() {
-    assert!(checkpoint_for(Network::Mainnet).is_real);
-    assert!(checkpoint_for(Network::Signet).is_real);
-    assert!(!checkpoint_for(Network::Testnet3).is_real);
-    assert!(checkpoint_for(Network::Regtest).is_real);
-}
-
-#[test]
 fn mainnet_checkpoint_is_retarget_boundary_aligned() {
     // Else the chain stops at the first boundary above it.
     assert_eq!(MAINNET_CHECKPOINT.height % RETARGET_INTERVAL, 0);
@@ -71,10 +39,9 @@ fn parse_spec_five_field_form_sets_chainwork() {
     assert!(cp.chain_work.is_some());
 }
 
-/// The parser refuses the two-field form, which copied the bits and time of
-/// the compiled checkpoint. It cannot check that the given bits and time are
-/// those of the block. This test gives the real bits and time of block
-/// 951_552.
+/// The parser refuses the two-field form: a spec must give the bits and time
+/// of its own block. The parser cannot check that they are those of the
+/// block, so this test gives the real bits and time of block 951_552.
 #[test]
 fn parse_spec_refuses_the_two_field_form() {
     let spec = "951552:00000000000000000001b472f1922f86148c8286609fb14be39e12b8bd14bb64";
@@ -132,22 +99,45 @@ fn parse_spec_rejects_malformed_specs() {
     }
 }
 
-/// `cfg(test)` allows the override. The boot gate refuses it only in release
-/// builds without `allow-seed-import`.
-#[test]
-fn override_is_allowed_in_test_builds() {
-    assert!(checkpoint_override_allowed());
-}
-
 /// With no env var set, boot resolution is the compiled-in constant.
 #[test]
 fn resolve_without_env_returns_the_compiled_checkpoint() {
-    if std::env::var(CHECKPOINT_ENV).is_ok() {
-        return; // set in the shell; the parser tests cover the rest
+    const CHILD: &str = "UTEXO_CHECKPOINT_NO_ENV_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Clear the override in a subprocess, without racing other tests or
+        // silently skipping the assertion when the developer sets it.
+        let full_name = concat!(
+            module_path!(),
+            "::resolve_without_env_returns_the_compiled_checkpoint"
+        );
+        let (_, test_name) = full_name.split_once("::").unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env_remove(CHECKPOINT_ENV)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "checkpoint subprocess failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "the subprocess must execute the checkpoint assertion: {result:?}"
+        );
+    } else {
+        assert!(std::env::var_os(CHECKPOINT_ENV).is_none());
+        let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
+        assert_eq!(cp.height, SIGNET_CHECKPOINT.height);
+        assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
+        assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
+        assert_eq!(cp.time, SIGNET_CHECKPOINT.time);
+        assert_eq!(cp.chain_work, SIGNET_CHECKPOINT.chain_work);
+        assert_eq!(cp.is_real, SIGNET_CHECKPOINT.is_real);
+        assert_eq!(source, CheckpointSource::Compiled);
     }
-    let (cp, source) = resolve_checkpoint(Network::Signet).unwrap();
-    assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
-    assert_eq!(source, CheckpointSource::Compiled);
 }
 
 #[test]

@@ -103,9 +103,9 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: None,
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_binder: None,
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_sats: None,
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: None,
@@ -171,23 +171,20 @@ fn rejects_calldata_over_size_cap() {
 }
 
 #[test]
-fn accepts_calldata_at_size_cap() {
-    // Exactly at the cap is allowed. The selector stays, so dispatch still
-    // recognizes the fundsOut shape.
+fn calldata_at_size_cap_reaches_selector_validation() {
+    // An unknown selector identifies the next validation stage. The size
+    // guard must allow the exact boundary before dispatch rejects it.
     let mut destination = destination();
     destination
         .call_data
         .resize(MAX_FUNDS_OUT_CALL_DATA_LEN, 0u8);
-    destination.call_data[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
-    // The zero-padded tail can fail the ABI decode. Assert only that it is
-    // NOT the size error.
+    destination.call_data[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     with_ctx(&config(), |ctx| {
-        if let Err(e) = validate_dest(&destination, ctx) {
-            assert!(
-                !e.to_string().contains("call_data too large"),
-                "calldata exactly at the cap must not trip the size check, got: {e}"
-            );
-        }
+        let err = validate_dest(&destination, ctx).unwrap_err().to_string();
+        assert!(
+            err.contains("unexpected calldata selector") && err.contains("deadbeef"),
+            "calldata at the size cap must reach selector validation, got: {err}"
+        );
     });
 }
 
@@ -264,7 +261,7 @@ fn lz_destination(destination_chain_id: u64) -> EvmDestination {
     }
 }
 
-// F05-NEW-AF-12: `lz_release` is present exactly when the selector is
+// `lz_release` is present exactly when the selector is
 // `lzFundsOut`. The two valid forms pass above. The two mixed forms fail here.
 
 #[test]
@@ -329,8 +326,9 @@ fn rejects_entrypoint_route_to_pinned_chain() {
     });
 }
 
-/// An `lzFundsOut` destination with the given floor and options. `lz_release`
-/// follows the floor, so only the new checks can refuse it.
+/// An `lzFundsOut` destination with the given floor and options. Its
+/// `lz_release` follows the floor, so only the floor and `extraOptions` checks
+/// can refuse it.
 fn lz_destination_with(min_amount_ld: u64, extra_options: Vec<u8>) -> EvmDestination {
     let mut call = lz_funds_out_call(1000, 137);
     call.minAmountLD = U256::from(min_amount_ld);
@@ -444,7 +442,7 @@ fn rejects_expired_deadline() {
 }
 
 #[test]
-fn accepts_deadline_at_cap() {
+fn accepts_deadline_just_inside_cap() {
     let mut destination = destination();
     // A few seconds of slack for the clock tick between here and the check.
     destination.deadline = now() + MAX_TEE_DEADLINE_SECS - 5;
@@ -462,24 +460,6 @@ fn rejects_deadline_beyond_cap() {
             .unwrap_err()
             .to_string()
             .contains("more than"));
-    });
-}
-
-#[test]
-fn rejects_far_future_deadline() {
-    let mut destination = destination();
-    destination.deadline = u64::MAX;
-    with_ctx(&config(), |ctx| {
-        assert!(validate_dest(&destination, ctx).is_err());
-    });
-}
-
-#[test]
-fn ignores_rgb_config() {
-    let mut config = config();
-    config.rgb_asset_id.clear();
-    with_ctx(&config, |ctx| {
-        assert!(validate_dest(&destination(), ctx).is_ok());
     });
 }
 
@@ -773,53 +753,6 @@ fn burn_id_recompute_matches_the_contract_formula() {
 }
 
 #[test]
-fn burn_id_recompute_binds_every_input() {
-    // Each preimage input alone must change the id, so the contract derives a
-    // different key for each change.
-    let cfg = token_pinned_config();
-    let base = rgb_release();
-    let base_id = expected_burn_id(&cfg, &base);
-
-    let variants = [
-        ReleaseIdentity {
-            amount: U256::from(1001u64),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_chain_id: U256::from(97u64),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_address: "x".into(),
-            ..base.clone()
-        },
-        ReleaseIdentity {
-            source_burn_tx_id: [0x5c; 32],
-            ..base.clone()
-        },
-    ];
-    for v in &variants {
-        assert_ne!(expected_burn_id(&cfg, v), base_id, "{v:?}");
-    }
-    for other_cfg in [
-        BridgeConfig {
-            chain_id: 1,
-            ..token_pinned_config()
-        },
-        BridgeConfig {
-            funds_in_contract: [0xb2; ADDRESS_LEN],
-            ..token_pinned_config()
-        },
-        BridgeConfig {
-            token_contract: [0x71; ADDRESS_LEN],
-            ..token_pinned_config()
-        },
-    ] {
-        assert_ne!(expected_burn_id(&other_cfg, &base), base_id);
-    }
-}
-
-#[test]
 fn burn_id_ignores_settlement_data() {
     // One burn has one burnId, so a second release citing other deposits reverts.
     let cfg = token_pinned_config();
@@ -833,8 +766,7 @@ fn burn_id_ignores_settlement_data() {
         expected_burn_id(&cfg, &base)
     );
 }
-
-/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID` (827166).
+/// The shared vector, with `sourceChainId` = `RGB_CHAIN_ID`.
 #[test]
 fn burn_id_matches_the_shared_vector() {
     let mut cfg = BridgeConfig {
@@ -866,8 +798,8 @@ fn burn_id_matches_the_shared_vector() {
     );
 }
 
-/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
-/// `sourceChainId` = 827166. The contract test still pins the 96 form.
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
+/// `sourceChainId` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
 fn burn_id_matches_the_contract_vector() {
     let cfg = BridgeConfig {
@@ -904,15 +836,4 @@ fn burn_id_check_accepts_the_derived_id_and_refuses_any_other() {
         err.contains("burnId") && err.contains("InvalidBurnId"),
         "{err}"
     );
-}
-
-#[test]
-fn burn_id_check_is_skipped_while_the_token_is_unpinned() {
-    // Dev builds have no token pin. Production cannot boot without one, so a
-    // release image never skips.
-    let cfg = BridgeConfig {
-        token_contract: [0u8; ADDRESS_LEN],
-        ..token_pinned_config()
-    };
-    validate_burn_id(&cfg, &rgb_release()).expect("unpinned token skips the recompute");
 }

@@ -3,20 +3,22 @@ use std::time::Duration;
 use crate::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, EvmSignatureResponse,
     GetAttestedPublicKeyRequest, GetAttestedPublicKeyResponse, GetLastSavedBlockRequest,
-    GetLastSavedBlockResponse, GetPublicKeyRequest, HealthRequest, HealthResponse,
-    InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest, InitiateCloningResponse,
-    MerkleProofEntry, PublicKeysResponse, SetCloneRequest, SetEndpointsRequest, SignedPsbtResponse,
+    GetLastSavedBlockResponse, GetLimitsRequest, GetPublicKeyRequest, HealthRequest,
+    HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
+    InitiateCloningResponse, Limits, LimitsResponse, MerkleProofEntry, PublicKeysResponse,
+    SetCloneRequest, SetEndpointsRequest, SetLimitsRequest, SignedPsbtResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
+use crate::grpc_server::{is_timeout, ENCLAVE_WAIT_MARGIN_SECS, IMAGE_DEADLINE_SECS};
 
 /// TCP connect timeout. It matters only across a network or a bad vsock proxy.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Read and write timeout for one socket operation to the enclave. It stops a
-/// silent peer from hanging the CLI.
-/// Slow valid operations (key generation, consignment validation) must fit in it.
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Read and write timeout for one socket operation of `GetLimits`. The enclave
+/// answers it with no other work, so this timeout stops a silent peer from
+/// hanging the CLI.
+const LIMITS_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct SignEvmRequest {
@@ -94,14 +96,52 @@ impl EnclaveClient {
         }
     }
 
+    /// Send `req` and read the reply. Before any request other than
+    /// `GetLimits`, read the socket deadline in force: each socket read and
+    /// write of the request may then block for that deadline plus
+    /// [`ENCLAVE_WAIT_MARGIN_SECS`], so the enclave gives up first, as it does
+    /// for the parent. A consignment validation can take most of the deadline.
     pub fn send_request(&self, req: &EnclaveRequest) -> Result<EnclaveResponse> {
+        let wait = match req.request {
+            Some(enclave_request::Request::GetLimits(_)) => LIMITS_IO_TIMEOUT,
+            _ => self.enclave_wait(LIMITS_IO_TIMEOUT)?,
+        };
+        self.exchange(req, wait)
+    }
+
+    /// The socket deadline in force plus [`ENCLAVE_WAIT_MARGIN_SECS`]. The
+    /// deadline comes from `GetLimits`, whose socket reads and writes may each
+    /// block for `limits_wait`. A `GetLimits` that times out is the error: the
+    /// enclave does not answer. After any other failure, the wait starts from
+    /// [`IMAGE_DEADLINE_SECS`].
+    fn enclave_wait(&self, limits_wait: Duration) -> Result<Duration> {
+        let req = EnclaveRequest {
+            request: Some(enclave_request::Request::GetLimits(GetLimitsRequest {})),
+        };
+        let deadline = match self.exchange(&req, limits_wait).and_then(limits_reply) {
+            Ok(limits) => limits
+                .current
+                .map(|current| current.total_request_timeout_secs)
+                .filter(|&secs| secs != 0)
+                .unwrap_or(IMAGE_DEADLINE_SECS),
+            Err(ParentError::Io(e)) if is_timeout(&e) => return Err(e.into()),
+            Err(_) => IMAGE_DEADLINE_SECS,
+        };
+        Ok(Duration::from_secs(
+            deadline.saturating_add(ENCLAVE_WAIT_MARGIN_SECS),
+        ))
+    }
+
+    /// Connect, write `req` and read the reply. Each socket read and write may
+    /// block for `wait`.
+    fn exchange(&self, req: &EnclaveRequest, wait: Duration) -> Result<EnclaveResponse> {
         // A `vsock://<cid>[:<port>]` address targets one enclave. Without vsock
         // support in the build, it is an error.
         if let Some(spec) = self.addr.strip_prefix("vsock://") {
             #[cfg(all(feature = "vsock", target_os = "linux"))]
             {
                 let (cid, port) = parse_vsock_spec(spec)?;
-                return self.send_vsock(req, cid, port);
+                return self.send_vsock(req, cid, port, wait);
             }
             #[cfg(not(all(feature = "vsock", target_os = "linux")))]
             {
@@ -124,7 +164,7 @@ impl EnclaveClient {
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(5000);
             match cid {
-                Some(cid) => self.send_vsock(req, cid, port),
+                Some(cid) => self.send_vsock(req, cid, port, wait),
                 None => Err(ParentError::Connection(
                     "vsock build: select the enclave explicitly - pass \
                      `--addr vsock://<cid>:<port>` (e.g. vsock://16:5000) or set \
@@ -147,24 +187,33 @@ impl EnclaveClient {
             let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)
                 .map_err(|e| ParentError::Connection(e.to_string()))?;
             stream
-                .set_read_timeout(Some(IO_TIMEOUT))
+                .set_read_timeout(Some(wait))
                 .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
+            stream
+                .set_write_timeout(Some(wait))
+                .map_err(|e| ParentError::Connection(format!("set_write_timeout: {e}")))?;
             framing::write_message(&mut stream, req)?;
             framing::read_message(&mut stream)
         }
     }
 
     #[cfg(feature = "vsock")]
-    fn send_vsock(&self, req: &EnclaveRequest, cid: u32, port: u32) -> Result<EnclaveResponse> {
+    fn send_vsock(
+        &self,
+        req: &EnclaveRequest,
+        cid: u32,
+        port: u32,
+        wait: Duration,
+    ) -> Result<EnclaveResponse> {
         use vsock::VsockStream;
         let mut stream = VsockStream::connect_with_cid_port(cid, port).map_err(|e| {
             ParentError::Connection(format!("vsock connect cid={cid} port={port}: {e}"))
         })?;
         stream
-            .set_read_timeout(Some(IO_TIMEOUT))
+            .set_read_timeout(Some(wait))
             .map_err(|e| ParentError::Connection(format!("set_read_timeout: {e}")))?;
         stream
-            .set_write_timeout(Some(IO_TIMEOUT))
+            .set_write_timeout(Some(wait))
             .map_err(|e| ParentError::Connection(format!("set_write_timeout: {e}")))?;
         framing::write_message(&mut stream, req)?;
         framing::read_message(&mut stream)
@@ -467,6 +516,27 @@ impl EnclaveClient {
         }
     }
 
+    /// Read the time, memory and size limits of the enclave.
+    pub fn get_limits(&self) -> Result<LimitsResponse> {
+        self.limits_request(enclave_request::Request::GetLimits(GetLimitsRequest {}))
+    }
+
+    /// Change limits. A value of 0 keeps that limit. With `reset`, the limits
+    /// go back to the image values first.
+    pub fn set_limits(&self, values: Limits, reset: bool) -> Result<LimitsResponse> {
+        self.limits_request(enclave_request::Request::SetLimits(SetLimitsRequest {
+            values: Some(values),
+            reset,
+        }))
+    }
+
+    fn limits_request(&self, request: enclave_request::Request) -> Result<LimitsResponse> {
+        let req = EnclaveRequest {
+            request: Some(request),
+        };
+        limits_reply(self.send_request(&req)?)
+    }
+
     /// Set the chain endpoints once, at launch. The enclave rejects a second
     /// call.
     pub fn set_endpoints(&self, req: SetEndpointsRequest) -> Result<()> {
@@ -485,5 +555,162 @@ impl EnclaveClient {
                 other
             ))),
         }
+    }
+}
+
+/// The limits of a `GetLimits` or `SetLimits` reply.
+fn limits_reply(resp: EnclaveResponse) -> Result<LimitsResponse> {
+    match resp.response {
+        Some(enclave_response::Response::Limits(limits)) => Ok(limits),
+        Some(enclave_response::Response::Error(e)) => Err(ParentError::EnclaveError {
+            code: e.code,
+            message: e.message,
+        }),
+        other => Err(ParentError::Connection(format!(
+            "unexpected response variant: {:?}",
+            other
+        ))),
+    }
+}
+
+#[cfg(all(test, not(all(feature = "vsock", target_os = "linux"))))]
+mod tests {
+    use super::*;
+    use crate::enclave_proto::ErrorResponse;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    /// A fake enclave on TCP. It sends each request to the receiver, then
+    /// writes the reply of `answer`, or closes the connection when there is
+    /// none.
+    fn fake_enclave(
+        answer: impl Fn(&EnclaveRequest) -> Option<EnclaveResponse> + Send + 'static,
+    ) -> (EnclaveClient, mpsc::Receiver<EnclaveRequest>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = EnclaveClient::new(&listener.local_addr().unwrap().to_string());
+        let (requests, received) = mpsc::channel();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let request: EnclaveRequest = framing::read_message(&mut stream).unwrap();
+                let reply = answer(&request);
+                let _ = requests.send(request);
+                if let Some(reply) = reply {
+                    // The client may have given up already.
+                    let _ = framing::write_message(&mut stream, &reply);
+                }
+            }
+        });
+        (client, received)
+    }
+
+    fn limits_with_deadline(deadline: u64) -> EnclaveResponse {
+        EnclaveResponse {
+            response: Some(enclave_response::Response::Limits(LimitsResponse {
+                current: Some(Limits {
+                    total_request_timeout_secs: deadline,
+                    ..Default::default()
+                }),
+                image: None,
+            })),
+        }
+    }
+
+    fn health() -> EnclaveResponse {
+        EnclaveResponse {
+            response: Some(enclave_response::Response::Health(HealthResponse::default())),
+        }
+    }
+
+    fn is_get_limits(request: &EnclaveRequest) -> bool {
+        matches!(
+            request.request,
+            Some(enclave_request::Request::GetLimits(_))
+        )
+    }
+
+    fn assert_timeout(result: Result<impl std::fmt::Debug>) {
+        match result {
+            Err(ParentError::Io(e)) if is_timeout(&e) => {}
+            other => panic!("expected a socket timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_wait_is_the_deadline_in_force_and_the_margin() {
+        let (client, _) = fake_enclave(|_| Some(limits_with_deadline(3_600)));
+        assert_eq!(
+            client.enclave_wait(LIMITS_IO_TIMEOUT).unwrap(),
+            Duration::from_secs(3_600 + ENCLAVE_WAIT_MARGIN_SECS)
+        );
+    }
+
+    #[test]
+    fn each_request_but_get_limits_reads_the_deadline_first() {
+        let (client, received) = fake_enclave(|request| {
+            Some(if is_get_limits(request) {
+                limits_with_deadline(40)
+            } else {
+                health()
+            })
+        });
+        client.health().unwrap();
+        assert!(is_get_limits(&received.recv().unwrap()));
+        assert!(matches!(
+            received.recv().unwrap().request,
+            Some(enclave_request::Request::Health(_))
+        ));
+
+        client.get_limits().unwrap();
+        assert!(is_get_limits(&received.recv().unwrap()));
+        assert!(received.try_recv().is_err(), "a second request was sent");
+    }
+
+    #[test]
+    fn an_enclave_that_does_not_give_its_deadline_gets_the_image_deadline() {
+        let image = Duration::from_secs(IMAGE_DEADLINE_SECS + ENCLAVE_WAIT_MARGIN_SECS);
+        let refused = EnclaveResponse {
+            response: Some(enclave_response::Response::Error(ErrorResponse {
+                code: 1,
+                message: "refused".into(),
+            })),
+        };
+        let no_current = EnclaveResponse {
+            response: Some(enclave_response::Response::Limits(LimitsResponse::default())),
+        };
+        for answer in [
+            None,
+            Some(refused),
+            Some(limits_with_deadline(0)),
+            Some(no_current),
+        ] {
+            let (client, _) = fake_enclave(move |_| answer.clone());
+            assert_eq!(client.enclave_wait(LIMITS_IO_TIMEOUT).unwrap(), image);
+        }
+    }
+
+    #[test]
+    fn a_silent_enclave_ends_the_request_at_get_limits() {
+        // The fake keeps each connection open for a second and writes nothing.
+        let (client, received) = fake_enclave(|_| {
+            thread::sleep(Duration::from_secs(1));
+            None
+        });
+        assert_timeout(client.enclave_wait(Duration::from_millis(100)));
+        assert!(is_get_limits(&received.recv().unwrap()));
+    }
+
+    #[test]
+    fn the_wait_bounds_each_socket_read() {
+        let (client, _) = fake_enclave(|_| {
+            thread::sleep(Duration::from_millis(500));
+            Some(health())
+        });
+        let request = EnclaveRequest {
+            request: Some(enclave_request::Request::Health(HealthRequest {})),
+        };
+        assert_timeout(client.exchange(&request, Duration::from_millis(100)));
+        client.exchange(&request, Duration::from_secs(30)).unwrap();
     }
 }

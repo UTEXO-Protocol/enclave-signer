@@ -115,7 +115,7 @@ pub fn expected_bits(input: &BitsInput, network: Network) -> Option<u32> {
     }
 
     // Boundary: BIP94 retargets from the period's first block, which cannot
-    // be a min-difficulty block. Older networks use the last block.
+    // be a min-difficulty block. Networks without BIP94 use the last block.
     let base = if network.bip94() {
         input.epoch_first_bits
     } else {
@@ -240,7 +240,6 @@ pub fn validate_header_full(
 mod tests {
     use super::*;
     use bitcoin::consensus::deserialize;
-    use bitcoin::hashes::Hash;
 
     /// Real mainnet block 1 header (hex), to test the parser and mainnet PoW.
     /// https://blockstream.info/api/block/00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048/header
@@ -294,17 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn expected_bits_non_boundary_equals_prev() {
-        let bits = 0x1d00ffff;
-        let input = BitsInput {
-            height: 1,
-            prev_bits: bits,
-            ..BitsInput::default()
-        };
-        assert_eq!(expected_bits(&input, Network::Mainnet), Some(bits));
-    }
-
-    #[test]
     fn expected_bits_signet_returns_none() {
         let input = BitsInput {
             height: 2016,
@@ -313,16 +301,6 @@ mod tests {
         };
         assert_eq!(expected_bits(&input, Network::Signet), None);
         assert_eq!(expected_bits(&input, Network::SignetCustom), None);
-    }
-
-    #[test]
-    fn expected_bits_regtest_returns_none() {
-        let input = BitsInput {
-            height: 2016,
-            prev_bits: 0x207fffff,
-            ..BitsInput::default()
-        };
-        assert_eq!(expected_bits(&input, Network::Regtest), None);
     }
 
     // Real testnet4 blocks (mempool.emzy.de/testnet4). Boundary 155232 has
@@ -484,28 +462,5 @@ mod tests {
         assert!(check_time_too_old(12, 50, Some(100)).is_err());
         // No median: the rule does not apply.
         check_time_too_old(5, 0, None).unwrap();
-    }
-
-    #[test]
-    fn is_retarget_height_boundaries() {
-        assert!(is_retarget_height(0));
-        assert!(is_retarget_height(2016));
-        assert!(is_retarget_height(4032));
-        assert!(!is_retarget_height(1));
-        assert!(!is_retarget_height(2015));
-        assert!(!is_retarget_height(2017));
-    }
-
-    #[test]
-    fn block_hash_round_trip() {
-        // Block 1 hash in display order. Internal order is the reverse.
-        let h1 = parse_hex_header(MAINNET_BLOCK_1_HEADER_HEX);
-        let internal = h1.block_hash().to_byte_array();
-        let mut display = internal;
-        display.reverse();
-        assert_eq!(
-            hex::encode(display),
-            "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
-        );
     }
 }

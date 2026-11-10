@@ -1,8 +1,8 @@
 //! The indexer client of `RgbValidator`.
 //!
-//! It serves [`RgbValidator::fetch_transaction`] and, on the mint path, the
-//! on-chain status of the consignment witnesses ([`IndexerWitnesses`]) and of
-//! an off-tx seal. The burn path reads witness status from SPV proofs instead.
+//! It serves the on-chain status of the consignment witnesses
+//! ([`IndexerWitnesses`]) to a burn signer built without `spv`. An `spv` build
+//! reads witness status from SPV proofs instead, and needs no indexer to sign.
 //! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora
 //! (`https://`, `http://`), through the host vsock forwarder. Each call
 //! crosses the trust boundary and has a timeout. Electrum calls are
@@ -28,28 +28,18 @@ use rgbstd::validation::{ResolveWitness, WitnessStatus};
 use rgbstd::vm::{WitnessOrd, WitnessPos};
 use rgbstd::ChainNet;
 
-/// Per-socket timeout (seconds) for the Electrum client.
-/// `Config::default()` has `timeout: None`, so a stalled read blocks the
-/// worker thread indefinitely. This limit applies to each socket operation.
-/// The ingress deadline does not cancel indexer work. The timeout is compiled
-/// into the image.
-const ELECTRUM_TIMEOUT_SECS: u64 = 15;
-
-/// Timeout (seconds) for one Esplora HTTP call, connect and read.
-const ESPLORA_HTTP_TIMEOUT_SECS: u64 = 30;
-
 /// Validates RGB consignments using rgbstd, and fetches transactions.
 ///
-/// Production uses Electrum at `ssl://...:50002` through the vsock forwarder.
+/// Production uses Electrum at an `ssl://` URL through the vsock forwarder.
 /// TLS ends inside the enclave against the real server cert, so the host
 /// relays only ciphertext. Dev signet uses Esplora at an `https://` URL.
 #[derive(Debug)]
 pub struct RgbValidator {
     pub(super) indexer_url: String,
     pub(super) chain_net: ChainNet,
-    /// [`ELECTRUM_TIMEOUT_SECS`] or [`ESPLORA_HTTP_TIMEOUT_SECS`].
-    /// Only tests can change it (no env or host input).
-    pub(super) timeout_secs: u64,
+    /// The indexer read timeout of a test. Other callers read the limit
+    /// ([`crate::limits`]).
+    pub(super) timeout_secs: Option<u64>,
     /// Canned validation result, so tests run the signing path with no
     /// indexer.
     #[cfg(test)]
@@ -64,16 +54,15 @@ impl RgbValidator {
     /// - `bitcoin_network`: a `BITCOIN_NETWORK` value (see
     ///   [`Network::from_env_str`]).
     pub fn new(indexer_url: String, bitcoin_network: &str) -> Result<Self> {
-        let timeout_secs = if is_electrum_url(&indexer_url) {
-            ELECTRUM_TIMEOUT_SECS
-        } else if indexer_url.starts_with("https://") || indexer_url.starts_with("http://") {
-            ESPLORA_HTTP_TIMEOUT_SECS
-        } else {
+        if !is_electrum_url(&indexer_url)
+            && !indexer_url.starts_with("https://")
+            && !indexer_url.starts_with("http://")
+        {
             return Err(EnclaveError::Internal(format!(
                 "indexer URL {indexer_url:?} is not ssl:// or tcp:// (Electrum), \
                  https:// or http:// (Esplora)"
             )));
-        };
+        }
         let chain_net = Network::from_env_str(bitcoin_network)
             .map_err(|e| {
                 EnclaveError::Internal(format!("unknown bitcoin network {bitcoin_network}: {e}"))
@@ -83,7 +72,7 @@ impl RgbValidator {
         Ok(Self {
             indexer_url,
             chain_net,
-            timeout_secs,
+            timeout_secs: None,
             #[cfg(test)]
             canned: None,
         })
@@ -101,13 +90,18 @@ impl RgbValidator {
     /// Sets a short timeout for the stalled-host test.
     #[cfg(test)]
     pub(super) fn with_timeout(mut self, secs: u64) -> Self {
-        self.timeout_secs = secs;
+        self.timeout_secs = Some(secs);
         self
+    }
+
+    /// The timeout of an indexer read: `limit`, or the value of a test.
+    fn timeout_of(&self, limit: u64) -> u64 {
+        self.timeout_secs.unwrap_or(limit)
     }
 }
 
 impl RgbValidator {
-    /// The mint path's witness source, at `min_confirmations` depth. It
+    /// The witness source of a no-SPV burn, at `min_confirmations` depth. It
     /// connects on the first witness it is asked about.
     pub fn indexer_witnesses(&self, min_confirmations: u32) -> IndexerWitnesses<'_> {
         IndexerWitnesses {
@@ -119,13 +113,15 @@ impl RgbValidator {
 
     fn esplora_client(&self) -> esplora_client::BlockingClient {
         esplora_client::Builder::new(&self.indexer_url)
-            .timeout(self.timeout_secs)
+            .timeout(self.timeout_of(crate::limits::get().esplora_timeout_secs))
             .build_blocking()
     }
 
     fn electrum_client(&self) -> std::result::Result<electrum_client::Client, String> {
         let cfg = electrum_client::Config::builder()
-            .timeout(Some(Duration::from_secs(self.timeout_secs)))
+            .timeout(Some(Duration::from_secs(
+                self.timeout_of(crate::limits::get().electrum_timeout_secs),
+            )))
             .build();
         electrum_client::Client::from_config(&self.indexer_url, cfg).map_err(|e| e.to_string())
     }
@@ -140,7 +136,7 @@ impl RgbValidator {
     }
 }
 
-/// The mint path's witness status, from the pinned indexer. TLS ends in the
+/// The witness status of a no-SPV burn, from the pinned indexer. TLS ends in the
 /// enclave on a release image, so the host can only make a lookup fail.
 pub struct IndexerWitnesses<'a> {
     validator: &'a RgbValidator,

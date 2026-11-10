@@ -1,13 +1,15 @@
 #![deny(unsafe_code)]
 
-// Release guards for two dev-only features:
+// Release guards for three dev-only features:
 //
 //   * `allow-seed-import` - the parent can install a chosen seed, which
 //     defeats in-enclave key custody.
 //   * `mock-attestation`  - zero-PCR attestation documents pass, so a forged
 //     enclave passes verification.
+//   * `allow-debug-pcrs`  - the verifier stops refusing all-zero PCRs. A
+//     debug-mode enclave reports those, and they identify no image.
 //
-// A release build (`debug_assertions` off) with either one fails to compile.
+// A release build (`debug_assertions` off) with any of them fails to compile.
 // `not(test)` exempts the unit-test compilation only. Integration tests also
 // compile the library without `cfg(test)`. Dev images build in debug mode.
 macro_rules! dev_feature_release_guard {
@@ -26,6 +28,12 @@ dev_feature_release_guard!(
     "mock-attestation",
     "`mock-attestation` must not be enabled in a release build (debug_assertions off): \
      it accepts zero-PCR attestation documents."
+);
+dev_feature_release_guard!(
+    "allow-debug-pcrs",
+    "`allow-debug-pcrs` must not be enabled in a release build (debug_assertions off): \
+     it removes the all-zero PCR rejection from the attestation verifier. Build dev images \
+     in debug mode."
 );
 
 // Builds without SPV require real attestation and an explicit signer role.
@@ -62,7 +70,7 @@ compile_error!(
 compile_error!(
     "an RGB build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
-     vsock,rgb,mint-signer`"
+     vsock,spv,mint-signer`"
 );
 
 // The attested role reads the features. The gates read the `build.rs` cfgs.
@@ -102,6 +110,7 @@ pub mod keys;
 #[cfg(feature = "kms-persistence")]
 pub mod kms;
 // The request memory model and its boot check.
+pub mod limits;
 pub mod memory;
 pub mod networks;
 pub mod policy;

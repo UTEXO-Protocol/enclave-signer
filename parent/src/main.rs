@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
     let health_addr = format!("{}:{}", cfg.health_host, cfg.health_port).parse()?;
 
-    // Limit active requests across all connections (F03-AF-13), requests per
+    // Limit active requests across all connections, requests per
     // connection, and handler duration. The enclave still authenticates clones.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
     let connection_age = Duration::from_secs(300);
@@ -94,6 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.signed_response_max_bytes,
         ),
     );
+
+    tokio::spawn(service.clone().follow_enclave_deadline());
 
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop

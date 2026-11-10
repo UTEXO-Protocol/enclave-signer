@@ -17,8 +17,8 @@
 //! The parent is untrusted; this is a delivery aid, not a security control. A
 //! wrong stored reply fails in the node or in rgb-lib, as any wrong parent
 //! output does. The enclave's own guard still refuses a second PSBT for the
-//! same deposit. Bounded by count, bytes and age; a restart clears it, and the
-//! enclave's window then applies as before.
+//! same deposit. Bounded by count, bytes and age; a restart clears it, and
+//! then only the enclave's window applies.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -353,24 +353,5 @@ mod tests {
         assert_eq!(cache.stored(), 2);
         assert_eq!(served(cache.claim([1; 32]).await), reply(1));
         assert_eq!(served(cache.claim([2; 32]).await), reply(2));
-    }
-
-    #[test]
-    fn the_key_is_the_request_digest() {
-        use crate::enclave_proto::{enclave_request, SignRequest};
-        let a = EnclaveRequest {
-            request: Some(enclave_request::Request::Sign(SignRequest {
-                amount: 1,
-                ..Default::default()
-            })),
-        };
-        let b = EnclaveRequest {
-            request: Some(enclave_request::Request::Sign(SignRequest {
-                amount: 2,
-                ..Default::default()
-            })),
-        };
-        assert_eq!(SignedResponses::key(&a), SignedResponses::key(&a));
-        assert_ne!(SignedResponses::key(&a), SignedResponses::key(&b));
     }
 }

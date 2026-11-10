@@ -5,11 +5,8 @@ use bitcoin::bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv,
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
-use hmac::{Hmac, KeyInit, Mac};
 use k256::ecdsa::SigningKey as K256SigningKey;
 use secrecy::{ExposeSecret, SecretBox};
-use sha2::Sha512;
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroize;
 
@@ -25,12 +22,9 @@ const RGB_COIN_TYPE_TESTNET: u32 = 827167;
 const COLORED_KEYCHAIN: u32 = 0;
 
 /// Keychains the vanilla (BTC) descriptor may use. rgb-lib defaults to
-/// keychain 0 (`KEYCHAIN_BTC`) and lets a wallet pass any u8; our bridges
-/// use 0, and the swap path uses 1. We accept only 0 or 1.
+/// keychain 0 (`KEYCHAIN_BTC`) and lets a wallet pass any u8, so a bridge
+/// may set 1. We accept only 0 or 1.
 const VANILLA_KEYCHAINS: [u32; 2] = [0, 1];
-
-/// SLIP-44 coin type for Concordium.
-const CONCORDIUM_COIN_TYPE: u32 = 919;
 
 /// True only for a child path `[k, i]`, both steps non-hardened, and `k` a
 /// keychain rgb-lib scans on `account`. The index is not capped: rgb-lib only
@@ -46,50 +40,15 @@ pub fn is_wallet_child_path(account: AccountType, child_path: &[ChildNumber]) ->
     }
 }
 
-type HmacSha512 = Hmac<Sha512>;
-
-/// SLIP-0010 Ed25519 key derivation. Returns the 32-byte private key at `path`.
-/// Every index is hardened: SLIP-0010 Ed25519 supports only hardened derivation.
-fn derive_ed25519_slip10(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
-    // Master key: I = HMAC-SHA512(key="ed25519 seed", data=seed).
-    let mut mac = HmacSha512::new_from_slice(b"ed25519 seed").expect("HMAC accepts any key length");
-    mac.update(seed);
-    let mut i = mac.finalize().into_bytes();
-
-    let mut key = [0u8; 32];
-    let mut chain = [0u8; 32];
-    key.copy_from_slice(&i[0..32]);
-    chain.copy_from_slice(&i[32..64]);
-
-    // Child: I = HMAC-SHA512(key=chain, data=0x00 || key || ser32(index | hardened)).
-    for &index in path {
-        let hardened = index | 0x8000_0000;
-        let mut mac = HmacSha512::new_from_slice(&chain).expect("HMAC accepts any key length");
-        mac.update(&[0u8]);
-        mac.update(&key);
-        mac.update(&hardened.to_be_bytes());
-        i = mac.finalize().into_bytes();
-        key.copy_from_slice(&i[0..32]);
-        chain.copy_from_slice(&i[32..64]);
-    }
-
-    i.fill(0);
-    chain.zeroize();
-    key
-}
-
 /// Public keys of a [`KeyManager`], for responses.
 pub struct KeyInfo {
     pub evm_address: [u8; 20],
     pub evm_uncompressed_pub: [u8; 64],
     pub evm_gas_tx_address: [u8; 20],
     pub evm_gas_tx_uncompressed_pub: [u8; 64],
-    pub btc_compressed_pubkey: [u8; 33],
-    pub btc_xpub: String,
     pub master_fingerprint: [u8; 4],
     pub account_xpub_vanilla: String,
     pub account_xpub_colored: String,
-    pub ccd_ed25519_pub: [u8; 32],
 }
 
 /// Which BIP-86 account to derive from.
@@ -108,8 +67,6 @@ pub struct KeyManager {
     evm_uncompressed_pub: [u8; 64],
     evm_gas_tx_address: [u8; 20],
     evm_gas_tx_uncompressed_pub: [u8; 64],
-    btc_compressed_pubkey: [u8; 33],
-    btc_xpub: Xpub,
     // BIP-86 taproot account keys.
     master_fingerprint: Fingerprint,
     account_xpriv_vanilla: Xpriv,
@@ -118,11 +75,9 @@ pub struct KeyManager {
     account_xpub_colored: Xpub,
     // Vanilla coin type: 0 mainnet, 1 other networks.
     vanilla_coin_type: u32,
-    // Colored coin type: 827166 mainnet, 827167 other networks.
+    // Colored coin type: `RGB_COIN_TYPE_MAINNET` on mainnet,
+    // `RGB_COIN_TYPE_TESTNET` on other networks.
     colored_coin_type: u32,
-    // Concordium Ed25519 governance key (SLIP-0010, m/44'/919'/0'/0'/0').
-    concordium_secret: SecretBox<[u8; 32]>,
-    concordium_pub: [u8; 32],
 }
 
 impl KeyManager {
@@ -202,19 +157,6 @@ impl KeyManager {
         let mut evm_gas_tx_address = [0u8; 20];
         evm_gas_tx_address.copy_from_slice(&gas_tx_hash[12..32]);
 
-        // === Retired BTC key: BIP-84 path m/84'/0'/0'/0/0, all networks ===
-        // Only its public key is published. It signs nothing.
-        let btc_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
-            .map_err(|e| EnclaveError::InvalidKey(format!("invalid BTC path: {}", e)))?;
-        let btc_xpriv = master
-            .derive_priv(&secp, &btc_path)
-            .map_err(|e| EnclaveError::InvalidKey(format!("BTC derivation failed: {}", e)))?;
-        let btc_pubkey = PublicKey::from_secret_key(&secp, &btc_xpriv.private_key);
-        let mut btc_compressed_pubkey = [0u8; 33];
-        btc_compressed_pubkey.copy_from_slice(&btc_pubkey.serialize());
-
-        let btc_xpub = Xpub::from_priv(&secp, &btc_xpriv);
-
         // === BIP-86 Taproot accounts ===
         let vanilla_coin_type = match network {
             Network::Bitcoin => 0,
@@ -247,17 +189,6 @@ impl KeyManager {
         })?;
         let account_xpub_colored = Xpub::from_priv(&secp, &account_xpriv_colored);
 
-        // === Concordium: Ed25519 via SLIP-0010, m/44'/919'/0'/0'/0' (all hardened) ===
-        let mut concordium_secret_bytes = derive_ed25519_slip10(
-            seed_box.expose_secret(),
-            &[44, CONCORDIUM_COIN_TYPE, 0, 0, 0],
-        );
-        let concordium_signing = Ed25519SigningKey::from_bytes(&concordium_secret_bytes);
-        let concordium_pub = concordium_signing.verifying_key().to_bytes();
-        let concordium_secret = SecretBox::new(Box::new(concordium_secret_bytes));
-        concordium_secret_bytes.zeroize();
-        drop(concordium_signing);
-
         Ok(Self {
             seed: seed_box,
             evm_secret,
@@ -266,8 +197,6 @@ impl KeyManager {
             evm_uncompressed_pub,
             evm_gas_tx_address,
             evm_gas_tx_uncompressed_pub,
-            btc_compressed_pubkey,
-            btc_xpub,
             master_fingerprint,
             account_xpriv_vanilla,
             account_xpub_vanilla,
@@ -275,8 +204,6 @@ impl KeyManager {
             account_xpub_colored,
             vanilla_coin_type,
             colored_coin_type,
-            concordium_secret,
-            concordium_pub,
         })
     }
 
@@ -286,14 +213,6 @@ impl KeyManager {
 
     pub fn evm_uncompressed_pub(&self) -> &[u8; 64] {
         &self.evm_uncompressed_pub
-    }
-
-    pub fn btc_compressed_pubkey(&self) -> &[u8; 33] {
-        &self.btc_compressed_pubkey
-    }
-
-    pub fn btc_xpub(&self) -> &Xpub {
-        &self.btc_xpub
     }
 
     pub fn master_fingerprint(&self) -> &Fingerprint {
@@ -314,10 +233,6 @@ impl KeyManager {
 
     pub fn evm_gas_tx_uncompressed_pub(&self) -> &[u8; 64] {
         &self.evm_gas_tx_uncompressed_pub
-    }
-
-    pub fn ccd_ed25519_pub(&self) -> &[u8; 32] {
-        &self.concordium_pub
     }
 
     pub fn expose_seed(&self) -> &[u8; 64] {
@@ -400,13 +315,6 @@ impl KeyManager {
         result[..64].copy_from_slice(&signature.to_bytes());
         result[64] = recovery_id.to_byte();
         Ok(result)
-    }
-
-    /// Sign a 32-byte Concordium transaction hash with the governance Ed25519
-    /// key, with no more hashing. Returns the signature and the public key.
-    pub fn sign_ccd(&self, hash: &[u8; 32]) -> Result<([u8; 64], [u8; 32])> {
-        let signing_key = Ed25519SigningKey::from_bytes(self.concordium_secret.expose_secret());
-        Ok((signing_key.sign(hash).to_bytes(), self.concordium_pub))
     }
 
     /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.

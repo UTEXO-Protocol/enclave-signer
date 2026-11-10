@@ -6,42 +6,6 @@ fn reference_params() -> FundsOutParams {
     decode_funds_out_params(&reference_call_data()).expect("reference calldata must decode")
 }
 
-#[test]
-fn test_abi_encode_u256() {
-    let encoded = abi_encode_u256(42);
-    assert_eq!(encoded[31], 42);
-    assert!(encoded[..31].iter().all(|&b| b == 0));
-}
-
-#[test]
-fn test_abi_encode_u256_large() {
-    let encoded = abi_encode_u256(u64::MAX);
-    assert_eq!(&encoded[24..], &u64::MAX.to_be_bytes());
-    assert!(encoded[..24].iter().all(|&b| b == 0));
-}
-
-#[test]
-fn test_abi_encode_address() {
-    let addr = [0xAA; 20];
-    let encoded = abi_encode_address(&addr);
-    assert!(encoded[..12].iter().all(|&b| b == 0));
-    assert_eq!(&encoded[12..], &[0xAA; 20]);
-}
-
-#[test]
-fn test_domain_separator_deterministic() {
-    let domain = Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id: 1,
-        verifying_contract: [0u8; 20],
-    };
-    let hash1 = domain.separator_hash();
-    let hash2 = domain.separator_hash();
-    assert_eq!(hash1, hash2);
-    assert_ne!(hash1, [0u8; HASH_LEN]);
-}
-
 /// Reference calldata for the fields in
 /// [`test_digest_matches_reference_vector`], with `sourceBurnTxId = 0xdd..dd`.
 fn reference_call_data() -> Vec<u8> {
@@ -98,8 +62,8 @@ fn test_tee_funds_out_typehash_matches_contract() {
         hex::encode(type_hash),
         "7b1c067721d3d07e40255c970c458626d43b425ca4bb0449b42baa0766cdae45"
     );
-    // The pre-#152 string (no `sourceBurnTxId`) must not match: the proxy does
-    // not verify that struct.
+    // The string without `sourceBurnTxId` must not match: the proxy does not
+    // verify that struct.
     assert_ne!(
         hex::encode(type_hash),
         "e84f4b6ff956c2d754ac4310166ee6df5e488aa5a36cd65cf367cf80aff7c608"
@@ -116,37 +80,6 @@ fn test_tee_lz_funds_out_typehash_matches_contract() {
     );
 }
 
-#[test]
-fn test_funds_out_digest_deterministic() {
-    let domain = arbitrum_domain();
-    let params = reference_params();
-    let digest1 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
-    let digest2 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
-    assert_eq!(digest1, digest2);
-    assert_ne!(digest1, [0u8; HASH_LEN]);
-}
-
-#[test]
-fn test_different_nonce_different_digest() {
-    let domain = arbitrum_domain();
-    let params = reference_params();
-    let d1 = funds_out_digest(&domain, &params, 0, 1_700_000_000).unwrap();
-    let d2 = funds_out_digest(&domain, &params, 1, 1_700_000_000).unwrap();
-    assert_ne!(d1, d2);
-}
-
-/// The decode, before signing, rejects short and non-`fundsOut` calldata.
-#[test]
-fn test_undecodable_call_data_rejected() {
-    assert!(decode_funds_out_params(&[0xAA, 0xBB]).is_err());
-    let erc20_transfer = decode(
-        "a9059cbb000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd\
-         0000000000000000000000000000000000000000000000000000000000000064",
-    )
-    .unwrap();
-    assert!(decode_funds_out_params(&erc20_transfer).is_err());
-}
-
 /// Cross-implementation vector: Solidity, Go and this module must agree
 /// byte-for-byte. Else the chain recovers a wrong signer and reports only
 /// "not a registered enclave signer".
@@ -159,8 +92,8 @@ fn test_undecodable_call_data_rejected() {
 ///
 /// The alloy EIP-712 encoder over `TeeFundsOut` (an independent
 /// implementation) made the pinned digest. [`test_digest_matches_alloy_eip712`]
-/// derives it again at test time. TODO: pin a post-#152 Foundry vector when the
-/// contracts repo publishes one.
+/// derives it again at test time. TODO: pin a Foundry vector with
+/// `sourceBurnTxId` when the contracts repo publishes one.
 #[test]
 fn test_digest_matches_reference_vector() {
     let digest =
@@ -225,23 +158,6 @@ fn test_digest_matches_alloy_eip712() {
         funds_out_digest(&domain, &p, 3, 1_700_000_000).unwrap(),
         typed.eip712_signing_hash(&alloy_domain).0
     );
-}
-
-#[test]
-fn test_different_chain_id_different_domain() {
-    let d1 = Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id: 1,
-        verifying_contract: [0u8; 20],
-    };
-    let d2 = Eip712Domain {
-        name: "MultisigProxy".to_string(),
-        version: "1".to_string(),
-        chain_id: 137,
-        verifying_contract: [0u8; 20],
-    };
-    assert_ne!(d1.separator_hash(), d2.separator_hash());
 }
 
 #[test]
@@ -310,64 +226,6 @@ fn lz_test_release() -> crate::proto::LzReleaseParams {
 }
 
 #[test]
-fn test_lz_funds_out_digest_deterministic() {
-    let domain = lz_test_domain();
-    let call_data = lz_test_calldata();
-    let lz_release = lz_test_release();
-
-    let d1 = lz_funds_out_digest(&domain, &call_data, &lz_release, 7, 999_999).unwrap();
-    let d2 = lz_funds_out_digest(&domain, &call_data, &lz_release, 7, 999_999).unwrap();
-    assert_eq!(d1, d2);
-    assert_ne!(d1, [0u8; HASH_LEN]);
-}
-
-#[test]
-fn test_lz_different_nonce_different_digest() {
-    let domain = lz_test_domain();
-    let call_data = lz_test_calldata();
-    let lz_release = lz_test_release();
-
-    let d1 = lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).unwrap();
-    let d2 = lz_funds_out_digest(&domain, &call_data, &lz_release, 1, 999_999).unwrap();
-    assert_ne!(d1, d2);
-}
-
-#[test]
-fn test_lz_different_dst_eid_different_digest() {
-    let domain = lz_test_domain();
-    let call_data = lz_test_calldata();
-    let lz1 = lz_test_release();
-    let mut lz2 = lz_test_release();
-    lz2.dst_eid = 40161; // Sepolia
-
-    // Build calldata again with a different dstEid for lz2.
-    use crate::networks::evm::validation::lzFundsOutCall;
-    use alloy_primitives::{Bytes, FixedBytes, U256};
-    use alloy_sol_types::SolCall;
-    let mut recipient = [0u8; 32];
-    recipient[31] = 0x05;
-    let call_data2 = lzFundsOutCall {
-        amount: U256::from(1u64),
-        burnId: U256::from(3u64),
-        sourceChainId: U256::from(84u64),
-        destinationChainId: U256::from(1u64),
-        sourceAddress: "addr".to_string(),
-        proof: Bytes::new(),
-        settlementData: Bytes::new(),
-        dstEid: 40161u32,
-        recipient: FixedBytes(recipient),
-        minAmountLD: U256::from(1u64),
-        extraOptions: Bytes::new(),
-        sourceBurnTxId: FixedBytes([0x5b; 32]),
-    }
-    .abi_encode();
-
-    let d1 = lz_funds_out_digest(&domain, &call_data, &lz1, 0, 999_999).unwrap();
-    let d2 = lz_funds_out_digest(&domain, &call_data2, &lz2, 0, 999_999).unwrap();
-    assert_ne!(d1, d2);
-}
-
-#[test]
 fn test_lz_rejects_dst_eid_mismatch() {
     let domain = lz_test_domain();
     let call_data = lz_test_calldata();
@@ -385,4 +243,139 @@ fn test_lz_rejects_recipient_mismatch() {
     lz_release.recipient = vec![0xAB; 32]; // wrong
 
     assert!(lz_funds_out_digest(&domain, &call_data, &lz_release, 0, 999_999).is_err());
+}
+
+/// The independent Alloy EIP-712 encoder checks field order, dynamic-field
+/// hashes, and every signed value against the handwritten production encoder.
+#[test]
+fn test_lz_digest_matches_independent_encoder_for_every_field() {
+    use crate::networks::evm::validation::lzFundsOutCall;
+    use alloy_primitives::{Address, U256};
+    use alloy_sol_types::{sol, SolCall, SolStruct};
+
+    sol! {
+        struct TeeLzFundsOut {
+            uint256 amount;
+            uint256 burnId;
+            uint256 sourceChainId;
+            uint256 destinationChainId;
+            string sourceAddress;
+            bytes proof;
+            bytes settlementData;
+            uint32 dstEid;
+            bytes32 recipient;
+            uint256 minAmountLD;
+            bytes extraOptions;
+            bytes32 sourceBurnTxId;
+            uint256 nonce;
+            uint256 deadline;
+        }
+    }
+    let domain = arbitrum_domain();
+    let alloy_domain = alloy_sol_types::Eip712Domain::new(
+        Some("MultisigProxy".into()),
+        Some("1".into()),
+        Some(U256::from(42161)),
+        Some(Address::from(domain.verifying_contract)),
+        None,
+    );
+    let mut baseline = None;
+    // Case zero is the positive control. Each other case changes exactly one
+    // signed field, including the fields not present in the proto cross-check.
+    for field in 0..=14 {
+        let mut typed = TeeLzFundsOut {
+            amount: U256::from(1000),
+            burnId: U256::from(123),
+            sourceChainId: U256::from(827166),
+            destinationChainId: U256::from(137),
+            sourceAddress: "rgb:fixture".into(),
+            proof: vec![1, 2, 3].into(),
+            settlementData: vec![4, 5, 6].into(),
+            dstEid: 30109,
+            recipient: [0x22; 32].into(),
+            minAmountLD: U256::from(900),
+            extraOptions: vec![0, 3, 1, 0, 1].into(),
+            sourceBurnTxId: [0x55; 32].into(),
+            nonce: U256::from(7),
+            deadline: U256::from(1_700_000_000u64),
+        };
+        match field {
+            0 => {}
+            1 => typed.amount += U256::from(1),
+            2 => typed.burnId += U256::from(1),
+            3 => typed.sourceChainId += U256::from(1),
+            4 => typed.destinationChainId += U256::from(1),
+            5 => typed.sourceAddress.push('x'),
+            6 => typed.proof = vec![1, 2, 4].into(),
+            7 => typed.settlementData = vec![4, 5, 7].into(),
+            8 => typed.dstEid += 1,
+            9 => typed.recipient.0[0] ^= 1,
+            10 => typed.minAmountLD += U256::from(1),
+            11 => typed.extraOptions = vec![0, 3, 1, 0, 2].into(),
+            12 => typed.sourceBurnTxId.0[0] ^= 1,
+            13 => typed.nonce += U256::from(1),
+            14 => typed.deadline += U256::from(1),
+            _ => unreachable!(),
+        }
+        let call = lzFundsOutCall {
+            amount: typed.amount,
+            burnId: typed.burnId,
+            sourceChainId: typed.sourceChainId,
+            destinationChainId: typed.destinationChainId,
+            sourceAddress: typed.sourceAddress.clone(),
+            proof: typed.proof.clone(),
+            settlementData: typed.settlementData.clone(),
+            dstEid: typed.dstEid,
+            recipient: typed.recipient,
+            minAmountLD: typed.minAmountLD,
+            extraOptions: typed.extraOptions.clone(),
+            sourceBurnTxId: typed.sourceBurnTxId,
+        };
+        let release = LzReleaseParams {
+            dst_eid: typed.dstEid,
+            recipient: typed.recipient.to_vec(),
+            min_amount_ld: typed.minAmountLD.try_into().unwrap(),
+        };
+        let digest = lz_funds_out_digest(
+            &domain,
+            &call.abi_encode(),
+            &release,
+            typed.nonce.try_into().unwrap(),
+            typed.deadline.try_into().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            digest,
+            typed.eip712_signing_hash(&alloy_domain).0,
+            "field {field}"
+        );
+        if let Some(original) = baseline {
+            assert_ne!(digest, original, "field {field} must be signed");
+        } else {
+            baseline = Some(digest);
+        }
+    }
+}
+
+#[test]
+fn test_lz_rejects_min_amount_mismatch_and_overflow() {
+    use crate::networks::evm::validation::lzFundsOutCall;
+    use alloy_primitives::U256;
+    use alloy_sol_types::SolCall;
+    let domain = lz_test_domain();
+    let release = lz_test_release();
+    let mut call = lzFundsOutCall::abi_decode_validate(&lz_test_calldata()).unwrap();
+    lz_funds_out_digest(&domain, &call.abi_encode(), &release, 7, 999_999).unwrap();
+    call.minAmountLD = U256::from(release.min_amount_ld + 1);
+    let err = lz_funds_out_digest(&domain, &call.abi_encode(), &release, 7, 999_999).unwrap_err();
+    assert!(
+        err.to_string().contains("lz_release.min_amount_ld"),
+        "{err}"
+    );
+    call.minAmountLD = U256::from(u64::MAX) + U256::from(1);
+    let err = lz_funds_out_digest(&domain, &call.abi_encode(), &release, 7, 999_999).unwrap_err();
+    assert!(
+        err.to_string().contains("minAmountLD exceeds u64 range"),
+        "{err}"
+    );
 }

@@ -17,6 +17,7 @@ SHARED_BLOCKS = {
     # The checks that run before anything is touched, up to the exit of `check`.
     'start and check': re.compile(r'  start\|check\)\n.*?\n      exit 0\n    fi\n', re.S),
     'free pages': re.compile(r'    # Refuse with one clear message, not five failed attempts.*?\n    fi\n', re.S),
+    'send limits': re.compile(r'# Send the limits of the operator\..*?\nsend_limits\(\) \{\n.*?\n\}\n', re.S),
 }
 
 
@@ -131,6 +132,8 @@ os.execvp(args[0], args)
             PATH=self.env['PATH'], GIT_SHA='0' * 40, BUCKET='bucket',
             AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base), SIGNER_ROLE='mint',
             NITRO_ALLOCATOR_CONFIG=str(self.pool), NITRO_HUGEPAGES_DIR=str(self.pages),
+            # Never read the limits file of the machine that runs the tests.
+            ENCLAVE_LIMITS_FILE=str(self.base / 'absent' / 'enclave-limits.conf'),
         )
         env.update(extra)
         return subprocess.run(['bash', str(HOST)], env=env, capture_output=True, text=True,
@@ -201,6 +204,108 @@ os.execvp(args[0], args)
                 result = self.run_ctl(script, None)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('--memory 4096 --enclave-cid 16', self.calls.read_text())
+
+    def limits_stub(self, refuse):
+        # The parent CLI records its commands. It can refuse `limits set`.
+        calls = self.base / 'cli.calls'
+        self.stub('utexo-bridge-parent-cli', f'''
+import sys
+with open({str(calls)!r}, 'a') as f:
+    f.write(' '.join(sys.argv[1:]) + '\\n')
+if 'health' in sys.argv:
+    print('Endpoints set: yes')
+if 'limits' in sys.argv and {refuse!r}:
+    sys.exit(1)
+''')
+        return calls
+
+    def test_start_sends_the_limits_file_before_the_endpoints(self):
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        calls = self.limits_stub(refuse=False)
+        limits = self.base / 'enclave-limits.conf'
+        limits.write_text('max_rgb_lib_ms=21000\n')
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                sent = calls.read_text()
+                self.assertIn(f'limits set --file {limits}', sent)
+                self.assertLess(sent.index('limits set'), sent.index('set-endpoints'))
+
+    def test_start_goes_on_without_a_limits_file_or_when_the_enclave_refuses_it(self):
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        limits = self.base / 'enclave-limits.conf'
+        calls = self.limits_stub(refuse=True)
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('limits set', calls.read_text())
+                # The file is optional, so its absence is not reported.
+                self.assertNotIn(str(limits), result.stdout + result.stderr)
+                self.assertNotIn('image values', result.stdout + result.stderr)
+
+                limits.write_text('max_rgb_lib_ms=1\n')
+                calls.write_text('')
+                result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('keeps the image values', result.stderr)
+                self.assertIn('set-endpoints', calls.read_text())
+                limits.unlink()
+
+    def test_start_says_when_it_cannot_read_the_limits_file(self):
+        # A limits file that the unit user cannot read leaves the image values,
+        # as a refused file does. The launch says so and goes on. A link to no
+        # file counts as a file. Root reads a file of mode 0.
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        calls = self.limits_stub(refuse=False)
+        unreadable = self.base / 'enclave-limits.conf'
+        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.chmod(0)
+        dangling = self.base / 'linked-limits.conf'
+        dangling.symlink_to(self.base / 'absent-limits.conf')
+        for path in (dangling,) + ((unreadable,) if os.geteuid() else ()):
+            for script in self.scripts():
+                with self.subTest(script=script.name, path=path.name):
+                    calls.write_text('')
+                    result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(path))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f'cannot read {path} as user ', result.stderr)
+                    self.assertIn('CID 16 keeps the image values', result.stderr)
+                    sent = calls.read_text()
+                    self.assertNotIn('limits set', sent)
+                    self.assertIn('set-endpoints', sent)
+
+    def test_start_sends_the_limits_file_that_deploy_host_names(self):
+        # deploy-host.sh writes ENCLAVE_LIMITS_FILE into enclave.env, and systemd
+        # gives `start` the values of that file.
+        if not bash_expands_empty_arrays():
+            self.skipTest('bash 4.4 or later is needed for the start path')
+        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
+                            HOST.read_text(), re.S)
+        self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
+        limits = self.base / 'operator-limits.conf'
+        limits.write_text('max_rgb_lib_ms=21000\n')
+        names = set(re.findall(r'\$([A-Z_][A-Z0-9_]*)', heredoc.group(1)))
+        subprocess.run(['bash', '-c', 'set -eu\ncat > "$OUT" <<EOF\n' + heredoc.group(1)],
+                       env=dict({name: '' for name in names}, ENCLAVE_LIMITS_FILE=str(limits),
+                                OUT=str(self.env_file), PATH=os.environ['PATH']),
+                       check=True)
+        written = dict(line.split('=', 1) for line in self.env_file.read_text().splitlines())
+        self.assertEqual(written['ENCLAVE_LIMITS_FILE'], str(limits))
+        calls = self.limits_stub(refuse=False)
+        for script in self.scripts():
+            with self.subTest(script=script.name):
+                calls.write_text('')
+                result = self.run_ctl(script, None,
+                                      ENCLAVE_LIMITS_FILE=written['ENCLAVE_LIMITS_FILE'])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'limits set --file {limits}', calls.read_text())
 
     def test_start_refuses_when_the_free_pages_cannot_hold_its_enclave(self):
         for gib, free_gib, mib2, free_mib2, free_mib in ((12, 3, 0, 0, 3072), (3, 3, 511, 511, 4094)):
@@ -413,6 +518,7 @@ os.execvp(args[0], args)
             ELECTRUM_URL='https://user%40example.org:p%3Aw@esplora.example.org:8443'
                          '/api?network=bitcoin&limit=25',
             EVM_RPC_TLS_CA_DER_FILE='',
+            EVM_RPC_PATH_FILE='/etc/utexo/evm-rpc-path',
             KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/'
                         '0f0e0d0c-0b0a-0908-0706-050403020100',
             KMS_REGION='eu-central-1', KMS_SEED_ID='seed-1',
@@ -423,6 +529,7 @@ os.execvp(args[0], args)
                 ENCLAVE_MEMORY='8192', NITRO_ALLOCATOR_CONFIG=str(self.pool),
                 NITRO_HUGEPAGES_DIR=str(self.pages), ENCLAVE_DEBUG_MODE='0',
                 DIR='/home/ubuntu/cluster', SIGNER_ROLE='mint',
+                ENCLAVE_LIMITS_FILE='/etc/utexo/enclave-limits.conf',
                 **{key: '' if empty else value for key, value in optional.items()})
             subprocess.run(['bash', '-c', 'set -eu\nCIDS=(16)\ncat > "$OUT" <<EOF\n'
                             + heredoc.group(1)],
@@ -478,6 +585,54 @@ os.execvp(args[0], args)
         self.assertIn('provision readable mTLS file', result.stdout + result.stderr)
         self.assertFalse(self.calls.exists(), 'nitro-cli ran')
 
+    def test_deploy_host_checks_the_limits_file_as_ubuntu_before_any_change(self):
+        for path in ('enclave-limits.conf', "/etc/utexo/it's.conf", '/etc/utexo/a b.conf'):
+            with self.subTest(path=path):
+                self.assert_refused(self.run_host(ENCLAVE_LIMITS_FILE=path),
+                                    'ENCLAVE_LIMITS_FILE must be an absolute path')
+        # The check runs after the script declares associative arrays, which
+        # bash 3 does not have.
+        if not bash_expands_empty_arrays():
+            return
+        # su runs the command as the user that runs the tests, and records the call.
+        su_calls = self.base / 'su.calls'
+        self.stub('su', f'''
+import os, sys
+args = sys.argv[1:]
+with open({str(su_calls)!r}, 'a') as f:
+    f.write(' '.join(args) + '\\n')
+shell = args[args.index('-s') + 1]
+os.execv(shell, [shell, '-c', args[args.index('-c') + 1]])
+''')
+        host = dict(GRPC_HOST='10.0.0.1', PARENT_TLS_DIR=str(self.base / 'tls'))
+        # A link to no file counts as a file. Root reads a file of mode 0.
+        unreadable = self.base / 'enclave-limits.conf'
+        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.chmod(0)
+        dangling = self.base / 'linked-limits.conf'
+        dangling.symlink_to(self.base / 'absent-limits.conf')
+        for path in (dangling,) + ((unreadable,) if os.geteuid() else ()):
+            with self.subTest(path=path.name):
+                result = self.run_host(ENCLAVE_LIMITS_FILE=str(path), **host)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, output)
+                self.assertIn(f'user ubuntu cannot read {path}', output)
+                self.assertNotIn('mTLS', output)
+                self.assertIn(f"-s /bin/sh ubuntu -c test -r '{path}'", su_calls.read_text())
+                self.assertFalse(self.calls.exists(), 'nitro-cli ran')
+        # With no file, or with a file that ubuntu can read, the script goes on
+        # to the mTLS files, the next check.
+        readable = self.base / 'readable-limits.conf'
+        readable.write_text('max_rgb_lib_ms=21000\n')
+        for path in (self.base / 'absent-limits.conf', readable):
+            with self.subTest(path=path.name):
+                result = self.run_host(ENCLAVE_LIMITS_FILE=str(path), **host)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, output)
+                self.assertIn('provision readable mTLS file', output)
+                self.assertNotIn('cannot read', output)
+                self.assertFalse(self.calls.exists(), 'nitro-cli ran')
+
     def test_the_embedded_copy_equals_the_standalone_one(self):
         standalone, embedded = CTL.read_text(), embedded_ctl()
         for name, block in SHARED_BLOCKS.items():
@@ -493,6 +648,57 @@ os.execvp(args[0], args)
         ours, theirs = function.findall(CTL.read_text()), function.findall(HOST.read_text())
         self.assertEqual(len(ours), 1)
         self.assertEqual(theirs, ours * 2)
+
+
+
+class DeployRpcPathTests(unittest.TestCase):
+    """deploy-host.sh gives the private RPC path file to the service user."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix='deploy-rpc-path-')
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.copy = self.base / 'evm-rpc-path'
+        self.calls = self.base / 'install.log'
+        (self.base / 'bin').mkdir()
+        stub = self.base / 'bin' / 'install'
+        # Records the call and copies the file. The real command needs root.
+        stub.write_text('#!/bin/sh\n'
+                        'echo "$@" >> "$INSTALL_LOG"\n'
+                        'for last; do :; done\n'
+                        'eval "source=\\${$(($# - 1))}"\n'
+                        'cp "$source" "$last"\n')
+        stub.chmod(0o755)
+
+    def run_step(self, value):
+        step = re.search(r'# The private RPC path can hold a provider API key, so only.*?\n'
+                         r'  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path\nfi\n',
+                         HOST.read_text(), re.S)
+        self.assertTrue(step, 'install step not found in deploy-host.sh')
+        script = step.group(0).replace('/etc/utexo/evm-rpc-path', str(self.copy))
+        result = subprocess.run(
+            ['bash', '-c', f'set -euo pipefail\n{script}printf %s "$EVM_RPC_PATH_FILE"'],
+            env=dict(EVM_RPC_PATH_FILE=value, INSTALL_LOG=str(self.calls),
+                     PATH=f"{self.base / 'bin'}:{os.environ['PATH']}"),
+            capture_output=True, text=True, check=True)
+        return result.stdout
+
+    def test_a_new_file_reaches_only_the_service_user(self):
+        source = self.base / 'source'
+        source.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(str(source)), str(self.copy))
+        self.assertEqual(self.copy.read_text(), '/v2/key\n')
+        self.assertIn('-m 0600 -o ubuntu -g ubuntu', self.calls.read_text())
+
+    def test_a_deploy_without_the_variable_keeps_the_copy(self):
+        self.copy.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(''), str(self.copy))
+        self.assertFalse(self.calls.exists())
+
+    def test_the_copy_is_not_installed_over_itself(self):
+        self.copy.write_text('/v2/key\n')
+        self.assertEqual(self.run_step(str(self.copy)), str(self.copy))
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == '__main__':

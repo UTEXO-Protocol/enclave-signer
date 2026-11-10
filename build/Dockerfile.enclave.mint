@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Mint signer enclave image: EVM -> RGB only (vsock + rgb + mint-signer).
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# Mint signer enclave image: EVM -> RGB only (vsock + spv + mint-signer).
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
@@ -33,18 +33,17 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `rgb` implies `spv` + `rgb-validation`. `--no-default-features` drops `ccd`
-# (so this binary is RGB-only). The signer role implies
-# `bfa-mint` -> `bfa-validation` -> `evm-rpc` (in-enclave FundsIn verification,
-# alloy + tokio); it needs a second host vsock-proxy
-# (EVM_RPC_VSOCK_PORT, default 8002).
+# `spv` implies `rgb-validation`. `--no-default-features` keeps the feature list explicit
+# (so this binary is RGB-only). The signer role implies `rgb-validation`,
+# which includes in-enclave FundsIn verification (alloy + tokio). It needs a
+# second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).
 #
-# `mint-signer` (implies `bfa-mint` -> the mint/burn flow + BFA validation)
+# `mint-signer` (implies `rgb-validation`: the mint/burn flow + BFA validation)
 # builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-ARG ENCLAVE_FEATURES=vsock,rgb,mint-signer
+ARG ENCLAVE_FEATURES=vsock,spv,mint-signer
 RUN --mount=type=secret,id=lib_key \
     --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
@@ -86,7 +85,7 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 
 # Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
 # (chain_id 42161), SPV and Production policy. Without SPV, Development policy
-# requires BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none and ENDPOINTS_SHA256.
+# requires BITCOIN_NETWORK=signet and BTC_RELAY_MODE=none.
 # Electrum is set at launch. The enclave pins its host to 127.0.0.1 and reaches
 # it over the vsock forwarder (host runs
 # `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
@@ -103,7 +102,6 @@ ARG FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951
 ARG TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
 ARG BITCOIN_NETWORK=bitcoin
 ARG BTC_RELAY_MODE=required
-ARG ENDPOINTS_SHA256=""
 ARG RGB_ASSET_ID=""
 RUN test -n "$RGB_ASSET_ID"
 # The AWS accounts the seed KMS key may live in (comma-separated 12-digit ids).
@@ -112,13 +110,12 @@ RUN test -n "$RGB_ASSET_ID"
 ARG KMS_ALLOWED_ACCOUNT_IDS=""
 RUN test -n "$KMS_ALLOWED_ACCOUNT_IDS"
 ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
-    ENDPOINTS_SHA256=${ENDPOINTS_SHA256} \
     EVM_CHAIN_ID=${EVM_CHAIN_ID} \
     EVM_PROXY_CONTRACT_ADDRESS=${EVM_PROXY_CONTRACT_ADDRESS} \
     RGB_ASSET_ID=${RGB_ASSET_ID} \
     BITCOIN_NETWORK=${BITCOIN_NETWORK}
 
-# In-enclave EVM verification (evm-rpc). The enclave reaches the EVM RPC only
+# In-enclave EVM verification. The enclave reaches the EVM RPC only
 # through the vsock forwarder (host runs
 # `vsock-proxy <EVM_RPC_VSOCK_PORT=8002> <rpc host> <tls port>`).
 # Receipts require EVM_FINALITY_TAG coverage and a matching canonical block hash.
@@ -133,12 +130,12 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
-# Production policy commits them; without SPV, the measured ENDPOINTS_SHA256
-# pin binds them instead.
-# SPV_MIN_CONFIRMATIONS (at least 1) is attested, but no mint check reads it:
+# They remain outside the image with or without SPV. Production policy commits
+# the Electrum/EVM hosts and EVM CA; Development policy does not commit them.
+# A Production policy attests SPV_MIN_CONFIRMATIONS (at least 1), but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
-# Here it only decides when the health check reports the SPV header chain
-# synced, that many blocks past the checkpoint. Every image sets 3, the depth
+# In an `spv` build it only decides when the health check reports the SPV header chain
+# synced, that many blocks past the checkpoint. Both role images set 3, the depth
 # the burn signer checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output
 # (546 to 10000). It must equal the connector's MINT_WITNESS_SAT, or every

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Host-prep for enclave-host observability (run as root, e.g. via SSM).
 #
-# PROBLEM (2026-08-27): today there is NO signal when a `parent` or `enclave`
-# process dies. Parents log only to journald (local, invisible off-host); the
-# enclave itself is opaque in prod (no `nitro-cli console` under non-debug = TEE
-# isolation). Listeners already ship to CloudWatch (`/utexo/stage/listeners`, via
-# the docker `awslogs` driver) — parents/enclaves have nothing.
+# Parents and the host-side enclave units log to journald, which stays on the
+# host. The enclave itself is opaque in prod (no `nitro-cli console` under
+# non-debug = TEE isolation). Listeners ship to CloudWatch
+# (`/utexo/stage/listeners`, via the docker `awslogs` driver).
 #
-# This stands up, idempotently and reboot-safe, the host side of LOG collection
-# (TODO §7a Track 1). It installs the amazon-cloudwatch-agent and ships the
-# relevant journald units to CloudWatch Logs:
+# This stands up, idempotently and reboot-safe, the host side of LOG collection.
+# It installs the amazon-cloudwatch-agent and ships the relevant journald units
+# to CloudWatch Logs:
 #
 #   journald unit                 -> log group `/utexo/stage/enclave-hosts`
 #   ---------------------------      stream `{instance_id}/<role>`
@@ -28,8 +27,8 @@
 # ⚠️ Parents ≠ listeners mechanically: listeners are docker (`awslogs` driver);
 # parents/enclaves are systemd/journald, so awslogs does not apply. We use the
 # CloudWatch Agent journald collector with a `units` selector (supports the
-# `utexo-parent@*` wildcard). Requires a recent agent (journald support was added
-# to amazon-cloudwatch-agent); this script installs `latest`.
+# `utexo-parent@*` wildcard). Requires an agent version with journald support;
+# this script installs `latest`.
 #
 # ── IAM (attach ONCE to the hosts' instance role `ec2-ssm-role`) ──────────────
 # Least-privilege WRITE policy `utexo-stage-enclave-hosts-logs-write`:

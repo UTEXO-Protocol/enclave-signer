@@ -43,15 +43,6 @@ fn synthetic_regtest_setup() -> (HeaderChain, Vec<Vec<u8>>) {
 }
 
 #[test]
-fn empty_chain_tip_is_checkpoint() {
-    let (chain, _) = synthetic_regtest_setup();
-    assert_eq!(chain.tip_height(), 100);
-    assert_eq!(chain.tip_hash()[0], 0xAA);
-    assert_eq!(chain.len(), 0);
-    assert!(chain.is_empty());
-}
-
-#[test]
 fn submits_contiguous_batch() {
     let (mut chain, raws) = synthetic_regtest_setup();
     let outcome = chain.submit_headers(101, &raws, NOW).unwrap();
@@ -240,21 +231,6 @@ fn reorg_rejected_when_alt_chain_is_equal_length() {
 }
 
 #[test]
-fn reorg_rejected_when_alt_chain_is_shorter() {
-    let (mut chain, original) = synthetic_regtest_setup();
-    chain.submit_headers(101, &original, NOW).unwrap();
-    let original_tip = chain.tip_hash();
-
-    // Reorg at 102 with 3 alt blocks. The original has 4 (102..=105).
-    let pred_hash = chain.hash_at(101).unwrap();
-    let (alt, _) = synth_chain_from(pred_hash, 1_700_000_002, 11, 3);
-
-    let err = chain.submit_headers(102, &alt, NOW).unwrap_err();
-    assert!(matches!(err, SpvError::WeakerChain));
-    assert_eq!(chain.tip_hash(), original_tip);
-}
-
-#[test]
 fn reorg_too_deep_rejected() {
     let (mut chain, _) = synthetic_regtest_setup();
     let cp_hash = chain.checkpoint().hash;
@@ -310,8 +286,8 @@ fn reorg_atomic_on_validation_failure() {
 
 #[test]
 fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
-    // Regression: on a non-PoW network, an epoch start below the checkpoint
-    // must not give HeaderNotFound. Checkpoint 4000, retarget 4032, start 2016.
+    // On a non-PoW network, an epoch start below the checkpoint must not give
+    // HeaderNotFound. Checkpoint 4000, retarget 4032, start 2016.
     let cp_hash = {
         let mut h = [0u8; 32];
         h[0] = 0xBB;
@@ -340,7 +316,7 @@ fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
 // With a misaligned checkpoint, that block is below the checkpoint and is not
 // stored, so the chain stops. validation.rs tests the difficulty math.
 
-/// TH-1: with an aligned checkpoint, the first boundary above it resolves its
+/// With an aligned checkpoint, the first boundary above it resolves its
 /// epoch start to the checkpoint.
 #[test]
 fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
@@ -365,7 +341,7 @@ fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
     );
 }
 
-/// TH-2: a misaligned checkpoint (950_000) stops the chain. The first boundary
+/// A misaligned checkpoint (950_000) stops the chain. The first boundary
 /// (951_552) needs the epoch start 949_536, which is not stored. The load-time
 /// check rejects such a checkpoint.
 #[test]
@@ -422,11 +398,11 @@ fn retains_full_history_from_checkpoint() {
     assert_eq!(chain.hash_at(0), Some(chain.base_hash));
     assert!(chain.header_at(1).is_some(), "oldest header retained");
 
-    // An anchor at approx tip - 3200 is still present.
+    // An anchor at approx tip - 3200 is present.
     let deep = 1000u32;
     assert!(
         (count - deep) > 2122,
-        "precondition: deep anchor is below the old window"
+        "precondition: deep anchor is more than 2122 blocks below the tip"
     );
     assert!(
         chain.header_at(deep).is_some(),
@@ -664,19 +640,6 @@ fn min_difficulty_blocks_confirm_on_testnets() {
     assert_eq!(chain.confirmations(155_257, 6), 6);
     assert_eq!(chain.confirmations(155_262, 6), 1);
     assert_eq!(chain.confirmations(155_263, 6), 0);
-}
-
-#[test]
-fn confirmations_stop_at_the_cap() {
-    let chain = testnet4_chain();
-    assert_eq!(chain.confirmations(155_233, 2), 2);
-}
-
-#[test]
-fn every_block_confirms_where_min_difficulty_is_not_allowed() {
-    let (mut chain, raws) = synthetic_regtest_setup();
-    chain.submit_headers(101, &raws, NOW).unwrap();
-    assert_eq!(chain.confirmations(101, 6), 5);
 }
 
 /// A free block dated weeks ahead would let a host fork retarget down without

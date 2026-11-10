@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, SecretBox};
 use crate::cloning::{validate_cloning_secret, CloneSession};
 use crate::error::Result;
 
-/// Time limit for a Cloning session. (F03-AF-01)
+/// Time limit for a Cloning session.
 /// A new initiation can replace an expired session without a restart.
 /// The state refuses replacement of a valid session.
 /// The requester has no seed in this state.
@@ -26,7 +26,7 @@ pub struct CloningSession {
     /// Validated requester credential. It becomes the donor credential only
     /// when this exact session's verified clone response activates its keys.
     donor_cloning_secret: SecretBox<String>,
-    /// Monotonic start time for session expiry. (F03-AF-01)
+    /// Monotonic start time for session expiry.
     created_at: Instant,
 }
 

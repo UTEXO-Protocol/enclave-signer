@@ -1,6 +1,6 @@
-//! F03-AF-08: test identity commitments before state changes.
+//! Test identity commitments before state changes.
 //! These tests use mock attestation without an NSM signature.
-//! Real NSM tests run separately.
+//! This repository has no test of these paths on a real NSM.
 // Cloning is disabled with KMS persistence (see `test_clone.rs`).
 #![cfg(all(
     feature = "mock-attestation",
@@ -80,7 +80,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
     };
     let bundles = clone_commitment::bundle_cases(&keys);
     let policies = clone_commitment::policy_cases(&policy.attested());
-    assert_eq!(bundles.len(), 13);
+    assert_eq!(bundles.len(), 10);
     assert_eq!(policies.len(), 24);
     let mut cases: Vec<_> = bundles
         .into_iter()
@@ -176,7 +176,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
         else {
             panic!("{name}: retry did not activate")
         };
-        assert_eq!(actual, keys, "{name}: retry must restore all 13 fields");
+        assert_eq!(actual, keys, "{name}: retry must restore all 10 fields");
         let Resp::Error(err) = set(requester, &original) else {
             panic!("{name}: replay accepted")
         };

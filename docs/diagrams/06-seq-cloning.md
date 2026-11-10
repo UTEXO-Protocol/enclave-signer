@@ -13,7 +13,7 @@ sequenceDiagram
     participant RN as Req NSM
     participant DN as Don NSM
 
-    Note over Req,Don: Both enclaves must have IDENTICAL PCR0/1/2<br/>(same compiled binary) and PCR3<br/>(same parent IAM role) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey or a completed clone.<br/>A release image never carries it. The legacy UTEXO_CLONING_SECRET<br/>env fallback is image env, for dev images only.
+    Note over Req,Don: Both enclaves must have IDENTICAL PCR0/1/2<br/>(same compiled binary) and PCR3<br/>(same parent IAM role) for cloning to succeed.<br/>The cloning_secret is a pre-shared operator value - the donor<br/>received it at runtime via InitializeKey or a completed clone.<br/>A release image never carries it. The UTEXO_CLONING_SECRET<br/>env fallback is image env, for dev images only.
 
     Note over Cli,Req: Message 1 - the CLI talks to the requester over the enclave wire<br/>protocol and to the donor through its parent's gRPC Clone RPC
     Op->>Cli: clone --cloning-secret-file --donor-grpc --donor-evm
@@ -68,8 +68,8 @@ sequenceDiagram
     Req->>Req: commit nonce
     Req-->>Cli: SetCloneResponse{} (empty)
     Cli->>Req: GetPublicKey
-    Cli->>Cli: all 13 identity fields == donor bundle
+    Cli->>Cli: all 10 identity fields == donor bundle
     Cli-->>Op: CLONE_RESULT_V1=success
 
-    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. It also retains<br/>the verified session secret and can become a donor.<br/>Seed and donor secret remain in SecretBox; temporary plaintext buffers are zeroized.<br/>Ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor || requester.
+    Note over Req,Don: After SetClone the requester has the IDENTICAL HD seed<br/>as the donor and signs as the same address. It also retains<br/>the verified session secret and can become a donor.<br/>Seed and donor secret remain in SecretBox, and temporary plaintext buffers are zeroized.<br/>Ciphertext on the wire is bound to<br/>the per-handshake DH key by HKDF info = donor || requester.
 ```

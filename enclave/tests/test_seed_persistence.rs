@@ -93,7 +93,7 @@ fn persistence_initialize_rejects_cloning_secret_before_activating() {
         port,
         &EnclaveRequest {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
-                cloning_secret: "obsolete-secret".into(),
+                cloning_secret: "any-cloning-secret".into(),
                 ..Default::default()
             })),
         },
@@ -274,8 +274,9 @@ fn ingress_time_is_subtracted_before_custody_dispatch() {
         output: Vec::new(),
         delay_once: true,
     };
-    // The request has ten milliseconds of dispatch time plus the two seconds
-    // reserved for its response. Reading the frame consumes the dispatch time.
+    // The request has ten milliseconds of dispatch time plus the time that
+    // `seed_persistence::RESPONSE_RESERVE` keeps for its response. Reading the
+    // frame consumes the dispatch time.
     server::handle_connection_until(
         &mut stream,
         &ctx,

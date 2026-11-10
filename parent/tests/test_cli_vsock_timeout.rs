@@ -54,10 +54,16 @@ fn cli_clone_returns_error_when_vsock_peer_is_silent() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let status = status.expect("CLI still blocked after 45 s");
+    assert!(peer.is_some(), "CLI never connected: {stderr}");
     assert_eq!(status.code(), Some(1), "stdout: {stdout}\nstderr: {stderr}");
     assert!(
         stderr.contains("Error before SetClone: io error:"),
         "{stderr}"
     );
+    // Linux SO_RCVTIMEO returns EAGAIN (11), not ETIMEDOUT. Prove that the
+    // accepted silent connection reached its 30-second read timeout, rather
+    // than counting a connection/configuration error as a timeout.
+    assert!(stderr.contains("os error 11"), "{stderr}");
+    assert!(elapsed >= Duration::from_secs(30), "{elapsed:?}");
     assert!(elapsed < GUARD, "{elapsed:?}");
 }

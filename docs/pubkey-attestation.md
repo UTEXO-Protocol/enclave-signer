@@ -50,7 +50,7 @@ Attestation document { pcrs, public_key, user_data, nonce, timestamp, ... }
 `AttestedPublicKey` attests the installed public keys and configured policy.
 It does not contact the EVM RPC provider, so verification can succeed while that
 provider is unavailable. It does not show that the node can complete a signing
-request. The current `Health` response checks whether endpoints are set, keys
+request. The `Health` response checks whether endpoints are set, keys
 are loaded and, where required, SPV is ready; it does not probe EVM RPC
 availability either. Routing that requires live provider availability needs
 a separate check.
@@ -90,7 +90,7 @@ populates them as:
 A lightweight verifier can stop at `public_key` (e.g. an EVM contract that
 only cares about the signing address). A thorough verifier rebuilds the
 canonical bundle **and the expected security policy** and checks `user_data` to
-confirm the BTC keys, xpubs, and fingerprint were not swapped by the parent host
+confirm the account xpubs and fingerprint were not swapped by the parent host
 process *and* that the enclave's posture matches what was expected.
 
 ### Canonical bundle encoding
@@ -102,8 +102,6 @@ Prefix each field with its length as a big-endian u32. Encode strings as UTF-8.
 ```
 canonical_bundle =
     u32_be(len(evm_address))                 || evm_address
-    u32_be(len(btc_compressed_pub))          || btc_compressed_pub
-    u32_be(len(btc_xpub))                    || btc_xpub_utf8
     u32_be(len(master_fingerprint))          || master_fingerprint
     u32_be(len(account_xpub_vanilla))        || account_xpub_vanilla_utf8
     u32_be(len(account_xpub_colored))        || account_xpub_colored_utf8
@@ -113,20 +111,22 @@ canonical_bundle =
     u32_be(len(rgb_asset_id))                || rgb_asset_id_utf8
     u32_be(len(evm_gas_tx_uncompressed_pub)) || evm_gas_tx_uncompressed_pub   // 64 bytes
     u32_be(len(evm_gas_tx_address))          || evm_gas_tx_address            // 20 bytes
-    u32_be(len(ccd_ed25519_pub))             || ccd_ed25519_pub               // 32 bytes
 ```
 
-Thirteen fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
+Ten fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
 config pinned at enclave boot from env (`EVM_CHAIN_ID`,
 `EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the enclave to a
 specific chain / contract / asset triple — a misconfigured or
 maliciously-redirected enclave is observable through this commitment. (The
-attestation-bundle/proto field keeps the legacy name `bridge_contract`; its
-value is the MultisigProxy from `EVM_PROXY_CONTRACT_ADDRESS`.)
+attestation-bundle/proto field `bridge_contract` holds the MultisigProxy
+address from `EVM_PROXY_CONTRACT_ADDRESS`.)
 Production deployments MUST set all three; the commitment for a dev /
 mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
-`rgb_asset_id=""`. The gas-tx key and the Concordium key are derived in every
-build, so the bundle has the same shape regardless of features.
+`rgb_asset_id=""`. The gas-tx key is derived in every
+build, so the bundle has the same shape regardless of features. The bundle
+dropped the retired BTC key and the retired Concordium key: this is a new
+layout (offline bundle format `utexo-signer-attestation/3`), and the image
+measurements change with it.
 
 The CLI reconstructs policy using the chain/contract/asset pins from the
 response. These values are always authenticated (they are inside the signed
@@ -162,7 +162,7 @@ policy_commitment =
     u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 retired | 3 pinned TLS rpc
+    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 reserved | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8
     u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest | 4 testnet4 | 5 signetcustom
@@ -187,7 +187,7 @@ policy_commitment =
       || u8(address_present) [|| expected_evm_address(20)]
     u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
       [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
-    // Development (debug/test/dev-feature/non-bridge/unpinned build):
+    // Development (debug/test/dev-feature/no-SPV/non-bridge/unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
@@ -201,7 +201,7 @@ the pinned RPC for the correctness of these responses. Production verification
 requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
 value; a production enclave refuses `latest` at boot, and so does the verifier.
 
-`clone_peer_pcr3` binds clone peers to the parent instance IAM role (#270). A
+`clone_peer_pcr3` binds clone peers to the parent instance IAM role. A
 verifier does not configure it: it takes PCR3 from the verified document (the
 NSM signs it), requires it to be present and not all zero for a cloning role,
 and expects no value for the mint signer. An enclave on an instance without an
@@ -230,14 +230,17 @@ and `attest-verify` has no flag for them. `BTC_MAX_TOTAL_SATS` shows only as
 `allow_vanilla_psbt`: a non-zero value allows plain-BTC signing, except on a
 burn signer.
 
-Image-baked values remain measured in the EIF. The endpoints are not in the
-image; the operator sets them and the KMS values once at launch
-(`SetEndpoints`). The policy commits only the fields listed above. Until
+Image-baked values remain measured in the EIF. For both SPV and no-SPV builds,
+the endpoints and any digest of them are outside the image; the operator sets
+them and the KMS values once at launch (`SetEndpoints`). Changing launch hosts,
+ports or the RPC CA does not change PCR0/1/2 of the same EIF. The policy commits
+only the fields listed above. Until
 the set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
 that `user_data` commits (`attested_policy`), so a verifier can decode them.
 
-A production enclave commits the full production tuple. A dev/mock enclave
-commits only `[version, 0x00]`, without individual policy settings. The response
+A production enclave commits the full production tuple. A dev/mock enclave,
+and the real-attestation no-SPV / IndexerTrusted profile, commit only
+`[version, 0x00]`, without individual policy settings. The response
 contains this encoding in `attested_policy`. The verifier authenticates and
 decodes those bytes.
 It then constructs the expected policy from its own settings and the authenticated
@@ -267,6 +270,26 @@ PCR0 measures the image. PCR1 measures the kernel and bootstrap. PCR2 measures
 the application. Rebuild the EIF to determine whether a change affects them.
 A file checksum and a PCR measurement are different values.
 
+Reproducing the image measurements requires the release's source, toolchain
+and public build inputs, not a member's endpoint hosts, ports or RPC CA.
+This applies to both SPV and no-SPV profiles. Source/dependency access is
+required as described in the README. Endpoint changes reuse the same image
+and its PCR allowlist.
+
+Provider credentials can be supplied through `EVM_RPC_PATH_FILE` at launch.
+The private path is not in the image, attested policy or KMS encryption context.
+Replacing the file and restarting rotates the key without changing those
+values. Verifiers need only the independently approved public fields their
+selected policy commits; they do not need the API key. See the
+[launch path rules](../README.md#enclave).
+
+Checking image identity and approving runtime policy are separate checks.
+The full production verifier still compares independently approved endpoint
+hosts and CA hashes with the signed policy in `user_data`; these values do
+not enter image PCRs. A no-SPV Development commitment contains no such
+settings. Its real attestation can authenticate the image and key, but cannot
+authenticate or approve the operator's endpoint configuration.
+
 This repository publishes measurements with EIF artifacts. Verify those
 artifacts before you use their PCRs. A trusted configuration or registry can
 also distribute approved measurements. Its security depends on how updates
@@ -293,6 +316,7 @@ Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
    §8.1 the COSE signature is raw `r||s` (96 bytes for P-384), not DER.
 5. Reject all-zero PCR0/1/2. Compare each PCR with its expected value, byte for byte.
    The unsafe `allow-debug-pcrs` feature disables only the all-zero rejection.
+   A release build with this feature does not compile.
 6. Nonce check: `doc.nonce == nonce_sent`.
 7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
 8. Commitment check: confirm
@@ -340,7 +364,7 @@ attest-verify \
 
 # --expect-signer-role is required: `mint` for the mint signer image
 # (Dockerfile.enclave.mint), `burn` for the burn signer
-# (Dockerfile.enclave.burn), `combined` for a build with no signer role (CCD). A burn signer that
+# (Dockerfile.enclave.burn), `combined` for a build with no signer role. A burn signer that
 # attests `mint` fails verification. A role attests the other role's path as
 # off whatever its env says: a burn signer never attests plain-BTC signing
 # (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
@@ -394,18 +418,23 @@ Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
 `sha256("utexo/attested-policy/v1\0" || policy_bytes)`. The parent gRPC
 `AttestedPublicKey` still refuses an answer without keys.
 
-`deploy/deploy-host.sh` runs `utexo-bridge-parent-cli verify-launch` on each
-enclave after `set-endpoints`. The script deploys only the combined image
-(`utexo-bridge-enclave.eif`) and passes `SIGNER_ROLE=combined`. For a mint or
-burn signer, run `set-endpoints` and `verify-launch --signer-role mint` (or
-`burn`) yourself. `verify-launch` verifies the document for a fresh nonce
+`deploy/deploy-host.sh` deploys one enclave per run, for `SIGNER_ROLE=mint` or
+`burn`. `utexo-enclave-ctl.sh start` then runs `set-endpoints` and
+`utexo-bridge-parent-cli verify-launch --signer-role <role>` on that enclave.
+`verify-launch` verifies the document for a fresh nonce
 against `PCR.json`, and compares every attested policy field with the deploy
 inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
 the build) and the `set-endpoints` values. On a mismatch it names the field,
 the expected value and the attested value. The enclave is then terminated,
-all enclaves stop, and the deploy exits 1 before a parent starts. The deploy
+its unit stops, and the deploy exits 1 before a parent starts. The deploy
 inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
 verified document, as described above.
+
+These production-policy checks do not accept the no-SPV Development posture.
+The `export-attestation --allow-development-policy` option for real
+burn/combined exports verifies approved nonzero image PCRs, not individual
+endpoint settings. Approve those launch inputs separately; the enclave does
+not receive an authorization from this host-side verification command.
 
 `ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
 
@@ -424,7 +453,7 @@ Defended:
 - **Replay** — the verifier-supplied nonce is signed into the doc and checked
   for equality on response. An old doc is rejected.
 - **Pubkey swap by parent** — `public_key` is inside the signed payload.
-- **BTC key / xpub swap** — `user_data` commits to the full bundle. A parent
+- **Account xpub swap** — `user_data` commits to the full bundle. A parent
   cannot change one field of `PublicKeysResponse` without breaking the
   commitment match.
 - **Posture downgrade** — `user_data` also commits to the resolved

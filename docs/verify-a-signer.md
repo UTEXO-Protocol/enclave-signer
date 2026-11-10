@@ -10,6 +10,10 @@ enclave has its key and the operator supplies the complete approved identity
 map. An attestation failure returns nonzero; other CIDs may already have exported
 bundles. Do not treat individual files as approval of the whole deployment.
 
+The attestation does not cover the time, memory and size limits. The operator can
+change them, and they do not change what the enclave signs
+([Runtime limits](runtime-limits.md)).
+
 ## Operator: approve every signer before routing
 
 Obtain the expected main EVM address for **every CID** from the approved deployment
@@ -53,12 +57,13 @@ bash deploy/verify-identity.sh --liveness
 
 This explicit mode needs no identity map or release PCRs, exports no bundles,
 and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
-routing. Omitting the map in the default mode no longer falls back to liveness.
+routing. In the default mode, a missing or partial map is a configuration
+error; the mode does not fall back to liveness.
 
-The bundle format is `utexo-signer-attestation/2`. The `verification_mode`
+The bundle format is `utexo-signer-attestation/3`. The `verification_mode`
 field tells how the exporter checked the document (`real` or `mock`).
-`attest-verify` refuses a bundle whose mode is not its own, and refuses an
-older format.
+`attest-verify` refuses a bundle whose mode is not its own, and a bundle of
+any other format.
 
 ## What one bundle proves
 
@@ -97,6 +102,19 @@ leaks after its certificate expires, it can sign a backdated document.
   `EVM_PROXY_CONTRACT_ADDRESS` in `build/Dockerfile.enclave.burn`.
 
 ## Choose the expected launch values
+
+Endpoint settings are runtime inputs in both SPV and no-SPV images. Rebuilding
+the EIF and checking its image PCRs does not require those settings. The
+production verification below additionally checks the signed runtime policy,
+so it requires independently approved public hosts and CA hashes.
+The no-SPV / IndexerTrusted Development policy does not commit endpoint fields
+and is not accepted by this production verification recipe.
+
+A provider API key in `EVM_RPC_PATH_FILE` is private launch configuration. Do not
+publish it in an attestation bundle or verifier command. The path is excluded
+from the attested policy, so rotating that key on restart does not change the
+image PCRs or the public host/CA expectations. Approval covers accepted paths
+at that endpoint, not a particular provider account.
 
 The bundle's `policy` lists every attested launch value. Do not copy them. Read
 them, and decide whether you accept each one:

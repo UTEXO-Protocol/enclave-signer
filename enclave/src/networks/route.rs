@@ -7,8 +7,6 @@
 #[cfg(feature = "rgb-validation")]
 use std::sync::Mutex;
 
-#[cfg(feature = "ccd")]
-use super::ccd;
 use super::{evm, rgb};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
@@ -35,7 +33,7 @@ pub struct ValidationContext<'a> {
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// The blocks that the SPV checks used, recorded under each check's lock.
     /// They are checked again before key use, so a reorg in the gap refuses
-    /// instead of signing old chain state (F05-NEW-AF-08).
+    /// instead of signing old chain state.
     #[cfg(feature = "rgb-validation")]
     pub chain_pins: &'a crate::networks::rgb::spv_crosscheck::ChainPins,
     /// Selects the colored key-path inputs the enclave signs, without holding
@@ -45,15 +43,14 @@ pub struct ValidationContext<'a> {
     pub psbt_fee_key_paths: Option<crate::networks::rgb::psbt_validation::FeeKeyPathResolver<'a>>,
     /// Binds the mint a PSBT commits to the request's EVM deposit (M6).
     /// `None` fails the mint closed.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
     /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
     /// keys are not held across I/O. `None` fails the mint closed.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
-    /// Binds each BFA mint anchor of a consignment to an EVM lock. `None` on
-    /// builds without `bfa-validation`: a consignment with a mint anchor is
-    /// then refused.
+    /// Binds each BFA mint anchor of a consignment to an EVM lock. With
+    /// `None`, a consignment with a mint anchor is refused.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     pub anchor_binder: Option<crate::networks::rgb::validation::AnchorBinder<'a>>,
     /// Reads the asset's reject list.
@@ -91,18 +88,16 @@ pub fn validate_source(
             rgb_consignment: None,
         }),
         // On a build without the validator, `rgb::validate_source` fails
-        // closed. Thus a `ccd`-only enclave refuses RGB sources.
+        // closed.
         #[cfg(rgb_to_evm)]
         SourceNetwork::RgbSource(source) => rgb::validate_source(source, ctx),
-        #[cfg(feature = "ccd")]
-        SourceNetwork::CcdSource(source) => Ok(SourceProof {
-            proof: ccd::validate_source(amount, source)?,
-            #[cfg(feature = "rgb-validation")]
-            rgb_consignment: None,
-        }),
-        #[allow(unreachable_patterns)]
-        _ => Err(EnclaveError::InvalidRequest(
-            "source network not supported by this build (rebuild with `--features ccd`)".into(),
+        #[cfg(not(evm_to_rgb))]
+        SourceNetwork::EvmSource(_) => Err(EnclaveError::InvalidRequest(
+            "source network not supported by this enclave".into(),
+        )),
+        #[cfg(not(rgb_to_evm))]
+        SourceNetwork::RgbSource(_) => Err(EnclaveError::InvalidRequest(
+            "source network not supported by this enclave".into(),
         )),
     }
 }
@@ -151,7 +146,7 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is the consignment recipient leg that the
+            // The destination amount is `mint.issued` from the fascia that the
             // enclave proves, not the unchecked host `psbt_output_amount`. Only
             // builds without that bind use the wire field. They run no
             // destination cross-checks.
@@ -201,11 +196,6 @@ pub fn validate_route_proofs(
             // The handler binds burn identity on both routes: `validate_burn_id`
             // and the `sourceBurnTxId` OpId bind.
         }
-        // Concordium fundsIn -> EVM release. The listener validates the source.
-        #[cfg(feature = "ccd")]
-        (SourceNetwork::CcdSource(_), DestinationNetwork::EvmDestination(_)) => {
-            validate_amount_covers_destination(source_proof.amount, destination_proof.amount)
-        }
         _ => Err(EnclaveError::InvalidRequest(
             "unsupported source/destination network pair".into(),
         )),
@@ -216,7 +206,7 @@ pub fn validate_route_proofs(
 /// `source_amount` is the `FundsIn` amount from
 /// `evm::events::verify_funds_in_event`. For RGB -> EVM, it is the consignment
 /// amount. An RGB
-/// `destination_amount` is the consignment recipient leg in RGB units, issued
+/// `destination_amount` is the fascia's `mint.issued` in RGB units, issued
 /// 1:1 against the EVM token. The PSBT checks in sats are in
 /// [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {

@@ -202,8 +202,8 @@ pub(super) fn extract_transition_summary(
     }
     // A concealed seal reads as an invoice recipient: `<chain_net>:utxob:...`.
     let recipient_prefix = format!("{}:", inspection.genesis.chain_net);
-    // One tx can commit many transitions. A bind of only the settling one
-    // leaves the other value unbound, so the PSBT cross-check binds the group.
+    // One tx can commit many transitions, so the summary keeps them grouped
+    // by witness tx.
     inspection
         .witnesses
         .iter()

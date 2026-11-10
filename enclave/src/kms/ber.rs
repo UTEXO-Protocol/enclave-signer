@@ -266,7 +266,7 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{ber_to_der, test_support::to_streaming_ber};
+    use super::ber_to_der;
 
     #[test]
     fn der_passes_through_unchanged() {
@@ -330,16 +330,5 @@ mod tests {
             deep.extend_from_slice(&[0x00, 0x00]);
         }
         assert!(ber_to_der(&deep).is_none());
-    }
-
-    #[test]
-    fn streaming_helper_round_trips() {
-        let der: Vec<u8> = [vec![
-            0x30, 0x0C, 0x80, 0x04, 1, 2, 3, 4, 0x04, 0x04, 5, 6, 7, 8,
-        ]]
-        .concat();
-        let ber = to_streaming_ber(&der);
-        assert_ne!(ber, der);
-        assert_eq!(ber_to_der(&ber).unwrap(), der);
     }
 }

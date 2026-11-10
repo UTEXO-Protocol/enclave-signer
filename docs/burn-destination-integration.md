@@ -1,12 +1,11 @@
 # Burn destination: integration design
 
-Status: design for the bridge, wallet and contract teams. The proto change
-is merged (proto PR #37).
+Status: design for the bridge, wallet and contract teams.
 Format spec: [burn-destination.md](burn-destination.md).
 
 ## Problem
 
-Audit MAJOR finding (burn signer): `lzFundsOut` carries two destination
+In a burn release, `lzFundsOut` carries two destination
 fields. `destinationChainId` picks the route and the commission. `dstEid` picks
 where LayerZero delivers. The burn named no chain, so nothing compared them
 with the user's intent. A compromised backend could pay the right address on
@@ -14,8 +13,8 @@ the wrong chain. The `burnId` is then spent, so the user cannot redo it.
 
 ## Fix
 
-The burn names the destination. `burnReason` (`GS_BURN_REASON`) stays 32
-bytes (RGB team decision). From V1 it holds `hash_v1(destinationChainId, dstEid, recipient)`.
+The burn names the destination. `burnReason` (`GS_BURN_REASON`) is 32
+bytes (RGB team decision). In V1 it holds `hash_v1(destinationChainId, dstEid, recipient)`.
 The user signs it with the burn. The enclave gets the record, checks the hash,
 and signs only the release that the record names.
 
@@ -47,7 +46,7 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 - Send it in node `EvmSignData.burn_destination` with the sign job.
 - Pick the route from the record: `dstEid == 0` -> `fundsOut`, else
   `lzFundsOut` with `dstEid` and `destinationChainId` from the record.
-- A V0 burn (legacy address) goes on the direct route only.
+- A V0 burn (a plain EVM address) goes on the direct route only.
 
 ### Listener (federated-signer-node)
 
@@ -57,20 +56,21 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 
 ### Proto (federated-signer-proto)
 
-- One field per hop, merged into `main` in proto PR #37:
+- One field per hop:
   - backend -> listener: node `EvmSignData.burn_destination = 4`;
   - listener -> parent: parent `EnrichedEvmPayload.burn_destination = 10`;
   - parent -> enclave: enclave `EvmDestination.burn_destination = 9`.
-- enclave-signer vendors and pins proto `6c10ce0`, which contains that merge.
+- enclave-signer vendors and pins a proto commit that has these fields
+  (`enclave-proto/README.md` names it).
 
 ### Enclave (enclave-signer)
 
-- Record checks, V0/V1 rules, tests, spec and the proto resync (PR #314),
-  ported onto the RGB-Tools release (`burnReason` global).
+- Check the record against the burn's `burnReason` global under the V0/V1
+  rules of [burn-destination.md](burn-destination.md).
 
 ### Contracts (bridge-smart-contracts, usdt0-smart-contracts)
 
-Not required for the fix. Defense in depth, as the audit recommends:
+Not required for the fix. Defense in depth:
 
 - `UtexoLZAdapter.sendOut` takes `destinationChainId` and checks a governed
   outbound map: `outboundChainIdOf[dstEid] == destinationChainId`, else revert.
@@ -84,7 +84,8 @@ mismatched pair.
 
 ## Rollout order
 
-1. Proto PR merged. Done: proto PR #37, pinned at `6c10ce0`.
+1. Proto with these fields, vendored and pinned (`enclave-proto/README.md`
+   names the commit).
 2. Enclave release with the resync (new PCR0, re-attest).
 3. Listener, then backend.
 4. Wallets start writing V1.

@@ -24,11 +24,11 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// mainnet block. Measured: 10_002 transitions, each with a proof, are
 /// 8_932_069 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
 ///
-/// The memory model sets the upper end. Validation of the densest
+/// The memory model sets the upper end at the image frame. Validation of the densest
 /// consignment measured takes about 53 times its bytes. At this size, a burn
 /// request with such a consignment fits the heap each worker holds
-/// (`memory.rs`), with little room left. So the enclave refuses to start
-/// with a larger value ([`parse_consignment_limit`]).
+/// (`memory.rs`), with little room left. So a larger image value stops the boot
+/// ([`parse_consignment_limit`]). `SetLimits` checks a runtime value (`limits.rs`).
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
@@ -36,15 +36,16 @@ pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
 /// Default cap on total proof bytes, txids and Merkle siblings, in all proofs
 /// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work. A proof in
-/// a full mainnet block has 13 siblings (448 bytes), so the proof-count cap
-/// fits: 16_384 x 448 bytes = 7.3 MB.
+/// a full mainnet block has 13 siblings (448 bytes), and this cap fits
+/// [`DEFAULT_MAX_MERKLE_PROOFS`] such proofs.
 pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
-/// The most bytes a PSBT may have, on every path that parses one. A decoded
-/// input or output takes far more memory than its bytes. The densest shape
-/// measured parses at about 102 times its bytes: one input, and outputs that
-/// each carry two empty records. At this limit, the two PSBTs a request can
-/// hold parsed at once fit the heap each worker holds (`memory.rs`).
+/// The most bytes a PSBT may have in the image, on every path that parses
+/// one. The operator can change it (`max_psbt_bytes`). A decoded input or
+/// output takes far more memory than its bytes. The densest shape measured
+/// parses at about 102 times its bytes: one input, and outputs that each
+/// carry two empty records. At this limit, the two PSBTs a request can hold
+/// parsed at once fit the heap each worker holds (`memory.rs`).
 ///
 /// The tested flows are far smaller: a mint is about 1 KiB, and a rights
 /// refill of 255 outputs measured about 40 KiB. rgb-lib puts the whole
@@ -53,12 +54,13 @@ pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 /// that spends very many outputs of large transactions must be split.
 pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
 
-/// Refuses `bytes` over [`MAX_PSBT_BYTES`] before any parse. `what` names the
-/// field in the error.
+/// Refuses `bytes` over `max_psbt_bytes`, the limit in force, before any
+/// parse. `what` names the field in the error.
 pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
-    if bytes.len() > MAX_PSBT_BYTES {
+    let max = crate::limits::get().max_psbt_bytes;
+    if bytes.len() as u64 > max {
         return Err(crate::error::EnclaveError::CrossCheck(format!(
-            "{what} is {} bytes; the limit is {MAX_PSBT_BYTES}",
+            "{what} is {} bytes; the limit is {max}",
             bytes.len()
         )));
     }
@@ -131,8 +133,8 @@ pub struct BridgeConfig {
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
     /// Budget in sats for plain-BTC outputs that do not pay back into the same
-    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers `create_utxo` dust (1000 sats
-    /// each, 5 by default). `0` = unset: production refuses plain-BTC signing.
+    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers the dust outputs of
+    /// `create_utxo`. `0` = unset: production refuses plain-BTC signing.
     pub btc_max_unowned_sats: u64,
     /// Emitter of `FundsIn`/`BridgeFundsIn` (`FUNDS_IN_CONTRACT`), default
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
@@ -154,30 +156,32 @@ pub struct BridgeConfig {
     /// `none` is for a local stand only; production does not boot on it
     /// ([`crate::policy::ProductionPolicy::check_invariants`]).
     pub btc_relay_mode: BtcRelayMode,
-    /// RGB request size limits (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`,
-    /// `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*` value. A
-    /// consignment limit above its default stops the boot
-    /// ([`parse_consignment_limit`]). Not attested.
+    /// Image values of the RGB request size limits (`MAX_CONSIGNMENT_BYTES`,
+    /// `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*`
+    /// value. A consignment limit above its default stops the boot
+    /// ([`parse_consignment_limit`]). Not attested. `SetLimits` can change them.
     pub max_consignment_bytes: usize,
     pub max_merkle_proofs: usize,
     pub max_total_proof_bytes: usize,
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
-    /// 3, at least 1). Image env, so PCR0 measures it, and attested.
+    /// [`DEFAULT_SPV_MIN_CONFIRMATIONS`], at least 1). Image env, so PCR0
+    /// measures it, and attested.
     pub spv_min_confirmations: u32,
     /// Exact sats a witness mint pays to its recipient's output
-    /// (`MINT_WITNESS_SAT`, default 1500, 546 to 10_000). It must equal the
+    /// (`MINT_WITNESS_SAT`, default [`DEFAULT_MINT_WITNESS_SAT`], from
+    /// [`MIN_MINT_WITNESS_SAT`] to [`MAX_MINT_WITNESS_SAT`]). It must equal the
     /// connector's value. Image env, so PCR0 measures it; not attested.
     pub mint_witness_sat: u64,
-    /// Measured commitment to chain endpoint hosts, ports and RPC CA. KMS
-    /// launch fields remain runtime inputs, as in production recovery.
-    pub endpoints_sha256: Option<[u8; 32]>,
     /// The AWS accounts a KMS key may live in (`KMS_ALLOWED_ACCOUNT_IDS`). Image
     /// env, so PCR0 measures it. Empty when unset; a release mint image then
-    /// refuses every key in `SetEndpoints`.
+    /// refuses every key in `SetEndpoints`. A build with no KMS key, such as
+    /// burn, has no list and does not read the env var.
+    #[cfg(feature = "kms-persistence")]
     pub kms_allowed_accounts: Vec<String>,
 }
 
 /// Image env var: the AWS accounts a KMS key may live in.
+#[cfg(feature = "kms-persistence")]
 pub const KMS_ALLOWED_ACCOUNTS_ENV: &str = "KMS_ALLOWED_ACCOUNT_IDS";
 
 /// Env var selecting [`BtcRelayMode`].
@@ -250,7 +254,7 @@ impl Default for BridgeConfig {
             max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
             mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
-            endpoints_sha256: None,
+            #[cfg(feature = "kms-persistence")]
             kms_allowed_accounts: Vec::new(),
         }
     }
@@ -270,11 +274,6 @@ impl BridgeConfig {
         if self.spv_min_confirmations == 0 {
             return Err(
                 "indexer-trusted validation requires at least one Bitcoin confirmation".into(),
-            );
-        }
-        if self.endpoints_sha256.is_none_or(|hash| hash == [0; 32]) {
-            return Err(
-                "RGB validation without SPV requires a nonzero ENDPOINTS_SHA256 pin".into(),
             );
         }
         if !self.is_configured()
@@ -434,10 +433,7 @@ impl BridgeConfig {
             max_total_proof_bytes,
             spv_min_confirmations,
             mint_witness_sat,
-            endpoints_sha256: parse_endpoints_sha256(
-                std::env::var("ENDPOINTS_SHA256").ok().as_deref(),
-            )
-            .unwrap_or_else(|e| panic!("{e}")),
+            #[cfg(feature = "kms-persistence")]
             kms_allowed_accounts: parse_kms_allowed_accounts(
                 std::env::var(KMS_ALLOWED_ACCOUNTS_ENV).ok().as_deref(),
             )
@@ -476,37 +472,10 @@ impl BridgeConfig {
     }
 }
 
-/// Commit network inputs without changing the runtime KMS recovery contract.
-/// Hash the decoded request re-encoded with the pinned protobuf schema.
-/// Keep in sync with `parent/src/bin/cli.rs::endpoints_sha256`.
-pub fn chain_endpoints_sha256(request: &crate::proto::SetEndpointsRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    let mut network = request.clone();
-    // New schema fields must be explicitly classified as hashed or excluded.
-    let crate::proto::SetEndpointsRequest {
-        electrum_url: _,
-        evm_rpc_host: _,
-        evm_rpc_ca_der: _,
-        evm_rpc_tls_port: _,
-        // Hashed: the enclave requests `/` and never reads it, so only the empty
-        // path the parent sends matches the pin.
-        evm_rpc_path: _,
-        kms_key_arn,
-        kms_region,
-        kms_seed_id,
-        kms_expected_evm_address,
-    } = &mut network;
-    kms_key_arn.clear();
-    kms_region.clear();
-    kms_seed_id.clear();
-    kms_expected_evm_address.clear();
-    Sha256::digest(network.encode_to_vec()).into()
-}
-
 /// Parses `KMS_ALLOWED_ACCOUNT_IDS`: comma-separated 12-digit AWS account ids.
 /// Unset or blank gives an empty list. A malformed entry is an error, so a bad
 /// image does not boot with a partial list.
+#[cfg(feature = "kms-persistence")]
 pub fn parse_kms_allowed_accounts(value: Option<&str>) -> std::result::Result<Vec<String>, String> {
     let ids: Vec<String> = value
         .unwrap_or_default()
@@ -526,21 +495,10 @@ pub fn parse_kms_allowed_accounts(value: Option<&str>) -> std::result::Result<Ve
     Ok(ids)
 }
 
-fn parse_endpoints_sha256(value: Option<&str>) -> std::result::Result<Option<[u8; 32]>, String> {
-    match value {
-        None | Some("") => Ok(None),
-        Some(value) => hex::decode(value)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(Some)
-            .ok_or_else(|| "ENDPOINTS_SHA256 must be exactly 64 hex characters".into()),
-    }
-}
-
-/// Parses `MAX_CONSIGNMENT_BYTES`. Unset, unparseable or zero gives the
-/// default, as for the other request limits. A value above
-/// [`DEFAULT_MAX_CONSIGNMENT_BYTES`] is refused, because the memory model
-/// holds only up to that size (`memory.rs`).
+/// Parses `MAX_CONSIGNMENT_BYTES`, the image value of `max_consignment_bytes`.
+/// Unset, unparseable or zero gives the default. A value above
+/// [`DEFAULT_MAX_CONSIGNMENT_BYTES`] is refused, because at the image frame the memory
+/// model holds only up to that size (`memory.rs`). `SetLimits` can change it later.
 pub fn parse_consignment_limit(value: Option<&str>) -> std::result::Result<usize, String> {
     match value
         .and_then(|s| s.parse::<usize>().ok())
@@ -611,7 +569,7 @@ pub const MAX_EVM_RPC_CA_DER_BYTES: usize = 16 * 1024;
 pub const MAX_ENDPOINT_STRING_BYTES: usize = 2048;
 
 /// The TLS pin of the EVM RPC endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EvmRpcTls {
     /// The name for SNI and the certificate check, lowercased.
     pub host: String,
@@ -619,9 +577,42 @@ pub struct EvmRpcTls {
     pub ca_der: Vec<u8>,
     /// The upstream TLS port. The forwarder listens on it in the enclave.
     pub tls_port: u16,
+    /// Runtime RPC path. May contain a credential; redact in diagnostics.
+    pub path: String,
 }
 
-/// Endpoints and KMS pins set once at launch and committed in the attested policy.
+impl std::fmt::Debug for EvmRpcTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvmRpcTls")
+            .field("host", &self.host)
+            .field("ca_der", &self.ca_der)
+            .field("tls_port", &self.tls_port)
+            .field("path", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Accept only an absolute path with unreserved ASCII characters. Keeping
+/// authority, query, fragment and escaping out makes the TLS host independent
+/// of the credential and avoids URL-parser normalization of dot segments.
+#[cfg(feature = "rgb-validation")]
+fn parse_evm_rpc_path(value: &str) -> std::result::Result<String, String> {
+    let path = if value.is_empty() { "/" } else { value };
+    if path.len() > 2048
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || !path
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/-._~".contains(&c))
+        || path.split('/').any(|s| s == "." || s == "..")
+    {
+        return Err("evm_rpc_path must be an absolute ASCII path (max 2048 bytes), without query, fragment, escapes or dot segments".into());
+    }
+    Ok(path.into())
+}
+
+/// Endpoints and KMS pins set once at launch. Production policy commits its
+/// public fields; Development policy does not attest these runtime values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
     /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora).
@@ -630,7 +621,7 @@ pub struct Endpoints {
     pub electrum_url: String,
     pub electrum_host: String,
     pub electrum_port: u16,
-    /// `None` without `evm-rpc`.
+    /// `None` without `rgb-validation`.
     pub evm_rpc_tls: Option<EvmRpcTls>,
     /// `None` without `kms-persistence`, and in an import-only build with no
     /// KMS values.
@@ -646,7 +637,7 @@ impl Endpoints {
 
     /// Check the values this build uses. A value the build does not use
     /// must be empty. `kms_accounts` is the image's account list
-    /// ([`BridgeConfig::kms_allowed_accounts`]). With no list, `allow_unpinned`
+    /// (`KMS_ALLOWED_ACCOUNT_IDS`). With no list, `allow_unpinned`
     /// (a dev or test build) skips the account check and a release build refuses.
     pub fn parse(
         req: &crate::proto::SetEndpointsRequest,
@@ -685,7 +676,7 @@ impl Endpoints {
             (String::new(), 0)
         };
 
-        #[cfg(feature = "evm-rpc")]
+        #[cfg(feature = "rgb-validation")]
         let evm_rpc_tls = {
             let host = parse_host("evm_rpc_host", &req.evm_rpc_host)?;
             // A CA certificate is a few KiB. Refuse more before the parse and
@@ -712,10 +703,12 @@ impl Endpoints {
                 host,
                 ca_der: req.evm_rpc_ca_der.clone(),
                 tls_port,
+                path: parse_evm_rpc_path(&req.evm_rpc_path)?,
             })
         };
-        #[cfg(not(feature = "evm-rpc"))]
+        #[cfg(not(feature = "rgb-validation"))]
         let evm_rpc_tls = {
+            unused("evm_rpc_path", req.evm_rpc_path.is_empty())?;
             unused("evm_rpc_host", req.evm_rpc_host.is_empty())?;
             unused("evm_rpc_ca_der", req.evm_rpc_ca_der.is_empty())?;
             unused("evm_rpc_tls_port", req.evm_rpc_tls_port == 0)?;
@@ -786,7 +779,7 @@ impl Endpoints {
     }
 }
 
-#[cfg(not(all(feature = "evm-rpc", feature = "kms-persistence")))]
+#[cfg(any(not(feature = "rgb-validation"), not(feature = "kms-persistence")))]
 fn unused(name: &str, empty: bool) -> std::result::Result<(), String> {
     if empty {
         Ok(())
@@ -814,15 +807,14 @@ fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
     parse_indexer_url(url, plaintext_indexer_allowed())
 }
 
-/// True for a test, debug, mock-attestation or seed-import build. These are
-/// the inputs that make [`crate::policy::SecurityPolicy::resolve`] return a
-/// development policy.
+/// Only test, debug, mock-attestation and seed-import builds allow plaintext.
+/// Release images refuse it with or without SPV, including IndexerTrusted
+/// builds whose attested policy is Development.
 ///
 /// Over `tcp://` or `http://` the host reads and changes every indexer answer.
-/// The mint path has no SPV check, so the indexer alone says whether its
-/// history witnesses are mined. The attested policy commits the indexer host, not its
-/// scheme. Thus a release image refuses plaintext: the rule is in the code,
-/// and PCR0 measures it.
+/// A no-SPV burn signer trusts the indexer for witness status. TLS authenticates
+/// that endpoint; it does not prove Bitcoin consensus. The release TLS rule
+/// is enforced by code and measured into PCR0.
 #[cfg(feature = "rgb-validation")]
 fn plaintext_indexer_allowed() -> bool {
     let ctx = crate::policy::BuildContext::current();
@@ -901,100 +893,52 @@ mod tests {
     use crate::proto::SetEndpointsRequest;
 
     #[test]
-    fn endpoints_digest_matches_the_parent_golden_vector_and_excludes_kms() {
-        // The parent uses the upstream protobuf crate; the enclave vendors its
-        // schema. Keep this independently computed wire vector equal in both.
-        let mut request = SetEndpointsRequest {
-            electrum_url: "ssl://electrum.test:50002".into(),
-            evm_rpc_host: "rpc.test".into(),
-            evm_rpc_ca_der: vec![1, 2, 3],
-            evm_rpc_tls_port: 443,
-            kms_key_arn: "key".into(),
-            kms_region: "region".into(),
-            kms_seed_id: "seed".into(),
-            kms_expected_evm_address: "address".into(),
-            evm_rpc_path: String::new(),
-        };
-        let expected = "cca35663561e3945f16a6163c8a1aeac8a5547018748353925c4f3a47f9d9ec9";
-        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
-
-        // The EVM RPC path is a network input: another path misses the pin.
-        let other_path = SetEndpointsRequest {
-            evm_rpc_path: "/v2/key".into(),
-            ..request.clone()
-        };
-        assert_ne!(hex::encode(chain_endpoints_sha256(&other_path)), expected);
-
-        // Runtime seed recovery inputs must not require another measured EIF.
-        for field in [
-            &mut request.kms_key_arn,
-            &mut request.kms_region,
-            &mut request.kms_seed_id,
-            &mut request.kms_expected_evm_address,
-        ] {
-            field.clear();
-        }
-        assert_eq!(hex::encode(chain_endpoints_sha256(&request)), expected);
-    }
-
-    #[test]
-    fn endpoints_digest_env_requires_exactly_64_hex_characters() {
-        assert_eq!(parse_endpoints_sha256(None), Ok(None));
-        assert_eq!(parse_endpoints_sha256(Some("")), Ok(None));
-        for value in ["ab".repeat(32), "AB".repeat(32)] {
-            assert_eq!(parse_endpoints_sha256(Some(&value)), Ok(Some([0xab; 32])));
-        }
-        for value in [
-            "a".repeat(63),
-            "a".repeat(65),
-            "gg".repeat(32),
-            format!("0x{}", "ab".repeat(32)),
-            format!(" {}", "ab".repeat(32)),
-            format!("{} ", "ab".repeat(32)),
-        ] {
-            assert!(parse_endpoints_sha256(Some(&value)).is_err(), "{value}");
-        }
-    }
-
-    #[test]
-    fn endpoints_digest_from_env_installs_or_rejects_the_pin() {
+    fn endpoints_sha256_env_does_not_affect_bridge_configuration() {
         const CHILD: &str = "UTEXO_TEST_ENDPOINTS_ENV_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let config = BridgeConfig::from_env();
-            assert_eq!(config.endpoints_sha256, Some([0xab; 32]));
+            config.validate_indexer_only().unwrap();
+            assert_eq!(config.chain_id, 42161);
+            assert_eq!(config.bridge_contract, [1; 20]);
+            assert_eq!(config.funds_in_contract, [2; 20]);
+            assert_eq!(config.token_contract, [3; 20]);
+            assert_eq!(config.rgb_asset_id, "test-asset");
             return;
         }
 
-        // Isolate environment changes from the other parallel config tests.
-        for (value, valid) in [("ab".repeat(32), true), ("not-a-digest".into(), false)] {
+        // An `ENDPOINTS_SHA256` env value must not pin endpoints or stop
+        // startup, even when it is malformed. A child process isolates the env.
+        for value in [String::new(), "ab".repeat(32), "not-a-digest".into()] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "config::tests::endpoints_digest_from_env_installs_or_rejects_the_pin",
+                    "config::tests::endpoints_sha256_env_does_not_affect_bridge_configuration",
                     "--nocapture",
                 ])
                 .env_clear()
                 .env(CHILD, "1")
                 .env("ENDPOINTS_SHA256", value)
+                .env("BITCOIN_NETWORK", "signet")
+                .env("BTC_RELAY_MODE", "none")
+                .env("EVM_CHAIN_ID", "42161")
+                .env("EVM_PROXY_CONTRACT_ADDRESS", "01".repeat(20))
+                .env("FUNDS_IN_CONTRACT", "02".repeat(20))
+                .env("TOKEN_CONTRACT", "03".repeat(20))
+                .env("RGB_ASSET_ID", "test-asset")
                 .output()
                 .unwrap();
-            assert_eq!(
+            assert!(
                 output.status.success(),
-                valid,
                 "stdout: {}\nstderr: {}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-            if !valid {
-                assert!(String::from_utf8_lossy(&output.stderr)
-                    .contains("ENDPOINTS_SHA256 must be exactly 64 hex characters"));
-            }
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         }
     }
 
     /// Every name the SPV chain runs on attests the network a verifier
-    /// expects for that same name (W-04: testnet4 attested as mainnet).
+    /// expects for that same name (testnet4 attested as mainnet).
     #[test]
     fn attested_network_matches_the_spv_network() {
         use crate::networks::rgb::spv::Network;
@@ -1205,12 +1149,6 @@ mod tests {
         assert!(c.is_partially_configured());
     }
 
-    /// Default is the fail-closed `None`: only `value == 0`.
-    #[test]
-    fn gas_tx_value_ceiling_defaults_to_unset() {
-        assert_eq!(BridgeConfig::default().gas_tx_max_value_wei, None);
-    }
-
     #[test]
     fn zero_chain_id_is_not_configured() {
         let c = BridgeConfig {
@@ -1232,7 +1170,7 @@ mod tests {
         if cfg!(feature = "rgb-validation") {
             req.electrum_url = "ssl://Electrum.test:50002".into();
         }
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             req.evm_rpc_host = "RPC.Test".into();
             req.evm_rpc_ca_der = hex::decode(CA_HEX.trim()).unwrap();
             req.evm_rpc_tls_port = 443;
@@ -1256,6 +1194,7 @@ mod tests {
         Endpoints::parse(&req, &[], true)
     }
 
+    #[cfg(feature = "kms-persistence")]
     #[test]
     fn the_account_list_parses_ids_and_refuses_a_malformed_entry() {
         assert_eq!(parse_kms_allowed_accounts(None), Ok(vec![]));
@@ -1276,7 +1215,7 @@ mod tests {
             assert_eq!(e.electrum_host, "electrum.test");
             assert_eq!(e.electrum_port, 50002);
         }
-        assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "evm-rpc"));
+        assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "rgb-validation"));
         if let Some(tls) = e.evm_rpc_tls {
             assert_eq!(tls.host, "rpc.test");
             assert_eq!(tls.tls_port, 443);
@@ -1351,7 +1290,7 @@ mod tests {
         // The EVM RPC forwarder takes another loopback port than Esplora's 443.
         let e = parse_with(|r| {
             r.electrum_url = "https://esplora.test".into();
-            if cfg!(feature = "evm-rpc") {
+            if cfg!(feature = "rgb-validation") {
                 r.evm_rpc_tls_port = 8443;
             }
         })
@@ -1377,7 +1316,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_host_must_be_a_host_name() {
         // A DNS name up to 253 bytes total, no label over 63.
@@ -1418,7 +1357,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_ca_must_be_a_valid_certificate() {
         let der = hex::decode(CA_HEX.trim()).unwrap();
@@ -1469,7 +1408,7 @@ mod tests {
         peak::assert_within_request_bound("SetEndpoints with a 4 MiB key ARN", arn.len(), peak);
     }
 
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     #[test]
     fn evm_rpc_tls_port_must_be_a_free_port() {
         for port in [0, 65536, 50002] {
@@ -1477,12 +1416,61 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "rgb-validation"))]
+    #[test]
+    fn unsupported_rpc_paths_are_refused_without_echoing_them() {
+        Endpoints::parse(&valid(), &[], true).unwrap();
+        for path in [
+            "/",
+            "/v2/private-api-key",
+            "https://other.test/private-api-key",
+        ] {
+            let err = parse_with(|r| r.evm_rpc_path = path.into()).unwrap_err();
+            assert_eq!(err, "evm_rpc_path is set, but this build does not use it");
+        }
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn rpc_path_is_parsed_and_debug_redacted() {
+        let root = parse_with(|_| {}).unwrap();
+        assert_eq!(root.evm_rpc_tls.unwrap().path, "/");
+        let e = parse_with(|r| r.evm_rpc_path = "/v3/fixture-secret".into()).unwrap();
+        assert_eq!(e.evm_rpc_tls.as_ref().unwrap().path, "/v3/fixture-secret");
+        assert!(!format!("{e:?}").contains("fixture-secret"));
+        assert!(format!("{e:?}").contains("[REDACTED]"));
+    }
+
+    #[cfg(feature = "rgb-validation")]
+    #[test]
+    fn rpc_path_rejects_authority_query_fragment_and_normalization() {
+        for bad in [
+            "https://other.test/key",
+            "//other.test/key",
+            "key",
+            "/x?key=y",
+            "/x#key",
+            "/x\\key",
+            "/x\r\nheader",
+            "/x/../key",
+            "/./key",
+            "/%2e%2e/key",
+            "/clé",
+            "/key with space",
+        ] {
+            let err = parse_with(|r| r.evm_rpc_path = bad.into()).unwrap_err();
+            assert!(err.contains("evm_rpc_path"));
+            assert!(!err.contains(bad));
+        }
+        assert!(parse_with(|r| r.evm_rpc_path = format!("/{}", "a".repeat(2048))).is_err());
+    }
+
     #[test]
     fn a_value_the_build_does_not_use_is_refused() {
         if !cfg!(feature = "rgb-validation") {
             assert!(parse_with(|r| r.electrum_url = "ssl://electrum.test:50002".into()).is_err());
         }
-        if !cfg!(feature = "evm-rpc") {
+        if !cfg!(feature = "rgb-validation") {
             assert!(parse_with(|r| r.evm_rpc_host = "rpc.test".into()).is_err());
             assert!(parse_with(|r| r.evm_rpc_ca_der = vec![1]).is_err());
             assert!(parse_with(|r| r.evm_rpc_tls_port = 443).is_err());

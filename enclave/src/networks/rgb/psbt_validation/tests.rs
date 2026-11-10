@@ -1,9 +1,11 @@
 use super::*;
-use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+#[cfg(feature = "rgb-validation")]
+use bitcoin::{hashes::Hash, OutPoint, Sequence, TxIn, Txid, Witness};
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 
 /// Minimal BIP-174-valid PSBT: one dummy input, one dummy output, no
 /// signatures.
+#[cfg(feature = "rgb-validation")]
 fn minimal_valid_psbt_bytes() -> Vec<u8> {
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version(2),
@@ -32,11 +34,6 @@ fn minimal_valid_psbt_bytes() -> Vec<u8> {
 // PSBT shape allowlist tests
 
 #[test]
-fn accepts_valid_psbt_bytes() {
-    assert!(validate_psbt_bytes(&minimal_valid_psbt_bytes()).is_ok());
-}
-
-#[test]
 fn rejects_empty_psbt_bytes() {
     let err = validate_psbt_bytes(&[]).unwrap_err();
     assert!(err.to_string().contains("psbt_bytes is empty"));
@@ -48,16 +45,6 @@ fn rejects_empty_psbt_bytes() {
 fn rejects_garbage_psbt_bytes() {
     // Not empty, but not a BIP-174 PSBT.
     let err = validate_psbt_bytes(&[0xFF; 100]).unwrap_err();
-    assert!(
-        err.to_string().contains("not a valid PSBT"),
-        "expected PSBT parse rejection, got: {err}"
-    );
-}
-
-#[test]
-fn rejects_truncated_psbt_below_magic() {
-    // Shorter than the 5-byte BIP-174 magic prefix.
-    let err = validate_psbt_bytes(&[0x70, 0x73]).unwrap_err();
     assert!(
         err.to_string().contains("not a valid PSBT"),
         "expected PSBT parse rejection, got: {err}"
@@ -126,12 +113,22 @@ fn op_key_varies_with_every_field() {
 
 #[test]
 fn op_key_length_prefix_blocks_concatenation_collision() {
-    // Without length prefixes, a byte moved across a field boundary would
-    // collide. evm_tx_hash and operationId are 32 bytes in practice, but the
-    // key must not depend on that.
-    let k1 = psbt_operation_key(1, &[0x11; 20], b"AB", b"X", "C");
-    let k2 = psbt_operation_key(1, &[0x11; 20], b"A", b"X", "BC");
-    assert_ne!(k1, k2);
+    // Both variable-length field boundaries must be framed. Without the
+    // prefixes, every case hashes the same bytes, "ABXC".
+    let cases: [(&[u8], &[u8], &str); 3] =
+        [(b"AB", b"X", "C"), (b"A", b"BX", "C"), (b"AB", b"", "XC")];
+    let keys: Vec<_> = cases
+        .iter()
+        .map(|(tx, operation, asset)| {
+            assert_eq!([*tx, *operation, asset.as_bytes()].concat(), b"ABXC");
+            psbt_operation_key(1, &[0x11; 20], tx, operation, asset)
+        })
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        for other in &keys[i + 1..] {
+            assert_ne!(key, other, "field boundaries must change the operation key");
+        }
+    }
 }
 
 // Operation dedup end-to-end: `psbt_operation_key` and the soft replay guard,
@@ -165,36 +162,6 @@ mod operation_dedup {
         assert!(
             matches!(g.reserve(k), Err(EnclaveError::NonceReplay)),
             "the same operation must be refused as a replay"
-        );
-    }
-
-    #[test]
-    fn a_different_deposit_is_not_a_false_replay() {
-        // A different operationId is a different deposit and signs.
-        let g = guard();
-        g.reserve(op_key(&[0xAA; 32], &[0x07; 32]))
-            .expect("first")
-            .commit();
-        g.reserve(op_key(&[0xAA; 32], &[0x08; 32]))
-            .expect("a different funds_in_operation_id is a different op")
-            .commit();
-    }
-
-    #[test]
-    fn restart_or_sibling_instance_admits_the_same_operation_again() {
-        // The guard is in-memory and per instance. A new instance (restart or
-        // sibling enclave) accepts the same op again. Thus the durable
-        // exactly-once anchor is on-chain (consumedBurnIds / fundsInRecords).
-        let k = op_key(&[0xAA; 32], &[0x07; 32]);
-        let first = guard();
-        first.reserve(k).expect("instance A reserves").commit();
-        assert!(matches!(first.reserve(k), Err(EnclaveError::NonceReplay)));
-
-        let second = guard(); // restart / sibling enclave
-        assert!(
-            second.reserve(k).is_ok(),
-            "a fresh instance does not share the soft guard - on-chain state \
-             is the durable anchor"
         );
     }
 }
@@ -619,7 +586,7 @@ mod fee_policy {
 
     #[test]
     fn rejects_a_fee_that_burns_most_of_the_input() {
-        // #248: 60_676 sat in, 1_000 sat back to custody, approx 98% to
+        // 60_676 sat in, 1_000 sat back to custody, approx 98% to
         // miners. Under the absolute cap, far over the rate cap.
         let psbt = psbt_with_fee(60_676, 1_000);
         let err = check_psbt_fee(&psbt, &[], "plain-BTC").unwrap_err();

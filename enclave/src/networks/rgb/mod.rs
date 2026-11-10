@@ -24,14 +24,13 @@ pub mod btc_crosscheck;
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
-// The invoice bind reads a verified BridgeFundsIn log. It needs `evm-rpc` to
-// fetch that log (`evm-rpc` implies `rgb-validation`).
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+// The invoice bind reads a verified BridgeFundsIn log.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub mod invoice;
 // The mint signer reads mints and refills from their fascias, with no consignment.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub mod parent_proof;
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub mod psbt_commit;
 #[cfg(evm_to_rgb)]
 mod psbt_fee_size;
@@ -49,7 +48,7 @@ pub mod validation;
 pub use route::validate_destination;
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use route::validate_destination_anchor;
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use route::validate_rights_refill;
 #[cfg(rgb_to_evm)]
 pub use route::validate_source;

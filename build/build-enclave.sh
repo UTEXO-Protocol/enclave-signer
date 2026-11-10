@@ -15,16 +15,15 @@
 #                    (mint, burn)
 #   KMS_ALLOWED_ACCOUNT_IDS  mint only: AWS accounts of the seed KMS key; the
 #                    recipe fails the build without it
-#   ENCLAVE_DEBUG_FEATURES optional test features; leave empty for production
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
 #   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   RGB_PRIVATE_DEPS_TOKEN  token with read access to the UTEXO-Protocol/<repo>-s-bfa
-#                           mirrors of the RGB protocol crates
+#   RGB_PRIVATE_DEPS_TOKEN  token the build scripts require; it maps no URL,
+#                           because the RGB protocol crates are public
 #   PRIVATE_DEPS_DIR        or a directory with those in lib_key and rgb_deps_token files
 #
-# rgb-lib and the RGB protocol crates it pins come from private mirrors. The
-# key and the token go in BuildKit secrets: never in a build arg, a layer, the
-# image or PCR0.
+# rgb-lib comes from a private mirror and the RGB protocol crates it pins from
+# public repos. The key and the token go in BuildKit secrets: never in a build
+# arg, a layer, the image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -57,10 +56,9 @@ OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 IMAGE_TAG="${IMAGE_TAG:-utexo-bridge-enclave:latest}"
 # Which enclave image to build. Required. Production is
 # DOCKERFILE=Dockerfile.enclave.mint / Dockerfile.enclave.burn (the two BFA
-# signer EIFs). The other one is Dockerfile.enclave.ccd. EIF_NAME names the
-# output .eif and its SHA256SUMS entry; the default keeps the historical
-# artifact name.
-DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint, .burn or .ccd)}"
+# signer EIFs). EIF_NAME names the
+# output .eif and its SHA256SUMS entry.
+DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint or .burn)}"
 BUILD_PROFILE="${BUILD_PROFILE:-default}"
 case "$BUILD_PROFILE" in
     default) ;;
@@ -84,7 +82,7 @@ command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 mkdir -p "$OUT_DIR"
 
 # Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
-# Reject a missing asset before the build starts. (F06-AF-38)
+# Reject a missing asset before the build starts.
 # A fixed ENV asset does not need a build argument.
 BUILD_ARGS=()
 declares_build_arg() {
@@ -117,20 +115,21 @@ if declares_build_arg KMS_ALLOWED_ACCOUNT_IDS; then
     echo "    kms accounts : $KMS_ALLOWED_ACCOUNT_IDS"
 fi
 
-# Optional measured configuration for the mint/burn recipes. Unset values
-# retain each Dockerfile's production defaults.
+# Optional measured protocol configuration for the mint/burn recipes. Member
+# endpoints are launch inputs in every profile. Unset protocol values retain
+# each Dockerfile's production defaults.
 if declares_build_arg ENCLAVE_FEATURES; then
     # Match Docker's effective defaults when an override is unset or empty.
     build_features="${ENCLAVE_FEATURES:-$(sed -n 's/^ARG ENCLAVE_FEATURES=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
     bitcoin_network="${BITCOIN_NETWORK:-$(sed -n 's/^ARG BITCOIN_NETWORK=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
     if [ "$bitcoin_network" != signet ] && \
-        ! grep -qE '(^|[[:space:],])rgb([[:space:],]|$)' <<< "$build_features"; then
-        echo "Error: $DOCKERFILE requires the rgb feature when BITCOIN_NETWORK=$bitcoin_network." >&2
-        echo "       Include rgb in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
+        ! grep -qE '(^|[[:space:],])spv([[:space:],]|$)' <<< "$build_features"; then
+        echo "Error: $DOCKERFILE requires the spv feature when BITCOIN_NETWORK=$bitcoin_network." >&2
+        echo "       Include spv in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
         exit 1
     fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
-        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT ENDPOINTS_SHA256 \
+        EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT \
         GAS_TX_ALLOWED_TO GAS_TX_MAX_GAS_LIMIT GAS_TX_MAX_FEE_PER_GAS GAS_TX_MAX_VALUE_WEI \
         GAS_TX_ALLOWED_SELECTORS RUST_LOG; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
@@ -158,17 +157,10 @@ elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ] && [ -n "${RGB_PRIVATE_DEPS_TOKEN:-}" 
     )
 else
     echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa" >&2
-    echo "       and a token with read access to the UTEXO-Protocol/<repo>-s-bfa RGB crate mirrors." >&2
+    echo "       and the token that the build scripts require, although it maps no URL." >&2
     echo "       Set RGB_LIB_BFA_DEPLOY_KEY and RGB_PRIVATE_DEPS_TOKEN, or PRIVATE_DEPS_DIR with" >&2
     echo "       lib_key and rgb_deps_token files." >&2
     exit 1
-fi
-
-# Forward debug features only when set. (F03-AF-12)
-# Do not set ENCLAVE_DEBUG_FEATURES for production builds.
-if [ -n "${ENCLAVE_DEBUG_FEATURES:-}" ]; then
-    BUILD_ARGS+=(--build-arg "ENCLAVE_DEBUG_FEATURES=$ENCLAVE_DEBUG_FEATURES")
-    echo "    DEBUG feats  : $ENCLAVE_DEBUG_FEATURES  (⚠ NON-PRODUCTION EIF)"
 fi
 
 # --- 1. Build the docker image ---------------------------------------------

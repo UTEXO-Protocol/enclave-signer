@@ -2340,7 +2340,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "curve25519-dalek-derive",
- "digest 0.11.3",
  "fiat-crypto",
  "rustc_version 0.4.1",
  "subtle",
@@ -2666,28 +2665,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ed25519"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
-dependencies = [
- "signature 3.0.0",
-]
-
-[[package]]
-name = "ed25519-dalek"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
-dependencies = [
- "curve25519-dalek",
- "ed25519",
- "sha2 0.11.0",
- "subtle",
- "zeroize",
-]
-
-[[package]]
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2872,7 +2849,7 @@ dependencies = [
 [[package]]
 name = "federated-signer-proto"
 version = "0.1.0"
-source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0#6c10ce0a58f7bf99c43ddadacfe02cb4df0616b0"
+source = "git+ssh://git@github-federated-signer/UTEXO-Protocol/federated-signer-proto.git?rev=97fad47ab026354d43809f970704dc27cfd09884#97fad47ab026354d43809f970704dc27cfd09884"
 dependencies = [
  "bytes",
  "prost",
@@ -4518,7 +4495,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6441,7 +6418,6 @@ dependencies = [
  "bip39",
  "bitcoin",
  "chacha20poly1305",
- "ed25519-dalek",
  "enclave-proto",
  "getrandom 0.4.3",
  "hex",
@@ -6456,7 +6432,6 @@ dependencies = [
  "rgb-lib",
  "rgb-ops",
  "rgb-schemas",
- "rgb-strict-encoding",
  "rustls-pki-types",
  "rustls-webpki 0.103.15",
  "secrecy",

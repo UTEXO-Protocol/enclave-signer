@@ -28,13 +28,11 @@ pub const POLICY_COMMITMENT_V1: u8 = 1;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignerRole {
-    /// No signer role: an image that is neither mint nor burn (for example
-    /// the `ccd` image).
+    /// No signer role: an image that is neither mint nor burn.
     Combined = 0,
     /// `mint-signer`: EVM -> RGB only. Refuses every `fundsOut` release.
     Mint = 1,
-    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT. A `ccd`
-    /// dev build also signs CCD -> EVM. No shipped burn image has `ccd`.
+    /// `burn-signer`: EVM releases only. Refuses every RGB mint PSBT.
     Burn = 2,
 }
 
@@ -53,13 +51,13 @@ impl SignerRole {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvmDataSource {
-    /// No EVM verification in the build (`evm-rpc` off). The enclave rejects
+    /// No EVM verification in the build (`rgb-validation` off). The enclave rejects
     /// every EVM->RGB bridge request.
     Disabled = 0,
     /// Plaintext JSON-RPC over the host relay. The host can forge the
     /// responses. Dev and test builds only.
     RawRpc = 1,
-    // 2 is retired. Do not reuse it.
+    // 2 is reserved. Do not use it.
     /// JSON-RPC over TLS that ends inside the enclave. The host relays only
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
@@ -181,7 +179,7 @@ pub enum AttestationMode {
 ///
 /// [`Production`](AttestedPolicy::Production) is the fail-closed bridge
 /// posture: fully pinned, real attestation, SPV anchors and a known EVM data
-/// source. A debug, dev-feature, unpinned or non-bridge build is
+/// source. A debug, dev-feature, no-SPV, unpinned or non-bridge build is
 /// [`Development`](AttestedPolicy::Development). A production verifier must
 /// reject it.
 // Built once at boot, so the variant size difference does not matter.
@@ -991,7 +989,7 @@ mod tests {
         let mut network = good.clone();
         network[15] = 6;
         bad.push(network);
-        // EVM source 2 (retired) is no longer valid.
+        // EVM source 2 is not a valid source.
         let mut evm = good.clone();
         evm[5] = 2;
         bad.push(evm);
@@ -1024,12 +1022,22 @@ mod tests {
     }
 
     #[test]
-    fn asset_is_length_prefixed_not_ambiguous() {
-        // The u32 length prefix stops confusion between asset IDs that share
-        // a prefix.
-        let a = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
-        let b = prod(false, EvmDataSource::RawRpc, 1, 0x11, "abc");
-        assert_ne!(a.to_bytes(), b.to_bytes());
+    fn asset_length_prefix_matches_the_wire_contract() {
+        // Fixed offset from the documented V1 layout: tags (7), chain (8),
+        // network (1), bridge address (20). Do not discover it with to_bytes.
+        const OFFSET: usize = 36;
+        let policy = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
+        let bytes = policy.to_bytes();
+        assert_eq!(&bytes[OFFSET..OFFSET + 6], b"\x00\x00\x00\x02ab");
+        assert_eq!(AttestedPolicy::from_bytes(&bytes), Ok(policy));
+        for wrong_length in [0u32, 1, 3, u32::MAX] {
+            let mut corrupted = bytes.clone();
+            corrupted[OFFSET..OFFSET + 4].copy_from_slice(&wrong_length.to_be_bytes());
+            assert!(
+                AttestedPolicy::from_bytes(&corrupted).is_err(),
+                "{wrong_length}"
+            );
+        }
     }
 
     // ---- gas-tx rule commitment ----
@@ -1075,9 +1083,9 @@ mod tests {
     }
 
     #[test]
-    fn selector_count_is_length_prefixed() {
-        // The selector count is length-prefixed, so a set cannot be confused
-        // with a longer set that shares a prefix.
+    fn selector_count_prefix_matches_the_wire_contract() {
+        // V1 offset for base(): 9-byte asset, 13-byte indexer host, no TLS pin.
+        const OFFSET: usize = 152;
         let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
         let two = base_with_gas(
             [0xAA; 20],
@@ -1086,6 +1094,22 @@ mod tests {
             0,
             vec![[1, 1, 1, 1], [2, 2, 2, 2]],
         );
-        assert_ne!(one.to_bytes(), two.to_bytes());
+        let one_bytes = one.to_bytes();
+        let two_bytes = two.to_bytes();
+        assert_eq!(&one_bytes[OFFSET..OFFSET + 8], &[0, 0, 0, 1, 1, 1, 1, 1]);
+        assert_eq!(
+            &two_bytes[OFFSET..OFFSET + 12],
+            &[0, 0, 0, 2, 1, 1, 1, 1, 2, 2, 2, 2]
+        );
+        assert_eq!(AttestedPolicy::from_bytes(&one_bytes), Ok(one));
+        assert_eq!(AttestedPolicy::from_bytes(&two_bytes), Ok(two));
+        for wrong_count in [0u32, 2, u32::MAX] {
+            let mut corrupted = one_bytes.clone();
+            corrupted[OFFSET..OFFSET + 4].copy_from_slice(&wrong_count.to_be_bytes());
+            assert!(
+                AttestedPolicy::from_bytes(&corrupted).is_err(),
+                "{wrong_count}"
+            );
+        }
     }
 }

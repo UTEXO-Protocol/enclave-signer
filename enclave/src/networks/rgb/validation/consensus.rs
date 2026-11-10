@@ -39,9 +39,9 @@ use crate::error::{EnclaveError, Result};
 impl RgbValidator {
     /// Validates raw consignment bytes and returns the extracted data.
     ///
-    /// `bind` binds every mint anchor to a lock. Builds without
-    /// `bfa-validation` pass `None`, and then a consignment with any mint in
-    /// its history is refused. `witnesses` says which witness txs are mined.
+    /// `bind` binds every mint anchor to a lock. With `None`, a consignment
+    /// with any mint in its history is refused. `witnesses` says which witness
+    /// txs are mined.
     /// `lists` binds the asset before rgb-lib runs, and reads its reject list.
     pub fn validate_consignment(
         &self,
@@ -258,8 +258,8 @@ fn summarize(
     })
 }
 
-/// Witnesses rgb-lib did not see mined, in display order: at most the one the
-/// swap flow signs.
+/// Witnesses rgb-lib did not see mined, in display order. A passing validation
+/// leaves none: the resolver refuses every unmined witness.
 fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32]>> {
     let mut txids = BTreeSet::new();
     for witness in &validation.witnesses {
@@ -325,8 +325,8 @@ pub(super) fn validation_error(
 ) -> EnclaveError {
     use rgb_lib::Error as E;
     let text = match &e {
-        E::NoClaimResolver => "consignment carries BFA mint claims, but this build binds none \
-                                (built without bfa-validation) - refusing to validate"
+        E::NoClaimResolver => "consignment carries BFA mint claims, but no lock binder is set - \
+                                refusing to validate"
             .to_string(),
         E::NoRejectListResolver => "the asset declares a reject list, but this build cannot read \
                                     it - refusing to sign"

@@ -28,27 +28,21 @@ pub(super) fn handle_set_endpoints(
         ));
     }
 
-    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
-    if ctx.bridge_config.endpoints_sha256 != Some(crate::config::chain_endpoints_sha256(&req)) {
-        return Err(EnclaveError::InvalidRequest(
-            "SetEndpoints does not match the measured ENDPOINTS_SHA256 pin".into(),
-        ));
-    }
-
-    let endpoints = Endpoints::parse(
-        &req,
-        &ctx.bridge_config.kms_allowed_accounts,
-        ctx.build_ctx.debug_or_test,
-    )
-    .map_err(EnclaveError::InvalidRequest)?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "kms-persistence")]
+    let kms_accounts = ctx.bridge_config.kms_allowed_accounts.as_slice();
+    // This build takes no KMS key, so it has no account list.
+    #[cfg(not(feature = "kms-persistence"))]
+    let kms_accounts: &[String] = &[];
+    let endpoints = Endpoints::parse(&req, kms_accounts, ctx.build_ctx.debug_or_test)
+        .map_err(EnclaveError::InvalidRequest)?;
+    #[cfg(feature = "rgb-validation")]
     let tls = endpoints
         .evm_rpc_tls
         .as_ref()
         .ok_or_else(|| EnclaveError::InvalidRequest("the EVM RPC endpoint is not set".into()))?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     let (evm_source, evm_rpc_tls) = crate::bootstrap::resolve_evm_data_source(tls);
-    #[cfg(not(feature = "evm-rpc"))]
+    #[cfg(not(feature = "rgb-validation"))]
     let (evm_source, evm_rpc_tls) = (crate::policy::EvmDataSource::Disabled, None);
     let policy = SecurityPolicy::resolve(
         &ctx.build_ctx,
@@ -74,20 +68,20 @@ pub(super) fn handle_set_endpoints(
         .transpose()?;
 
     // Unit tests cannot do the loopback binds and the /etc/hosts pin
-    // (port 443, root). Thus `cfg(test)` skips them.
+    // (privileged ports, root). Thus `cfg(test)` skips them.
     #[cfg(all(feature = "vsock", target_os = "linux", not(test)))]
     let listeners = bind_all(&forwarder_plan(&endpoints))?;
 
     #[cfg(feature = "rgb-validation")]
     let rgb_validator = crate::bootstrap::build_rgb_validator(endpoints.electrum_url.clone())
         .ok_or_else(|| EnclaveError::Internal("cannot build the RGB validator".into()))?;
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     let evm_rpc_client = crate::bootstrap::build_evm_rpc_client(tls)
         .ok_or_else(|| EnclaveError::Internal("cannot build the EVM RPC client".into()))?;
     let launch = Launch {
         #[cfg(feature = "rgb-validation")]
         rgb_validator: Some(rgb_validator),
-        #[cfg(feature = "evm-rpc")]
+        #[cfg(feature = "rgb-validation")]
         evm_rpc_client: Some(evm_rpc_client),
         endpoints,
         policy,
@@ -152,7 +146,7 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32, bool)> {
         vsock_port("ESPLORA_VSOCK_PORT", 8001),
         endpoints.indexer_uses_tls(),
     ));
-    #[cfg(feature = "evm-rpc")]
+    #[cfg(feature = "rgb-validation")]
     if let Some(tls) = &endpoints.evm_rpc_tls {
         plan.push((
             SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, tls.tls_port),
@@ -160,7 +154,8 @@ fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32, bool)> {
             true,
         ));
     }
-    // KMS and EVM RPC both use port 443, so KMS takes its own address.
+    // The EVM RPC can use the KMS port (`crate::kms::KMS_PORT`), so KMS takes
+    // its own loopback address.
     #[cfg(feature = "kms-persistence")]
     if endpoints.kms.is_some() {
         plan.push((
@@ -235,7 +230,7 @@ mod tests {
         if cfg!(feature = "rgb-validation") {
             req.electrum_url = format!("ssl://electrum{n}.test:50002");
         }
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             req.evm_rpc_host = format!("rpc{n}.test");
             req.evm_rpc_ca_der =
                 hex::decode(include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim())
@@ -294,7 +289,6 @@ mod tests {
             Request::SignBtc(SignBtcRequest::default()),
             Request::SignRightsRefill(SignRightsRefillRequest::default()),
             Request::SignRawDigest(SignRawDigestRequest::default()),
-            Request::SignCcd(SignCcdRequest::default()),
             Request::GetAttestedPublicKey(GetAttestedPublicKeyRequest { nonce: vec![0; 32] }),
         ] {
             // A request that this build does not serve has its own refusal.
@@ -308,7 +302,7 @@ mod tests {
             assert!(not_ready(call(&ctx, request)));
         }
         // The mint signer serves the refill, so it waits for the set too.
-        if cfg!(all(feature = "bfa-mint", evm_to_rgb)) {
+        if cfg!(all(feature = "rgb-validation", evm_to_rgb)) {
             let refill = Request::SignRightsRefill(SignRightsRefillRequest::default());
             assert!(not_ready(call(&ctx, refill)));
         }
@@ -355,7 +349,7 @@ mod tests {
             electrum_url: "ftp://electrum.test:1".into(),
             ..valid(1)
         }];
-        if cfg!(feature = "evm-rpc") {
+        if cfg!(feature = "rgb-validation") {
             bad.push(SetEndpointsRequest {
                 evm_rpc_host: "rpc.test:443".into(),
                 ..valid(1)
@@ -541,22 +535,6 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
-    /// A release bridge build with no bridge pins gets a policy that fails
-    /// the launch gate. The set is refused without a panic.
-    #[test]
-    fn a_policy_that_fails_the_launch_gate_is_refused() {
-        let release = BuildContext {
-            debug_or_test: false,
-            mock_attestation: false,
-            allow_seed_import: false,
-            rgb_validation: true,
-            ..BuildContext::current()
-        };
-        let ctx = awaiting(release);
-        assert!(handle_set_endpoints(&ctx, valid(1)).is_err());
-        assert!(ctx.launch.get().is_none());
-    }
-
     #[test]
     fn a_second_set_is_refused_and_the_first_values_stay() {
         let ctx = awaiting(BuildContext::current());
@@ -567,6 +545,34 @@ mod tests {
             assert!(err.to_string().contains("already set"), "{err}");
         }
         assert_eq!(ctx.launch().unwrap().endpoints, first);
+    }
+
+    #[cfg(feature = "spv")]
+    #[test]
+    fn the_same_spv_build_accepts_different_runtime_hosts_ports_and_ca() {
+        let first = valid(1);
+        let second = SetEndpointsRequest {
+            electrum_url: "ssl://member-two-indexer.test:50003".into(),
+            evm_rpc_host: "member-two-rpc.test".into(),
+            evm_rpc_ca_der: hex::decode(
+                include_str!("../../tests/fixtures/evm_rpc_tls/ca_b.der.hex").trim(),
+            )
+            .unwrap(),
+            evm_rpc_tls_port: 8443,
+            ..first.clone()
+        };
+        let build = BuildContext::current();
+        for request in [&first, &second] {
+            let ctx = awaiting(build);
+            handle_set_endpoints(&ctx, request.clone()).unwrap();
+            let launch = ctx.launch().unwrap();
+            assert_eq!(
+                launch.endpoints,
+                Endpoints::parse(request, &[], true).unwrap()
+            );
+            assert!(launch.rgb_validator.is_some());
+            assert!(launch.evm_rpc_client.is_some());
+        }
     }
 
     #[test]

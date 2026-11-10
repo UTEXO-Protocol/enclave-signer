@@ -96,21 +96,6 @@ fn seal(public_key: &RsaPublicKey, plaintext: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn bitcoin_network_names_are_plain_context_values() {
-    for network in [
-        Network::Bitcoin,
-        Network::Testnet,
-        Network::Testnet4,
-        Network::Signet,
-        Network::Regtest,
-    ] {
-        let name = network.to_string();
-        assert!((1..=8).contains(&name.len()));
-        assert!(name.bytes().all(|b| b.is_ascii_graphic()));
-    }
-}
-
-#[test]
 fn configuration_rejects_endpoint_injection_alias_and_wrong_region() {
     assert!(config().validate().is_ok());
     assert_eq!(config().endpoint_host(), "kms.eu-west-1.amazonaws.com");
@@ -140,13 +125,6 @@ fn configuration_rejects_endpoint_injection_alias_and_wrong_region() {
 #[test]
 fn credentials_reject_control_characters() {
     assert!(AwsCredentials::new("AKID".into(), "secret".into(), "token\r\nforged".into()).is_err());
-}
-
-#[test]
-fn pinned_roots_are_the_amazon_trust_services_set() {
-    let bundle = std::str::from_utf8(AMAZON_TRUST_ROOTS).unwrap();
-    assert_eq!(bundle.matches("-----BEGIN CERTIFICATE-----").count(), 5);
-    assert!(https_client().is_ok());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! F03-IT-03: real enclave state, crypto and handlers. Response faults occur
+//! Real enclave state, crypto and handlers. Response faults occur
 //! after SetClone commits Active. NSM is mocked. Clone processing is real.
 #![cfg(not(feature = "vsock"))]
 
@@ -368,8 +368,6 @@ fn prepare(donor: &Enclave, requester: &Enclave) -> (SetCloneRequest, AttestedPu
     let bundle = AttestedPublicKeyResponse {
         evm_address: keys.evm_address,
         evm_uncompressed_pub: keys.evm_uncompressed_pub,
-        btc_compressed_pub: keys.btc_compressed_pub,
-        btc_xpub: keys.btc_xpub,
         master_fingerprint: keys.master_fingerprint,
         account_xpub_vanilla: keys.account_xpub_vanilla,
         account_xpub_colored: keys.account_xpub_colored,
@@ -378,7 +376,6 @@ fn prepare(donor: &Enclave, requester: &Enclave) -> (SetCloneRequest, AttestedPu
         rgb_asset_id: keys.rgb_asset_id,
         evm_gas_tx_uncompressed_pub: keys.evm_gas_tx_uncompressed_pub,
         evm_gas_tx_address: keys.evm_gas_tx_address,
-        ccd_ed25519_pub: keys.ccd_ed25519_pub,
         ..Default::default()
     };
     (
@@ -453,24 +450,21 @@ fn no_keys_is_a_snapshot_and_transport_errors_are_unknown() {
 #[test]
 fn recovered_success_requires_every_identity_and_config_field() {
     let donor = start(true, Fault::None);
-    for index in 0..13 {
+    for index in 0..10 {
         let requester = start(false, Fault::Drop);
         let (request, mut bundle) = prepare(&donor, &requester);
         let expected_evm = bundle.evm_address.clone();
         match index {
             0 => bundle.evm_address[0] ^= 1,
             1 => bundle.evm_uncompressed_pub[0] ^= 1,
-            2 => bundle.btc_compressed_pub[0] ^= 1,
-            3 => bundle.btc_xpub.push('x'),
-            4 => bundle.master_fingerprint[0] ^= 1,
-            5 => bundle.account_xpub_vanilla.push('x'),
-            6 => bundle.account_xpub_colored.push('x'),
-            7 => bundle.chain_id ^= 1,
-            8 => bundle.bridge_contract.push(1),
-            9 => bundle.rgb_asset_id.push('x'),
-            10 => bundle.evm_gas_tx_uncompressed_pub.push(1),
-            11 => bundle.evm_gas_tx_address.push(1),
-            12 => bundle.ccd_ed25519_pub.push(1),
+            2 => bundle.master_fingerprint[0] ^= 1,
+            3 => bundle.account_xpub_vanilla.push('x'),
+            4 => bundle.account_xpub_colored.push('x'),
+            5 => bundle.chain_id ^= 1,
+            6 => bundle.bridge_contract.push(1),
+            7 => bundle.rgb_asset_id.push('x'),
+            8 => bundle.evm_gas_tx_uncompressed_pub.push(1),
+            9 => bundle.evm_gas_tx_address.push(1),
             _ => unreachable!(),
         }
         let result = complete(&requester.client, request, &expected_evm, &bundle);

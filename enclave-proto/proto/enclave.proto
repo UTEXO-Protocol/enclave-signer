@@ -9,8 +9,8 @@ package enclave;
 option go_package = "github.com/UTEXO-Protocol/federated-signer-proto/go-gen/enclave;enclavepb";
 
 message EnclaveRequest {
-  reserved 4, 6;
-  reserved "proxy_federation";
+  reserved 4, 6, 15;
+  reserved "proxy_federation", "sign_ccd";
 
   oneof request {
     InitializeKeyRequest initialize_key = 1;
@@ -25,16 +25,17 @@ message EnclaveRequest {
     GetLastSavedBlockRequest get_last_saved_block = 12;
     GetAttestedPublicKeyRequest get_attested_public_key = 13;
     SignBtcRequest sign_btc = 14;
-    SignCcdRequest sign_ccd = 15;
     HealthRequest health = 16;
     SetEndpointsRequest set_endpoints = 17;
     SignRightsRefillRequest sign_rights_refill = 18;
+    SetLimitsRequest set_limits = 19;
+    GetLimitsRequest get_limits = 20;
   }
 }
 
 message EnclaveResponse {
-  reserved 6;
-  reserved "federation_sig";
+  reserved 6, 14;
+  reserved "federation_sig", "ccd_signature";
 
   oneof response {
     InitializeKeyResponse initialize_key = 1;
@@ -49,10 +50,10 @@ message EnclaveResponse {
     SubmitHeadersResponse submit_headers = 11;
     GetLastSavedBlockResponse get_last_saved_block = 12;
     GetAttestedPublicKeyResponse get_attested_public_key = 13;
-    CcdSignatureResponse ccd_signature = 14;
     ErrorResponse error = 15;
     HealthResponse health = 16;
     SetEndpointsResponse set_endpoints = 17;
+    LimitsResponse limits = 18;
   }
 }
 
@@ -70,9 +71,11 @@ message InitializeKeyRequest {
 }
 
 message InitializeKeyResponse {
+  // 2, 3 and 13 are reserved. Do not use them.
+  reserved 2, 3, 13;
+  reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
+
   bytes evm_address = 1; // 20 bytes: keccak256(uncompressed_pubkey[1..])[12..].
-  bytes btc_compressed_pub = 2; // 33-byte compressed secp256k1 public key.
-  string btc_xpub = 3; // Base58 BIP-32 extended public key.
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
   string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
@@ -82,7 +85,6 @@ message InitializeKeyResponse {
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
-  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
 }
 
 message GetPublicKeyRequest {
@@ -90,9 +92,11 @@ message GetPublicKeyRequest {
 }
 
 message PublicKeysResponse {
+  // 2, 3 and 13 are reserved. Do not use them.
+  reserved 2, 3, 13;
+  reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
+
   bytes evm_address = 1; // 20-byte Ethereum address of the primary signing key.
-  bytes btc_compressed_pub = 2; // 33-byte compressed Bitcoin public key.
-  string btc_xpub = 3; // Base58 BIP-32 extended public key.
   bytes master_fingerprint = 4; // 4-byte BIP-32 master key fingerprint.
   string account_xpub_vanilla = 5; // BIP-86 account xpub: m/86'/<coin>'/0'.
   string account_xpub_colored = 6; // RGB BIP-86 account xpub: m/86'/827167'/0'.
@@ -102,7 +106,6 @@ message PublicKeysResponse {
   string rgb_asset_id = 10; // RGB asset identifier pinned at enclave boot.
   bytes evm_gas_tx_uncompressed_pub = 11; // 64-byte gas transaction public key.
   bytes evm_gas_tx_address = 12; // 20-byte Ethereum address of the gas transaction key.
-  bytes ccd_ed25519_pub = 13; // 32-byte Concordium Ed25519 governance public key.
 }
 
 message GetAttestedPublicKeyRequest {
@@ -116,12 +119,15 @@ message GetAttestedPublicKeyResponse {
 }
 
 message SignRequest {
+  // 6 is reserved. Do not use it.
+  reserved 6;
+  reserved "ccd_source";
+
   uint64 amount = 1;
 
   oneof source_network {
     EvmSource evm_source = 2;
     RgbSource rgb_source = 3;
-    CcdSource ccd_source = 6;
   }
 
   oneof destination_network {
@@ -150,18 +156,9 @@ message RgbSource {
   bytes consignment_hash = 5; // keccak256(consignment).
   repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
   uint64 commission = 7; // Commission reported by the source event.
-  // 8 was mint_ancestors, dropped: deposit ids are derived from the mint.
+  // 8 is reserved. Do not use it.
   reserved 8;
   reserved "mint_ancestors";
-}
-
-// CcdSource is the validated Concordium source of a fundsIn operation (the
-// finalized user->governance transfer or governance burn). The listener has
-// already validated finality and structure; the enclave trusts it and only
-// cross-checks the release amount (SignRequest.amount) against the destination.
-message CcdSource {
-  bytes tx_hash = 1; // Concordium source transaction hash (32 bytes).
-  uint64 commission = 2; // Commission reported by the source operation.
 }
 
 message EvmDestination {
@@ -176,10 +173,10 @@ message EvmDestination {
   // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
   // crosscheck. Absent for direct fundsOutCall releases.
   optional LzReleaseParams lz_release = 8;
-  // burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
-  // Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
-  // holds the EVM address itself. Transport only: the enclave hashes the
-  // typed fields, never these protobuf bytes.
+  // burn_destination is the preimage of the hash in the burn's burnReason
+  // global (GS_BURN_REASON). Required for a V1+ burn. Absent for a V0 burn,
+  // whose burnReason holds the EVM address itself. Transport only: the enclave
+  // hashes the typed fields, never these protobuf bytes.
   optional BurnDestination burn_destination = 9;
 }
 
@@ -216,10 +213,10 @@ message RgbDestination {
   string asset_id = 4; // RGB asset identifier associated with the transfer.
   bytes consignment = 5; // Raw destination RGB consignment bytes.
   bytes consignment_hash = 6; // keccak256(consignment).
-  // 7 was mint_ancestors, dropped: deposit ids are derived from the mint.
+  // 7 is reserved. Do not use it.
   reserved 7;
   reserved "mint_ancestors";
-  // 8 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  // 8 is reserved. Do not use it.
   reserved 8;
   reserved "parent_psbt";
   // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
@@ -253,12 +250,12 @@ message SignedPsbtResponse {
 
 // Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
 // bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
-// correlation. The enclave authorises it ONLY against an operator-pinned output
-// allowlist + amount cap (env BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS), never a
-// listener-supplied flag, and signs on the vanilla BIP-86 account so it can
-// never co-sign a colored (RGB-allocated) input. A production (rgb-validation)
-// build refuses to sign when the allowlist/cap are unconfigured (fail-closed).
-// Response is a SignedPsbtResponse, same as the RGB-send path. Audit M-01 / #69.
+// correlation. The enclave authorises it from the PSBT, never from a listener
+// flag. It derives which outputs pay back to scripts it co-controls; the rest
+// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
+// BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
+// requires the cap. It signs only vanilla BIP-86 inputs, never a colored
+// (RGB-allocated) one. Response is a SignedPsbtResponse.
 message SignBtcRequest {
   bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
 }
@@ -272,7 +269,7 @@ message SignRightsRefillRequest {
   reserved "consignment", "consignment_hash";
   bytes psbt_bytes = 1;
   string asset_id = 4;
-  // 5 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  // 5 is reserved. Do not use it.
   reserved 5;
   reserved "parent_psbt";
   // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
@@ -290,29 +287,12 @@ message RawSignatureResponse {
 }
 
 message SignRawDigestRequest {
-  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
-  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required in release builds for shape/allowlist gating (audit TEE-XC-09 / #68).
+  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
+  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist.
 }
 
 message RawDigestSignatureResponse {
   bytes signature = 1; // 65-byte signature produced by the gas transaction key.
-}
-
-// SignCcdRequest asks the enclave to Ed25519-sign a Concordium account-transaction
-// hash with the governance key. The listener has already re-derived the hash and
-// verified the transaction structure/amounts; the enclave signs the hash directly.
-message SignCcdRequest {
-  bytes hash = 1; // Exactly 32 bytes, signed without additional hashing.
-}
-
-message CcdSignatureResponse {
-  bytes signature = 1; // 64-byte Concordium Ed25519 signature.
-  // 32-byte Ed25519 public key that produced `signature`. Ed25519 signatures are
-  // not recoverable, so the consumer cannot derive the signer the way it does on
-  // EVM; it needs the key to look the signature's credential and key index up in
-  // the governance account. Derived in the same operation as the signature, so
-  // the two cannot disagree.
-  bytes public_key = 2;
 }
 
 message InitiateCloningRequest {
@@ -372,8 +352,8 @@ message GetLastSavedBlockResponse {
   bytes block_hash = 2; // 32-byte hash of the latest accepted header.
 }
 
-// Readiness probe used by deploy orchestration to replace a fixed sleep between
-// sequential enclave restarts. Internal only: never expose outside the host.
+// Readiness probe: answers whether the enclave is ready to sign. Deploy
+// orchestration polls it. Internal only: never expose outside the host.
 
 message HealthRequest {}
 
@@ -398,8 +378,62 @@ message HealthResponse {
   uint32 spv_tip_age_secs = 7;
   // Max age spv_tip_age_secs is compared against.
   uint32 spv_max_tip_age_secs = 8;
-  // SetEndpoints was accepted.
+  // The endpoints from SetEndpoints are in force.
   bool endpoints_set = 9;
+}
+
+// The time, memory and size limits. The operator can change them at run time,
+// and a change needs no new image. Each limit only sets when the enclave refuses
+// a request or how long it waits. The attestation does not cover these values.
+// docs/runtime-limits.md has the rules.
+message Limits {
+  // 26 and 27 are reserved. Do not use them.
+  reserved 26, 27;
+  reserved "mint_reply_ttl_secs", "mint_reply_max_entries";
+
+  uint64 total_request_timeout_secs = 1;
+  uint64 io_idle_timeout_secs = 2;
+  uint64 first_bytes_timeout_secs = 3;
+  uint64 electrum_timeout_secs = 4;
+  uint64 esplora_timeout_secs = 5;
+  uint64 max_rgb_lib_ms = 6;
+  uint64 max_witness_check_cost = 7;
+  uint64 max_bundle_id_cost = 8;
+  uint64 max_reject_walk_cost = 9;
+  uint64 max_message_bytes = 10;
+  uint64 max_wire_elements = 11;
+  uint64 max_consignment_bytes = 12;
+  uint64 max_merkle_proofs = 13;
+  uint64 max_total_proof_bytes = 14;
+  uint64 max_psbt_bytes = 15;
+  uint64 max_gas_tx_bytes = 16;
+  uint64 max_rlp_items = 17;
+  uint64 max_funds_out_call_data_bytes = 18;
+  uint64 max_headers_per_submit = 19;
+  uint64 max_headers_per_minute = 20;
+  uint64 evm_rpc_timeout_secs = 21;
+  uint64 max_reject_list_entries = 22;
+  uint64 reject_list_page_entries = 23;
+  uint64 mint_replay_ttl_secs = 24;
+  uint64 mint_replay_max_entries = 25;
+  uint64 mint_max_inputs = 28;
+  uint64 mint_max_outputs = 29;
+}
+
+// Changes limits. The enclave checks all the values first, so a refused request
+// changes nothing. The values stay until the enclave restarts.
+message SetLimitsRequest {
+  // The new values. 0 keeps the value of that limit.
+  Limits values = 1;
+  // Go back to the image values first, then apply `values`.
+  bool reset = 2;
+}
+
+message GetLimitsRequest {}
+
+message LimitsResponse {
+  Limits current = 1; // The values in force.
+  Limits image = 2; // The values of the image, which a reset restores.
 }
 
 // The chain endpoints the enclave reads from. The operator sets them once,

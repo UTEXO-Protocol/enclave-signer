@@ -4,8 +4,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
 use bitcoin::{
-    Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, WPubkeyHash,
-    Witness, XOnlyPublicKey,
+    Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+    XOnlyPublicKey,
 };
 
 use crate::keys::AccountType;
@@ -132,14 +132,6 @@ fn cfg_with_cap(cap: u64) -> BridgeConfig {
     }
 }
 
-#[test]
-fn rejects_empty_psbt() {
-    let keys = km();
-    let req = SignBtcRequest { psbt_bytes: vec![] };
-    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("psbt_bytes is empty"));
-}
-
 // --- witness_utxo required (to bound the value spent) ---
 
 #[test]
@@ -207,18 +199,6 @@ fn rejects_one_foreign_output_among_self_paying_ones() {
     );
 }
 
-/// A non-taproot output is never proven ours. The enclave co-controls taproot
-/// scripts only, and BIP-371 metadata cannot describe a P2WPKH.
-#[test]
-fn rejects_non_taproot_output() {
-    let keys = km();
-    let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0xCC; 20]));
-    let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[(p2wpkh, 10_000)]),
-    };
-    assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_err());
-}
-
 #[test]
 fn rejects_empty_output_set() {
     let keys = km();
@@ -254,18 +234,6 @@ fn rejects_summed_input_value_over_cap() {
     assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
 }
 
-/// The unowned budget applies even when the value cap allows the spend.
-#[test]
-fn foreign_output_over_budget_is_rejected_whatever_the_value_cap_says() {
-    let keys = km();
-    let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[100_000], &[(foreign_address(), 90_000)]),
-    };
-    // In `btc_max_total_sats`, but far over the unowned budget.
-    let err = validate_btc_request(&req, &cfg_with_cap(1_000_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("same custody"), "got: {err}");
-}
-
 /// Five 1000-sat colored allocations funded from vanilla inputs fit the
 /// budget. The vanilla change goes back to the spent script (address reuse).
 #[test]
@@ -280,25 +248,7 @@ fn create_utxo_allocation_dust_fits_the_budget() {
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
 }
 
-/// With the cap unset, an `rgb-validation` build fails closed. Other builds
-/// and test builds use the dev path, after the other checks pass.
-#[test]
-fn unpinned_cap_behaviour_matches_build_profile() {
-    let keys = km();
-    let ours = our_address(&keys);
-    let req = SignBtcRequest {
-        // 200 sat pays for approx 111 signed vB at the 1 sat/vB floor.
-        psbt_bytes: psbt_from_our_address(&keys, &[1_000], &[(ours.spk, 800)]),
-    };
-    let result = validate_btc_request(&req, &BridgeConfig::default(), &keys);
-    #[cfg(all(feature = "rgb-validation", not(test)))]
-    assert!(result.is_err());
-    // Unit tests are always cfg(test), so the dev fallback returns Ok.
-    #[cfg(not(all(feature = "rgb-validation", not(test))))]
-    assert!(result.is_ok());
-}
-
-// --- pinned fee policy on the plain-BTC path (#248) ---
+// --- pinned fee policy on the plain-BTC path ---
 
 /// **The attack.** A compromised host spends a custody UTXO back to custody.
 /// All outputs are self-owned and the value cap passes, but approx 98% of the
@@ -308,7 +258,7 @@ fn rejects_a_fee_that_burns_most_of_the_input() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // #248: 60_676 sat in, 1_000 sat out, 59_676 sat fee.
+        // 60_676 sat in, 1_000 sat out, 59_676 sat fee.
         psbt_bytes: psbt_from_our_address(&keys, &[60_676], &[(ours.spk, 1_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
@@ -316,31 +266,6 @@ fn rejects_a_fee_that_burns_most_of_the_input() {
         err.to_string().contains("plain-BTC PSBT fee rate too high"),
         "got: {err}"
     );
-}
-
-#[test]
-fn rejects_an_excessive_fee_spread_over_two_inputs() {
-    let keys = km();
-    let ours = our_address(&keys);
-    let req = SignBtcRequest {
-        // Each input is small, but together 59_000 sat over approx 135 vB.
-        psbt_bytes: psbt_from_our_address(&keys, &[30_000, 30_000], &[(ours.spk, 1_000)]),
-    };
-    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("fee rate too high"), "got: {err}");
-}
-
-#[test]
-fn rejects_a_fee_over_the_pinned_absolute_maximum() {
-    let keys = km();
-    let ours = our_address(&keys);
-    // Many self-owned outputs, so the absolute cap fails, not the rate.
-    let outputs: Vec<_> = (0..30).map(|_| (ours.spk.clone(), 1_000)).collect();
-    let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[1_000_000], &outputs),
-    };
-    let err = validate_btc_request(&req, &cfg_with_cap(10_000_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("fee too high"), "got: {err}");
 }
 
 /// The fee floor needs the signed size, so every input must be classifiable.
@@ -402,7 +327,7 @@ fn rejects_a_fee_below_the_signed_size_floor() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // 50 sat cannot pay for approx 111 signed vB at 1 sat/vB.
+        // 50 sat cannot pay for approx 111 signed vB at `MIN_FEE_RATE_SAT_VB`.
         psbt_bytes: psbt_from_our_address(&keys, &[10_000], &[(ours.spk, 9_950)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();

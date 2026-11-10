@@ -45,8 +45,6 @@ fn start_mock_enclave() -> u16 {
                     response: Some(enclave_response::Response::PublicKeys(
                         enclave_proto::PublicKeysResponse {
                             evm_address: vec![0xAA; 20],
-                            btc_compressed_pub: vec![0xBB; 33],
-                            btc_xpub: "xpub-test".into(),
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
@@ -56,7 +54,6 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
-                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -122,8 +119,6 @@ fn start_mock_enclave() -> u16 {
                     response: Some(enclave_response::Response::InitializeKey(
                         enclave_proto::InitializeKeyResponse {
                             evm_address: vec![0xAA; 20],
-                            btc_compressed_pub: vec![0xBB; 33],
-                            btc_xpub: "xpub-test".into(),
                             master_fingerprint: vec![0xDD; 4],
                             account_xpub_vanilla: "tpub-vanilla-test".into(),
                             account_xpub_colored: "tpub-colored-test".into(),
@@ -133,7 +128,6 @@ fn start_mock_enclave() -> u16 {
                             rgb_asset_id: String::new(),
                             evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                             evm_gas_tx_address: vec![0xFA; 20],
-                            ccd_ed25519_pub: vec![0x99; 32],
                         },
                     )),
                 },
@@ -159,8 +153,6 @@ fn start_mock_enclave() -> u16 {
                     use sha2::Digest;
                     let public_keys = enclave_proto::PublicKeysResponse {
                         evm_address: vec![0xAA; 20],
-                        btc_compressed_pub: vec![0xBB; 33],
-                        btc_xpub: "xpub-test".into(),
                         master_fingerprint: vec![0xDD; 4],
                         account_xpub_vanilla: "tpub-vanilla-test".into(),
                         account_xpub_colored: "tpub-colored-test".into(),
@@ -170,14 +162,11 @@ fn start_mock_enclave() -> u16 {
                         rgb_asset_id: String::new(),
                         evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
                         evm_gas_tx_address: vec![0xCC; 20],
-                        ccd_ed25519_pub: vec![0x99; 32],
                     };
                     let mut bundle: Vec<u8> = Vec::new();
                     let chain_id_bytes = public_keys.chain_id.to_be_bytes();
-                    let parts: [&[u8]; 13] = [
+                    let parts: [&[u8]; 10] = [
                         &public_keys.evm_address,
-                        &public_keys.btc_compressed_pub,
-                        public_keys.btc_xpub.as_bytes(),
                         &public_keys.master_fingerprint,
                         public_keys.account_xpub_vanilla.as_bytes(),
                         public_keys.account_xpub_colored.as_bytes(),
@@ -187,7 +176,6 @@ fn start_mock_enclave() -> u16 {
                         public_keys.rgb_asset_id.as_bytes(),
                         &public_keys.evm_gas_tx_uncompressed_pub,
                         &public_keys.evm_gas_tx_address,
-                        &public_keys.ccd_ed25519_pub,
                     ];
                     for p in parts {
                         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -378,63 +366,8 @@ async fn grpc_public_key_evm_gas_tx() {
 }
 
 #[tokio::test]
-async fn grpc_public_key_transaction_type() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let resp = client
-        .public_key(PublicKeyRequest {
-            network_id: 0,
-            data_type: DataType::Transaction as i32,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(
-        resp.public_key.len(),
-        33,
-        "Transaction type returns BTC compressed pubkey"
-    );
-    assert_eq!(resp.public_key, vec![0xBB; 33]);
-}
-
-#[tokio::test]
-async fn grpc_public_key_ccd_governance() {
-    // Plain PublicKey must return the governance key without attestation.
-    // AttestedPublicKey needs an NSM device, and the dev container has none.
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let resp = client
-        .public_key(PublicKeyRequest {
-            network_id: 0,
-            data_type: DataType::CcdGovernance as i32,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(
-        resp.public_key.len(),
-        32,
-        "CCD_GOVERNANCE returns a 32-byte Ed25519 pubkey"
-    );
-    assert_eq!(resp.public_key, vec![0x99; 32]);
-}
-
-#[tokio::test]
-async fn grpc_public_key_rejects_unsupported_data_type() {
-    // The CCD_GOVERNANCE arm must not become a catch-all. Data types without
-    // their own public key must still fail.
+async fn grpc_public_key_refuses_transaction_type() {
+    // The BTC key is retired, so TRANSACTION has no public key.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 
@@ -445,7 +378,7 @@ async fn grpc_public_key_rejects_unsupported_data_type() {
     let err = client
         .public_key(PublicKeyRequest {
             network_id: 0,
-            data_type: DataType::Swap as i32,
+            data_type: DataType::Transaction as i32,
         })
         .await
         .unwrap_err();
@@ -549,35 +482,6 @@ async fn grpc_sign_evm_gas_tx_forwards_unsigned_tx() {
         resp.signature,
         vec![0x02; 65],
         "parent must forward EnrichedEvmPayload.unsigned_tx to the enclave"
-    );
-}
-
-#[tokio::test]
-async fn grpc_sign_psbt_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let payload = enriched::EnrichedRgbPayload {
-        operation_idx: 5,
-        psbt_bytes: vec![0xFF; 32],
-        psbt_output_amount: 0,
-        rgb_asset_id: String::new(),
-        consignment: vec![],
-        consignment_hash: vec![],
-        fascia: vec![],
-        parent_fascia: vec![],
-    };
-
-    let req = sign_rgb_request(evm_source(0, 0), payload);
-
-    let resp = client.sign(req).await.unwrap().into_inner();
-    assert!(
-        !resp.signature.is_empty(),
-        "signed PSBT should not be empty"
     );
 }
 
@@ -974,81 +878,6 @@ async fn grpc_evm_passes_enriched_fields_through() {
     }
 }
 
-#[tokio::test]
-async fn grpc_evm_forwards_raw_consignment_bytes() {
-    // Regression: the parent must forward both the raw RGB consignment and
-    // its keccak256 hash.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let enclave_port = listener.local_addr().unwrap().port();
-
-    let (tx, rx) = std::sync::mpsc::channel::<enclave_proto::SignRequest>();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let req: EnclaveRequest = framing::read_message(&mut stream).unwrap();
-
-            if let Some(enclave_request::Request::Sign(sign_req)) = req.request {
-                tx.send(sign_req).unwrap();
-                let resp = EnclaveResponse {
-                    response: Some(enclave_response::Response::EvmSignature(
-                        enclave_proto::EvmSignatureResponse {
-                            signature: vec![0xCC; 65],
-                            call_data: Vec::new(),
-                        },
-                    )),
-                };
-                let _ = framing::write_message(&mut stream, &resp);
-            }
-        }
-    });
-
-    let grpc_port = start_grpc_server(enclave_port).await;
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let consignment_bytes: Vec<u8> = (0..256u32).map(|i| (i & 0xFF) as u8).collect();
-    let consignment_hash = vec![0x5A; 32];
-
-    let payload = enriched::EnrichedEvmPayload {
-        call_data: vec![0xAB; 132],
-        nonce: 7,
-        deadline: 1234,
-        chain_id: 1,
-        proxy_contract: vec![0x02; 20],
-        calldata_amount: 0,
-        calldata_commission: 0,
-        unsigned_tx: Vec::new(),
-        lz_release: None,
-        burn_destination: None,
-    };
-
-    let req = sign_evm_request(
-        rgb_source(
-            0,
-            0,
-            consignment_bytes.clone(),
-            consignment_hash.clone(),
-            String::new(),
-        ),
-        payload,
-    );
-
-    client.sign(req).await.unwrap();
-
-    let received = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-    match received.source_network {
-        Some(enclave_proto::sign_request::SourceNetwork::RgbSource(source)) => {
-            assert_eq!(source.consignment.len(), 256);
-            assert_eq!(source.consignment, consignment_bytes);
-            assert_eq!(source.consignment_hash.len(), 32);
-            assert_eq!(source.consignment_hash, consignment_hash);
-        }
-        other => panic!("expected RGB source, got {other:?}"),
-    }
-}
-
 // Error-path tests
 
 #[tokio::test]
@@ -1084,26 +913,6 @@ async fn grpc_sign_rejects_unknown_data_type() {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), format!("unknown data_type: {data_type}"));
     }
-}
-
-#[tokio::test]
-async fn grpc_invalid_data_type_returns_error() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    // SIGNATURE data_type is not supported.
-    let req = SignRequest {
-        common: Some(common(0, 84, DataType::Signature)),
-        source: Some(rgb_source(0, 0, vec![], vec![], String::new())),
-        data: None,
-    };
-
-    let err = client.sign(req).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -1155,30 +964,6 @@ async fn grpc_clone_maps_enclave_codes() {
             .unwrap_err();
         assert_eq!(status.code(), expected, "code {code}");
     }
-}
-
-#[tokio::test]
-async fn grpc_initialize_roundtrip() {
-    let enclave_port = start_mock_enclave();
-    let grpc_port = start_grpc_server(enclave_port).await;
-
-    let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-        .await
-        .unwrap();
-
-    let resp = client
-        .initialize(utexo_bridge_parent::grpc_proto::InitializeRequest {
-            cloning_secret: String::new(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert_eq!(
-        resp.public_key.len(),
-        33,
-        "public_key should be BTC compressed pubkey"
-    );
 }
 
 #[tokio::test]
@@ -1263,10 +1048,8 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
     use sha2::Digest;
     let mut bundle: Vec<u8> = Vec::new();
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 13] = [
+    let parts: [&[u8]; 10] = [
         &resp.evm_address,
-        &resp.btc_compressed_pub,
-        resp.btc_xpub.as_bytes(),
         &resp.master_fingerprint,
         resp.account_xpub_vanilla.as_bytes(),
         resp.account_xpub_colored.as_bytes(),
@@ -1276,7 +1059,6 @@ async fn grpc_attested_public_key_roundtrip_and_verify() {
         resp.rgb_asset_id.as_bytes(),
         &resp.evm_gas_tx_uncompressed_pub,
         &resp.evm_gas_tx_address,
-        &resp.ccd_ed25519_pub,
     ];
     for p in parts {
         bundle.extend_from_slice(&(p.len() as u32).to_be_bytes());

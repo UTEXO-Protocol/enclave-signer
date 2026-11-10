@@ -1,7 +1,7 @@
-//! The mint rules (`Sign`, EVM -> RGB) on the committed transition: what the
-//! VM's `sas` and `plc` and the former consignment binds enforced, read from
-//! the fascia, and the sats rule of its PSBT. The rule ids (M1-M8) are those of
-//! `docs/mint-flow.md` section 5.
+//! The mint rules (`Sign`, EVM -> RGB): the rules on the committed transition,
+//! read from the fascia (what the VM's `sas` and `plc` enforce, and the shape
+//! of the mint), and the sats rule of its PSBT. The rule ids (M1-M8) are those
+//! of `docs/mint-flow.md` section 5.
 
 use std::collections::HashSet;
 
@@ -20,25 +20,29 @@ use crate::keys::KeyManager;
 /// Inputs a mint spends: its right alone, whose UTXO's sats pay the fee.
 pub const MINT_INPUTS: usize = 1;
 
-/// Most inputs and outputs a mint tx may have before any fascia is decoded.
-/// Looser than `MINT_INPUTS`, which F7 enforces exactly after the fascia rules.
-pub const MINT_MAX_INPUTS: usize = 16;
-pub const MINT_MAX_OUTPUTS: usize = 16;
+// The limits of the image, for the tests. `Limits` holds them and says why.
+#[cfg(test)]
+pub const MINT_MAX_INPUTS: usize = crate::limits::Limits::DEFAULTS.mint_max_inputs as usize;
+#[cfg(test)]
+pub const MINT_MAX_OUTPUTS: usize = crate::limits::Limits::DEFAULTS.mint_max_outputs as usize;
 
 /// M0: the mint tx has a bounded number of inputs and outputs. Cheap, so it
 /// runs before any fascia is decoded.
 pub fn assert_mint_shape(psbt: &Psbt) -> Result<()> {
     let tx = &psbt.unsigned_tx;
-    if tx.input.len() > MINT_MAX_INPUTS {
+    let limits = crate::limits::get();
+    if tx.input.len() as u64 > limits.mint_max_inputs {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint PSBT has {} inputs, at most {MINT_MAX_INPUTS}",
-            tx.input.len()
+            "mint PSBT has {} inputs, at most {}",
+            tx.input.len(),
+            limits.mint_max_inputs
         )));
     }
-    if tx.output.len() > MINT_MAX_OUTPUTS {
+    if tx.output.len() as u64 > limits.mint_max_outputs {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint PSBT has {} outputs, at most {MINT_MAX_OUTPUTS}",
-            tx.output.len()
+            "mint PSBT has {} outputs, at most {}",
+            tx.output.len(),
+            limits.mint_max_outputs
         )));
     }
     Ok(())
@@ -70,8 +74,9 @@ pub enum MintRecipient {
 }
 
 impl MintRecipient {
-    /// The seals S6.2 compares with a legacy deposit's invoice. A witness mint
-    /// has none, so a legacy blinded invoice refuses it.
+    /// The seals S6.2 compares with the invoice in a deposit's
+    /// `destinationAddress`. A witness mint has none, so S6.2 refuses it when
+    /// the deposit names an invoice.
     pub fn blinded_seals(&self) -> Vec<String> {
         match self {
             Self::Blinded(seal) => vec![seal.clone()],

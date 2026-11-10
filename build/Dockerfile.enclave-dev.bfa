@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.4
-# Enclave (dev mode, TCP, no vsock) WITH the BFA mint path, one signer role.
+# Enclave (dev mode, TCP, no vsock) with the BFA bridge, one signer role.
 # SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
 # (RGB -> EVM). The two roles are two enclaves with two seeds.
-# rgb-lib and its RGB crates come from private mirrors: BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
+# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
@@ -29,22 +29,16 @@ WORKDIR /build/enclave
 # image in debug keeps `debug_assertions` on so the guard stays quiet while
 # still refusing the feature in any production (release) build.
 #
-# `--no-default-features` is REQUIRED: the default is `ccd`, and a
-# plain `--features` still applies them. Keep the list below explicit.
-# `ccd` is listed because Concordium signing sits behind that feature; without it
-# every CCD request answers "not compiled in".
+# `--no-default-features` keeps the feature list below explicit.
 #
-# The signer role implies `bfa-mint`, and `mock-attestation` is on.
-# `ccd` stays in the list: init-enclaves.sh ends by asking each adapter for its
-# CCD_GOVERNANCE public key and fails the whole run if that answers "not
-# compiled in".
+# The signer role implies `rgb-validation`, and `mock-attestation` is on.
 #
 ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
 RUN --mount=type=secret,id=lib_key \
     --mount=type=secret,id=rgb_deps_token \
-    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,ccd,evm-rpc,mock-attestation,$SIGNER_ROLE
+    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim
@@ -64,7 +58,8 @@ USER enclave
 
 ENV ENCLAVE_LISTEN_ADDR=0.0.0.0:5000
 ENV BITCOIN_NETWORK=testnet
-ENV RUST_LOG=debug
+# Alloy HTTP debug logs include the provider URL, which can contain an API key.
+ENV RUST_LOG=debug,alloy_transport_http=off
 # CD runs the mint signer from this image. The runtime env may change it.
 ENV MINT_WITNESS_SAT=1500
 

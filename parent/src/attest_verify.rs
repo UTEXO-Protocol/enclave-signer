@@ -58,7 +58,7 @@ pub(crate) fn refuse_mock_production(mode: VerifyMode, production: bool) -> Resu
 /// Chain, contract and asset values come from the wire response, which the
 /// public-key bundle binds. This type gives only the posture flags and rules
 /// that are not on the wire. The optional chain, contract and asset pins
-/// (F02-AF-04) also compare the wire values with the operator deployment.
+/// also compare the wire values with the operator deployment.
 /// Without a pin, the value is authenticated but not compared.
 ///
 /// One value is built per run, so the variant size difference does not matter.
@@ -135,10 +135,8 @@ pub struct AttestedPubkeyResult {
 /// `canonical_pubkey_bundle` in `enclave/src/server/keys.rs`.
 pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
     let chain_id_bytes = resp.chain_id.to_be_bytes();
-    let parts: [&[u8]; 13] = [
+    let parts: [&[u8]; 10] = [
         &resp.evm_address,
-        &resp.btc_compressed_pub,
-        resp.btc_xpub.as_bytes(),
         &resp.master_fingerprint,
         resp.account_xpub_vanilla.as_bytes(),
         resp.account_xpub_colored.as_bytes(),
@@ -148,7 +146,6 @@ pub fn canonical_bundle(resp: &AttestedPublicKeyResponse) -> Vec<u8> {
         resp.rgb_asset_id.as_bytes(),
         &resp.evm_gas_tx_uncompressed_pub,
         &resp.evm_gas_tx_address,
-        &resp.ccd_ed25519_pub,
     ];
     let mut out = Vec::new();
     for p in parts {
@@ -315,8 +312,6 @@ pub fn attested_response(r: GetAttestedPublicKeyResponse) -> Result<AttestedPubl
     Ok(AttestedPublicKeyResponse {
         evm_address: pk.evm_address,
         evm_uncompressed_pub: pk.evm_uncompressed_pub,
-        btc_compressed_pub: pk.btc_compressed_pub,
-        btc_xpub: pk.btc_xpub,
         master_fingerprint: pk.master_fingerprint,
         account_xpub_vanilla: pk.account_xpub_vanilla,
         account_xpub_colored: pk.account_xpub_colored,
@@ -326,13 +321,12 @@ pub fn attested_response(r: GetAttestedPublicKeyResponse) -> Result<AttestedPubl
         rgb_asset_id: pk.rgb_asset_id,
         evm_gas_tx_uncompressed_pub: pk.evm_gas_tx_uncompressed_pub,
         evm_gas_tx_address: pk.evm_gas_tx_address,
-        ccd_ed25519_pub: pk.ccd_ed25519_pub,
         attested_policy: r.attested_policy,
     })
 }
 
 /// The `format` value of an [`AttestationBundle`].
-pub const BUNDLE_FORMAT: &str = "utexo-signer-attestation/2";
+pub const BUNDLE_FORMAT: &str = "utexo-signer-attestation/3";
 
 /// One verified attested answer, stored for offline verification.
 /// Bytes are 0x-hex, except the document, which is base64.
@@ -359,8 +353,6 @@ pub struct AttestationBundle {
 #[serde(deny_unknown_fields)]
 pub struct BundleKeys {
     pub evm_address: String,
-    pub btc_compressed_pub: String,
-    pub btc_xpub: String,
     pub master_fingerprint: String,
     pub account_xpub_vanilla: String,
     pub account_xpub_colored: String,
@@ -370,7 +362,6 @@ pub struct BundleKeys {
     pub rgb_asset_id: String,
     pub evm_gas_tx_uncompressed_pub: String,
     pub evm_gas_tx_address: String,
-    pub ccd_ed25519_pub: String,
 }
 
 fn hex0x(bytes: &[u8]) -> String {
@@ -386,8 +377,6 @@ impl BundleKeys {
     fn new(r: &AttestedPublicKeyResponse) -> Self {
         Self {
             evm_address: hex0x(&r.evm_address),
-            btc_compressed_pub: hex0x(&r.btc_compressed_pub),
-            btc_xpub: r.btc_xpub.clone(),
             master_fingerprint: hex0x(&r.master_fingerprint),
             account_xpub_vanilla: r.account_xpub_vanilla.clone(),
             account_xpub_colored: r.account_xpub_colored.clone(),
@@ -397,16 +386,13 @@ impl BundleKeys {
             rgb_asset_id: r.rgb_asset_id.clone(),
             evm_gas_tx_uncompressed_pub: hex0x(&r.evm_gas_tx_uncompressed_pub),
             evm_gas_tx_address: hex0x(&r.evm_gas_tx_address),
-            ccd_ed25519_pub: hex0x(&r.ccd_ed25519_pub),
         }
     }
 
     /// Each key as (name, value), in field order.
-    fn fields(&self) -> [(&'static str, String); 13] {
+    fn fields(&self) -> [(&'static str, String); 10] {
         let Self {
             evm_address,
-            btc_compressed_pub,
-            btc_xpub,
             master_fingerprint,
             account_xpub_vanilla,
             account_xpub_colored,
@@ -416,12 +402,9 @@ impl BundleKeys {
             rgb_asset_id,
             evm_gas_tx_uncompressed_pub,
             evm_gas_tx_address,
-            ccd_ed25519_pub,
         } = self;
         [
             ("evm_address", evm_address.clone()),
-            ("btc_compressed_pub", btc_compressed_pub.clone()),
-            ("btc_xpub", btc_xpub.clone()),
             ("master_fingerprint", master_fingerprint.clone()),
             ("account_xpub_vanilla", account_xpub_vanilla.clone()),
             ("account_xpub_colored", account_xpub_colored.clone()),
@@ -434,7 +417,6 @@ impl BundleKeys {
                 evm_gas_tx_uncompressed_pub.clone(),
             ),
             ("evm_gas_tx_address", evm_gas_tx_address.clone()),
-            ("ccd_ed25519_pub", ccd_ed25519_pub.clone()),
         ]
     }
 }
@@ -496,8 +478,6 @@ impl AttestationBundle {
         let response = AttestedPublicKeyResponse {
             evm_address: from_hex0x("evm_address", &k.evm_address)?,
             evm_uncompressed_pub: from_hex0x("evm_uncompressed_pub", &k.evm_uncompressed_pub)?,
-            btc_compressed_pub: from_hex0x("btc_compressed_pub", &k.btc_compressed_pub)?,
-            btc_xpub: k.btc_xpub.clone(),
             master_fingerprint: from_hex0x("master_fingerprint", &k.master_fingerprint)?,
             account_xpub_vanilla: k.account_xpub_vanilla.clone(),
             account_xpub_colored: k.account_xpub_colored.clone(),
@@ -512,7 +492,6 @@ impl AttestationBundle {
                 &k.evm_gas_tx_uncompressed_pub,
             )?,
             evm_gas_tx_address: from_hex0x("evm_gas_tx_address", &k.evm_gas_tx_address)?,
-            ccd_ed25519_pub: from_hex0x("ccd_ed25519_pub", &k.ccd_ed25519_pub)?,
             attested_policy: from_hex0x("attested_policy", &self.attested_policy)?,
         };
         Ok((nonce, response))
@@ -588,7 +567,7 @@ fn verify_bundle_with(
         mode,
         matches!(expected_policy, ExpectedPolicy::Production { .. }),
     )?;
-    // Read the format first, so an old bundle fails with a clear message.
+    // Read the format first, so another bundle format fails with a clear message.
     #[derive(Deserialize)]
     struct Format {
         format: String,
@@ -696,7 +675,7 @@ fn expected_attested_policy(
                     )
                 })?;
 
-            // Check operator pins before building the expected commitment. (F02-AF-04)
+            // Check operator pins before building the expected commitment.
             if let Some(want) = expected_chain_id {
                 if *want != resp.chain_id {
                     bail!(
@@ -921,7 +900,7 @@ mod tests {
 
     #[test]
     fn empty_asset_pin_matches_empty_wire() {
-        // A build with no RGB asset (EVM or CCD only) must match a "" pin.
+        // A build with no RGB asset (EVM only) must match a "" pin.
         let mut w = wire();
         w.rgb_asset_id = String::new();
         let exp = expect_prod(None, None, Some(String::new()));
@@ -1261,14 +1240,11 @@ mod tests {
         let mut result = verify_policy(resp, &root, &expected).unwrap();
         // The formatter sees these values; verification does not.
         let r = &mut result.response;
-        r.btc_compressed_pub = vec![0x02; 33];
-        r.btc_xpub = "xpub-test".into();
         r.master_fingerprint = vec![0xF1; 4];
         r.account_xpub_vanilla = "tpub-vanilla".into();
         r.account_xpub_colored = "tpub-colored".into();
         r.evm_gas_tx_uncompressed_pub = vec![0x05; 65];
         r.evm_gas_tx_address = vec![0x06; 20];
-        r.ccd_ed25519_pub = vec![0x07; 32];
         result.response.rgb_asset_id = "rgb:x\n  public_keys.evm_address: 0xevil".into();
 
         // A new field of the result does not compile until it is listed here.
@@ -1283,8 +1259,6 @@ mod tests {
         let AttestedPublicKeyResponse {
             evm_address,
             evm_uncompressed_pub,
-            btc_compressed_pub,
-            btc_xpub,
             master_fingerprint,
             account_xpub_vanilla,
             account_xpub_colored,
@@ -1295,7 +1269,6 @@ mod tests {
             rgb_asset_id,
             evm_gas_tx_uncompressed_pub,
             evm_gas_tx_address,
-            ccd_ed25519_pub,
             // Printed decoded, as the `policy.*` lines.
             attested_policy: _,
         } = response;
@@ -1313,8 +1286,6 @@ mod tests {
         let mut want: Vec<(String, String)> = [
             ("mode", format!("{mode:?}")),
             ("public_keys.evm_address", hex(evm_address)),
-            ("public_keys.btc_compressed_pub", hex(btc_compressed_pub)),
-            ("public_keys.btc_xpub", btc_xpub.clone()),
             ("public_keys.master_fingerprint", hex(master_fingerprint)),
             (
                 "public_keys.account_xpub_vanilla",
@@ -1336,7 +1307,6 @@ mod tests {
                 hex(evm_gas_tx_uncompressed_pub),
             ),
             ("public_keys.evm_gas_tx_address", hex(evm_gas_tx_address)),
-            ("public_keys.ccd_ed25519_pub", hex(ccd_ed25519_pub)),
             ("bundle_commitment", hex(bundle_commitment)),
             ("pcr0", hex(&doc_pcrs[&0])),
             ("pcr1", hex(&doc_pcrs[&1])),
@@ -1508,7 +1478,7 @@ mod tests {
         .is_err());
     }
 
-    /// Issue #270: a cloning role commits the document PCR3 (the parent IAM
+    /// A cloning role commits the document PCR3 (the parent IAM
     /// role). The mint signer commits none.
     #[test]
     fn a_cloning_role_commits_the_document_pcr3() {

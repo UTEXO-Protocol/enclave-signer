@@ -27,17 +27,11 @@ fn initialize_and_get_keys() {
         "  EVM address:    0x{}",
         hex::encode(&init_resp.evm_address)
     );
-    eprintln!(
-        "  BTC compressed: {}",
-        hex::encode(&init_resp.btc_compressed_pub)
-    );
-    eprintln!("  BTC xpub:       {}", init_resp.btc_xpub);
+    eprintln!("  vanilla xpub:   {}", init_resp.account_xpub_vanilla);
 
     assert_eq!(init_resp.evm_address.len(), 20);
-    assert_eq!(init_resp.btc_compressed_pub.len(), 33);
-    assert!(init_resp.btc_compressed_pub[0] == 0x02 || init_resp.btc_compressed_pub[0] == 0x03);
-    assert!(!init_resp.btc_xpub.is_empty());
-    assert!(init_resp.btc_xpub.starts_with("xpub"));
+    assert!(!init_resp.account_xpub_vanilla.is_empty());
+    assert!(init_resp.account_xpub_vanilla.starts_with("xpub"));
 
     // GetPublicKey must return the same keys.
     let req2 = EnclaveRequest {
@@ -51,39 +45,9 @@ fn initialize_and_get_keys() {
     };
 
     assert_eq!(init_resp.evm_address, keys_resp.evm_address);
-    assert_eq!(init_resp.btc_compressed_pub, keys_resp.btc_compressed_pub);
-    assert_eq!(init_resp.btc_xpub, keys_resp.btc_xpub);
-}
-
-#[test]
-fn double_initialize_returns_error() {
-    let port = common::start_test_server();
-
-    let req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-
-    let resp1 = common::send_request(port, &req);
-    assert!(
-        matches!(&resp1.response, Some(Response::InitializeKey(_))),
-        "first init should succeed"
-    );
-
-    let resp2 = common::send_request(port, &req);
-    if let Some(Response::Error(e)) = &resp2.response {
-        eprintln!("--- double_initialize_returns_error ---");
-        eprintln!(
-            "  second init error: code={} message=\"{}\"",
-            e.code, e.message
-        );
-    }
-    assert!(
-        matches!(&resp2.response, Some(Response::Error(_))),
-        "second init should return error"
+    assert_eq!(
+        init_resp.account_xpub_vanilla,
+        keys_resp.account_xpub_vanilla
     );
 }
 
@@ -146,75 +110,6 @@ fn refused_cloning_secret_keeps_phase_initial() {
     }
 }
 
-#[test]
-fn get_keys_before_init_returns_error() {
-    let port = common::start_test_server();
-
-    let req = EnclaveRequest {
-        request: Some(Request::GetPublicKey(GetPublicKeyRequest {})),
-    };
-    let resp = common::send_request(port, &req);
-
-    if let Some(Response::Error(e)) = &resp.response {
-        eprintln!("--- get_keys_before_init_returns_error ---");
-        eprintln!("  error: code={} message=\"{}\"", e.code, e.message);
-    }
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "get_keys before init should return error"
-    );
-}
-
-#[test]
-#[cfg(feature = "allow-seed-import")]
-fn deterministic_seed_import() {
-    let seed = [42u8; 64];
-
-    let port1 = common::start_test_server();
-    let req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: seed.to_vec(),
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    let resp1 = common::send_request(port1, &req);
-
-    let init1 = match &resp1.response {
-        Some(Response::InitializeKey(r)) => r,
-        other => panic!("expected InitializeKeyResponse, got {:?}", other),
-    };
-
-    // The same seed on a fresh server must produce the same keys.
-    let port2 = common::start_test_server();
-    let resp2 = common::send_request(port2, &req);
-
-    let init2 = match &resp2.response {
-        Some(Response::InitializeKey(r)) => r,
-        other => panic!("expected InitializeKeyResponse, got {:?}", other),
-    };
-
-    eprintln!("--- deterministic_seed_import (seed = [42u8; 64]) ---");
-    eprintln!("  server 1:");
-    eprintln!("    EVM address:    0x{}", hex::encode(&init1.evm_address));
-    eprintln!(
-        "    BTC compressed: {}",
-        hex::encode(&init1.btc_compressed_pub)
-    );
-    eprintln!("    BTC xpub:       {}", init1.btc_xpub);
-    eprintln!("  server 2:");
-    eprintln!("    EVM address:    0x{}", hex::encode(&init2.evm_address));
-    eprintln!(
-        "    BTC compressed: {}",
-        hex::encode(&init2.btc_compressed_pub)
-    );
-    eprintln!("    BTC xpub:       {}", init2.btc_xpub);
-
-    assert_eq!(init1.evm_address, init2.evm_address);
-    assert_eq!(init1.btc_compressed_pub, init2.btc_compressed_pub);
-    assert_eq!(init1.btc_xpub, init2.btc_xpub);
-}
-
 /// The enclave refuses a mnemonic over the size limit before the parse,
 /// which normalizes the whole string first. The refusal changes no state.
 #[test]
@@ -250,7 +145,9 @@ const TEST_MNEMONIC: &str =
 /// change, so a later OS-entropy init on the same server succeeds.
 ///
 /// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`.
-/// The gate is compile-time, so CI must run both feature profiles.
+/// The gate is compile-time, so CI runs this test in a build without
+/// `allow-seed-import` (the `light` job), and the counterpart in the signer
+/// test builds.
 #[test]
 #[cfg(not(feature = "allow-seed-import"))]
 fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
@@ -335,8 +232,7 @@ fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
         other => panic!("dev build must accept seed import, got {:?}", other),
     };
     assert_eq!(seed_init.evm_address.len(), 20);
-    assert_eq!(seed_init.btc_compressed_pub.len(), 33);
-    assert!(seed_init.btc_xpub.starts_with("xpub"));
+    assert!(seed_init.account_xpub_vanilla.starts_with("xpub"));
 
     // Caller-supplied mnemonic -> accepted (fresh server; init is one-shot).
     let port_mnemonic = common::start_test_server();

@@ -3,14 +3,14 @@
 The `mint-signer` feature enables `kms-persistence`, using AWS KMS to generate a
 64-byte seed and S3 to persist its encrypted `CiphertextBlob`. On initialization
 the enclave loads the saved blob, decrypts it with KMS recipient attestation,
-and passes the seed to its existing key derivation. Signing stays inside the enclave; it does not use
-KMS Sign.
+and derives its keys from that seed, as every build does. Signing stays inside
+the enclave; it does not use KMS Sign.
 
 The measured mint image compiles in `CUSTODY_FLOW`, whose encryption-context
 value is `rgb-mint`. Neither a host request nor an environment variable selects
 the custody flow. Builds enabling `kms-persistence` without `mint-signer` are
-rejected at compile time. Burn signers retain their existing OS-entropy and
-cloning lifecycle.
+rejected at compile time. Burn signers use the OS-entropy and cloning
+lifecycle.
 
 The address pin selects one of two initialization modes:
 
@@ -64,6 +64,7 @@ so the host cannot name a key in its own account.
 - With no list, a release image refuses every key. A dev or test build skips the
   check.
 - A new list needs a new PCR0, which the key policy must approve.
+- A burn build has no KMS key, so it has no list and does not read this variable.
 - The check pins the account, not the key. It does not replace
   `attest-verify --expect-kms-key-arn`.
 
@@ -78,7 +79,7 @@ For Production policy, a verifier checks them with `attest-verify --expect-kms-k
 
 ## Parent integration
 
-The existing [Rust parent](../parent/src/seed_persistence.rs) returns AWS
+The [Rust parent](../parent/src/seed_persistence.rs) returns AWS
 credentials and reads/conditionally creates one S3 object. It never receives
 the plaintext seed. Configure persistence on the parent process that serves
 this mint signer:
@@ -128,8 +129,10 @@ the enclave; the proxy only forwards bytes. The standard proxy restricts the
 destination, not source CIDs; isolation and process supervision belong to the
 host deployment. Do not run a second listener on `8003` or `8004`.
 
-`deploy/deploy-host.sh` deploys only the combined image, so it does not launch the mint signer.
-Set the mint signer's KMS values with `cli set-endpoints`.
+`deploy/deploy-host.sh` takes `SIGNER_ROLE=mint` or `burn` and deploys one CID per run. It writes
+the KMS values of its environment to `/etc/utexo/enclave.env`, and `utexo-enclave-ctl.sh start`
+sends them in `set-endpoints`. A mint enclave refuses blank KMS values, and `start` then terminates
+it, so you cannot add them by hand after the deploy. `release-eif.yml` exports no KMS value.
 No deployment script provisions the KMS relay, broker storage settings, or AWS policies.
 
 ## AWS permissions and persistence
@@ -219,7 +222,7 @@ recovery before funding the signer.
    Supply no seed or cloning secret.
    Verify the public identity and attestation.
    Independently back up the saved S3 ciphertext.
-   This procedure does not import a legacy seed.
+   This procedure imports no seed.
 3. Set `KMS_EXPECTED_EVM_ADDRESS` to the verified address at the next launch.
    Initialize the restarted enclave.
    Verify that its keys match the original keys.

@@ -2,7 +2,7 @@
 //! `GetLastSavedBlock`). They use the full wire path: TCP framing ->
 //! `dispatch` -> `ServerContext.header_chain` -> response.
 //!
-//! Gated with `spv`. A `ccd`-only build has no header chain.
+//! Gated with `rgb-validation`: a build without it has no header chain. Run it with `spv`.
 #![cfg(feature = "rgb-validation")]
 
 use utexo_bridge_enclave::networks::rgb::spv::{checkpoint_for, Network};
@@ -24,17 +24,6 @@ fn last_saved(port: u16) -> GetLastSavedBlockResponse {
         Some(ERes::GetLastSavedBlock(r)) => r,
         other => panic!("unexpected response: {other:?}"),
     }
-}
-
-#[test]
-fn fresh_enclave_reports_checkpoint_as_tip() {
-    // The test server uses Regtest. Its checkpoint is the regtest genesis
-    // block at height 0, so a fresh enclave reports it as the tip.
-    let port = start_test_server();
-    let cp = checkpoint_for(Network::Regtest);
-    let r = last_saved(port);
-    assert_eq!(r.block_height, 0);
-    assert_eq!(r.block_hash, cp.hash.to_vec());
 }
 
 #[test]

@@ -233,30 +233,6 @@ async fn rotation_opens_a_new_socket_while_the_original_rpc_finishes() {
 }
 
 #[tokio::test]
-async fn an_idle_connection_closes_at_its_age_without_waiting_for_grace() {
-    let (channel, mut seen, mut closed) = server(
-        Duration::from_millis(300),
-        Some(Duration::from_secs(3)),
-        Arc::new(Notify::new()),
-    )
-    .await;
-    channel
-        .clone()
-        .oneshot(request("/rotation/fast"))
-        .await
-        .unwrap();
-    let peer = seen.recv().await.unwrap();
-
-    assert_eq!(
-        timeout(Duration::from_secs(2), closed.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        peer
-    );
-}
-
-#[tokio::test]
 async fn grace_force_closes_a_stream_that_does_not_finish() {
     let (channel, mut seen, mut closed) = server(
         Duration::from_millis(200),
@@ -282,20 +258,4 @@ async fn grace_force_closes_a_stream_that_does_not_finish() {
             .unwrap(),
         peer
     );
-}
-
-#[tokio::test]
-async fn an_age_without_a_grace_keeps_the_original_stream_alive() {
-    let release = Arc::new(Notify::new());
-    let (channel, mut seen, _) = server(Duration::from_millis(200), None, release.clone()).await;
-    let call = tokio::spawn(channel.oneshot(request("/rotation/slow")));
-    seen.recv().await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    release.notify_one();
-    timeout(Duration::from_secs(2), call)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
 }

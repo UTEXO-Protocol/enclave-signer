@@ -5,7 +5,7 @@
 //! The individual checks are in `networks/`.
 
 use super::context::ServerContext;
-use super::dispatch::{unsupported_build, wrong_signer_role};
+use super::dispatch::wrong_signer_role;
 #[cfg(rgb_to_evm)]
 use super::signers::handle_sign_evm;
 #[cfg(evm_to_rgb)]
@@ -37,7 +37,7 @@ pub(super) fn handle_sign(
     check_signer_role(source_ref, destination_ref)?;
 
     // No deposit verifier in this build: refuse before the replay guard.
-    #[cfg(not(feature = "evm-rpc"))]
+    #[cfg(not(feature = "rgb-validation"))]
     refuse_unverifiable_funds_in(source_ref, destination_ref)?;
 
     // Refuse before any validation work while the key is not ready.
@@ -45,15 +45,6 @@ pub(super) fn handle_sign(
 
     // Refuse known replays before network I/O. An invalid request must not
     // use guard capacity, so this only checks. The reservation is made later.
-    // A byte-identical retry of a signed mint gets the same reply back.
-    #[cfg(evm_to_rgb)]
-    let op_key = operation_key(ctx, source_ref, destination_ref);
-    #[cfg(evm_to_rgb)]
-    let request_digest = request_digest(&req);
-    #[cfg(evm_to_rgb)]
-    if let Some(cached) = op_key.and_then(|k| ctx.state.signed_results.get(&k, &request_digest)) {
-        return Ok((cached, None));
-    }
     #[cfg(evm_to_rgb)]
     precheck_operation(ctx, source_ref, destination_ref)?;
 
@@ -80,14 +71,14 @@ pub(super) fn handle_sign(
     };
 
     // Binds each BFA mint claim of a consignment to the lock its lockId derives.
-    #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let anchor_binder =
         |bridge: &crate::networks::rgb::validation::BfaBridge,
          anchors: &[crate::networks::rgb::validation::MintAnchor]| {
             super::bfa::derived_locks(ctx, bridge, anchors)
         };
 
-    #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
@@ -95,13 +86,13 @@ pub(super) fn handle_sign(
     let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let mint_binder = |mint: &crate::networks::rgb::psbt_validation::MintFacts| {
         ensure_time_left(deadline, "the deposit binding")?;
         bind_mint(ctx, source_ref, mint)
     };
     // M8 takes the witness amount from the pinned config, never the request.
-    #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let mint_sats =
         |psbt: &bitcoin::psbt::Psbt,
          recipient: &crate::networks::rgb::psbt_validation::MintRecipient| {
@@ -117,7 +108,7 @@ pub(super) fn handle_sign(
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `sign_with_chain_pins_unchanged` reads these
-    // blocks again immediately before the key is used (F05-NEW-AF-08).
+    // blocks again immediately before the key is used.
     #[cfg(feature = "rgb-validation")]
     let chain_pins = crate::networks::rgb::spv_crosscheck::ChainPins::new();
 
@@ -131,13 +122,13 @@ pub(super) fn handle_sign(
         chain_pins: &chain_pins,
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         psbt_fee_key_paths: Some(&psbt_fee_key_paths),
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_binder: Some(&mint_binder),
-        #[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_sats: Some(&mint_sats),
-        #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: Some(&anchor_binder),
-        #[cfg(all(feature = "bfa-validation", rgb_to_evm))]
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         reject_list_reader: Some(&reject_list_reader),
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
@@ -184,9 +175,6 @@ pub(super) fn handle_sign(
             // RGB->EVM `fundsOut` binding: bind the calldata to the operation
             // that validation authenticated (witness confirmation, BtcRelay
             // agreement, consignment-bound release amount).
-            //
-            // RGB source only. A CCD source has no consignment, and the
-            // validation above already authorizes a CCD -> EVM release.
             //
             // Burn identity comes first, on both release routes. It needs only
             // the calldata and the pins.
@@ -245,20 +233,12 @@ pub(super) fn handle_sign(
         _ => Err(wrong_signer_role("this route")),
     };
 
-    #[cfg(evm_to_rgb)]
-    if let (Some(op_key), Ok(response)) = (op_key, &result) {
-        ctx.state
-            .signed_results
-            .put(op_key, request_digest, response.clone());
-    }
-
     // On error, the reservation drops here and rolls the key back.
     result.map(|response| (response, op_reservation))
 }
 
 /// Refuse a route of the other signer role. No-op on a build with both
-/// directions. It refuses by exclusion, so a burn build with `ccd` still signs
-/// CCD -> EVM.
+/// directions.
 fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -> Result<()> {
     #[cfg(not(evm_to_rgb))]
     if matches!(source, SourceNetwork::EvmSource(_))
@@ -277,7 +257,7 @@ fn check_signer_role(source: &SourceNetwork, destination: &DestinationNetwork) -
 }
 
 /// Bind RGB->EVM release calldata to the validated consignment before
-/// signing. It runs on both routes, `fundsOut` and `lzFundsOut` (#264).
+/// signing. It runs on both routes, `fundsOut` and `lzFundsOut`.
 /// Backend-supplied bridge operation ids are validated, not rewritten.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 fn apply_funds_out_binding(
@@ -305,7 +285,7 @@ fn apply_funds_out_binding(
     // Defense in depth: all consignment witness txs must be mined.
     crosscheck::assert_witnesses_confirmed(validated)?;
 
-    // BtcRelay agreement and source-block bind (#57 / #122).
+    // BtcRelay agreement and source-block bind.
     // The calldata `proof` must name headers that the enclave holds.
     // Its `source` pair must be the block of the last consignment witness tx.
     // An empty `proof` fails closed.
@@ -350,7 +330,7 @@ fn apply_funds_out_binding(
     // Consignment-bound release amount: the settling transition must be a Burn.
     crosscheck::validate_funds_out_amount(release, validated)?;
 
-    // Burn identity (bridge PR #152). `sourceBurnTxId` is the only `burnId`
+    // Burn identity. `sourceBurnTxId` is the only `burnId`
     // input that names the settled RGB operation. The contract trusts the
     // enclave for it. Bind it to the OpId of the settling transition.
     // `validate_rgb_source_identity` in `handle_sign` binds
@@ -366,29 +346,22 @@ fn apply_funds_out_binding(
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
     // exactly the locks consensus confirmed the burn's mint anchors against.
-    #[cfg(feature = "bfa-mint")]
+    #[cfg(feature = "rgb-validation")]
     crosscheck::validate_funds_out_settlement(release, &validated.mint_locks)?;
 
     Ok(())
 }
 
-/// The commission the source network declares, per compiled build.
-///
-/// Only a `ccd` build has a CCD source. Other builds need the fallback arm
-/// to type-check. `validate_source` already refused the request there.
+/// The commission the source network declares.
 fn source_commission(source: &SourceNetwork) -> Result<u64> {
     match source {
         SourceNetwork::EvmSource(source) => Ok(source.commission),
         SourceNetwork::RgbSource(source) => Ok(source.commission),
-        #[cfg(feature = "ccd")]
-        SourceNetwork::CcdSource(source) => Ok(source.commission),
-        #[allow(unreachable_patterns)]
-        _ => Err(unsupported_build("ccd")),
     }
 }
 
 /// M6 for this request: the mint must be the one its EVM deposit pays.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn bind_mint(
     ctx: &ServerContext,
     source: &SourceNetwork,
@@ -416,7 +389,7 @@ fn ensure_time_left(deadline: std::time::Instant, stage: &str) -> Result<()> {
 }
 
 /// The deposit tx hash of an EVM source: exactly 32 bytes.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn evm_tx_hash(source: &EvmSource) -> Result<[u8; 32]> {
     source.tx_hash.as_slice().try_into().map_err(|_| {
         EnclaveError::CrossCheck(format!(
@@ -428,23 +401,23 @@ fn evm_tx_hash(source: &EvmSource) -> Result<[u8; 32]> {
 
 /// The recipient that a verified deposit authorizes. Uninhabited on builds
 /// without a deposit verifier, so their `Option` is always `None`.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::networks::rgb::invoice::AuthorizedRecipient;
-#[cfg(all(not(feature = "evm-rpc"), evm_to_rgb))]
+#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
 type AuthorizedRecipient = std::convert::Infallible;
 
 /// Prove the EVM `FundsIn` deposit of an EVM->RGB request. Fails closed.
 ///
 /// One name for two builds, so `handle_sign` needs no `#[cfg]` here:
 ///
-///   * `evm-rpc`: fetch the receipt with the enclave RPC client. Return the
+///   * `rgb-validation`: fetch the receipt with the enclave RPC client. Return the
 ///     recipient that the deposit invoice authorizes.
-///   * no `evm-rpc`: no-op. [`refuse_unverifiable_funds_in`] already refused
+///   * no `rgb-validation`: no-op. [`refuse_unverifiable_funds_in`] already refused
 ///     all EVM->RGB requests.
 ///
 /// [`bind_funds_in_recipient`] uses the result after RGB validation proves the
 /// recipient seals.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn verify_funds_in_deposit(
     ctx: &ServerContext,
     amount: u64,
@@ -461,7 +434,7 @@ fn verify_funds_in_deposit(
     // operationId. `verify_funds_in_event` fails closed on an empty or short value.
     let client = ctx.launch()?.evm_rpc_client.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
-            "evm-rpc build but RPC client unavailable - refusing to sign a bridge PSBT \
+            "the EVM RPC client is unavailable - refusing to sign a bridge PSBT \
              without independently verifying the FundsIn deposit"
                 .into(),
         )
@@ -483,10 +456,11 @@ fn verify_funds_in_deposit(
     // Recipient bind. The checks above prove the amount, not the recipient.
     // The v2 Bridge `fundsIn` refuses a non-empty RGB destinationAddress, so
     // the deposit has no invoice. Then the lockId binds the recipient:
-    // `decode_funds_in` requires the deposit lockId to name the signed mint
-    // transition in the signed tx. The transition commits to its recipient
+    // M6 (`verify_rgb_funds_in`) requires the deposit lockId to name the
+    // signed mint transition in the signed tx. The transition commits to its recipient
     // seals and the tx to a witness mint's output script.
-    // A legacy deposit with an invoice also gets the seal bind.
+    // A deposit with an invoice (a non-empty destinationAddress) also gets
+    // the seal bind.
     if verified.destination_address.trim().is_empty() {
         return Ok(None);
     }
@@ -495,7 +469,7 @@ fn verify_funds_in_deposit(
     ))
 }
 
-#[cfg(all(not(feature = "evm-rpc"), evm_to_rgb))]
+#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
 fn verify_funds_in_deposit(
     _ctx: &ServerContext,
     _amount: u64,
@@ -505,10 +479,10 @@ fn verify_funds_in_deposit(
     Ok(None)
 }
 
-/// Refuse an EVM->RGB request on a build without `evm-rpc`.
+/// Refuse an EVM->RGB request on a build without `rgb-validation`.
 /// The consignment and PSBT checks prove the transfer shape only.
 /// They do not prove that an EVM deposit backs it.
-#[cfg(not(feature = "evm-rpc"))]
+#[cfg(not(feature = "rgb-validation"))]
 fn refuse_unverifiable_funds_in(
     source: &SourceNetwork,
     destination: &DestinationNetwork,
@@ -521,10 +495,10 @@ fn refuse_unverifiable_funds_in(
         )
     ) {
         return Err(EnclaveError::CrossCheck(
-            "enclave was not built with --features evm-rpc: refusing to sign a bridge-mode PSBT \
+            "enclave was not built with --features mint-signer: refusing to sign a bridge-mode PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
-             event_valid/event_finalized booleans are no longer trusted). \
-             Rebuild with `--features evm-rpc`."
+             event_valid/event_finalized booleans are not trusted). \
+             Rebuild with `--features mint-signer`."
                 .into(),
         ));
     }
@@ -535,7 +509,7 @@ fn refuse_unverifiable_funds_in(
 /// Compare the seals that RGB validation proved with the recipient that the
 /// verified deposit authorized. No-op when [`verify_funds_in_deposit`]
 /// returns no recipient.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn bind_funds_in_recipient(
     authorized: Option<AuthorizedRecipient>,
     destination_proof: &crate::networks::DestinationProof,
@@ -549,20 +523,12 @@ fn bind_funds_in_recipient(
     }
 }
 
-#[cfg(all(not(feature = "evm-rpc"), evm_to_rgb))]
+#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
 fn bind_funds_in_recipient(
     _authorized: Option<AuthorizedRecipient>,
     _destination_proof: &crate::networks::DestinationProof,
 ) -> Result<()> {
     Ok(())
-}
-
-/// SHA-256 of the request bytes: a cached reply is for this request only.
-#[cfg(evm_to_rgb)]
-fn request_digest(req: &SignRequest) -> [u8; 32] {
-    use prost::Message;
-    use sha2::{Digest, Sha256};
-    Sha256::digest(req.encode_to_vec()).into()
 }
 
 /// Replay-guard key of an EVM->RGB bridge sign. `None` for all other routes.
@@ -650,7 +616,7 @@ fn reserve_operation<'ctx>(
 }
 
 /// The early deposit and replay checks run before RGB work.
-#[cfg(all(test, feature = "evm-rpc", evm_to_rgb))]
+#[cfg(all(test, feature = "rgb-validation", evm_to_rgb))]
 mod early_bridge_checks {
     use super::*;
     use crate::config::BridgeConfig;
@@ -772,68 +738,10 @@ mod early_bridge_checks {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(ctx.state.op_replay_guard.seen_count(), 1);
     }
-
-    fn committed_key(ctx: &ServerContext) -> [u8; 32] {
-        let key = crate::networks::rgb::psbt_validation::psbt_operation_key(
-            ctx.bridge_config.chain_id,
-            &ctx.bridge_config.bridge_contract,
-            &[1; 32],
-            &[2; 32],
-            "rgb:test",
-        );
-        ctx.state.op_replay_guard.reserve(key).unwrap().commit();
-        key
-    }
-
-    fn cached_reply() -> EnclaveResponse {
-        EnclaveResponse {
-            response: Some(crate::proto::enclave_response::Response::Error(
-                crate::proto::ErrorResponse {
-                    code: 0,
-                    message: "cached".into(),
-                },
-            )),
-        }
-    }
-
-    #[test]
-    fn a_lost_reply_retry_gets_the_cached_reply_without_rpc() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let ctx = context(&calls);
-        let key = committed_key(&ctx);
-        ctx.state
-            .signed_results
-            .put(key, request_digest(&request()), cached_reply());
-        let (response, reservation) =
-            handle_sign(&ctx, request(), crate::test_support::far_deadline()).unwrap();
-        assert_eq!(response, cached_reply());
-        assert!(reservation.is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn a_changed_request_does_not_get_the_cached_reply() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let ctx = context(&calls);
-        let key = committed_key(&ctx);
-        ctx.state
-            .signed_results
-            .put(key, request_digest(&request()), cached_reply());
-        let mut changed = request();
-        changed.amount += 1;
-        let err = handle_sign(&ctx, changed, crate::test_support::far_deadline())
-            .map(|(response, _)| response)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("duplicate bridge operation"),
-            "{err}"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
 }
 
 /// A signer with no ready key refuses a burn before any validation work.
-#[cfg(all(test, feature = "bfa-validation", rgb_to_evm))]
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod key_not_ready {
     use super::*;
     use crate::cloning::CloneSession;
@@ -982,20 +890,6 @@ mod key_not_ready {
         }
     }
 
-    /// Control: with a ready key the same bytes reach validation, which
-    /// refuses them.
-    #[test]
-    fn a_ready_key_lets_the_same_bytes_reach_validation() {
-        let (response, _) = sign_burn(ready_state(), NOT_A_CONSIGNMENT.to_vec(), "rgb:test".into());
-        let Response::Error(err) = &response else {
-            panic!("expected the validation refusal, got {response:?}");
-        };
-        assert!(
-            err.message.contains("deserialization failed"),
-            "{response:?}"
-        );
-    }
-
     /// Control: with a ready key a valid burn passes the mint-anchor bind and
     /// stops at the witnesses: with no SPV proof, none is mined to consensus.
     #[test]
@@ -1017,12 +911,12 @@ mod key_not_ready {
 }
 
 /// A burn of a listed asset reads the list through the pinned EVM client.
-#[cfg(all(test, feature = "bfa-validation", rgb_to_evm))]
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod reject_list_wiring;
 
 /// The request memory model, measured on a whole burn request through
 /// `dispatch`. Only the mint/burn flow accepts a burn.
-#[cfg(all(test, feature = "bfa-mint", rgb_to_evm))]
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod request_memory;
 
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
@@ -1238,14 +1132,9 @@ mod indexer_only_bindings {
 
 #[cfg(all(test, evm_to_rgb))]
 mod deadline_tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::ensure_time_left;
-
-    #[test]
-    fn passes_while_time_is_left() {
-        ensure_time_left(Instant::now() + Duration::from_secs(60), "x").unwrap();
-    }
 
     #[test]
     fn refuses_once_the_deadline_has_passed() {

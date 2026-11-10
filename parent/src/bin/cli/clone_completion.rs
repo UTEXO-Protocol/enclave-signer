@@ -1,4 +1,4 @@
-//! F03-AF-05: report the result of one CLI clone attempt.
+//! Report the result of one CLI clone attempt.
 //! Use at most two workers for blocking calls.
 //! Process exit stops any remaining workers.
 //! Do not use this helper in a service.
@@ -46,7 +46,7 @@ pub struct Completion {
     pub detail: String,
 }
 
-/// Send SetClone once, then read all 13 identity fields.
+/// Send SetClone once, then read all 10 identity fields.
 /// Limit the total caller wait to 1.5 seconds.
 /// A timeout does not prove that SetClone failed.
 pub fn complete(
@@ -91,7 +91,7 @@ pub fn complete(
                     Outcome::RecoveredSuccess
                 },
                 detail: if identity_matches {
-                    format!("{set_detail}; requester matches expected EVM and all 13 donor fields")
+                    format!("{set_detail}; requester matches expected EVM and all 10 donor fields")
                 } else {
                     format!("{set_detail}; identity mismatch (expected EVM match: {}; differing donor fields: {})",
                         keys.evm_address == expected_evm, mismatches.join(", "))
@@ -119,7 +119,7 @@ pub fn complete(
 
 /// Compare all fields with the donor bundle.
 /// The CLI uses the configured transport authentication.
-/// The enclave checks the signed identity commitment. (F03-AF-08)
+/// The enclave checks the signed identity commitment.
 pub fn identity_field_mismatches(
     local: &PublicKeysResponse,
     donor: &AttestedPublicKeyResponse,
@@ -133,8 +133,6 @@ pub fn identity_field_mismatches(
     compare!(
         evm_address,
         evm_uncompressed_pub,
-        btc_compressed_pub,
-        btc_xpub,
         master_fingerprint,
         account_xpub_vanilla,
         account_xpub_colored,
@@ -142,8 +140,7 @@ pub fn identity_field_mismatches(
         bridge_contract,
         rgb_asset_id,
         evm_gas_tx_uncompressed_pub,
-        evm_gas_tx_address,
-        ccd_ed25519_pub
+        evm_gas_tx_address
     );
     diff
 }

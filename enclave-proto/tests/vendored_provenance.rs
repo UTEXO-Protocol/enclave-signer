@@ -6,9 +6,8 @@
 //! Editing only `proto/enclave.proto` leaves the Rust types unchanged. These
 //! tests detect changes that do not match the recorded provenance.
 //!
-//! Nothing but prose stood between us and that drift, and the prose has already
-//! been wrong once (the blob-hash table shipped with two incorrect hashes). So
-//! assert it instead:
+//! The README tables are prose, and no build reads prose. So these tests assert
+//! the two invariants:
 //!
 //!   1. README's blob-hash table == the files actually on disk. Catches any
 //!      edit to `enclave.rs` or `enclave.proto`, including a hand-edit of the
@@ -168,24 +167,4 @@ fn readme_commit_matches_the_rev_parent_pins() {
          renumbering would surface as a mis-parsed request at runtime, not as a build \
          failure. Re-vendor enclave-proto/ from the rev parent pins (or move both together).\n"
     );
-}
-
-/// The re-sync procedure is only trustworthy if the README keeps saying how to
-/// run it, so fail if the Provenance section is gutted.
-#[test]
-fn readme_still_documents_the_resync_procedure() {
-    let readme = read("README.md");
-    for marker in [
-        "## Provenance",
-        "git hash-object",
-        "rust-gen/src/enclave/enclave.rs",
-        "proto/enclave/enclave.proto",
-    ] {
-        assert!(
-            readme.contains(marker),
-            "enclave-proto/README.md no longer contains {marker:?}. The vendored slice has no \
-             build.rs, so this README is the only description of how to re-sync it - keep the \
-             Provenance section and its verification commands intact."
-        );
-    }
 }

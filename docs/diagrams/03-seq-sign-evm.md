@@ -35,7 +35,7 @@ sequenceDiagram
     Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
     Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
-    Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units; no EVM RPC read)
+    Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units, no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
     Rgb->>Rgb: witness resolver: tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
     opt genesis names a reject list
@@ -44,7 +44,7 @@ sequenceDiagram
     end
     Rgb->>Rgb: the bound locks are the anchors, one for one
     Rgb->>Rgb: rgb-lib inspect_consignment(All) on the same file:<br/>the flat summary of every transition
-    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId; flat summary must agree
+    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId<br/>(the flat summary must agree)
     Rgb->>Rgb: contract_id == declared asset_id, again
     Rgb-->>Srv: ValidatedConsignment
 
@@ -103,7 +103,7 @@ sequenceDiagram
         Sign->>Sign: structHash TeeFundsOut(9 decoded fields + nonce, deadline)
     end
     Sign->>Sign: digest = keccak256(0x1901 || domSep || structHash)
-    Srv->>Chain: sign_with_chain_pins_unchanged<br/>(lock chain; pinned SPV blocks still in the chain<br/>and as deep as their check required, else REFUSE)
+    Srv->>Chain: sign_with_chain_pins_unchanged<br/>(lock chain, pinned SPV blocks still in the chain<br/>and as deep as their check required, else REFUSE)
     Sign->>Sign: k256 ECDSA sign_prehash_recoverable (r‖s‖v)
     Sign-->>Srv: signature (65 bytes)
     Srv->>Chain: release chain lock

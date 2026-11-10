@@ -5,9 +5,10 @@
 //! AWS Nitro attestation verifier: cert chain, COSE signature, PCRs, nonce
 //! and bundle commitment.
 //!
-//! Usage:
-//!     attest-verify --endpoint http://127.0.0.1:50051 \
-//!         --pcr0 <hex> --pcr1 <hex> --pcr2 <hex>
+//! Usage: production verification takes the PCRs and the `--expect-*` flags.
+//! Missing PCRs or `--expect-*` values exit 1 after parsing; a missing
+//! `--expect-evm-finality-tag` exits 2. See `docs/verify-a-signer.md` and
+//! `docs/pubkey-attestation.md` for the full commands.
 //!
 //! `--from-file <bundle.json>` runs the same checks offline on a bundle that
 //! `utexo-bridge-parent-cli export-attestation` wrote. The nonce is the

@@ -1,6 +1,8 @@
 mod common;
 
+#[cfg(rgb_to_evm)]
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+#[cfg(rgb_to_evm)]
 use alloy_sol_types::{sol, SolCall};
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::proto::enclave_request::Request;
@@ -9,6 +11,7 @@ use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwor
 use utexo_bridge_enclave::proto::*;
 
 // Mirrors `IBridge.fundsOut(FundsOutParams)`: one dynamic tuple.
+#[cfg(rgb_to_evm)]
 sol! {
     struct FundsOutParams {
         address recipient;
@@ -68,6 +71,7 @@ fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
 }
 
 /// Build ABI-valid `fundsOut(FundsOutParams)` calldata in the deployed shape.
+#[cfg(rgb_to_evm)]
 fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     fundsOutCall {
         params: FundsOutParams {
@@ -90,14 +94,18 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
 /// Placeholder consignment bytes. `validate_source_payload` checks only the
 /// keccak hash. This harness has no RGB validator, so tests stop at the
 /// handler's "requires validated consignment" check.
+#[cfg(rgb_to_evm)]
 const PLACEHOLDER_CONSIGNMENT: &[u8] = b"placeholder-consignment-bytes-for-integration-tests";
 
+#[cfg(rgb_to_evm)]
 fn placeholder_consignment_hash() -> Vec<u8> {
     use sha3::{Digest, Keccak256};
     Keccak256::digest(PLACEHOLDER_CONSIGNMENT).to_vec()
 }
 
-/// One hour from now: inside the enclave's 1-day deadline cap.
+/// One hour from now: inside the enclave's deadline cap,
+/// [`utexo_bridge_enclave::networks::evm::validation::MAX_TEE_DEADLINE_SECS`].
+#[cfg(rgb_to_evm)]
 fn test_deadline() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -108,6 +116,7 @@ fn test_deadline() -> u64 {
 
 /// Build a valid enriched EVM-destination SignRequest for testing. `commission`
 /// stays outside the calldata and does not reach the signed digest.
+#[cfg(rgb_to_evm)]
 fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
     SignRequest {
         amount: amount + commission + 100, // plenty of headroom
@@ -383,7 +392,7 @@ fn sign_psbt_request(
             token: vec![],
             recipient: vec![],
             commission: evm_commission,
-            // Unchecked in non-`evm-rpc` builds, but must still be 32 bytes.
+            // Unchecked without `rgb-validation`, but must still be 32 bytes.
             funds_in_operation_id: vec![0x33; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
@@ -399,12 +408,23 @@ fn sign_psbt_request(
     }
 }
 
+fn assert_key_uninitialized(response: EnclaveResponse) {
+    match response.response {
+        Some(Response::Error(error)) => {
+            assert_eq!(error.code, 1);
+            assert_eq!(error.message, "key not initialized");
+        }
+        other => panic!("expected uninitialized key refusal, got {other:?}"),
+    }
+}
+
 // EVM signing tests
 
-// No happy-path EVM sign test here. The harness has no `rgb_validator`, so the
-// handler refuses fundsOut. The `evm::crosscheck` unit tests cover the happy path.
+// This lightweight harness intentionally omits an RGB validator. Successful
+// burn signing is covered by the dedicated burn handler integration fixture.
 
 #[test]
+#[cfg(rgb_to_evm)]
 fn test_sign_evm_before_init() {
     let port = common::start_test_server();
 
@@ -413,15 +433,12 @@ fn test_sign_evm_before_init() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "sign before init should return error"
-    );
+    assert_key_uninitialized(resp);
 }
 
 // EVM enriched cross-check tests
 
-/// P0 regression: the host `consignment_valid` flag must not bypass validation.
+/// The host `consignment_valid` flag must not bypass validation.
 /// The enclave rejects empty consignment bytes, whatever the flag says.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
@@ -501,184 +518,20 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-/// Regression (CcdSource -> EvmDestination fundsOut): a Concordium-sourced
-/// release must sign. A CCD source has no RGB consignment, so the RGB->EVM
-/// fundsOut binding does not apply. This covers the full `handle_sign` path with
-/// the real selector, which `route_proofs_accept_ccd_source_to_evm_destination`
-/// does not reach.
-#[cfg(all(feature = "rgb-validation", feature = "ccd"))]
-#[test]
-fn test_sign_evm_accepts_ccd_source_funds_out() {
-    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let amount = 1000u64;
-    let commission = 50u64;
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(SignRequest {
-            amount: amount + commission + 100, // headroom, mirrors valid_sign_evm_request
-            source_network: Some(SourceNetwork::CcdSource(CcdSource {
-                tx_hash: vec![0xCC; 32],
-                commission,
-            })),
-            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
-                call_data: mock_funds_out_calldata([0x22; 20], amount),
-                nonce: 1,
-                deadline: test_deadline(),
-                chain_id: 1,
-                proxy_contract: vec![0xAA; 20],
-                calldata_amount: amount,
-                calldata_commission: commission,
-                lz_release: None,
-                burn_destination: None,
-            })),
-        })),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::EvmSignature(sig)) => {
-            assert!(
-                !sig.signature.is_empty(),
-                "expected a non-empty EVM signature for CcdSource -> EvmDestination fundsOut"
-            );
-        }
-        // An unconditional RGB binding fails here.
-        other => panic!(
-            "expected EvmSignature for CcdSource -> EvmDestination fundsOut, got {:?}",
-            other
-        ),
-    }
-}
-
-/// An lzFundsOut selector without `lz_release` must fail in validation,
-/// before the key, with an error and no signature (F05-NEW-AF-12).
-#[cfg(all(feature = "rgb-validation", feature = "ccd"))]
-#[test]
-fn test_sign_evm_refuses_lz_selector_without_lz_release() {
-    let port = common::start_test_server_with_config(|_| {}, pinned_bridge_config());
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let amount = 1000u64;
-    let commission = 50u64;
-    // Remote destination chain: the entrypoint route refuses the pinned one.
-    let call_data = lzFundsOutCall {
-        amount: U256::from(amount),
-        burnId: U256::ZERO,
-        sourceChainId: U256::ZERO,
-        destinationChainId: U256::from(137u64),
-        sourceAddress: String::new(),
-        proof: Bytes::new(),
-        settlementData: Bytes::new(),
-        dstEid: 30109,
-        recipient: [0x22; 32].into(),
-        minAmountLD: U256::from(amount),
-        extraOptions: Bytes::new(),
-        sourceBurnTxId: FixedBytes([0x5b; 32]),
-    }
-    .abi_encode();
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(SignRequest {
-            amount: amount + commission + 100,
-            source_network: Some(SourceNetwork::CcdSource(CcdSource {
-                tx_hash: vec![0xCC; 32],
-                commission,
-            })),
-            destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
-                call_data,
-                nonce: 1,
-                deadline: test_deadline(),
-                chain_id: 1,
-                proxy_contract: vec![0xAA; 20],
-                calldata_amount: amount,
-                calldata_commission: commission,
-                lz_release: None,
-                burn_destination: None,
-            })),
-        })),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => assert!(
-            e.message
-                .contains("lzFundsOut calldata requires lz_release"),
-            "expected the missing lz_release refusal, got: {}",
-            e.message
-        ),
-        other => panic!("expected ErrorResponse and no signature, got {:?}", other),
-    }
-}
-
-/// Fail-closed: a build that can validate consignments must not sign without a
-/// pinned operator config. It must not fall back to trusting the listener.
-/// The harness builds the library without `cfg(test)`, so the production guard
-/// is active. The test builds the empty `BridgeConfig`, so env cannot interfere.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-#[test]
-fn test_sign_evm_rejects_unconfigured_bridge_config() {
-    let unconfigured = BridgeConfig {
-        chain_id: 0,
-        bridge_contract: [0u8; 20],
-        rgb_asset_id: String::new(),
-        ..Default::default()
-    };
-    let port = common::start_test_server_with_config(|_| {}, unconfigured);
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    // A valid fundsOut request. Only the pinned config is missing.
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(valid_sign_evm_request(1000, 50))),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3, "cross-check failures should use code 3");
-            assert!(e.message.contains("rgb_validator"));
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
 // Route proofs bind the amount. RGB source validation emits the consignment
 // amount. EVM destination validation decodes `fundsOut.amount` and checks it
 // against `calldata_amount`. `validate_route_proofs` compares the two.
 
-/// A build without `spv` must refuse every `fundsOut`, even with no
-/// merkle_proofs. Without SPV, only the host-controlled indexer anchors
-/// witness txs, so the enclave could sign against a fabricated anchor.
+/// A build without `rgb-validation` must refuse an RGB source, even with no
+/// merkle_proofs. It has no consensus code to check a consignment with.
 ///
-/// `not(rgb-validation)` implies `not(spv)` for any build that compiles. The
+/// A no-SPV burn signer is a different build. It has `rgb-validation` and signs
+/// on the indexer's witness status, so it does not run this test. The
 /// refusal fires in RGB source validation, whose message names the missing
 /// `rgb-validation` feature.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
-fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
+fn a_build_without_rgb_validation_refuses_rgb_sources() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -723,7 +576,7 @@ fn test_no_spv_build_refuses_funds_out_even_without_merkle_proofs() {
 // PSBT signing tests
 
 #[test]
-#[cfg(evm_to_rgb)]
+#[cfg(all(evm_to_rgb, feature = "rgb-validation"))]
 fn test_sign_psbt_before_init() {
     let port = common::start_test_server();
 
@@ -740,60 +593,16 @@ fn test_sign_psbt_before_init() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "sign before init should return error"
-    );
+    assert_key_uninitialized(resp);
 }
 
 // PSBT enriched cross-check tests
 
-/// The listener `event_valid` and `event_finalized` booleans do not
-/// authorize or block signing. With both `false`, no rejection comes from them.
-#[test]
-#[cfg(evm_to_rgb)]
-fn test_sign_psbt_ignores_listener_evm_booleans() {
-    let port = common::start_test_server();
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(sign_psbt_request(
-            vec![0xAA; 32],
-            false,
-            false,
-            1000,
-            0,
-            minimal_valid_psbt_bytes(),
-            500,
-        ))),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    // Other checks can reject this synthetic request, but not the booleans.
-    if let Some(Response::Error(e)) = &resp.response {
-        assert!(
-            !e.message.contains("not yet finalized")
-                && !e.message.contains("not validated by Listener"),
-            "listener booleans must no longer drive rejection, got: {}",
-            e.message
-        );
-    }
-}
-
-/// A build without the `evm-rpc` FundsIn verifier must refuse a bridge-mode
-/// PSBT. In the minimal build, the `evm-rpc` fail-closed guard is the first
-/// bridge-mode gate.
+/// A build without the `FundsIn` verifier must refuse a bridge-mode PSBT. In
+/// the minimal build, that fail-closed guard is the first bridge-mode gate.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
-fn test_no_evm_rpc_build_refuses_bridge_psbt() {
+fn test_no_rgb_validation_build_refuses_bridge_psbt() {
     let port = common::start_test_server();
 
     let init_req = EnclaveRequest {
@@ -807,7 +616,7 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
 
     // Bridge mode (EVM source + RGB destination) with a shape-valid PSBT and
     // consistent amounts. It passes the route cross-checks and reaches the
-    // evm-rpc guard. The listener booleans are true but ignored.
+    // `FundsIn` guard. The listener booleans are true but ignored.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0xAA; 32],
@@ -825,8 +634,8 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("--features evm-rpc"),
-                "expected an evm-rpc feature refusal, got: {}",
+                e.message.contains("--features mint-signer"),
+                "expected a mint-signer feature refusal, got: {}",
                 e.message
             );
         }
@@ -834,71 +643,15 @@ fn test_no_evm_rpc_build_refuses_bridge_psbt() {
     }
 }
 
-/// The first RGB bind refusal of a bare PSBT: the swap flow needs a
-/// consignment, the mint signer reads the PSBT's own data and inputs.
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
-const RGB_BIND_REFUSAL: &str = if cfg!(feature = "bfa-mint") {
-    "witness_utxo"
-} else {
-    "consignment"
-};
-
-#[test]
-#[cfg(all(feature = "evm-rpc", evm_to_rgb))]
-fn test_sign_psbt_rejects_amount_mismatch() {
-    // The enclave refuses a bridge-mode PSBT unless it can verify the FundsIn
-    // deposit. The stub reports the deposit that this request declares, so the
-    // RGB bind is what rejects.
-    let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
-        operation_id: [0x33; 32],
-        gross: 100,
-        commission: 20,
-        emitter: utexo_bridge_enclave::config::BridgeConfig::from_env().funds_in_contract,
-    }));
-
-    let init_req = EnclaveRequest {
-        request: Some(Request::InitializeKey(InitializeKeyRequest {
-            seed: vec![],
-            mnemonic: String::new(),
-            cloning_secret: String::new(),
-        })),
-    };
-    common::send_request(port, &init_req);
-
-    let sign_req = EnclaveRequest {
-        request: Some(Request::Sign(sign_psbt_request(
-            vec![0xAA; 32],
-            true,
-            true,
-            100,
-            20,
-            minimal_valid_psbt_bytes(),
-            90, // 90 + 20 = 110 > 100
-        ))),
-    };
-    let resp = common::send_request(port, &sign_req);
-
-    match &resp.response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(
-                e.message.contains("amount mismatch")
-                    || e.message.contains(RGB_BIND_REFUSAL)
-                    || e.message.contains("rgb_validator"),
-                "expected amount or RGB validation rejection, got: {}",
-                e.message
-            );
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
+/// The first RGB bind refusal of a bare PSBT: the mint signer reads the
+/// PSBT's own data and inputs.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+const RGB_BIND_REFUSAL: &str = "witness_utxo";
 
 // An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
-// An empty `evm_tx_hash` does not select a "vanilla mode" that skips the
-// bridge checks.
+// An empty `evm_tx_hash` does not skip the bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-#[cfg(feature = "evm-rpc")]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
     let port = common::start_test_server();
 
@@ -937,14 +690,13 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
     }
 }
 
-// A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
+// A length-valid, all-zero evm_tx_hash does not skip the bridge checks.
 // An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
 // consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
-#[cfg(feature = "evm-rpc")]
-fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
+fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     // The deposit stub lets the run pass the FundsIn gate and reach the
     // consignment bind.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
@@ -1015,10 +767,7 @@ fn test_sign_btc_before_init() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    assert!(
-        matches!(&resp.response, Some(Response::Error(_))),
-        "SignBtc before init should return error"
-    );
+    assert_key_uninitialized(resp);
 }
 
 // `signing::taproot::tests::scoped_vanilla_refuses_a_colored_input` covers the
@@ -1206,7 +955,7 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     }
 }
 
-/// #248 end to end: each output pays back to custody and the value cap holds,
+/// End to end: each output pays back to custody and the value cap holds,
 /// but about 98% of the input goes to miners. The pinned fee policy refuses
 /// before the signer runs.
 #[test]
@@ -1547,7 +1296,7 @@ fn test_sign_evm_rejects_consignment_without_hash() {
 
 // Raw message signing
 
-/// The proto still has `SignRawMessage`. Signing it would put the bridge key on
+/// The proto has `SignRawMessage`. Signing it would put the bridge key on
 /// caller bytes under EIP-191 with no policy, so the enclave must refuse it.
 #[test]
 fn test_sign_raw_message_is_refused() {
@@ -1576,7 +1325,7 @@ fn test_sign_raw_message_is_refused() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert!(
-                e.message.contains("SignRawMessage is removed"),
+                e.message.contains("SignRawMessage is not supported"),
                 "unexpected error message: {}",
                 e.message
             );
@@ -1707,8 +1456,8 @@ fn eip1559_full(to: &[u8; 20], max_fee: u64, gas: u64, data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(rgb_to_evm)]
-fn init(port: u16) {
-    common::send_request(
+fn init(port: u16) -> InitializeKeyResponse {
+    let response = common::send_request(
         port,
         &EnclaveRequest {
             request: Some(Request::InitializeKey(InitializeKeyRequest {
@@ -1718,29 +1467,50 @@ fn init(port: u16) {
             })),
         },
     );
+    match response.response {
+        Some(Response::InitializeKey(keys)) => keys,
+        other => panic!("expected initialized keys, got {other:?}"),
+    }
+}
+
+#[cfg(rgb_to_evm)]
+fn recovered_address(digest: &[u8; 32], signature: &[u8]) -> [u8; 20] {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use sha3::{Digest, Keccak256};
+    assert_eq!(signature.len(), 65);
+    let sig = Signature::from_slice(&signature[..64]).unwrap();
+    let recovery = RecoveryId::from_byte(signature[64]).unwrap();
+    let key = VerifyingKey::recover_from_prehash(digest, &sig, recovery).unwrap();
+    Keccak256::digest(&key.to_sec1_point(false).as_bytes()[1..])[12..]
+        .try_into()
+        .unwrap()
 }
 
 #[test]
 #[cfg(rgb_to_evm)]
-fn test_gas_tx_signs_pinned_destination() {
+fn test_gas_tx_signature_commits_to_preimage_and_gas_key() {
+    use sha3::{Digest, Keccak256};
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
-    init(port);
-
-    // Calldata leads with the pinned 0xdeadbeef selector (empty calldata is refused).
-    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &[0xde, 0xad, 0xbe, 0xef]);
-    let resp = common::send_request(
-        port,
-        &EnclaveRequest {
-            request: Some(Request::SignRawDigest(SignRawDigestRequest {
-                digest: vec![],
-                unsigned_tx: tx,
-            })),
-        },
-    );
-
-    match &resp.response {
-        Some(Response::RawDigestSig(r)) => assert_eq!(r.signature.len(), 65),
-        other => panic!("expected RawDigestSignatureResponse, got {:?}", other),
+    let keys = init(port);
+    for arguments in [vec![], vec![0u8; 32]] {
+        let mut data = vec![0xde, 0xad, 0xbe, 0xef];
+        data.extend(arguments);
+        let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &data);
+        let digest: [u8; 32] = Keccak256::digest(&tx).into();
+        let signature = match sign_gas_tx(port, tx).response {
+            Some(Response::RawDigestSig(r)) => r.signature,
+            other => panic!("expected gas signature, got {other:?}"),
+        };
+        let signer = recovered_address(&digest, &signature);
+        assert_eq!(signer.as_slice(), keys.evm_gas_tx_address);
+        assert_ne!(
+            signer.as_slice(),
+            keys.evm_address,
+            "must use the separate gas key"
+        );
+        let changed = eip1559_full(&[0xAA; 20], 101, 21_000, &data);
+        let changed_digest = Keccak256::digest(&changed).into();
+        assert_ne!(recovered_address(&changed_digest, &signature), signer);
     }
 }
 
@@ -1846,22 +1616,6 @@ fn test_gas_tx_rejects_fee_over_cap() {
             assert!(e.message.contains("maxFeePerGas"), "got: {}", e.message);
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
-#[test]
-#[cfg(rgb_to_evm)]
-fn test_gas_tx_signs_allowlisted_selector() {
-    let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
-    init(port);
-
-    // Calldata leading with the pinned 0xdeadbeef selector is accepted.
-    let mut data = vec![0xde, 0xad, 0xbe, 0xef];
-    data.extend_from_slice(&[0u8; 32]);
-    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &data);
-    match &sign_gas_tx(port, tx).response {
-        Some(Response::RawDigestSig(r)) => assert_eq!(r.signature.len(), 65),
-        other => panic!("expected RawDigestSignatureResponse, got {:?}", other),
     }
 }
 

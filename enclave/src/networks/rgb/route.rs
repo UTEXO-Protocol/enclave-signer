@@ -15,9 +15,9 @@ use super::flow;
 use super::psbt_validation;
 #[cfg(feature = "rgb-validation")]
 use super::validation;
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use super::{parent_proof, psbt_commit};
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::config::BridgeConfig;
 #[cfg(all(not(feature = "rgb-validation"), rgb_to_evm))]
 use crate::error::EnclaveError;
@@ -29,7 +29,7 @@ use crate::networks::ValidationContext;
 use crate::proto::RgbDestination;
 #[cfg(rgb_to_evm)]
 use crate::proto::RgbSource;
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::proto::SignRightsRefillRequest;
 
 /// Validates an RGB source. The route amount comes from the consignment,
@@ -112,7 +112,7 @@ pub fn validate_destination(
 
 /// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO
 /// (F1-F7, PP, M1-M8). Returns the units and the `utxob:` seal of a blinded mint.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
     source_amount: u64,
@@ -153,7 +153,7 @@ pub fn validate_destination_anchor(
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which
 /// `asset_id` must name too. Returns the pin and the committed transition.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn pinned_commitment(
     psbt: &bitcoin::psbt::Psbt,
     fascia: &[u8],
@@ -172,9 +172,9 @@ fn pinned_commitment(
     Ok((pin, committed))
 }
 
-/// F7: the mint spends one input, a Colored key-path input of this enclave.
-/// Returns it, for the fee bound.
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+/// F7: the mint spends its right alone ([`psbt_validation::MINT_INPUTS`]), a
+/// Colored key-path input of this enclave. Returns it, for the fee bound.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Result<Vec<usize>> {
     use crate::error::EnclaveError;
 
@@ -199,7 +199,7 @@ fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Resul
 
 /// A refill from its PSBT and the two fascias alone (F2-F6, RR6-RR8, RR11), no
 /// network. Returns the new rights' vouts, which the caller proves ours (RR9).
-#[cfg(all(feature = "bfa-mint", evm_to_rgb))]
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_rights_refill(
     req: &SignRightsRefillRequest,
     psbt: &bitcoin::psbt::Psbt,

@@ -26,10 +26,10 @@ sequenceDiagram
     Srv->>Srv: require SetEndpoints done, else NotReady
     Srv->>State: get_keys()
     Note over Parent,State: No keys yet - the enclave attests the policy only,<br/>with no public_key. The parent refuses that answer.
-    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key + address, btc keys, master_fingerprint,<br/>account xpubs vanilla+colored, ccd_ed25519_pub}
+    State-->>Srv: KeyInfo{evm_address, evm_uncompressed_pub,<br/>gas-tx key + address, master_fingerprint,<br/>account xpubs vanilla+colored}
 
     Srv->>Srv: merge boot-pinned BridgeConfig<br/>(chain_id, bridge_contract, rgb_asset_id)<br/>into PublicKeysResponse
-    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(13 length-prefixed fields, proto order)
+    Srv->>Srv: bundle := canonical_pubkey_bundle(keys)<br/>(10 length-prefixed fields, proto order)
     Srv->>Srv: commitment := sha256(bundle || policy_commitment)<br/>policy = SecurityPolicy resolved once at SetEndpoints
 
     Srv->>Att: get_attestation(nonce, pubkey=evm_uncompressed_pub, user_data=commitment)

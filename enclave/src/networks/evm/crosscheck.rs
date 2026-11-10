@@ -16,7 +16,7 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map, which the burn path fills from verified SPV proofs only.
+/// ordinal map, filled from verified SPV proofs, or from the indexer on a no-SPV burn.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -100,7 +100,7 @@ pub fn validate_funds_out_burn_recipient(
     })?;
     let target = burn_destination::resolve(&reason, record)?;
 
-    // `None` = direct fundsOut. A legacy (V0) burn names no chain, so it is
+    // `None` = direct fundsOut. A V0 burn names no chain, so it is
     // direct only.
     if target.dst_eid != release.dst_eid {
         return Err(EnclaveError::CrossCheck(format!(
@@ -126,7 +126,7 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
-/// Source-burn bind (bridge PR #152): `sourceBurnTxId` must be the RGB OpId of
+/// Source-burn bind: `sourceBurnTxId` must be the RGB OpId of
 /// the settling transition, which [`validate_funds_out_amount`] reads.
 ///
 /// On chain, `sourceBurnTxId` is the only `burnId` input that identifies the
@@ -193,10 +193,9 @@ pub fn validate_funds_out_source_burn_tx_id(
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
 /// `operationId` order, which also refuses duplicates. `burnId` does not hash
-/// `settlementData`, so replay safety does not rest on this order
-/// (F05-NEW-AF-04). An empty lock set refuses: each signable
+/// `settlementData`, so replay safety does not rest on this order.
+/// An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
-#[cfg(feature = "bfa-mint")]
 pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,
     locks: &[crate::networks::rgb::validation::VerifiedLock],
@@ -261,8 +260,8 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay agreement and consignment source-block bind (spec section 13,
-/// #57/#122). Before a `fundsOut` is signed:
+/// BtcRelay agreement and consignment source-block bind (spec section 13).
+/// Before a `fundsOut` is signed:
 ///
 /// 1. Find the block of the last witness tx from its SPV Merkle proof, not
 ///    from the calldata.
@@ -478,10 +477,10 @@ struct ConsignmentAnchor {
 /// is at that height, the enclave is behind, so it refuses.
 ///
 /// The proof is verified again here. The earlier `validate_source_chain` pass
-/// held a different header-chain lock. A concurrent `SubmitHeaders` reorg (up
-/// to `MAX_REORG_DEPTH = 100`, more than `SPV_MIN_CONFIRMATIONS`) can
-/// replace the header between the two. Inclusion and header hash must come
-/// from one view.
+/// held a different header-chain lock. A concurrent `SubmitHeaders` reorg can
+/// replace the header between the two: it goes up to `MAX_REORG_DEPTH`
+/// blocks, which can be more than `SPV_MIN_CONFIRMATIONS`. Inclusion and
+/// header hash must come from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
     merkle_proofs: &[MerkleProofEntry],
@@ -575,9 +574,9 @@ const FUNDS_OUT_PROOF_LEN: usize = 4 * 32;
 /// Without a bound, a listener can send a very old block, and the freshness
 /// check proves nothing.
 ///
-/// Equal to `MAX_REORG_DEPTH` (100 blocks, ~16 h on mainnet). This is more
-/// than the relay posting interval, and the enclave does not reorg deeper.
-/// It is an alias, so the two values cannot drift. The host cannot change it.
+/// Equal to `MAX_REORG_DEPTH`. This is more than the relay posting interval,
+/// and the enclave does not reorg deeper. It is an alias, so the two values
+/// cannot drift. The host cannot change it.
 const MAX_RELAY_TIP_LAG_BLOCKS: u32 = crate::networks::rgb::spv::chain::MAX_REORG_DEPTH;
 
 /// Decodes the `fundsOut` `proof` slot into its `(source, latest)` block pair.

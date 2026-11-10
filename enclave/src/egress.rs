@@ -7,10 +7,10 @@
 //! A forwarder for a TLS endpoint (`ssl://` or `https://` indexer, EVM RPC,
 //! KMS) accepts only a connection that starts with a TLS handshake record.
 //! Thus no client in the enclave can send plaintext to such an endpoint, not
-//! even after an HTTPS -> HTTP redirect. Some HTTP clients (`minreq` in
-//! `esplora-client`, `reqwest` in the EVM RPC client) follow such redirects,
-//! and the enclave cannot turn that off through their APIs. A redirect to a
-//! port with no forwarder, or to another host, has no route out.
+//! even after an HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) does
+//! not follow redirects. `esplora-client` (`minreq`) can follow them, and the
+//! enclave cannot turn that off through its API. A redirect to a port with no
+//! forwarder, or to another host, has no route out.
 
 use std::io::{self, Read};
 use std::net::TcpStream;
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 /// Time a client has to send the first three bytes. A TLS client sends its
 /// ClientHello at once.
-const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
+pub const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// True for the header of a TLS handshake record: content type 22, protocol
 /// major version 3. A ClientHello record uses minor version 1 to 3, and TLS
@@ -35,7 +35,8 @@ pub fn is_tls_handshake(header: &[u8; 3]) -> bool {
 /// Errors: a timeout, a short read, or a non-TLS start (`InvalidData`). The
 /// caller then closes the connection, and no byte reaches the host.
 pub fn read_tls_record_header(stream: &mut TcpStream) -> io::Result<[u8; 3]> {
-    stream.set_read_timeout(Some(FIRST_BYTES_TIMEOUT))?;
+    let timeout = Duration::from_secs(crate::limits::get().first_bytes_timeout_secs);
+    stream.set_read_timeout(Some(timeout))?;
     let mut header = [0u8; 3];
     stream.read_exact(&mut header)?;
     stream.set_read_timeout(None)?;
@@ -115,11 +116,10 @@ mod tests {
         assert!(!is_tls_handshake(b"POS"));
     }
 
-    /// The downgrade from the review of #300: `esplora-client` follows an
-    /// HTTPS -> HTTP redirect, and its next request is plaintext. Here the
-    /// client sends that plaintext request to a gated forwarder port. The
-    /// gate refuses it before any byte goes on, and the client gets an error,
-    /// not an answer.
+    /// A redirect downgrade: `esplora-client` follows an HTTPS -> HTTP
+    /// redirect, and its next request is plaintext. Here the client sends
+    /// that plaintext request to a gated forwarder port. The gate refuses it
+    /// before any byte goes on, and the client gets an error, not an answer.
     #[cfg(feature = "rgb-validation")]
     #[test]
     fn a_downgraded_esplora_request_does_not_leave_the_enclave() {

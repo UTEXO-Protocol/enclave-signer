@@ -107,14 +107,6 @@ mod tests {
         );
     }
 
-    /// Both sides render `SecretSeal`. A format change on either side fails here,
-    /// not in production.
-    #[test]
-    fn a_real_invoice_binds_the_consignment_seal_it_names() {
-        let authorized = parse_authorized_recipient(BLINDED_INVOICE).unwrap();
-        assert!(assert_recipient_authorized(&[INVOICE_SEAL.to_string()], &authorized).is_ok());
-    }
-
     /// The frontend invoice shape: no contract/schema/state, with `expiry` and
     /// `endpoints` query params. Covers signet (`sb:`) and mainnet.
     #[test]

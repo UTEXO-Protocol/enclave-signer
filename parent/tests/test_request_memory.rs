@@ -282,8 +282,8 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
     let addr = server().await;
     let frame = framing::MAX_MESSAGE_SIZE as usize;
 
-    // A frame of empty proof entries is refused before the decode. Before the
-    // shape check, it took 65 times its size.
+    // A frame of empty proof entries is refused before the decode. Its decode
+    // needs 65 times its size in heap.
     let worst = empty_entries((frame - 16) / 2);
     let size = worst.len();
     let (outcomes, peak) = send(addr, SIGN, vec![worst]).await;

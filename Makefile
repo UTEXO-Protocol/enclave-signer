@@ -4,8 +4,8 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-# Private dependencies of both workspaces (the rgb-lib-bfa mirror and the RGB
-# protocol crate mirrors): the key and the token stay in BuildKit secrets.
+# Private dependency of both workspaces (the rgb-lib-bfa mirror) and the token
+# the build scripts require: both stay in BuildKit secrets.
 DOCKER_AUTH_ARGS ?= --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN
 
 # Pass public values through Docker's environment form, not shell interpolation.
@@ -14,7 +14,7 @@ IMAGE_ENCLAVE_MINT_LATEST ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRON
 build_enclave_mint: export RGB_ASSET_ID := $(RGB_ASSET_ID)
 build_enclave_mint: export KMS_ALLOWED_ACCOUNT_IDS := $(KMS_ALLOWED_ACCOUNT_IDS)
 
-.PHONY: build_parent push_parent build_parent_dev push_parent_dev build_enclave_ccd push_enclave_ccd build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
+.PHONY: build_parent push_parent build_parent_dev push_parent_dev build_enclave_mint push_enclave_mint check_mint_config docker docker_dev help
 
 build_parent: ## Build parent adapter docker image.
 	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.parent -t $(IMAGE_PARENT_BACKUP) . && \
@@ -44,14 +44,6 @@ build_enclave_mint: check_mint_config ## Build RGB mint signer image with KMS se
 push_enclave_mint: ## Push RGB mint signer image.
 	docker push $(IMAGE_ENCLAVE_MINT_BACKUP) && \
 	docker push $(IMAGE_ENCLAVE_MINT_LATEST)
-
-build_enclave_ccd: ## Build Concordium-only enclave docker image (vsock+ccd).
-	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_BACKUP) . && \
-	docker build $(DOCKER_AUTH_ARGS) -f ./build/Dockerfile.enclave.ccd -t $(IMAGE_ENCLAVE_CCD_LATEST) .
-
-push_enclave_ccd: ## Push Concordium-only enclave docker image.
-	docker push $(IMAGE_ENCLAVE_CCD_BACKUP) && \
-	docker push $(IMAGE_ENCLAVE_CCD_LATEST)
 
 docker: ## Build and push the parent image.
 	$(MAKE) build_parent push_parent

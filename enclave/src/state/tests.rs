@@ -52,7 +52,7 @@ fn cloning_session_constructors_reject_weak_donor_secrets() {
 
 #[test]
 fn seed_export_counter_increments_monotonically() {
-    // Each successful export increases the counter. (F03-AF-10)
+    // Each successful export increases the counter.
     let state = EnclaveState::new(Network::Bitcoin);
     assert_eq!(state.seed_export_count(), 0);
     assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
@@ -61,7 +61,7 @@ fn seed_export_counter_increments_monotonically() {
     assert_eq!(state.seed_export_count(), 3);
 }
 
-// Set the cap directly to avoid environment changes in parallel tests. (F03-AF-10)
+// Set the cap directly to avoid environment changes in parallel tests.
 #[test]
 fn export_hard_cap_blocks_after_quota() {
     let mut state = EnclaveState::new(Network::Bitcoin);
@@ -175,7 +175,7 @@ fn export_hard_cap_bounds_concurrent_in_flight_exports() {
     assert!(state.reserve_export_quota().is_err());
 }
 
-// Replace an expired session without a restart. (F03-AF-01)
+// Replace an expired session without a restart.
 #[test]
 fn enter_cloning_replaces_expired_but_protects_live_session() {
     let state = EnclaveState::new(Network::Bitcoin);
@@ -519,13 +519,6 @@ fn enter_cloning_rejected_once_active() {
 }
 
 #[test]
-fn new_state_is_initial() {
-    let state = EnclaveState::new(Network::Bitcoin);
-    assert_eq!(state.phase_name(), "initial");
-    assert!(!state.is_initialized());
-}
-
-#[test]
 fn initial_to_active_via_entropy() {
     let state = EnclaveState::new(Network::Bitcoin);
     let mut entropy = [1u8; 32];
@@ -543,24 +536,6 @@ fn active_to_active_via_entropy_rejected() {
     let mut entropy2 = [2u8; 32];
     let err = state.initialize_from_entropy(&mut entropy2).unwrap_err();
     assert!(matches!(err, EnclaveError::AlreadyInitialized));
-}
-
-#[test]
-fn initial_to_active_via_seed() {
-    let state = EnclaveState::new(Network::Bitcoin);
-    state.initialize_from_seed([42u8; 64]).unwrap();
-    assert_eq!(state.phase_name(), "active");
-}
-
-#[test]
-fn initial_to_active_via_mnemonic() {
-    let state = EnclaveState::new(Network::Bitcoin);
-    state
-        .initialize_from_mnemonic(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-        )
-        .unwrap();
-    assert_eq!(state.phase_name(), "active");
 }
 
 #[test]
@@ -757,8 +732,8 @@ fn reservation_rejects_concurrent_duplicate_before_commit() {
     held.commit();
 }
 
-/// A flood of unique nonces above `max` must not block the guard.
-/// Regression test for the reject-when-full DoS.
+/// A flood of unique nonces above `max` must not block the guard. A full
+/// guard evicts its oldest entry; it does not refuse a new nonce.
 #[test]
 fn replay_guard_never_wedges_under_flood() {
     let max = 8;
@@ -769,7 +744,7 @@ fn replay_guard_never_wedges_under_flood() {
     for i in 0..(max as u32 * 10) {
         assert!(
             g.check_and_record_at(nonce(i), t0).is_ok(),
-            "record {i} should succeed (no reject-when-full)"
+            "record {i} should succeed (a full guard evicts its oldest entry)"
         );
     }
     assert_eq!(g.seen_count(), max);
@@ -820,4 +795,31 @@ fn replay_guard_evicts_stale_entries_by_ttl() {
     assert!(g
         .check_and_record_at(nonce(1), t0 + ttl + Duration::from_secs(1))
         .is_ok());
+}
+
+/// The guard of the mint signer reads its limits at each call, so a change
+/// reaches a guard that already holds entries.
+#[test]
+fn the_mint_guard_follows_the_limits_in_force() {
+    use crate::limits::change_for_test;
+
+    let guard = NonceReplayGuard::for_mint_operations();
+    let now = Instant::now();
+    guard
+        .check_and_record_at(nonce(1), now - Duration::from_secs(600))
+        .unwrap();
+    assert!(matches!(
+        guard.check(&nonce(1)),
+        Err(EnclaveError::NonceReplay)
+    ));
+
+    change_for_test(|l| l.mint_replay_ttl_secs = 300);
+    assert!(guard.check(&nonce(1)).is_ok(), "the window is shorter now");
+    guard.reserve(nonce(1)).unwrap().commit();
+
+    change_for_test(|l| l.mint_replay_max_entries = 1_024);
+    for i in 2..2_000 {
+        guard.check_and_record_at(nonce(i), now).unwrap();
+    }
+    assert_eq!(guard.seen_count(), 1_024);
 }

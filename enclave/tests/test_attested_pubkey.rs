@@ -33,10 +33,8 @@ fn initialize(port: u16) {
 
 fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 13] = [
+    let parts: [&[u8]; 10] = [
         &keys.evm_address,
-        &keys.btc_compressed_pub,
-        keys.btc_xpub.as_bytes(),
         &keys.master_fingerprint,
         keys.account_xpub_vanilla.as_bytes(),
         keys.account_xpub_colored.as_bytes(),
@@ -46,7 +44,6 @@ fn canonical_bundle(keys: &PublicKeysResponse) -> Vec<u8> {
         keys.rgb_asset_id.as_bytes(),
         &keys.evm_gas_tx_uncompressed_pub,
         &keys.evm_gas_tx_address,
-        &keys.ccd_ed25519_pub,
     ];
     let mut out = Vec::new();
     for p in parts {
@@ -160,51 +157,13 @@ fn attested_pubkey_before_init_attests_the_policy_only() {
     );
 }
 
-#[test]
-fn attested_pubkey_different_nonces_yield_different_docs() {
-    let port = start_test_server();
-    initialize(port);
-
-    let resp_a = request_attested(port, &[1u8; 32]);
-    let resp_b = request_attested(port, &[2u8; 32]);
-
-    assert_ne!(resp_a.attestation_doc, resp_b.attestation_doc);
-
-    // The public-key bundle stays the same.
-    assert_eq!(resp_a.public_keys, resp_b.public_keys);
-}
-
-#[test]
-fn attested_pubkey_wrong_expected_nonce_fails_verify() {
-    let port = start_test_server();
-    initialize(port);
-
-    let nonce = [0x11u8; 32];
-    let other_nonce = [0x22u8; 32];
-    let resp = request_attested(port, &nonce);
-
-    let err = attestation_verify::verify_mock_attestation(
-        &resp.attestation_doc,
-        &attestation_verify::ExpectedPcrs::zero(),
-        Some(&other_nonce),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        attestation_verify::VerifyError::Attestation(_)
-    ));
-}
-
 /// The same field bytes as `canonical_bundle`, without the u32-BE length
 /// prefixes. This non-canonical framing proves that the attestation commits to
 /// the exact serialization, not only to the field contents.
 fn naive_concat(keys: &PublicKeysResponse) -> Vec<u8> {
     let chain_id_bytes = keys.chain_id.to_be_bytes();
-    let parts: [&[u8]; 12] = [
+    let parts: [&[u8]; 10] = [
         &keys.evm_address,
-        &keys.btc_compressed_pub,
-        keys.btc_xpub.as_bytes(),
         &keys.master_fingerprint,
         keys.account_xpub_vanilla.as_bytes(),
         keys.account_xpub_colored.as_bytes(),

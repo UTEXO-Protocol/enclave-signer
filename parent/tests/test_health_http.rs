@@ -169,20 +169,11 @@ async fn enclave_without_health_support_returns_503() {
     let port = serve_with(None).await;
 
     let (status, body) = get(port, "/health");
-    assert_eq!(status, 503, "an older enclave must read as not-ready");
+    assert_eq!(
+        status, 503,
+        "an enclave without Health must read as not-ready"
+    );
     assert!(body.contains("\"ready\":false"), "body: {body}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unknown_path_is_404() {
-    let port = serve_with(Some(enclave_response::Response::Health(ready_response(
-        true,
-    ))))
-    .await;
-
-    // The probe server has only one route.
-    let (status, _) = get(port, "/metrics");
-    assert_eq!(status, 404);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

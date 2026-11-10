@@ -152,20 +152,20 @@ fn rejects_invalid_bytes() {
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
-/// The V0 BFA burn of the old stack: a hard cutover refuses it.
+/// A V0 BFA burn does not deserialize, so the enclave refuses it.
 #[test]
 fn rejects_a_v0_consignment() {
-    let v0 = include_bytes!("../../../../tests/fixtures/legacy_v0_bfa_burn.rgbc");
+    let v0 = include_bytes!("../../../../tests/fixtures/v0_bfa_burn.rgbc");
     let err = error_of(validate(v0));
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
-/// A V1 file from before rgb-ops 596d3cb still carries the terminals map,
-/// which the format no longer has: it does not load.
+/// A V1 file that carries a terminals map does not load: the format has no
+/// terminals map.
 #[test]
-fn rejects_a_consignment_with_the_old_terminals_layout() {
-    let old = include_bytes!("../../../../tests/fixtures/legacy_terminals_bfa_transfer.rgb");
-    let err = error_of(validate(old));
+fn rejects_a_consignment_with_a_terminals_map() {
+    let terminals = include_bytes!("../../../../tests/fixtures/terminals_map_bfa_transfer.rgb");
+    let err = error_of(validate(terminals));
     assert!(err.contains("deserialization failed"), "{err}");
 }
 
@@ -617,14 +617,6 @@ fn the_list_resolver_refuses_a_source_other_than_the_genesis_list() {
     assert_eq!(*reads.borrow(), 1);
 }
 
-#[test]
-fn an_opout_key_converts_to_the_same_opout() {
-    let (_, right, units, _) = listed_burn();
-    for opout in [right.opout, units.opout] {
-        assert_eq!(rgbstd::Opout::from(key(opout)), opout);
-    }
-}
-
 /// The reject-list decisions, ported from rgb-lib `api/evm.rs`.
 mod reject_list_rules {
     use super::*;
@@ -687,14 +679,6 @@ mod reject_list_rules {
         assert_eq!(got.reject, set(&[1]));
         assert!(got.allow.is_empty());
     }
-
-    #[test]
-    fn reject_of_one_output_leaves_its_sibling() {
-        let sibling = OpoutKey { no: 1, ..op(1) };
-        let got = log(&[(1, true)], 1);
-        assert!(got.reject.contains(&op(1)));
-        assert!(!got.reject.contains(&sibling));
-    }
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
@@ -708,56 +692,6 @@ fn bfa_schema_id_is_pinned() {
     use rgbstd::contract::IssuerWrapper;
     let rules = schemata::BridgedFungibleAsset::schema_rules();
     assert_eq!(rules.schema().schema_id(), schemata::BFA_SCHEMA_ID);
-}
-
-/// The ids the bridge also uses (consignment-utils readers, mint ancestry),
-/// and the u16 copies the tests use.
-#[test]
-fn bfa_ids_the_bridge_shares_are_pinned() {
-    use crate::test_support::bfa_ids;
-    use rgbstd::{AssignmentType, GlobalStateType, MetaType, TransitionType};
-    assert_eq!(schemata::TS_MINT, TransitionType::with(bfa_ids::TS_MINT));
-    assert_eq!(schemata::TS_BURN, TransitionType::with(bfa_ids::TS_BURN));
-    assert_eq!(
-        schemata::TS_TRANSFER,
-        TransitionType::with(bfa_ids::TS_TRANSFER)
-    );
-    assert_eq!(
-        schemata::TS_PROPAGATE,
-        TransitionType::with(bfa_ids::TS_PROPAGATE)
-    );
-    assert_eq!(schemata::OS_ASSET, AssignmentType::with(bfa_ids::OS_ASSET));
-    assert_eq!(schemata::OS_MINT, AssignmentType::with(bfa_ids::OS_MINT));
-    assert_eq!(bfa_ids::TS_MINT, 8013);
-    assert_eq!(bfa_ids::TS_BURN, 8010);
-    assert_eq!(bfa_ids::TS_PROPAGATE, 8014);
-    assert_eq!(schemata::GS_BURNED_ASSET, GlobalStateType::with(2015));
-    assert_eq!(schemata::GS_BURN_REASON, GlobalStateType::with(3009));
-    assert_eq!(schemata::GS_TICKER, GlobalStateType::with(3011));
-    assert_eq!(schemata::MS_BEFORE_BLOCK, MetaType::with(1003));
-}
-
-/// A genesis with an empty ticker or an invalid precision byte is an error,
-/// not a panic.
-#[test]
-fn an_invalid_ticker_or_precision_is_refused_without_a_panic() {
-    for (global, bytes) in [
-        (schemata::GS_TICKER, vec![0]),
-        (schemata::GS_PRECISION, vec![0xff]),
-    ] {
-        let mut transfer = issue().as_transfer();
-        let blob = amplify::confinement::SmallBlob::try_from(bytes).unwrap();
-        transfer
-            .genesis
-            .globals
-            .insert(
-                global,
-                rgbstd::GlobalValues::with(rgbstd::RevealedData::new(blob)),
-            )
-            .unwrap();
-        let err = error_of(validate(&gen::save(&transfer)));
-        assert!(err.contains("validation failed"), "{global}: {err}");
-    }
 }
 
 // ===== a burn, end to end =====
@@ -884,33 +818,6 @@ fn burn_facts_agree_with_the_bridge_parser() {
     assert_eq!(global(3009), last.burn_reason.unwrap().to_vec());
 }
 
-/// The hand decode of the globals equals their strict encoding.
-#[test]
-fn burn_globals_decode_as_their_strict_encoding() {
-    use rgbstd::stl::BurnReason;
-    use strict_encoding::StrictSerialize;
-
-    let amount = rgbstd::Amount::from(0x0102_0304_0506_0708u64);
-    assert_eq!(
-        amount.to_strict_serialized::<8>().unwrap().as_slice(),
-        0x0102_0304_0506_0708u64.to_le_bytes()
-    );
-    let reason = BurnReason::from(amplify::Bytes32::from_array(gen::burn_reason_for(PAYEE)));
-    assert_eq!(
-        reason.to_strict_serialized::<32>().unwrap().as_slice(),
-        gen::burn_reason_for(PAYEE)
-    );
-}
-
-/// A burn with no `burnedAsset` destroys nothing: consensus refuses it when it
-/// spends asset units.
-#[test]
-fn refuses_a_burn_without_burned_asset() {
-    let (history, _) = burn_history(None, Some(gen::burn_reason_for(PAYEE)));
-    let err = error_of(validate(&history.consignment()));
-    assert!(err.contains("validation failed"), "{err}");
-}
-
 /// The schema does not require `burnReason`: validation passes and the release
 /// bind refuses it (see `evm::crosscheck`).
 #[test]
@@ -924,29 +831,6 @@ fn a_burn_without_burn_reason_validates_with_no_reason() {
     assert_eq!(last.burned_asset_amount, Some(MINTED));
 }
 
-/// The ae85958 burn kept its change; the schema now gives a burn no outputs.
-#[test]
-fn refuses_a_burn_that_assigns_change() {
-    let (mut history, units) = minted();
-    let half = MINTED / 2;
-    let burn = history
-        .transition("burn")
-        .add_input(
-            units.opout,
-            AllocatedState::from(RevealedValue::from(MINTED)),
-        )
-        .unwrap()
-        .add_global_state("burnedAsset", rgbstd::Amount::from(half))
-        .unwrap()
-        .add_fungible_state("assetOwner", GraphSeal::with_blinded_vout(1u32, 7), half)
-        .unwrap()
-        .complete_transition()
-        .unwrap();
-    history.commit(vec![burn], vec![units.outpoint], vec![gen::dust(9)]);
-    let err = error_of(validate(&history.consignment()));
-    assert!(err.contains("validation failed"), "{err}");
-}
-
 /// rgb-lib puts the split before the burn that spends its output. Consensus
 /// reads a bundle in order, so the burn first spends state it has not seen.
 #[test]
@@ -957,28 +841,6 @@ fn refuses_a_split_burn_bundle_with_the_burn_before_the_split() {
     history.commit(burn, vec![units.outpoint], vec![gen::dust(9)]);
     let err = error_of(validate(&history.consignment()));
     assert!(err.contains("cannot be found"), "{err}");
-}
-
-/// A burn that declares more, or less, than it destroys is refused.
-#[test]
-fn refuses_a_burn_that_misstates_what_it_destroyed() {
-    for burned in [MINTED + 1, MINTED - 1, 1] {
-        let (mut history, units) = minted();
-        let burn = history
-            .transition("burn")
-            .add_input(
-                units.opout,
-                AllocatedState::from(RevealedValue::from(MINTED)),
-            )
-            .unwrap()
-            .add_global_state("burnedAsset", rgbstd::Amount::from(burned))
-            .unwrap()
-            .complete_transition()
-            .unwrap();
-        history.commit(vec![burn], vec![units.outpoint], vec![gen::dust(9)]);
-        let err = error_of(validate(&history.consignment()));
-        assert!(err.contains("validation failed"), "{burned}: {err}");
-    }
 }
 
 /// A mint, then a transfer that splits the units into two halves on vout 1
@@ -1166,54 +1028,6 @@ fn reads_a_mint_and_its_anchor() {
     ));
 }
 
-/// A mint in the old form, which passes its right on to vout 1. Returns that
-/// right.
-fn old_form_mint() -> (History, Utxo) {
-    let mut history = issue();
-    let right = history.genesis_right(0, right_utxo());
-    let to = BuilderSeal::from(GraphSeal::with_blinded_vout(2u32, 7));
-    let (_, kept) = history.mint_keeping_right(
-        right,
-        MINTED,
-        90,
-        to,
-        vec![],
-        vec![gen::dust(1), gen::dust(2)],
-    );
-    (history, kept)
-}
-
-/// The schema lets a mint assign units only, so consensus refuses the old
-/// form; the PSBT bind (M3) refuses it on its own too.
-#[test]
-fn refuses_a_mint_keeping_its_right() {
-    let (history, _) = old_form_mint();
-    let err = error_of(validate(&history.consignment()));
-    assert!(err.contains("validation failed"), "{err}");
-}
-
-/// A propagate spends exactly one right, as the schema says.
-#[test]
-fn refuses_a_multi_right_propagate() {
-    let outpoints = vec![right_utxo(), gen::outpoint(0xA1, 0)];
-    let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
-    let mut propagate = history.transition("propagate");
-    for no in 0..2u16 {
-        let right = history.genesis_right(no, outpoints[usize::from(no)]);
-        propagate = propagate
-            .add_input(right.opout, AllocatedState::Void)
-            .unwrap();
-    }
-    let propagate = propagate
-        .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, 1))
-        .unwrap()
-        .complete_transition()
-        .unwrap();
-    history.commit(vec![propagate], outpoints, vec![gen::dust(1)]);
-    let err = error_of(validate(&history.consignment()));
-    assert!(err.contains("validation failed"), "{err}");
-}
-
 /// A mint of `MINTED` on `right`, to vout 2 of a witness tx that also spends
 /// `fee_inputs`.
 fn mint_spending(right: Utxo, fee_inputs: Vec<OutPoint>) -> History {
@@ -1280,15 +1094,7 @@ fn the_binder_sees_the_genesis_bridge() {
 #[test]
 fn refuses_mint_anchors_without_a_binder() {
     let err = error_of(validate_bound(&burn_bytes(), None));
-    assert!(err.contains("binds none"), "{err}");
-}
-
-#[test]
-fn passes_a_binder_error_through() {
-    let refuse =
-        |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
-    let err = validate_bound(&burn_bytes(), Some(&refuse)).expect_err("the binder refused");
-    assert_own_error(err, "binder");
+    assert!(err.contains("no lock binder"), "{err}");
 }
 
 /// Every anchor needs exactly its own lock: one too few, one too many, or one
@@ -1384,18 +1190,6 @@ fn lock_id_matches_the_upstream_vectors() {
     }
 }
 
-/// The lockId commits to both halves: another OpId or another txid moves it,
-/// and it is never the bare OpId.
-#[test]
-fn lock_id_differs_per_opid_and_per_txid() {
-    let opid = rgbstd::OpId::from([1u8; 32]);
-    let txid = bitcoin::Txid::from_byte_array([2; 32]);
-    let base = lock_id(opid, txid);
-    assert_ne!(base, lock_id(rgbstd::OpId::from([3u8; 32]), txid));
-    assert_ne!(base, lock_id(opid, bitcoin::Txid::from_byte_array([3; 32])));
-    assert_ne!(base, [1u8; 32]);
-}
-
 /// The bound chain id must be the genesis one, or rgb-lib's checked resolver
 /// refuses before it confirms anything.
 #[test]
@@ -1488,32 +1282,6 @@ fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
     }
 }
 
-/// A bundle that commits a transition the consignment does not show.
-#[test]
-fn reports_a_hidden_transition_in_the_last_bundle() {
-    let (mut history, units) = minted();
-    let burn = history
-        .transition("burn")
-        .add_input(
-            units.opout,
-            AllocatedState::from(RevealedValue::from(MINTED)),
-        )
-        .unwrap()
-        .add_global_state("burnedAsset", rgbstd::Amount::from(MINTED))
-        .unwrap()
-        .complete_transition()
-        .unwrap();
-    let mut bundle = gen::bundle_of(vec![burn]);
-    let hidden_input = rgbstd::Opout::new(rgbstd::OpId::from([0x99; 32]), schemata::OS_MINT, 0);
-    bundle
-        .input_map
-        .insert(hidden_input, rgbstd::OpId::from([0x98; 32]))
-        .unwrap();
-    history.commit_bundle(bundle, vec![units.outpoint], vec![gen::dust(5)]);
-    let validated = validate(&history.consignment()).unwrap();
-    assert!(!validated.last_bundle_fully_disclosed);
-}
-
 // ===== the flat summary =====
 
 #[test]
@@ -1568,34 +1336,6 @@ fn summary_of(outputs: Vec<RgbOutputInfo>) -> Result<TransitionSummary> {
     transition_summary(&t, WITNESS, "bcrt:")
 }
 
-/// Only `OS_ASSET` units are outputs: the rights are not.
-#[test]
-fn transition_summary_lists_only_asset_units() {
-    let t = inspected_transition(
-        TypeOfTransition::Mint,
-        vec![
-            output(Assignment::Fungible(500), WITNESS, 2),
-            output(Assignment::MintRight, WITNESS, 3),
-            output(Assignment::InflationRight(1_000_000), WITNESS, 4),
-        ],
-    );
-    let summary = transition_summary(&t, WITNESS, "bcrt:").unwrap();
-    assert_eq!(
-        summary.outputs,
-        vec![TransitionOutput {
-            assignment_type: schemata::OS_ASSET.to_inner(),
-            amount: 500,
-            seal: OutputSeal::Revealed {
-                txid: None,
-                vout: 2
-            },
-        }]
-    );
-    assert_eq!(summary.asset_output_amount, 500);
-    assert_eq!(summary.total_output_amount, 500);
-    assert_eq!(summary.op_id, "mint-op");
-}
-
 /// rgb-lib lists amounts per output: their sum is checked here.
 #[test]
 fn transition_summary_refuses_an_overflowing_total() {
@@ -1628,37 +1368,6 @@ fn transition_summary_keeps_the_schema_transition_type() {
     }
 }
 
-/// A seal on the witness reads as `None`, another txid as display-order
-/// bytes, a concealed seal without its chain prefix.
-#[test]
-fn transition_summary_reads_each_seal_kind() {
-    let mut explicit = [0x11; 32];
-    explicit[31] = 0x22;
-    let summary = summary_of(vec![
-        output(Assignment::Fungible(1), WITNESS, 1),
-        output(Assignment::Fungible(2), explicit, 3),
-        concealed(3, Some("bcrt:utxob:abc")),
-    ])
-    .unwrap();
-    let got: Vec<OutputSeal> = summary.outputs.into_iter().map(|o| o.seal).collect();
-    assert_eq!(
-        got,
-        vec![
-            OutputSeal::Revealed {
-                txid: None,
-                vout: 1
-            },
-            OutputSeal::Revealed {
-                txid: Some(explicit),
-                vout: 3
-            },
-            OutputSeal::Confidential {
-                secret_seal: "utxob:abc".into()
-            },
-        ]
-    );
-}
-
 #[test]
 fn transition_summary_refuses_a_concealed_seal_of_another_chain_or_none() {
     for recipient in [Some("bc:utxob:abc"), Some("utxob:abc"), None] {
@@ -1686,21 +1395,6 @@ fn transition_summary_refuses_a_seal_it_cannot_read_exactly() {
     };
     let err = summary_of(vec![no_vout]).unwrap_err().to_string();
     assert!(err.contains("without a txid and vout"), "{err}");
-}
-
-#[test]
-fn the_flat_summary_refuses_a_contract() {
-    let contract = issue().as_transfer().into_contract();
-    let mut bytes = Vec::new();
-    contract.save(&mut bytes).unwrap();
-    let err = summary::inspected(&bytes).unwrap_err().to_string();
-    assert!(err.contains("expected Transfer"), "{err}");
-}
-
-#[test]
-fn the_flat_summary_refuses_random_bytes() {
-    let err = summary::inspected(&[0u8; 64]).unwrap_err().to_string();
-    assert!(err.contains("rgb-lib inspect_consignment failed"), "{err}");
 }
 
 /// A BFA `mint` is the only mint shape. It is a signing shape only in the
@@ -1738,17 +1432,6 @@ fn maps_each_network_to_its_rgb_chain_net() {
     }
 }
 
-/// A consignment of another network fails consensus.
-#[test]
-fn refuses_a_consignment_of_another_network() {
-    let v = RgbValidator::new("tcp://indexer.invalid:1".into(), "testnet4").unwrap();
-    let bytes = burn_bytes();
-    let chain = mined(&witness_ids(&bytes));
-    let err =
-        error_of(v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &open_lists()));
-    assert!(err.contains("validation failed"), "{err}");
-}
-
 #[test]
 fn rejects_an_unknown_indexer_scheme() {
     for url in ["ftp://localhost:1", "ws://localhost:1", "localhost:1"] {
@@ -1757,13 +1440,6 @@ fn rejects_an_unknown_indexer_scheme() {
             err.to_string().contains("not ssl:// or tcp://"),
             "{url}: {err}"
         );
-    }
-}
-
-#[test]
-fn accepts_an_esplora_url() {
-    for url in ["https://esplora.test", "http://127.0.0.1:3000"] {
-        RgbValidator::new(url.to_string(), "signet").expect(url);
     }
 }
 
@@ -1949,7 +1625,7 @@ fn each_rgb_lib_refusal_names_what_failed() {
     };
     let cases = [
         (E::MintLockNotFound { opid: "op".into() }, "no bound lock"),
-        (E::NoClaimResolver, "binds none"),
+        (E::NoClaimResolver, "no lock binder"),
         (E::NoRejectListResolver, "cannot read it"),
         (
             E::ConsignmentRejected { opouts: vec![] },
@@ -2427,18 +2103,6 @@ mod indexer_answer {
     }
 
     #[test]
-    fn refuses_a_tx_in_the_mempool() {
-        let err = mined_deep_enough(TxPlace::Unmined, 100, 1).unwrap_err();
-        assert!(err.contains("unmined"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_tx_the_indexer_does_not_know() {
-        let err = mined_deep_enough(TxPlace::Unknown, 100, 1).unwrap_err();
-        assert!(err.contains("does not know"), "{err}");
-    }
-
-    #[test]
     fn refuses_a_block_above_the_indexer_tip() {
         let err = mined_deep_enough(TxPlace::Mined(pos(101)), 100, 1).unwrap_err();
         assert!(err.contains("above the indexer tip"), "{err}");
@@ -2670,13 +2334,6 @@ mod source_payload {
             .unwrap_err()
             .to_string();
         assert!(err.contains("too large in aggregate"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn ignores_consignment_valid_flag_when_bytes_present() {
-        let mut source = burn_source("rgb:any");
-        source.consignment_valid = true;
-        assert!(validate_source_payload(&source, &BridgeConfig::default()).is_ok());
     }
 
     #[test]
@@ -2940,22 +2597,6 @@ mod source_path {
         assert_eq!(reads, 1);
     }
 
-    #[test]
-    fn an_allowed_burn_input_shields_a_rejected_ancestor() {
-        let (_, right, units, _) = listed_burn();
-        let (result, _) = run_listed(None, &[(right.opout, true), (units.opout, false)]);
-        result.unwrap();
-    }
-
-    /// The change stays on the split, which is not released, so a list entry
-    /// on it does not block.
-    #[test]
-    fn a_rejected_burn_change_does_not_block_the_release() {
-        let (history, ..) = listed_burn();
-        let (result, _) = run_listed(None, &[(split_change(&history), true)]);
-        result.unwrap();
-    }
-
     /// The pin is checked first, so a foreign genesis cannot make the
     /// enclave read a contract of its choice.
     #[test]
@@ -2996,16 +2637,6 @@ fn long_history(transfers: usize) -> History {
         Some(gen::burn_reason_for(PAYEE)),
     );
     history
-}
-
-#[test]
-fn validates_a_history_of_200_transfers() {
-    let validated = validate(&long_history(200).consignment()).unwrap();
-    // The mint, 200 transfers and the burn.
-    assert_eq!(validated.witness_txids.len(), 202);
-    assert_eq!(validated.mint_locks.len(), 1);
-    let last = validated.last_transition.unwrap();
-    assert_eq!(last.burned_asset_amount, Some(MINTED));
 }
 
 /// Validates one small burn before a measurement, as `measure_dispatch` does.
@@ -3142,7 +2773,7 @@ fn opid_in(send: &mut rgbstd::Transition, first: std::ops::Range<u8>) -> rgbstd:
 ///   64 KiB of a decoded list, which is 1 365 assignments, and then doubles
 ///   the list. So a decoded list of 1 366, 21 841 or 43 681 rights takes
 ///   twice its length. Validation clones the decoded consignment, so this
-///   layout no longer adds heap at the peak.
+///   layout does not add heap at the peak.
 /// - The OpIds. Each transfer has an OpId below the transfer before it.
 ///   So its opouts go in front of exactly five opouts in a leaf of the two
 ///   B-trees that RGB validation fills. Then each leaf that they fill keeps

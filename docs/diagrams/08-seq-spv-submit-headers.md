@@ -32,7 +32,7 @@ sequenceDiagram
 
         Srv->>Srv: rate limiter: ≤ 100 000 headers per 60 s window<br/>(cumulative, counted before validation)
         Srv->>Chain: submit_headers(start_height, &headers, now)
-        Chain->>Chain: batch ≤ MAX_HEADERS_PER_SUBMIT (10 000)
+        Chain->>Chain: batch ≤ max_headers_per_submit (10 000)
         Chain->>Chain: check bounds:<br/>start_height > checkpoint AND<br/>start_height ≤ tip+1
         Chain->>Chain: reorg_depth := (tip+1) − start_height
         Chain->>Chain: require reorg_depth ≤ MAX_REORG_DEPTH (100)

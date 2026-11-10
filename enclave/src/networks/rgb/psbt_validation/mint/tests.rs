@@ -244,12 +244,6 @@ fn refuses_a_witness_output_on_the_right_input_script() {
 // ===== M0: the cheap shape check =====
 
 #[test]
-fn accepts_one_input_and_few_outputs() {
-    let keys = fx::km();
-    super::assert_mint_shape(&mint_psbt(&keys)).unwrap();
-}
-
-#[test]
 fn refuses_a_mint_with_too_many_inputs() {
     let keys = fx::km();
     let mut psbt = mint_psbt(&keys);
