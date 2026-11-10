@@ -868,7 +868,6 @@ cargo test -p attestation-verify --features mock                          # depe
 cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import
 cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer --test test_evm_event_live
-cargo test -p utexo-bridge-enclave --features mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
 python3 -m unittest discover -s build/tests -v
 python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
@@ -888,8 +887,10 @@ Neither smoke script substitutes for a successful signing regression.
 Mint initialization needs KMS configured; SPV-enabled burn readiness needs the
 parent's header sync to have caught up.
 
-CI runs the mock verifier tests, Lambda tests, the mint VSOCK deadline guard,
-and the parent CLI timeout against Linux `vsock_loopback`. To run the latter
+CI runs each test in one job, unless a build changes the code it tests (see
+`.github/workflows/ci.yml`). It runs the mock verifier tests, Lambda tests, the
+mint VSOCK forwarder and deadline tests, and the parent CLI timeout against
+Linux `vsock_loopback`. To run the latter
 locally on Linux:
 
 ```bash
@@ -897,9 +898,10 @@ sudo modprobe vsock_loopback
 cargo test --manifest-path parent/Cargo.toml --features vsock --test test_cli_vsock_timeout
 ```
 
-Large RGB histories and capacity/timing tests remain explicitly ignored in
-ordinary PR runs. Use **Actions → CI → Run workflow → run_stress** for the
-release-mode suite, or run:
+The large-history tests (three with 10 000 transfers, two forged histories at
+the caps) are ignored by default; the burn-signer CI job runs them on every PR.
+The release-mode timing tests are ignored. Use **Actions → CI → Run workflow
+→ run_stress** for them, or run:
 
 ```bash
 cargo test --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1

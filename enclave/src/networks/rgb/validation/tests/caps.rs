@@ -635,7 +635,7 @@ fn the_time_budget_counts_the_inspection_of_a_forged_burn() {
 /// A listed merge of 1400 lines after 11,500 transfers, within every cap: unlisted
 /// it passes the time budget, and its walk on top refuses it before rgb-lib.
 #[test]
-#[ignore = "builds a 6 MB history; run it in release on request"]
+#[ignore = "builds a 6 MB history; the burn-signer CI job runs it"]
 fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
     // Between the modeled time of the merge without its walk and with it.
     crate::limits::change_for_test(|l| l.max_rgb_lib_ms = 18_000);
@@ -650,7 +650,7 @@ fn a_listed_merge_within_every_cap_is_refused_by_its_walk_time() {
 /// 11 propagates of 65535 rights fit the size limit and every cap. 13 of them, 11.9 MB and
 /// 852k opouts, took rgb-lib 44 s to validate and 51 s to inspect. The opouts refuse the chain.
 #[test]
-#[ignore = "builds a 10 MB history; run it in release on request"]
+#[ignore = "builds a 10 MB history; the burn-signer CI job runs it"]
 fn a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib() {
     let bytes = propagate_chain(issue(), u16::MAX, 11);
     assert!(bytes.len() <= crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES);
