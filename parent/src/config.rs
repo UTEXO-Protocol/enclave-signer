@@ -24,7 +24,7 @@ pub struct Config {
     /// Use vsock instead of TCP.
     pub use_vsock: bool,
 
-    /// Maximum active gRPC requests across all connections. (F03-AF-13)
+    /// Maximum active gRPC requests across all connections.
     pub grpc_max_concurrent: usize,
 
     /// Maximum active `Sign` requests across all connections. A `Sign`

@@ -35,11 +35,11 @@ enum Command {
     Init {
         /// Donor cloning secret, sent at runtime (not in the EIF). Set it only on
         /// enclaves that serve clone requests. Avoid this flag: `ps`, shell
-        /// history and SSM logs show it (F03-AF-06). Use
+        /// history and SSM logs show it. Use
         /// --cloning-secret-file or UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
-        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Read the cloning secret from this file instead of argv.
         /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
         #[arg(long)]
         cloning_secret_file: Option<PathBuf>,
@@ -197,11 +197,11 @@ enum Command {
     Clone {
         /// Pre-shared operator cloning secret. Must match the donor enclave
         /// cloning secret. Avoid this flag: `ps`, shell history and SSM logs
-        /// show it (F03-AF-06). Use --cloning-secret-file or
+        /// show it. Use --cloning-secret-file or
         /// UTEXO_CLONING_SECRET.
         #[arg(long)]
         cloning_secret: Option<String>,
-        /// Read the cloning secret from this file instead of argv (F03-AF-06).
+        /// Read the cloning secret from this file instead of argv.
         /// Takes precedence over UTEXO_CLONING_SECRET and --cloning-secret.
         #[arg(long)]
         cloning_secret_file: Option<PathBuf>,
@@ -954,7 +954,7 @@ fn export_attestation(
 
 /// Read the secret from the file, the environment, or the command-line argument,
 /// in that order. Arguments can show the secret in process lists and logs.
-/// (F03-AF-06) Return `None` if no source is set; Init without a donor secret
+/// Return `None` if no source is set; Init without a donor secret
 /// accepts that.
 fn resolve_cloning_secret(
     arg: Option<String>,
@@ -1021,7 +1021,7 @@ fn run_clone(
 
     println!("[2/4] Clone via donor parent gRPC at {donor_grpc} ...");
     // Limit donor calls before SetClone. Completion and read-only
-    // reconciliation have their own caller deadline (F03-AF-05).
+    // reconciliation have their own caller deadline.
     let rt = tokio::runtime::Runtime::new()?;
     let clone_resp = rt.block_on(async {
         let endpoint = donor_endpoint.clone();

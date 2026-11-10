@@ -22,7 +22,7 @@ use utexo_bridge_enclave::proto::*;
 const DONOR_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 // Keep at least `cloning::MIN_CLONING_SECRET_BYTES` bytes and
-// `cloning::MIN_CLONING_SECRET_DISTINCT_BYTES` distinct values. (F03-AF-26)
+// `cloning::MIN_CLONING_SECRET_DISTINCT_BYTES` distinct values.
 const CLONING_SECRET: &str = "test-operator-cloning-secret-0123456789abcdef";
 
 fn initialize_key_from_mnemonic(port: u16, mnemonic: &str) -> PublicKeysResponse {
@@ -186,7 +186,7 @@ fn clone_rejects_wrong_cloning_secret() {
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
 
-    // Use a strong secret so this case tests HMAC rejection. (F03-AF-26)
+    // Use a strong secret so this case tests HMAC rejection.
     let init = initiate_cloning(
         requester_port,
         "wrong-operator-cloning-secret-0123456789abcdef",
@@ -222,7 +222,7 @@ fn clone_rejects_wrong_cluster_public_key() {
 
 #[test]
 fn clone_donor_rejects_request_armed_for_a_different_target() {
-    // Change the target address without changing its HMAC. (F03-AF-07)
+    // Change the target address without changing its HMAC.
     // The donor must reject the request before encrypting its seed.
     let (donor_port, donor_keys) = start_donor();
     let requester_port = start_requester();
@@ -351,7 +351,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
     let init = initiate_cloning(requester_port, CLONING_SECRET, &donor_keys.evm_address);
 
     // Change the wire key but keep the original attestation.
-    // Use a valid HMAC to reach the attested-key check. (F03-AF-20)
+    // Use a valid HMAC to reach the attested-key check.
     let mut tampered = init.clone();
     tampered.encryption_pubkey = vec![0x77u8; 32];
     let tampered_pk: [u8; 32] = tampered
@@ -359,7 +359,7 @@ fn clone_donor_rejects_wire_pubkey_not_matching_attestation() {
         .clone()
         .try_into()
         .expect("32-byte pubkey");
-    // Include the donor address so the HMAC passes the target check. (F03-AF-07)
+    // Include the donor address so the HMAC passes the target check.
     let donor_target: [u8; 20] = donor_keys
         .evm_address
         .clone()

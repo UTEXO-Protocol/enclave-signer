@@ -586,7 +586,7 @@ mod fee_policy {
 
     #[test]
     fn rejects_a_fee_that_burns_most_of_the_input() {
-        // #248: 60_676 sat in, 1_000 sat back to custody, approx 98% to
+        // 60_676 sat in, 1_000 sat back to custody, approx 98% to
         // miners. Under the absolute cap, far over the rate cap.
         let psbt = psbt_with_fee(60_676, 1_000);
         let err = check_psbt_fee(&psbt, &[], "plain-BTC").unwrap_err();

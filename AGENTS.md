@@ -496,7 +496,7 @@ production role. Do not combine mutually exclusive features with
   and release compile guards where the change touches them.
 - For endpoint work, show that key rotation and independently approved member
   endpoints use an unchanged EIF, while wrong host, CA, chain and policy fail.
-- Preserve prior audit regressions when rebasing, merging or moving modules.
+- Preserve existing regression tests when rebasing, merging or moving modules.
   Do not delete an assertion, ignore a test or weaken a fixture to resolve a
   conflict. Reconcile the intended rule and test the result.
 - For measured build changes, validate the build and reported measurements.

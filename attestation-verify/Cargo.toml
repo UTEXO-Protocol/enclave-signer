@@ -30,7 +30,7 @@ default = []
 # Mock document path for tests only. Docs are raw CBOR without COSE and skip
 # cert-chain checks. PCR, nonce and public key binding stay enforced.
 mock = []
-# Accept all-zero PCR0/1/2 in debug tests. (F03-AF-12 / F02-AF-08)
+# Accept all-zero PCR0/1/2 in debug tests.
 # Debug PCRs do not identify the peer image. Do not enable in production.
 allow-debug-pcrs = []
 # `test_util`: real-format documents signed under a test root. Tests only.

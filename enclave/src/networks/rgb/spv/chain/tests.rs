@@ -316,7 +316,7 @@ fn non_pow_network_skips_epoch_lookup_across_retarget_boundary() {
 // With a misaligned checkpoint, that block is below the checkpoint and is not
 // stored, so the chain stops. validation.rs tests the difficulty math.
 
-/// TH-1: with an aligned checkpoint, the first boundary above it resolves its
+/// With an aligned checkpoint, the first boundary above it resolves its
 /// epoch start to the checkpoint.
 #[test]
 fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
@@ -341,7 +341,7 @@ fn th1_epoch_start_resolves_at_first_boundary_above_aligned_checkpoint() {
     );
 }
 
-/// TH-2: a misaligned checkpoint (950_000) stops the chain. The first boundary
+/// A misaligned checkpoint (950_000) stops the chain. The first boundary
 /// (951_552) needs the epoch start 949_536, which is not stored. The load-time
 /// check rejects such a checkpoint.
 #[test]

@@ -5,7 +5,7 @@ Format spec: [burn-destination.md](burn-destination.md).
 
 ## Problem
 
-Audit MAJOR finding (burn signer): `lzFundsOut` carries two destination
+In a burn release, `lzFundsOut` carries two destination
 fields. `destinationChainId` picks the route and the commission. `dstEid` picks
 where LayerZero delivers. The burn named no chain, so nothing compared them
 with the user's intent. A compromised backend could pay the right address on
@@ -70,7 +70,7 @@ wallet ----(record + burn)----> backend (tricorn) ---> listener ---> enclave
 
 ### Contracts (bridge-smart-contracts, usdt0-smart-contracts)
 
-Not required for the fix. Defense in depth, as the audit recommends:
+Not required for the fix. Defense in depth:
 
 - `UtexoLZAdapter.sendOut` takes `destinationChainId` and checks a governed
   outbound map: `outboundChainIdOf[dstEid] == destinationChainId`, else revert.

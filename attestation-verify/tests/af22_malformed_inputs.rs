@@ -1,4 +1,4 @@
-//! F03-AF-22: test malformed CBOR and COSE inputs.
+//! Test malformed CBOR and COSE inputs.
 //! Use fixed inputs of a few KiB with limited nesting.
 //! These cases test rejection and panic handling, not all possible inputs.
 

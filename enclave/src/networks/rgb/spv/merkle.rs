@@ -233,7 +233,7 @@ mod tests {
         assert!(verify_merkle_proof(&t2, 2, &[t2, n01], &root).is_ok());
     }
 
-    // ===== Position binding and 64-byte transaction nodes (VAL-UENC-15) =====
+    // ===== Position binding and 64-byte transaction nodes =====
 
     /// A legacy transaction with one input (scriptSig of `s` bytes) and one
     /// output (scriptPubKey of `4 - s` bytes) serializes to 64 bytes:

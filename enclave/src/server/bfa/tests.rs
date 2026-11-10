@@ -67,7 +67,7 @@ mod burn {
         }
     }
 
-    /// Finding 47: a burn's locks come from its mints alone, keyed by lockId.
+    /// A burn's locks come from its mints alone, keyed by lockId.
     #[test]
     fn derives_every_lock_from_its_anchor_without_rpc() {
         let ctx = context(config(), Box::new(NoRpc));

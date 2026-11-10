@@ -604,7 +604,7 @@ const RGB_MINT_DEPOSIT_TYPEHASH_STR: &str = "UtexoRgbMintDeposit(address bridge,
      address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)";
 
 /// The `operationId` of the one deposit that can back a mint. Every input is
-/// pinned or in the consignment, so no caller or RPC chooses it (finding 47).
+/// pinned or in the consignment, so no caller or RPC chooses it.
 pub fn rgb_mint_deposit_id(
     cfg: &crate::config::BridgeConfig,
     lock_id: &[u8; 32],

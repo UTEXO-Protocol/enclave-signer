@@ -71,7 +71,7 @@ A production policy refuses `latest` at boot.
 The mint signer validates no RGB history: a bad history makes the mint
 invalid for every receiver, so it is liveness only (Sec 7.2).
 
-**Pinned EVM RPC trust (accepted by design, F05-NEW-AF-07):** the production
+**Pinned EVM RPC trust (accepted by design):** the production
 mint and burn images use `PinnedTlsRpc`. TLS ends inside the enclave and
 authenticates the configured hostname against the pinned CA. The host relay
 can block or delay traffic, but cannot alter authenticated responses without
@@ -385,7 +385,7 @@ signer's `MINT_WITNESS_SAT`.
 
 The scheme needs no commitment: a release image accepts only TLS
 (`ssl://` or `https://`) for the Electrum/Esplora URL, so the rule is in the
-code and PCR0 measures it (F05-RR-AF-24). The ports are not committed, and
+code and PCR0 measures it. The ports are not committed, and
 matching policies do not prove compliance with a specific port requirement. EVM RPC still requires TLS with the pinned host
 and CA on every accepted port. Bitcoin SPV checks for RGB-source requests
 still apply.
@@ -487,7 +487,7 @@ that can back it (burn-flow B2.4). It reads nothing from the chain. It then
 requires the cited ids to equal those derived locks exactly: set equality, canonical encoding,
 strictly ascending `operationId` order (so no duplicates), and at least one
 verified lock. `burnId` does not hash `settlementData`, so these rules decide
-what backs a release, not its replay key (F05-NEW-AF-04).
+what backs a release, not its replay key.
 
 **Burn identity bind.** The release carries
 `sourceBurnTxId`, the RGB OpId of the burn being settled, and `Bridge.fundsOut`

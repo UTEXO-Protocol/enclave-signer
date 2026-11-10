@@ -1,4 +1,4 @@
-//! Reads an `IRgbRejectList` contract (bridge-smart-contracts #176) the way
+//! Reads an `IRgbRejectList` contract (bridge-smart-contracts) the way
 //! rgb-lib 98a8af6 does (`api/evm.rs` `reject_list_entries_paged`).
 //!
 //! The list is append-only. `length()` is read at the finalized and at the

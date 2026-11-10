@@ -402,7 +402,7 @@ mod transfer {
         );
     }
 
-    /// I-06: a burn has no change leg and `fundsOut.amount` is gross, so the
+    /// A burn has no change leg and `fundsOut.amount` is gross, so the
     /// release must equal the burned amount. A lower release strands the
     /// difference.
     #[cfg(feature = "rgb-validation")]
@@ -507,7 +507,7 @@ mod settlement {
         assert!(check(&[0xA1, 0xB2], &[LOCK_A, LOCK_B]).is_ok());
     }
 
-    /// F05-NEW-AF-04: only the ascending order is signable.
+    /// Only the ascending order is signable.
     #[test]
     fn rejects_reordered_settlement() {
         let locks = [LOCK_A, LOCK_B];
@@ -710,7 +710,7 @@ mod lz_route {
         validate_funds_out_settlement(&r, &[LOCK])
     }
 
-    /// The audit case: the backend picks another LayerZero endpoint.
+    /// The backend picks another LayerZero endpoint.
     #[test]
     fn rejects_an_lz_dst_eid_the_burn_did_not_name() {
         let err = check(lzFundsOutCall {
@@ -721,7 +721,7 @@ mod lz_route {
         assert!(err.to_string().contains("dstEid mismatch"), "{err}");
     }
 
-    /// The audit case: route and commission of another chain.
+    /// Route and commission of another chain.
     #[test]
     fn rejects_an_lz_destination_chain_the_burn_did_not_name() {
         let err = check(lzFundsOutCall {
@@ -1338,7 +1338,7 @@ mod btc_relay {
         assert!(err.to_string().contains("no merkle proof"), "got: {err}");
     }
 
-    // -- F05-NEW-AF-08: the chain can move after the last check.
+    // -- The chain can move after the last check.
     //
     // `verify_btc_relay_agreement` is the last chain read on the direct
     // route. Its lock ends at return. A real reorg must close the gate.

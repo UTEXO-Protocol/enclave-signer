@@ -1,4 +1,4 @@
-//! F03-IT-03: real enclave state, crypto and handlers. Response faults occur
+//! Real enclave state, crypto and handlers. Response faults occur
 //! after SetClone commits Active. NSM is mocked. Clone processing is real.
 #![cfg(not(feature = "vsock"))]
 

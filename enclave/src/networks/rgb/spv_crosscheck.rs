@@ -99,8 +99,8 @@ pub fn validate_source_chain(
 
     // Pin every block this check used, with the depth it required, under the
     // caller's lock guard. The guard ends at return, so
-    // `ChainPins::assert_unchanged` checks the blocks again at signing time
-    // (F05-NEW-AF-08).
+    // `ChainPins::assert_unchanged` checks the blocks again
+    // at signing time.
     for proof in merkle_proofs {
         pins.pin(chain, proof.block_height, min_confirmations)?;
     }
@@ -433,7 +433,7 @@ struct Pin {
 /// The blocks the SPV checks used, checked again before the key is used.
 ///
 /// Each check releases the header-chain lock when it returns. Another worker
-/// can then accept a reorg before signing (F05-NEW-AF-08).
+/// can then accept a reorg before signing.
 ///
 /// A check records every block it used here, with the depth it required.
 /// `assert_unchanged` reads those heights again. It fails if a hash changed or
@@ -552,7 +552,7 @@ impl ChainPins {
 #[cfg(all(test, rgb_to_evm))]
 mod tests;
 
-/// F05-NEW-AF-08: the pin set checked before key use.
+/// The pin set checked before key use.
 #[cfg(all(test, rgb_to_evm))]
 mod chain_pin_tests {
     use super::*;

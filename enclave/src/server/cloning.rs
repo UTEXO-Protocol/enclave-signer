@@ -32,7 +32,7 @@ pub(super) fn handle_initiate_cloning(
     // Protect the request credential even on refusal. Keep it with this
     // session so only verified completion can install it for the donor role.
     let cloning_secret = SecretBox::new(Box::new(req.cloning_secret));
-    // Refuse weak cloning secrets before use. (F03-AF-26)
+    // Refuse weak cloning secrets before use.
     cloning::validate_cloning_secret(cloning_secret.expose_secret())?;
     let cluster_public_key: [u8; 20] =
         req.cluster_public_key.as_slice().try_into().map_err(|_| {
@@ -46,7 +46,7 @@ pub(super) fn handle_initiate_cloning(
     let encryption_pubkey = session.public_key();
 
     let nonce = fresh_nonce()?;
-    // Bind the digest to the intended donor EVM address. (F03-AF-07)
+    // Bind the digest to the intended donor EVM address.
     let cloning_digest = cloning::make_cloning_digest(
         cloning_secret.expose_secret(),
         &encryption_pubkey,
@@ -119,8 +119,8 @@ pub(super) fn handle_get_clone(
         )));
     }
 
-    // 2. Check the HMAC against the requester key and donor address. (F03-AF-07)
-    //    Refuse unauthorized requests before costly attestation checks. (F03-AF-20)
+    // 2. Check the HMAC against the requester key and donor address.
+    //    Refuse unauthorized requests before costly attestation checks.
     //    Steps 4 and 5 bind these values to the signed document.
     state.with_donor_cloning_secret(|secret| {
         if !cloning::verify_cloning_digest(secret, &req_encryption_pk, &req_cluster_pk, &req_digest)
@@ -157,12 +157,12 @@ pub(super) fn handle_get_clone(
         return Err(EnclaveError::DigestMismatch);
     }
 
-    // 5b. Reserve an export slot after authentication. (F03-AF-10)
+    // 5b. Reserve an export slot after authentication.
     //     The atomic reservation enforces the cap across workers.
     //     A later error releases the slot.
     let export_reservation = state.reserve_export_quota()?;
 
-    // 6. Reserve the verified nonce after authentication. (F03-AF-02 / F03-AF-04)
+    // 6. Reserve the verified nonce after authentication.
     //    Commit it after encryption and donor attestation succeed.
     //    An error releases the nonce, so the requester can retry.
     let nonce_array: [u8; 32] = verified
@@ -178,7 +178,7 @@ pub(super) fn handle_get_clone(
 
     // 8. Donor attestation with a new nonce. It binds the new donor pubkey,
     //    so the parent cannot replay an old response. `user_data` commits to
-    //    the donor identity, policy and this transcript. (F03-AF-08)
+    //    the donor identity, policy and this transcript.
     let donor_nonce = fresh_nonce()?;
     let bundle = build_public_keys_response(state.get_keys()?, &ctx.bridge_config);
     let commitment = clone_commitment(
@@ -194,7 +194,7 @@ pub(super) fn handle_get_clone(
 
     reservation.commit();
 
-    // Record the successful export. (F03-AF-10)
+    // Record the successful export.
     let export_count = export_reservation.commit(&req_encryption_pk);
     tracing::info!(
         cluster_pk = %hex::encode(our_evm),
@@ -240,7 +240,7 @@ pub(super) fn handle_set_clone(
         return Err(EnclaveError::PubkeyMismatch);
     }
 
-    // 3. Reserve the donor nonce before the state changes. (F03-AF-03)
+    // 3. Reserve the donor nonce before the state changes.
     //    An error releases the reservation.
     let nonce_array: [u8; 32] = verified
         .nonce

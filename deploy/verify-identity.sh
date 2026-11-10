@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# verify-identity.sh — post-init / post-restart signing-identity gate (F09-AF-13).
+# verify-identity.sh — post-init / post-restart signing-identity gate.
 #
-# WHY (audit F09-AF-13): a restart puts an enclave back in Initial (EMPTY) until it
+# WHY: a restart puts an enclave back in Initial (EMPTY) until it
 # is re-cloned, and a fresh re-init can mint a VALID-BUT-UNREGISTERED key. Process/
 # PCR/port health does NOT prove the node holds the APPROVED registered signing key.
 # If traffic is routed too early the node returns KeyNotInitialized, or a new

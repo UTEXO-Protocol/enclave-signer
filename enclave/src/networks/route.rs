@@ -33,7 +33,7 @@ pub struct ValidationContext<'a> {
     pub header_chain: &'a Mutex<crate::networks::rgb::spv::HeaderChain>,
     /// The blocks that the SPV checks used, recorded under each check's lock.
     /// They are checked again before key use, so a reorg in the gap refuses
-    /// instead of signing old chain state (F05-NEW-AF-08).
+    /// instead of signing old chain state.
     #[cfg(feature = "rgb-validation")]
     pub chain_pins: &'a crate::networks::rgb::spv_crosscheck::ChainPins,
     /// Selects the colored key-path inputs the enclave signs, without holding

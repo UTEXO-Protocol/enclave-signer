@@ -1,4 +1,4 @@
-//! F03-AF-05: report the result of one CLI clone attempt.
+//! Report the result of one CLI clone attempt.
 //! Use at most two workers for blocking calls.
 //! Process exit stops any remaining workers.
 //! Do not use this helper in a service.
@@ -119,7 +119,7 @@ pub fn complete(
 
 /// Compare all fields with the donor bundle.
 /// The CLI uses the configured transport authentication.
-/// The enclave checks the signed identity commitment. (F03-AF-08)
+/// The enclave checks the signed identity commitment.
 pub fn identity_field_mismatches(
     local: &PublicKeysResponse,
     donor: &AttestedPublicKeyResponse,

@@ -955,7 +955,7 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     }
 }
 
-/// #248 end to end: each output pays back to custody and the value cap holds,
+/// End to end: each output pays back to custody and the value cap holds,
 /// but about 98% of the input goes to miners. The pinned fee policy refuses
 /// before the signer runs.
 #[test]

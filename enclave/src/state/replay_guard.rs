@@ -17,7 +17,7 @@ pub(super) const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default maximum count of recorded nonces.
 pub(super) const DEFAULT_NONCE_MAX: usize = 10_000;
 
-/// In-memory nonce set for one enclave. (F03-AF-09)
+/// In-memory nonce set for one enclave.
 /// It refuses duplicate nonces. A restart clears the set.
 /// Entries expire after the TTL. When the set is full, the oldest entry goes.
 /// A replay still needs valid attestation, PCRs, key binding, and HMAC.

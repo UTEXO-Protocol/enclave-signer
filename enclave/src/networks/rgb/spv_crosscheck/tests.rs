@@ -682,7 +682,7 @@ fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
     );
 }
 
-// ===== Position binding and 64-byte transaction nodes (VAL-UENC-15) =====
+// ===== Position binding and 64-byte transaction nodes =====
 
 /// A 64-byte legacy transaction X: one input with an empty scriptSig, one
 /// output with a 4-byte scriptPubKey (4 + 1 + 41 + 1 + 13 + 4 = 64).

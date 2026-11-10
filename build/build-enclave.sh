@@ -82,7 +82,7 @@ command -v jq       &>/dev/null || { echo "Error: jq not found"; exit 1; }
 mkdir -p "$OUT_DIR"
 
 # Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
-# Reject a missing asset before the build starts. (F06-AF-38)
+# Reject a missing asset before the build starts.
 # A fixed ENV asset does not need a build argument.
 BUILD_ARGS=()
 declares_build_arg() {

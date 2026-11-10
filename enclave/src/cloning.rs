@@ -89,7 +89,7 @@ impl std::fmt::Debug for CloneSession {
 }
 
 /// HMAC-SHA256(secret, encryption_pubkey || target_cluster_pk).
-/// Binds the request to its recipient key and its donor (F03-AF-07).
+/// Binds the request to its recipient key and its donor.
 pub fn make_cloning_digest(
     secret: &str,
     encryption_pubkey: &[u8; 32],
@@ -113,14 +113,14 @@ pub fn verify_cloning_digest(
     expected.ct_eq(digest).into()
 }
 
-/// Minimum cloning-secret length in bytes. (F03-AF-26)
+/// Minimum cloning-secret length in bytes.
 pub const MIN_CLONING_SECRET_BYTES: usize = 32;
 
 /// Minimum number of distinct secret bytes. This rejects repeated values. It
 /// does not measure entropy.
 pub const MIN_CLONING_SECRET_DISTINCT_BYTES: usize = 8;
 
-/// Reject weak secrets before donor init or InitiateCloning (F03-AF-26).
+/// Reject weak secrets before donor init or InitiateCloning.
 /// The operator generates a random secret and rotates it.
 pub fn validate_cloning_secret(secret: &str) -> Result<()> {
     let bytes = secret.as_bytes();
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn digest_rejects_wrong_target_cluster_pk() {
-        // Same secret and requester key, different donor (F03-AF-07).
+        // Same secret and requester key, different donor.
         let secret = "correct horse battery staple";
         let pubkey = [7u8; 32];
         let digest = make_cloning_digest(secret, &pubkey, &[0xAAu8; 20]);
@@ -395,7 +395,7 @@ mod tests {
         assert_ne!(a.public_key(), b.public_key());
     }
 
-    // F03-AF-25: fixed vectors from Python `cryptography` (OpenSSL) and `hmac`.
+    // Fixed vectors from Python `cryptography` (OpenSSL) and `hmac`.
     // Each step is checked, so a wire-format change fails a test.
 
     /// Decode a fixed-width hex constant into a byte array.
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(make_cloning_digest(secret, &pubkey, &target), want);
         assert!(verify_cloning_digest(secret, &pubkey, &target, &want));
 
-        // A target that differs in each byte gives a different digest (F03-AF-07).
+        // A target that differs in each byte gives a different digest.
         let target_b = hexn::<20>("06111c27323d48535e69747f8a95a0abb6c1ccd7");
         let want_b = hexn::<32>("642b1bb86f3e1b0526fb3932fa85ea1695b4e8feaa07607826158cccf805518e");
         assert_eq!(make_cloning_digest(secret, &pubkey, &target_b), want_b);

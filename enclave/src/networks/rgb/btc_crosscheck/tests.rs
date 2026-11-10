@@ -248,7 +248,7 @@ fn create_utxo_allocation_dust_fits_the_budget() {
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
 }
 
-// --- pinned fee policy on the plain-BTC path (#248) ---
+// --- pinned fee policy on the plain-BTC path ---
 
 /// **The attack.** A compromised host spends a custody UTXO back to custody.
 /// All outputs are self-owned and the value cap passes, but approx 98% of the
@@ -258,7 +258,7 @@ fn rejects_a_fee_that_burns_most_of_the_input() {
     let keys = km();
     let ours = our_address(&keys);
     let req = SignBtcRequest {
-        // #248: 60_676 sat in, 1_000 sat out, 59_676 sat fee.
+        // 60_676 sat in, 1_000 sat out, 59_676 sat fee.
         psbt_bytes: psbt_from_our_address(&keys, &[60_676], &[(ours.spk, 1_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();

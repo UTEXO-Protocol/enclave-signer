@@ -285,7 +285,7 @@ impl ParentAdapterService {
     /// Unwrap an enclave error response into a gRPC Status.
     fn enclave_error_to_status(err: &enclave_proto::ErrorResponse) -> Status {
         match err.code {
-            // Report NotReady as unavailable so the caller can retry. (F03-AF-11)
+            // Report NotReady as unavailable so the caller can retry.
             2 => Status::unavailable(err.message.clone()),
             3 => Status::failed_precondition(err.message.clone()),
             // Codes 4-7 come from GetClone only.
@@ -847,7 +847,7 @@ impl ParentService for ParentAdapterService {
     }
 
     /// Generate fresh enclave keys and set the optional donor secret.
-    /// Map cloning_secret to the enclave cloning_secret field. (F03-AF-27)
+    /// Map cloning_secret to the enclave cloning_secret field.
     /// This RPC does not import a mnemonic or seed.
     async fn initialize(
         &self,

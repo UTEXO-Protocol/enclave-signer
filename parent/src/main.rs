@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = std::net::SocketAddr::new(cfg.grpc_host.parse()?, cfg.grpc_port);
     let health_addr = format!("{}:{}", cfg.health_host, cfg.health_port).parse()?;
 
-    // Limit active requests across all connections (F03-AF-13), requests per
+    // Limit active requests across all connections, requests per
     // connection, and handler duration. The enclave still authenticates clones.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
     let connection_age = Duration::from_secs(300);

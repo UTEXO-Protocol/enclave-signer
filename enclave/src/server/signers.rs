@@ -14,7 +14,7 @@ use crate::proto::*;
 /// still held.
 ///
 /// Each SPV check releases the lock at return. Another worker can accept a
-/// reorg in that gap (F05-NEW-AF-08). An extension does not change the pinned
+/// reorg in that gap. An extension does not change the pinned
 /// heights, so signing continues. This function refuses a reorg that replaces
 /// a pin, or that leaves a pinned block shallower than its check required.
 /// The lock is held until `sign` returns, so no header update can land between
@@ -56,7 +56,7 @@ pub(super) fn handle_sign_evm(
 
     let domain_sep = domain.separator_hash();
 
-    // Validation picks the route (F05-NEW-AF-12): `params` is `Some` on the
+    // Validation picks the route: `params` is `Some` on the
     // direct route, and `None` on the LayerZero route, which has `lz_release`.
     // The digest commits to the LZ fields of `lzFundsOutCall`.
     let digest = match (params, req.lz_release.as_ref()) {
@@ -265,7 +265,7 @@ mod tests {
         (ctx, pins)
     }
 
-    // F05-NEW-AF-08: no header update can land between the check and the key.
+    // No header update can land between the check and the key.
     #[test]
     fn header_chain_stays_locked_until_sign_returns() {
         let (ctx, pins) = pinned_context();

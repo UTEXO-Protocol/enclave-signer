@@ -1,4 +1,4 @@
-//! F03-AF-08: test identity commitments before state changes.
+//! Test identity commitments before state changes.
 //! These tests use mock attestation without an NSM signature.
 //! This repository has no test of these paths on a real NSM.
 // Cloning is disabled with KMS persistence (see `test_clone.rs`).

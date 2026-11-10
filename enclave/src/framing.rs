@@ -197,7 +197,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // F03-AF-22: test truncated and invalid protobuf frames.
+    // Test truncated and invalid protobuf frames.
 
     /// Reject a body shorter than its length header.
     #[test]

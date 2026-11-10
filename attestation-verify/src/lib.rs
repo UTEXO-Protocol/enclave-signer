@@ -286,7 +286,7 @@ pub(crate) enum CheckTime {
 
 // Shared helpers
 
-/// Reject all-zero PCR0/1/2. (F03-AF-12 / F02-AF-08)
+/// Reject all-zero PCR0/1/2.
 /// Debug enclaves share these values, so they cannot identify a trusted image.
 /// The allow-debug-pcrs feature disables this check for debug tests.
 #[cfg(not(feature = "allow-debug-pcrs"))]
@@ -452,7 +452,7 @@ IwLz3/Y=
 
         let nonce = check_nonce(&attestation.nonce, expected_nonce)?;
 
-        // Reject all-zero PCRs before comparing them with expected values. (F03-AF-12)
+        // Reject all-zero PCRs before comparing them with expected values.
         #[cfg(not(feature = "allow-debug-pcrs"))]
         reject_debug_pcrs(&attestation.pcrs)?;
 
@@ -714,7 +714,7 @@ IwLz3/Y=
             let value: ciborium::Value = ciborium::from_reader(data)
                 .map_err(|e| VerifyError::Attestation(format!("invalid CBOR: {e}")))?;
 
-            // Accept a bare COSE_Sign1 array or CBOR tag 18. (RFC 8152, F03-AF-14)
+            // Accept a bare COSE_Sign1 array or CBOR tag 18. (RFC 8152)
             // Reject other tags.
             // The signature checks below still apply.
             let value = match value {
@@ -786,7 +786,7 @@ IwLz3/Y=
         use x509_cert::ext::pkix::KeyUsages;
         use x509_cert::ext::Extension;
 
-        // --- COSE_Sign1 envelope (F03-AF-14) -------------------------------
+        // --- COSE_Sign1 envelope -------------------------------------------
 
         fn sample_cose_array() -> ciborium::Value {
             ciborium::Value::Array(vec![
@@ -999,7 +999,7 @@ IwLz3/Y=
             assert!(matches!(err, VerifyError::Certificate(_)));
         }
 
-        // --- COSE signature form (I-05) ------------------------------------
+        // --- COSE signature form -------------------------------------------
 
         #[test]
         fn cose_sig_rejects_der_encoding() {
@@ -1341,7 +1341,7 @@ mod tests {
         );
     }
 
-    // Test the zero-PCR check when allow-debug-pcrs is disabled. (F03-AF-12)
+    // Test the zero-PCR check when allow-debug-pcrs is disabled.
     #[cfg(not(feature = "allow-debug-pcrs"))]
     #[test]
     fn reject_debug_pcrs_flags_all_zero_but_allows_measured() {

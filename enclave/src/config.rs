@@ -938,7 +938,7 @@ mod tests {
     }
 
     /// Every name the SPV chain runs on attests the network a verifier
-    /// expects for that same name (W-04: testnet4 attested as mainnet).
+    /// expects for that same name (testnet4 attested as mainnet).
     #[test]
     fn attested_network_matches_the_spv_network() {
         use crate::networks::rgb::spv::Network;

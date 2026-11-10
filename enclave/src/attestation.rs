@@ -230,7 +230,7 @@ mod nsm {
             }
         };
 
-        // AF-21: stop on the first read error and release the NSM fd on every path.
+        // Stop on the first read error and release the NSM fd on every path.
         let pcr0 = match read(0) {
             Ok(value) => value,
             Err(error) => {

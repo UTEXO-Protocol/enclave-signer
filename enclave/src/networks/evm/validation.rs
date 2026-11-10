@@ -323,7 +323,7 @@ pub fn validate_destination(
     // `is_entrypoint_route` selects the check below.
     let is_entrypoint_route = selector == LZ_FUNDS_OUT_SELECTOR;
     // `lz_release` is required on the LayerZero route and refused on the
-    // direct route (F05-NEW-AF-12). The signer then routes on `params` only.
+    // direct route. The signer then routes on `params` only.
     match (is_entrypoint_route, destination.lz_release.is_some()) {
         (true, false) => {
             return Err(EnclaveError::CrossCheck(

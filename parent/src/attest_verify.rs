@@ -58,7 +58,7 @@ pub(crate) fn refuse_mock_production(mode: VerifyMode, production: bool) -> Resu
 /// Chain, contract and asset values come from the wire response, which the
 /// public-key bundle binds. This type gives only the posture flags and rules
 /// that are not on the wire. The optional chain, contract and asset pins
-/// (F02-AF-04) also compare the wire values with the operator deployment.
+/// also compare the wire values with the operator deployment.
 /// Without a pin, the value is authenticated but not compared.
 ///
 /// One value is built per run, so the variant size difference does not matter.
@@ -675,7 +675,7 @@ fn expected_attested_policy(
                     )
                 })?;
 
-            // Check operator pins before building the expected commitment. (F02-AF-04)
+            // Check operator pins before building the expected commitment.
             if let Some(want) = expected_chain_id {
                 if *want != resp.chain_id {
                     bail!(

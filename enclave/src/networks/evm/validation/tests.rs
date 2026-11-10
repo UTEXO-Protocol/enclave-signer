@@ -261,7 +261,7 @@ fn lz_destination(destination_chain_id: u64) -> EvmDestination {
     }
 }
 
-// F05-NEW-AF-12: `lz_release` is present exactly when the selector is
+// `lz_release` is present exactly when the selector is
 // `lzFundsOut`. The two valid forms pass above. The two mixed forms fail here.
 
 #[test]
@@ -798,7 +798,7 @@ fn burn_id_matches_the_shared_vector() {
     );
 }
 
-/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts #173), with
+/// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
 /// `sourceChainId` = 827166. The contract test still pins the 96 form.
 #[test]
 fn burn_id_matches_the_contract_vector() {

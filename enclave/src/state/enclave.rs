@@ -18,12 +18,12 @@ use crate::keys::{KeyInfo, KeyManager};
 use super::cloning_session::CloningSession;
 use super::replay_guard::NonceReplayGuard;
 
-/// Environment variable for the export warning threshold. (F03-AF-10)
+/// Environment variable for the export warning threshold.
 /// An unset, zero, or invalid value disables the threshold.
 /// This threshold does not block exports.
 const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
-/// Environment variable for the export limit per enclave process. (F03-AF-10)
+/// Environment variable for the export limit per enclave process.
 /// An unset, zero, or invalid value disables the limit.
 /// The check occurs after authentication and before encryption.
 /// Each enclave has a separate count. A restart resets it.
@@ -102,7 +102,7 @@ pub struct EnclaveState {
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub refill_rate: super::RefillRateLimit,
 
-    /// Successful exports from this enclave process. (F03-AF-10)
+    /// Successful exports from this enclave process.
     /// A restart resets the count. The slot counter enforces the hard quota.
     pub(super) seed_export_count: AtomicU64,
 
@@ -175,7 +175,7 @@ impl EnclaveState {
         }
     }
 
-    /// Reserve an export slot before the seed is encrypted. (F03-AF-10)
+    /// Reserve an export slot before the seed is encrypted.
     /// The limit counts successful exports and exports in progress.
     /// Returns an error when no slot is available. Zero disables the limit.
     pub fn reserve_export_quota(&self) -> Result<ExportQuotaReservation<'_>> {
@@ -207,7 +207,7 @@ impl EnclaveState {
         })
     }
 
-    /// Record and log a successful export, and return the count. (F03-AF-10)
+    /// Record and log a successful export, and return the count.
     /// Logs a warning above the soft cap. It does not enforce the hard quota.
     pub fn record_seed_export(&self, requester_pk: &[u8; 32]) -> u64 {
         let count = self.seed_export_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -227,7 +227,7 @@ impl EnclaveState {
         count
     }
 
-    /// Current lifetime seed-export count for this instance (F03-AF-10).
+    /// Current lifetime seed-export count for this instance.
     pub fn seed_export_count(&self) -> u64 {
         self.seed_export_count.load(Ordering::Relaxed)
     }
@@ -296,7 +296,7 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Set the donor cloning secret after a strength check. (F03-AF-26)
+    /// Set the donor cloning secret after a strength check.
     /// Replaces any previous secret. SecretBox clears the bytes on drop.
     pub fn set_donor_cloning_secret(&self, secret: String) -> Result<()> {
         validate_cloning_secret(&secret)?;
@@ -364,7 +364,7 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Enter Cloning from Initial or an expired Cloning session. (F03-AF-01)
+    /// Enter Cloning from Initial or an expired Cloning session.
     /// Returns AlreadyInitialized for all other phases.
     pub fn enter_cloning(&self, session: CloningSession) -> Result<()> {
         self.enter_cloning_at(session, Instant::now())

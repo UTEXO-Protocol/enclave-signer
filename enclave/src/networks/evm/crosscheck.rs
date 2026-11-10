@@ -193,8 +193,8 @@ pub fn validate_funds_out_source_burn_tx_id(
 ///
 /// Exact set equality, canonical encoding, and strictly ascending
 /// `operationId` order, which also refuses duplicates. `burnId` does not hash
-/// `settlementData`, so replay safety does not rest on this order
-/// (F05-NEW-AF-04). An empty lock set refuses: each signable
+/// `settlementData`, so replay safety does not rest on this order.
+/// An empty lock set refuses: each signable
 /// asset is bridged, so such a burn settles nothing.
 pub fn validate_funds_out_settlement(
     release: &ReleaseIdentity,

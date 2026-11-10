@@ -52,7 +52,7 @@ fn cloning_session_constructors_reject_weak_donor_secrets() {
 
 #[test]
 fn seed_export_counter_increments_monotonically() {
-    // Each successful export increases the counter. (F03-AF-10)
+    // Each successful export increases the counter.
     let state = EnclaveState::new(Network::Bitcoin);
     assert_eq!(state.seed_export_count(), 0);
     assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
@@ -61,7 +61,7 @@ fn seed_export_counter_increments_monotonically() {
     assert_eq!(state.seed_export_count(), 3);
 }
 
-// Set the cap directly to avoid environment changes in parallel tests. (F03-AF-10)
+// Set the cap directly to avoid environment changes in parallel tests.
 #[test]
 fn export_hard_cap_blocks_after_quota() {
     let mut state = EnclaveState::new(Network::Bitcoin);
@@ -175,7 +175,7 @@ fn export_hard_cap_bounds_concurrent_in_flight_exports() {
     assert!(state.reserve_export_quota().is_err());
 }
 
-// Replace an expired session without a restart. (F03-AF-01)
+// Replace an expired session without a restart.
 #[test]
 fn enter_cloning_replaces_expired_but_protects_live_session() {
     let state = EnclaveState::new(Network::Bitcoin);

@@ -159,7 +159,7 @@ asubuntu(){ runuser -u ubuntu -- env HOME=/home/ubuntu bash -c "$1"; }
 DESC_JSON=$(mktemp)
 trap 'rm -f "$DESC_JSON"' EXIT
 
-# Bind Parent gRPC to the private host address. (F03-AF-13)
+# Bind Parent gRPC to the private host address.
 # Set GRPC_HOST to override the address.
 if [ -z "${GRPC_HOST:-}" ]; then
   _tok=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
@@ -672,7 +672,7 @@ print(f"OK (debug): exactly {len(want)} enclaves RUNNING")
 PY
 else
 asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
-# F09-AF-07: require the EXACT expected CID set, all in RUNNING state, each with a
+# Require the EXACT expected CID set, all in RUNNING state, each with a
 # matching PCR0, so a host with zero or partial enclaves fails the deploy.
 python3 - "$MAN_PCR" "${CIDS[*]}" "$DESC_JSON" <<'PY'
 import json, sys
@@ -698,7 +698,7 @@ for CID in "${CIDS[@]}"; do
   systemctl restart "utexo-parent@$CID"
 done
 sleep 4
-# F09-AF-07: require ALL expected ports to be listening
+# Require ALL expected ports to be listening
 # (a single surviving parent must not make a partial cluster look healthy).
 # Health ports too: a parent without its health endpoint would leave the next
 # rolling deploy polling a dead port. Liveness only - readiness stays false
