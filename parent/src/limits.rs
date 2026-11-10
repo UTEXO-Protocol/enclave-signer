@@ -94,12 +94,61 @@ pub fn table(current: &Limits, image: &Limits) -> String {
     out
 }
 
+/// Notes on limits in force above the parent's own `framing::MAX_MESSAGE_SIZE`
+/// or `request_shape::MAX_WIRE_ELEMENTS`, which the parent applies first.
+pub fn notes(current: &Limits) -> Vec<String> {
+    let frame = u64::from(crate::framing::MAX_MESSAGE_SIZE);
+    let elements = crate::request_shape::MAX_WIRE_ELEMENTS as u64;
+    let mut notes = Vec::new();
+    if current.max_message_bytes > frame {
+        notes.push(format!(
+            "max_message_bytes is {}, but the parent forwards frames of at most {frame} \
+             bytes and refuses a larger request first",
+            current.max_message_bytes
+        ));
+    }
+    if current.max_wire_elements > elements {
+        notes.push(format!(
+            "max_wire_elements is {}, but the parent refuses a request of more than \
+             {elements} elements first",
+            current.max_wire_elements
+        ));
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pairs(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
+    }
+
+    /// The fixed limits equal the image values; only a higher one gets a note.
+    #[test]
+    fn a_limit_above_the_fixed_parent_limit_gets_a_note() {
+        let image = utexo_bridge_enclave::limits::Limits::DEFAULTS;
+        assert_eq!(
+            u64::from(crate::framing::MAX_MESSAGE_SIZE),
+            image.max_message_bytes
+        );
+        assert_eq!(
+            crate::request_shape::MAX_WIRE_ELEMENTS as u64,
+            image.max_wire_elements
+        );
+        let mut current = Limits {
+            max_message_bytes: image.max_message_bytes,
+            max_wire_elements: image.max_wire_elements,
+            ..Default::default()
+        };
+        assert!(notes(&current).is_empty());
+        current.max_message_bytes += 1;
+        current.max_wire_elements += 1;
+        let notes = notes(&current);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].starts_with("max_message_bytes"), "{notes:?}");
+        assert!(notes[1].starts_with("max_wire_elements"), "{notes:?}");
     }
 
     #[test]

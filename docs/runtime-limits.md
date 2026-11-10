@@ -171,6 +171,7 @@ at each call, so a change applies to the entries that it holds.
 
 Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If the
 parent drops a reply first, the enclave refuses the retry until the window ends.
+The parent logs a warning when its value is below the value in force.
 
 ## Measured times
 
@@ -263,11 +264,18 @@ These values also stay constants:
 
 ## The parent
 
-The parent reads `total_request_timeout_secs` from the enclave every 5 s, and it
-waits 10 s longer for each reply. The enclave must give up first. Its failed write
-rolls the replay key back. A parent that gives up first leaves a committed key and a
-response that nobody read. So a change of the deadline needs no change on the
-parent. For up to 5 s after a change, the parent can use the old value.
+The parent reads the limits in force from the enclave every 5 s. It waits 10 s
+longer than `total_request_timeout_secs` for each reply. The enclave must give up
+first. Its failed write rolls the replay key back. A parent that gives up first
+leaves a committed key and a response that nobody read. So a change of the deadline
+needs no change on the parent. For up to 5 s after a change, the parent can use the
+old value.
+
+The header sync of the parent follows the header limits of the same read. It sends
+at most `max_headers_per_submit` headers in one batch, and at most half of
+`max_headers_per_minute` in a minute. Before its first read, it uses the image
+values. A fork repair resends the headers below the tip, and its batch must reach
+past the old tip. So a lower batch limit also repairs only shallower forks.
 
 The CLI follows the deadline too. Before each request other than `GetLimits`, it
 reads `total_request_timeout_secs` with `GetLimits`. Each socket read and write of
@@ -278,9 +286,13 @@ before the parent. If `GetLimits` gets no answer within `LIMITS_IO_TIMEOUT`
 `GetLimits` with an error, or closes the connection, the CLI starts from the image
 deadline.
 
-Two timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS`
-on the parent (default 120 s), and the timeout of the backend (2 minutes). A deadline
-above 110 s also needs a change of these two values.
+Timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS` on
+the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` and
+`PARENT_ADAPTER_GRPC_TIMEOUT` on the signer node, and the timeout of the backend (2
+minutes). Each must stay above the deadline plus `ENCLAVE_WAIT_MARGIN_SECS`. A
+shorter one ends a slow request before the enclave answers, and a node retry then
+makes the enclave validate the same release again.
+
 The parent refuses to start when `GRPC_REQUEST_TIMEOUT_SECS` does not exceed the image
 deadline plus the wait margin. After a runtime deadline change, it logs an error when the
 deadline plus the margin reaches that timeout. It does not stop; restart it with a larger
@@ -289,4 +301,5 @@ value.
 The parent has its own frame limit (`parent/src/framing.rs`). A value of
 `max_message_bytes` above 24 MiB has no effect until the parent limit also changes.
 The same holds for `max_wire_elements` above 2^19: the parent keeps a fixed
-limit (`parent/src/request_shape.rs`).
+limit (`parent/src/request_shape.rs`). The `limits` command prints a note for
+such a value.

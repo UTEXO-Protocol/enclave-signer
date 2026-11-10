@@ -236,11 +236,46 @@ async fn the_wait_follows_the_deadline_in_force() {
     let service = ParentAdapterService::new(tcp(listener.local_addr().unwrap()));
     answer_limits(listener, 3_600);
 
-    service.read_enclave_deadline().await;
+    service.read_enclave_limits().await;
     assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
+    let limits = service.limits_in_force().unwrap();
+    assert_eq!(limits.total_request_timeout_secs, 3_600);
 
-    service.read_enclave_deadline().await;
+    service.read_enclave_limits().await;
     assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
+    assert_eq!(service.limits_in_force(), Some(limits));
+}
+
+/// The parent's own timeout must outlast its wait for the enclave.
+#[test]
+fn a_request_timeout_at_or_below_the_enclave_wait_is_reported() {
+    let wait = Duration::from_secs(100);
+    assert!(timeout_conflict(Duration::from_secs(101), wait).is_none());
+    let problem = timeout_conflict(Duration::from_secs(100), wait).unwrap();
+    assert!(
+        problem.contains("GRPC_REQUEST_TIMEOUT_SECS is 100 s"),
+        "{problem}"
+    );
+    assert!(timeout_conflict(Duration::from_secs(60), wait).is_some());
+}
+
+/// A kept reply must outlive the replay window of the enclave.
+#[test]
+fn a_reply_ttl_below_the_enclave_replay_window_is_reported() {
+    let enclave = Duration::from_secs(3_600);
+    assert!(reply_ttl_conflict(Duration::from_secs(3_600), enclave).is_none());
+    let problem = reply_ttl_conflict(Duration::from_secs(600), enclave).unwrap();
+    assert!(
+        problem.contains("SIGNED_RESPONSE_TTL_SECS is 600 s"),
+        "{problem}"
+    );
+}
+
+/// The default reply store outlives the replay window of the image.
+#[test]
+fn the_default_reply_ttl_covers_the_image_replay_window() {
+    let image = utexo_bridge_enclave::limits::Limits::DEFAULTS.mint_replay_ttl_secs;
+    assert!(crate::signed_responses::DEFAULT_TTL >= Duration::from_secs(image));
 }
 
 #[test]

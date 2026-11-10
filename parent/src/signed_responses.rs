@@ -147,6 +147,11 @@ impl SignedResponses {
         })
     }
 
+    /// How long a reply is kept.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// The key of a request: SHA-256 of its protobuf encoding. Two requests
     /// with the same key ask the enclave for the same signature.
     pub fn key(request: &EnclaveRequest) -> [u8; 32] {

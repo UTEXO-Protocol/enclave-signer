@@ -112,9 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.signed_response_max_bytes,
         ),
     )
-    .with_handler_timeout_secs(cfg.grpc_request_timeout_secs);
+    .with_request_timeout(request_timeout);
 
-    tokio::spawn(service.clone().follow_enclave_deadline());
+    tokio::spawn(service.clone().follow_enclave_limits());
 
     // The enclave accepts headers in every phase, so sync starts before keys
     // and endpoints. A failed step or a bad HEADER_ELECTRUM_URL does not stop
