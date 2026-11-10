@@ -46,7 +46,7 @@ A change stays until the enclave restarts. Then the enclave uses the image value
 
 To keep values, put them in `/etc/utexo/enclave-limits.conf`.
 `ENCLAVE_LIMITS_FILE` can name another file: `deploy-host.sh` takes it from its
-environment and writes it into `/etc/utexo/enclave.env`, which the enclave unit
+environment and writes it into `/etc/utexo/enclave-<CID>.env`, which the enclave unit
 reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has one
 `NAME=VALUE` on each line. The text after a `#` is a comment:
 

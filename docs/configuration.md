@@ -84,7 +84,7 @@ The operator sends these once after launch, with
 `utexo-bridge-parent-cli set-endpoints` (`SetEndpoints`). A build requires
 the values that it uses and refuses the others. `deploy-host.sh` reads
 `ELECTRUM_URL`, `EVM_RPC_TLS_CA_DER_FILE`, `EVM_RPC_PATH_FILE` and the KMS
-values from its environment and writes them to `/etc/utexo/enclave.env`.
+values from its environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 `EVM_RPC_HOST` and `EVM_RPC_TLS_PORT` come from
 `/etc/nitro_enclaves/vsock-proxy-evmrpc.env`, which
 `deploy/host-prep-evmrpc.sh` writes.
@@ -129,9 +129,9 @@ an API key in the URL path. Put the path in a restricted file and pass
 - To rotate a key, replace the file and launch again with the same public
   values. No rebuild and no change of a PCR allowlist is needed.
 - The parent supplies the file, so a compromised parent can read the key.
-- `deploy-host.sh` keeps a copy in `/etc/utexo/evm-rpc-path`, with mode 0600
-  and the service user as owner, and the launch reads that copy. A deploy
-  without the variable keeps the copy. To rotate a key on such a host,
+- `deploy-host.sh` keeps a copy in `/etc/utexo/evm-rpc-path-<CID>`, with mode
+  0600 and the service user as owner, and the launch reads that copy. A
+  deploy without the variable keeps the copy of that CID. To rotate a key on such a host,
   replace the copy and restart the enclave, or deploy again with
   `EVM_RPC_PATH_FILE`. To go back to the path `/`, delete the copy and deploy
   again.

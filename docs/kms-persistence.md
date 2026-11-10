@@ -130,7 +130,7 @@ Permit outbound HTTPS to KMS and S3, and role access to IMDS. Do not run a
 second listener on 8003 or 8004.
 
 `deploy/deploy-host.sh` writes the KMS values of its environment to
-`/etc/utexo/enclave.env`, and the launch sends them in `set-endpoints`. A
+`/etc/utexo/enclave-<CID>.env`, and the launch sends them in `set-endpoints`. A
 mint enclave refuses blank KMS values and is then terminated, so you cannot
 add them by hand after the deploy. `release-eif.yml` passes no KMS value.
 No deployment script sets up the KMS proxy, the storage settings of the

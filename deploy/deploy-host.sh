@@ -11,8 +11,8 @@
 #   EVM_RPC_PATH_FILE=<restricted file with a private RPC path, for example /v2/<key>>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
 # The private RPC path can hold a provider API key. The script keeps a copy in
-# /etc/utexo/evm-rpc-path that only the service user can read. A deploy without
-# EVM_RPC_PATH_FILE keeps that copy. To go back to the path /, delete the copy.
+# /etc/utexo/evm-rpc-path-<CID> that only the service user can read. A deploy
+# without EVM_RPC_PATH_FILE keeps that CID's copy. To use /, delete that copy.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
 # set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not
 # copied from ELECTRUM_URL, whose enclave-side rules differ. An invalid header
@@ -21,7 +21,7 @@
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
 # ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
-# (docs/runtime-limits.md). The script writes it into enclave.env. It stops
+# (docs/runtime-limits.md). The script writes it into enclave-<CID>.env. It stops
 # before it changes anything when that file exists and ubuntu cannot read it.
 #
 # After set-endpoints, verify each enclave's attested launch policy.
@@ -40,10 +40,10 @@ GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
 [[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "GIT_SHA must be a 40-hex commit" >&2; exit 1; }
 BUCKET="${BUCKET:?BUCKET required (S3 artifact bucket)}"
 REGION="${AWS_REGION:?AWS_REGION required (e.g. eu-central-1)}"
-DIR="${CLUSTER_DIR:?CLUSTER_DIR required (cluster working dir, e.g. /home/<user>/<dir>)}"
+CLUSTER_DIR="${CLUSTER_DIR:?CLUSTER_DIR required (artifact root writable by ubuntu)}"
+[[ "$CLUSTER_DIR" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo "CLUSTER_DIR must be an absolute path of letters, digits, '_', '.', '/' and '-'" >&2; exit 1; }
 SIGNER_ROLE="${SIGNER_ROLE:?SIGNER_ROLE required (mint or burn)}"
 case "$SIGNER_ROLE" in mint|burn) ;; *) echo "SIGNER_ROLE must be mint or burn" >&2; exit 1 ;; esac
-EIF="$DIR/utexo-bridge-enclave.eif"
 # build-eif publishes one S3 subpath per signer role.
 SRC="s3://$BUCKET/eif/$GIT_SHA/rgb-$SIGNER_ROLE"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-2}"
@@ -87,7 +87,7 @@ if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
   echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
   exit 1
 fi
-# The path goes into enclave.env and into a shell command below, so it has only
+# The path goes into the enclave env file and a shell command below, so it has only
 # plain characters.
 ENCLAVE_LIMITS_FILE="${ENCLAVE_LIMITS_FILE:-/etc/utexo/enclave-limits.conf}"
 if ! [[ "$ENCLAVE_LIMITS_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
@@ -102,6 +102,13 @@ case "$ENCLAVE_CID" in
   *) echo "ENCLAVE_CID must be 16, 18 or 20, got '$ENCLAVE_CID'" >&2; exit 1 ;;
 esac
 CIDS=("$ENCLAVE_CID")
+# Artifacts and launch files belong to one CID. A peer's next restart must use
+# its own release even when both deployments have the same CLUSTER_DIR.
+DIR="$CLUSTER_DIR/enclave-$ENCLAVE_CID/$GIT_SHA/rgb-$SIGNER_ROLE"
+EIF="$DIR/utexo-bridge-enclave.eif"
+CONTROL_DIR="/usr/local/lib/utexo/$ENCLAVE_CID"
+RPC_CA_COPY="/etc/utexo/evm-rpc-ca-$ENCLAVE_CID.der"
+RPC_PATH_COPY="/etc/utexo/evm-rpc-path-$ENCLAVE_CID"
 # The hugepage pool must hold this enclave at the launch value. Refuse here,
 # before the script downloads or stops anything. The allocator applies the file
 # at its next start, and the kernel holds the pool now.
@@ -199,7 +206,7 @@ done
 # below relies on the group). Group membership is persistent across reboots.
 getent group ne >/dev/null || groupadd -g 986 ne
 id -nG ubuntu | grep -qw ne || usermod -aG ne ubuntu
-mkdir -p "$DIR"
+asubuntu "mkdir -p '$DIR'"
 
 # --- 1. fetch artifacts ----------------------------------------------------
 log "pulling artifacts from $SRC"
@@ -232,6 +239,7 @@ log "PCR0 (manifest) = $MAN_PCR"
 # --- 4. install host services (udev + tmpfiles + systemd units + env) ------
 log "installing systemd units + udev/tmpfiles"
 install -d /etc/utexo
+install -d "$CONTROL_DIR"
 
 # udev: give the `ne` group the Nitro device on every boot.
 cat > /etc/udev/rules.d/99-nitro-enclaves.rules <<'EOF'
@@ -249,16 +257,28 @@ EOF
 
 # enclave control wrapper (serialized + retried: at boot all enclave units start
 # in parallel and concurrent run-enclave calls race on the pool -> E36/E39).
-cat > /usr/local/bin/utexo-enclave-ctl.sh <<'EOF'
+cat > "$CONTROL_DIR/utexo-enclave-ctl.sh" <<'EOF'
 #!/usr/bin/env bash
 # start|check|stop a single Nitro enclave by CID, used by utexo-enclave@.service.
-# `check` refuses a launch value or a hugepage pool that cannot hold every
-# enclave of the host, and changes nothing. Run it before a rolling restart:
+# `check` refuses a launch value or a hugepage pool too small for this one
+# enclave, and changes nothing. Run it before a rolling restart:
 # under `systemctl restart` the old enclave stops before `start` runs.
+# `start` sets the chain endpoints on the fresh enclave. Identity is NOT
+# bootstrapped here - a freshly (re)started enclave is empty; run `init`/`clone`
+# separately (keys live only in enclave memory).
+#
+# At boot systemd starts all per-CID enclave units in parallel, but concurrent
+# `nitro-cli run-enclave` calls race on the shared CPU/memory pool and fail with
+# E36/E39. We therefore serialize starts host-wide with flock and retry the
+# transient pool failures.
 set -uo pipefail
+
 ACTION="${1:?usage: utexo-enclave-ctl.sh start|check|stop <cid>}"
 CID="${2:?cid required}"
-# systemd gives `start` the values in /etc/utexo/enclave.env. `check` takes
+[[ "$CID" =~ ^[1-9][0-9]{0,9}$ ]] && (( CID >= 4 && CID < 4294967295 )) || {
+  echo "invalid enclave CID: $CID" >&2; exit 2;
+}
+# systemd gives `start` the values in /etc/utexo/enclave-<CID>.env. `check` takes
 # the three keys below from this file only, and a key that is not in the file
 # gets its default. A drop-in or the systemd manager can still give `start` a
 # value for such a key, but deploy-host.sh writes all three keys. `check`
@@ -281,7 +301,7 @@ CID="${2:?cid required}"
 # in the value. systemd joins, splits, changes or ignores some other lines, or
 # refuses the file, so `check` refuses a file with them. An empty ENCLAVE_ENV
 # makes `check` use the environment.
-ENV_FILE="${ENCLAVE_ENV-/etc/utexo/enclave.env}"
+ENV_FILE="${ENCLAVE_ENV-/etc/utexo/enclave-$CID.env}"
 if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
   # The number of the first line that is not plain, or 0. awk can miss a NUL
   # byte, so tr changes it to a byte that is not plain.
@@ -328,10 +348,13 @@ NAME="enclave-${CID}"
 CPU="${ENCLAVE_CPU_COUNT:-2}"
 MEM="${ENCLAVE_MEMORY:-4096}"
 LOCK="${UTEXO_ENCLAVE_LOCK:-/tmp/utexo-enclave-start.lock}"
+
+# Resolve the running enclave-id for our name (empty if not running).
 enc_id() {
   nitro-cli describe-enclaves 2>/dev/null \
     | python3 -c "import json,sys; print(next((e['EnclaveID'] for e in json.load(sys.stdin) if e.get('EnclaveName')=='$NAME'), ''))"
 }
+
 # Send the limits of the operator. They do not survive a restart, so each launch
 # sends them again. The file is optional: with no file, nothing is sent or said.
 # If this user cannot read the file, or the enclave refuses it, the enclave keeps
@@ -349,7 +372,7 @@ send_limits() {
 }
 # Set endpoints and KMS values once from the unit env.
 set_endpoints() {
-  : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
+  : "${CLI:?CLI env required (set in the per-CID enclave env file)}"
   # systemd sources this via EnvironmentFile; a manual `start` does not, so
   # source it here too (idempotent: harmless if already in the environment).
   if [ -r /etc/nitro_enclaves/vsock-proxy-evmrpc.env ]; then
@@ -369,6 +392,7 @@ set_endpoints() {
   echo "enclave CID $CID did not answer health" >&2
   return 1
 }
+
 # Terminate this enclave if it runs. Fail if it still runs after.
 terminate() {
   id="$(enc_id)"; [ -n "$id" ] && nitro-cli terminate-enclave --enclave-id "$id"
@@ -461,16 +485,20 @@ case "$ACTION" in
       echo "CID $CID: one enclave of $MEM MiB fits: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
       exit 0
     fi
-    : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
+    : "${EIF:?EIF env required (set in the per-CID enclave env file)}"
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
-    # fd 9 closed in nitro-cli children (9>&-) so an orphaned run-enclave can't
-    # keep holding the lock and deadlock the next CID.
+    # Hold a host-wide lock so only one run-enclave runs at a time (anti-race).
+    # `nitro-cli` children are spawned with fd 9 closed (9>&-) so an occasionally
+    # orphaned/lingering run-enclave can never keep holding the lock and deadlock
+    # the next CID; the lock is released the moment this shell exits.
     exec 9>"$LOCK"
     flock -w 180 9 || { echo "could not acquire enclave start lock for CID $CID" >&2; exit 1; }
     # DEBUG-MODE: ENCLAVE_DEBUG_MODE=1 (unit env) -> run with --debug-mode so
-    # `nitro-cli console` can attach. Zeroes PCR0/1/2; never on real production.
+    # `nitro-cli console` can attach. This zeroes PCR0/1/2, so attestation is
+    # insecure. Never enable it on a production host.
     DEBUG_ARG=()
     [ "${ENCLAVE_DEBUG_MODE:-0}" = "1" ] && DEBUG_ARG=(--debug-mode)
+    # Clear a stale instance of THIS enclave so the CPU pool is free (anti-E39).
     old="$(enc_id)"; [ -n "$old" ] && nitro-cli terminate-enclave --enclave-id "$old" 9>&- || true
     # Refuse with one clear message, not five failed attempts, when the free
     # hugepages cannot hold this enclave. A stopped enclave frees its pages.
@@ -504,25 +532,34 @@ case "$ACTION" in
   stop)
     terminate
     ;;
-  *) echo "usage: utexo-enclave-ctl.sh start|check|stop <cid>" >&2; exit 2 ;;
+  *)
+    echo "usage: utexo-enclave-ctl.sh start|check|stop <cid>" >&2
+    exit 2
+    ;;
 esac
 EOF
-chmod 0755 /usr/local/bin/utexo-enclave-ctl.sh
+chmod 0755 "$CONTROL_DIR/utexo-enclave-ctl.sh"
 
 # parent launcher wrapper.
-cat > /usr/local/bin/utexo-parent-ctl.sh <<'EOF'
+cat > "$CONTROL_DIR/utexo-parent-ctl.sh" <<'EOF'
 #!/usr/bin/env bash
 # Launch the parent gRPC adapter from the cluster dir, used by utexo-parent@.service.
+# The parent binary reads its settings (GRPC_*, SIGNED_RESPONSE_*, HEALTH_*,
+# USE_VSOCK, ENCLAVE_VSOCK_*, HEADER_*) from the per-CID EnvironmentFile. A
+# setting that the file omits takes its default.
 set -uo pipefail
+
 cd "${CLUSTER_DIR:?CLUSTER_DIR env required (set in /etc/utexo/parent-<cid>.env)}"
 exec ./utexo-bridge-parent
 EOF
-chmod 0755 /usr/local/bin/utexo-parent-ctl.sh
+chmod 0755 "$CONTROL_DIR/utexo-parent-ctl.sh"
 
-# templated units.
-cat > /etc/systemd/system/utexo-enclave@.service <<'EOF'
+# Install only this instance. An explicit instance unit takes precedence over
+# a template, including a template used by a peer that has not been migrated.
+cat > "/etc/systemd/system/utexo-enclave@$ENCLAVE_CID.service" <<'EOF'
 [Unit]
 Description=UTEXO Nitro enclave (CID %i)
+# Enclaves need the allocator (CPU/memory pool) up first.
 After=nitro-enclaves-allocator.service
 Requires=nitro-enclaves-allocator.service
 
@@ -530,33 +567,39 @@ Requires=nitro-enclaves-allocator.service
 Type=oneshot
 RemainAfterExit=yes
 User=ubuntu
+# Allow for the serialized start lock (flock -w 180), run-enclave retries,
+# 60 s for the endpoint set and 50 s for the launch check.
 TimeoutStartSec=390
-EnvironmentFile=/etc/utexo/enclave.env
+# EIF path, cpu/memory, CLI, Electrum URL, EVM RPC CA and private RPC path file
+# come from the deploy-written env file. The EVM RPC host and port come from
+# host-prep-evmrpc.sh.
+EnvironmentFile=/etc/utexo/enclave-%i.env
 EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
-ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
-ExecStopPost=/usr/local/bin/utexo-enclave-ctl.sh stop %i
+ExecStart=/usr/local/lib/utexo/%i/utexo-enclave-ctl.sh start %i
+# Also runs after a failed or timed-out start, so no enclave stays up.
+ExecStopPost=/usr/local/lib/utexo/%i/utexo-enclave-ctl.sh stop %i
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/utexo-parent@.service <<'EOF'
+cat > "/etc/systemd/system/utexo-parent@$ENCLAVE_CID.service" <<'EOF'
 [Unit]
 Description=UTEXO parent gRPC adapter (CID %i)
+# Parent talks to its enclave over vsock, so the enclave must be up first.
 After=utexo-enclave@%i.service
 Requires=utexo-enclave@%i.service
 
 [Service]
 Type=simple
 User=ubuntu
+# deploy-host.sh writes the per-CID env (CLUSTER_DIR, GRPC_*, HEALTH_*, USE_VSOCK,
+# ENCLAVE_VSOCK_*, HEADER_ELECTRUM_URL) on each run. It sets no GRPC_MAX_CONCURRENT*,
+# GRPC_REQUEST_TIMEOUT_SECS or SIGNED_RESPONSE_*, so the parent uses their defaults.
 EnvironmentFile=/etc/utexo/parent-%i.env
-ExecStart=/usr/local/bin/utexo-parent-ctl.sh
+ExecStart=/usr/local/lib/utexo/%i/utexo-parent-ctl.sh
 Restart=on-failure
 RestartSec=2
-# The parent serves at most 8 Sign requests at once, each at most about
-# 75 MiB. Each other request is at most 256 KiB
-# (parent/src/request_shape.rs). Above this limit the kernel stops this
-# parent only, and systemd starts it again.
 MemoryMax=1G
 
 [Install]
@@ -565,23 +608,25 @@ EOF
 
 # env files (host-specific values; not in the repo).
 if [ -n "$EVM_RPC_TLS_CA_DER_FILE" ]; then
-  install -m 0644 "$EVM_RPC_TLS_CA_DER_FILE" /etc/utexo/evm-rpc-ca.der
-  EVM_RPC_TLS_CA_DER_FILE=/etc/utexo/evm-rpc-ca.der
+  if [ "$EVM_RPC_TLS_CA_DER_FILE" != "$RPC_CA_COPY" ]; then
+    install -m 0644 "$EVM_RPC_TLS_CA_DER_FILE" "$RPC_CA_COPY"
+  fi
+  EVM_RPC_TLS_CA_DER_FILE=$RPC_CA_COPY
 fi
 # The private RPC path can hold a provider API key, so only the service user
 # can read this copy. A deploy without EVM_RPC_PATH_FILE keeps the copy.
-if [ -n "$EVM_RPC_PATH_FILE" ] && [ "$EVM_RPC_PATH_FILE" != /etc/utexo/evm-rpc-path ]; then
-  install -m 0600 -o ubuntu -g ubuntu "$EVM_RPC_PATH_FILE" /etc/utexo/evm-rpc-path
+if [ -n "$EVM_RPC_PATH_FILE" ] && [ "$EVM_RPC_PATH_FILE" != "$RPC_PATH_COPY" ]; then
+  install -m 0600 -o ubuntu -g ubuntu "$EVM_RPC_PATH_FILE" "$RPC_PATH_COPY"
 fi
-if [ -e /etc/utexo/evm-rpc-path ]; then
+if [ -e "$RPC_PATH_COPY" ]; then
   if [ -z "$EVM_RPC_PATH_FILE" ]; then
-    echo "NOTICE: reusing /etc/utexo/evm-rpc-path from an earlier deploy." >&2
+    echo "NOTICE: reusing $RPC_PATH_COPY from an earlier deploy of CID $ENCLAVE_CID." >&2
     echo "  If the RPC provider changed, pass EVM_RPC_PATH_FILE, or delete that file" >&2
     echo "  to use the path /. Else the old provider key goes to the new provider." >&2
   fi
-  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path
+  EVM_RPC_PATH_FILE=$RPC_PATH_COPY
 fi
-cat > /etc/utexo/enclave.env <<EOF
+cat > "/etc/utexo/enclave-$ENCLAVE_CID.env" <<EOF
 EIF=$EIF
 ENCLAVE_CPU_COUNT=$ENCLAVE_CPU_COUNT
 ENCLAVE_MEMORY=$ENCLAVE_MEMORY
@@ -627,16 +672,16 @@ systemd-tmpfiles --create /etc/tmpfiles.d/10-nitro-enclaves.conf || true
 systemctl daemon-reload
 
 # --- 5. (re)start enclaves via systemd -------------------------------------
-# Stop the unit instances, and kill any parent process left outside systemd
-# (it would hold the gRPC ports). Enclave ctl `start` also terminates a
+# Stop only the selected unit instances. Enclave ctl `start` also terminates a
 # stale same-named enclave (anti-E39), so a leftover enclave is replaced cleanly.
 for CID in "${CIDS[@]}"; do
   systemctl stop "utexo-parent@$CID" "utexo-enclave@$CID" 2>/dev/null || true
 done
-pkill -f utexo-bridge-parent 2>/dev/null || true
+# An unmanaged process holding this CID's port must be stopped by its operator.
+# A name-based kill would also interrupt parents serving other enclaves.
 sleep 2
 
-# A unit fails when its enclave fails the launch check. Then stop all of them.
+# A unit fails when its enclave fails the launch check. Stop only this deployment.
 failed=()
 for CID in "${CIDS[@]}"; do
   systemctl enable "utexo-enclave@$CID" "utexo-parent@$CID" >/dev/null 2>&1 || true
@@ -647,51 +692,27 @@ if [ "${#failed[@]}" -gt 0 ]; then
   for CID in "${CIDS[@]}"; do
     systemctl stop "utexo-enclave@$CID" 2>/dev/null || true
   done
-  log "enclave start or launch check failed on CID ${failed[*]}; all enclaves stopped, no parent started"
+  log "enclave start or launch check failed on CID ${failed[*]}; selected enclave stopped, no parent started"
   exit 1
 fi
 
-# --- 6. verify runtime PCR matches the manifest ----------------------------
-# In debug-mode the running enclave reports zeroed PCR0, so a manifest match is
-# impossible by design - skip the runtime check (the static EIF measurement in
-# step 3 already verified the artifact). Only meaningful for a production EIF.
-if [ "$ENCLAVE_DEBUG_MODE" = "1" ]; then
-  log "ENCLAVE_DEBUG_MODE=1 — skipping runtime PCR0 check (PCRs zeroed under --debug-mode)"
-  # Check the complete CID set, including in debug mode.
-  # Read JSON from a file because the Python heredoc uses stdin.
-  asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
-  python3 - "${CIDS[*]}" "$DESC_JSON" <<'PY'
-import json, sys
-want = sorted(int(x) for x in sys.argv[1].split())
-d = json.load(open(sys.argv[2]))
-running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
-print("running CIDs (debug):", running, "want:", want)
-if running != want:
-    sys.exit(f"enclave set mismatch (debug-mode): want {want}, running {running}")
-print(f"OK (debug): exactly {len(want)} enclaves RUNNING")
-PY
-else
+# --- 6. verify only the selected CID ---------------------------------------
+# Peers can run another image or role. Never apply this release's PCR to them.
 asubuntu 'nitro-cli describe-enclaves' > "$DESC_JSON"
-# Require the EXACT expected CID set, all in RUNNING state, each with a
-# matching PCR0, so a host with zero or partial enclaves fails the deploy.
-python3 - "$MAN_PCR" "${CIDS[*]}" "$DESC_JSON" <<'PY'
+python3 - "$MAN_PCR" "$ENCLAVE_DEBUG_MODE" "$ENCLAVE_CID" "$DESC_JSON" <<'PYVERIFY'
 import json, sys
-man  = sys.argv[1]
-want = sorted(int(x) for x in sys.argv[2].split())
-d = json.load(open(sys.argv[3]))
-running = sorted(e["EnclaveCID"] for e in d if e.get("State") == "RUNNING")
-allcids = sorted(e["EnclaveCID"] for e in d)
-print("running CIDs:", allcids, "state=RUNNING:", running, "want:", want)
-if running != want:
-    missing = [c for c in want if c not in running]
-    extra   = [c for c in running if c not in want]
-    sys.exit(f"enclave set mismatch: want {want}, running {running} (missing {missing}, extra {extra})")
-bad = [e["EnclaveCID"] for e in d if e.get("Measurements", {}).get("PCR0") != man]
-if bad:
-    sys.exit(f"runtime PCR0 mismatch on CID {bad}")
-print(f"OK: exactly {len(want)} enclaves RUNNING with matching PCR0")
-PY
-fi
+man, debug, cid = sys.argv[1], sys.argv[2] == "1", int(sys.argv[3])
+d = json.load(open(sys.argv[4]))
+selected = [e for e in d if e.get("EnclaveCID") == cid]
+if len(selected) != 1 or selected[0].get("State") != "RUNNING":
+    sys.exit(f"expected exactly one RUNNING enclave for CID {cid}")
+if not debug and selected[0].get("Measurements", {}).get("PCR0") != man:
+    sys.exit(f"runtime PCR0 mismatch on CID {cid}")
+if debug:
+    print(f"OK: CID {cid} RUNNING (debug mode; PCR verification skipped)")
+else:
+    print(f"OK: CID {cid} RUNNING with matching PCR0")
+PYVERIFY
 
 # --- 7. start parents via systemd ------------------------------------------
 for CID in "${CIDS[@]}"; do
@@ -709,4 +730,5 @@ miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p"
 [ "${#miss[@]}" -eq 0 ] || { log "parents NOT listening on: ${miss[*]} (want ${WANT_PORTS[*]})"; exit 1; }
 log "all parent ports listening: ${WANT_PORTS[*]}"
 
-log "deploy OK (git_sha $GIT_SHA) — systemd-managed; run init/clone to bootstrap identity, then verify-identity.sh with a complete approved EXPECTED_EVM map (it writes the attestation bundles)"
+log "deploy OK (git_sha $GIT_SHA, CID $ENCLAVE_CID) — run init/clone to bootstrap identity"
+log "verify-identity.sh needs CIDS=$ENCLAVE_CID, CLUSTER_DIR=$DIR, ENCLAVE_ENV=/etc/utexo/enclave-$ENCLAVE_CID.env and the approved EXPECTED_EVM map before routing traffic"

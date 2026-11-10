@@ -58,26 +58,50 @@ succeeds and that a request of the other flow is refused.
 
 `deploy/deploy-host.sh` runs steps 2 to 6 for one enclave and its parent. It
 needs `GIT_SHA`, `BUCKET`, `AWS_REGION`, `CLUSTER_DIR` and `SIGNER_ROLE`
-(`mint` or `burn`). It installs the systemd units and fetches the EIF of that
-commit from S3.
+(`mint` or `burn`). It installs the systemd units of that enclave and fetches
+the artifacts of that commit from S3.
 
 - It starts no host proxy. Run `deploy/host-prep-evmrpc.sh` first: it starts
   the EVM RPC proxy and writes the `EVM_RPC_HOST` and `EVM_RPC_TLS_PORT`
   that the launch sends.
 - Before the start it checks the EIF checksum and the PCR0 of the EIF file
-  against the published files. After the start it checks the PCR0 of the
-  running enclave. `ENCLAVE_DEBUG_MODE=1` skips the second check.
+  against the published files. After the start it checks that the enclave of
+  the selected CID runs with that PCR0. `ENCLAVE_DEBUG_MODE=1` skips the PCR0
+  part. The check reads only the selected CID: another enclave of the host
+  can have another role or PCR0.
 - It checks its inputs before it changes a service: the TLS files of the
   parent, the limits file, and the memory pool.
 - It does a cold deployment. It does not initialize keys, and it is not a
   rolling restart.
 - One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18` or
   `20` selects another supported CID, with parents on ports 50051 to 50053.
-- It stops and starts only the units of its own CID. But it ends every
-  `utexo-bridge-parent` process of the host, and it replaces
-  `/etc/utexo/enclave.env`, the unit files and the EIF in `CLUSTER_DIR`,
-  which all enclaves of the host share. Its check after the start fails when
-  an enclave of another CID runs.
+
+Each CID has its own files, and a deploy changes only those:
+
+| What | Where |
+|------|-------|
+| Artifacts: the EIF, its manifests, the parent and the CLI | `<CLUSTER_DIR>/enclave-<CID>/<git_sha>/rgb-<role>/` |
+| Launch file of the enclave | `/etc/utexo/enclave-<CID>.env` |
+| Settings of the parent | `/etc/utexo/parent-<CID>.env` |
+| Copies of the EVM RPC CA and the private RPC path | `/etc/utexo/evm-rpc-ca-<CID>.der`, `/etc/utexo/evm-rpc-path-<CID>` |
+| Control scripts | `/usr/local/lib/utexo/<CID>/` |
+| Units | `utexo-enclave@<CID>.service`, `utexo-parent@<CID>.service` |
+
+- `CLUSTER_DIR` is the artifact root. The `ubuntu` user must be able to write
+  it.
+- The deploy stops and starts only the two units of its CID. These instance
+  units take precedence over a shared template unit.
+- The deploy does not kill a process by its name. An unmanaged parent that
+  holds the ports of the selected CID must be stopped by its operator.
+
+A host with the shared `/etc/utexo/enclave.env` and shared template units
+moves to this layout one CID at a time. Deploy each CID with its approved
+launch inputs, and supply its CA and private RPC path again, also when they
+are in the shared files: the script copies them into the per-CID paths. The
+script leaves the shared files, templates and wrappers in place for the CIDs
+that use them. Do not remove them until every CID is deployed this way.
+Verify the identity and the readiness of each CID before it takes traffic,
+and keep the quorum that the other signers need.
 
 ### Memory
 
@@ -106,12 +130,13 @@ sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
 - `deploy-host.sh` refuses a pool that is smaller than the launch value of
   its one enclave, before it downloads or stops anything. It does not count
   the pages that another enclave holds.
-- `utexo-enclave-ctl.sh check <cid>` makes the same checks and changes
-  nothing. Run it before each step of a rolling restart: `systemctl restart`
-  stops the old enclave before the new one starts. `start` itself refuses
-  only when the free hugepages cannot hold its own enclave.
+- `/usr/local/lib/utexo/<CID>/utexo-enclave-ctl.sh check <CID>` makes the
+  same checks and changes nothing. Run it before each step of a rolling
+  restart: `systemctl restart` stops the old enclave before the new one
+  starts. `start` itself refuses only when the free hugepages cannot hold its
+  own enclave.
 
-`check` reads its values from `/etc/utexo/enclave.env`, the file that
+`check` reads its values from `/etc/utexo/enclave-<CID>.env`, the file that
 systemd gives to the unit. Run it as root, or as a user that can read the
 file. A key that is not in the file gets its default. `check` reads only
 plain lines, on which it reads the same values as systemd:

@@ -9,7 +9,7 @@ CONFIG = Path(__file__).resolve().parents[2] / 'parent/src/config.rs'
 
 def parent_unit():
     match = re.search(
-        r"cat > /etc/systemd/system/utexo-parent@\.service <<'EOF'\n(.*?)\nEOF\n",
+        r"cat > \"/etc/systemd/system/utexo-parent@\$ENCLAVE_CID\.service\" <<'EOF'\n(.*?)\nEOF\n",
         HOST.read_text(), re.S)
     assert match, 'parent unit not found in deploy-host.sh'
     return match.group(1).splitlines()

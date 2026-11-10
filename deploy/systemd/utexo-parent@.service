@@ -11,9 +11,10 @@ User=ubuntu
 # ENCLAVE_VSOCK_*, HEADER_ELECTRUM_URL) on each run. It sets no GRPC_MAX_CONCURRENT*,
 # GRPC_REQUEST_TIMEOUT_SECS or SIGNED_RESPONSE_*, so the parent uses their defaults.
 EnvironmentFile=/etc/utexo/parent-%i.env
-ExecStart=/usr/local/bin/utexo-parent-ctl.sh
+ExecStart=/usr/local/lib/utexo/%i/utexo-parent-ctl.sh
 Restart=on-failure
 RestartSec=2
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target

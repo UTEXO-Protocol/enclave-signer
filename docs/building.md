@@ -139,8 +139,9 @@ mint image and the burn image.
 repository variable `BFA_RGB_ASSET_ID` and the account list from
 `KMS_ALLOWED_ACCOUNT_IDS`, and records the asset pin of the built image in
 `metadata.json`. `release-eif.yml` runs `deploy/deploy-host.sh` for one role
-on the default CID. It passes no launch value, and `set-endpoints` of a role
-image refuses blank values. The `cd-*.yml` workflows push container images
+and one CID: its `enclave_cid` input is 16, 18 or 20, and 16 by default. It
+passes no launch value, and `set-endpoints` of a role image refuses blank
+values. The `cd-*.yml` workflows push container images
 of the parent and of the dev enclave images only.
 
 ## Reproducibility

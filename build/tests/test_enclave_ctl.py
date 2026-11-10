@@ -35,7 +35,7 @@ def bash_expands_empty_arrays():
 def embedded_ctl():
     """The copy of the control script that deploy-host.sh installs on the host."""
     match = re.search(
-        r"cat > /usr/local/bin/utexo-enclave-ctl\.sh <<'EOF'\n(.*?)\nEOF\n", HOST.read_text(), re.S)
+        r"cat > \"\$CONTROL_DIR/utexo-enclave-ctl\.sh\" <<'EOF'\n(.*?)\nEOF\n", HOST.read_text(), re.S)
     assert match, 'embedded control script not found in deploy-host.sh'
     return match.group(1) + '\n'
 
@@ -286,7 +286,7 @@ if 'limits' in sys.argv and {refuse!r}:
         # gives `start` the values of that file.
         if not bash_expands_empty_arrays():
             self.skipTest('bash 4.4 or later is needed for the start path')
-        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
+        heredoc = re.search(r'cat > "/etc/utexo/enclave-\$ENCLAVE_CID\.env" <<EOF\n(.*?\nEOF\n)',
                             HOST.read_text(), re.S)
         self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
         limits = self.base / 'operator-limits.conf'
@@ -509,7 +509,7 @@ if 'limits' in sys.argv and {refuse!r}:
     def test_check_reads_the_file_that_deploy_host_writes(self):
         # bash expands the heredoc of deploy-host.sh as on a host. The values
         # are paths, a URL, an ARN, an address and numbers. Some are empty.
-        heredoc = re.search(r'cat > /etc/utexo/enclave\.env <<EOF\n(.*?\nEOF\n)',
+        heredoc = re.search(r'cat > "/etc/utexo/enclave-\$ENCLAVE_CID\.env" <<EOF\n(.*?\nEOF\n)',
                             HOST.read_text(), re.S)
         self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
         self.write_pool(24576)
@@ -545,6 +545,22 @@ if 'limits' in sys.argv and {refuse!r}:
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn('one enclave of 8192 MiB fits: memory_mib 24576 MiB, hugepages '
                                   f'24576 MiB, values from {self.env_file}', result.stdout)
+
+    def test_check_defaults_to_the_requested_cids_launch_file(self):
+        for cid, memory in ((16, 4096), (18, 8192)):
+            (self.base / f'enclave-{cid}.env').write_text(
+                f'ENCLAVE_MEMORY={memory}\nNITRO_ALLOCATOR_CONFIG={self.pool}\n'
+                f'NITRO_HUGEPAGES_DIR={self.pages}\n')
+        for script in self.scripts():
+            mapped = self.base / f'mapped-{script.name}'
+            mapped.write_text(script.read_text().replace('/etc/utexo/', f'{self.base}/'))
+            env = dict(self.env, ENCLAVE_MEMORY='4096')
+            del env['ENCLAVE_ENV']
+            result = subprocess.run(['bash', str(mapped), 'check', '18'],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('one enclave of 8192 MiB fits', result.stdout)
+            self.assertIn('enclave-18.env', result.stdout)
 
     def test_a_missing_allocator_file_is_refused(self):
         for script in self.scripts():
@@ -672,13 +688,13 @@ class DeployRpcPathTests(unittest.TestCase):
 
     def run_step(self, value):
         step = re.search(r'# The private RPC path can hold a provider API key, so only.*?\n'
-                         r'  EVM_RPC_PATH_FILE=/etc/utexo/evm-rpc-path\nfi\n',
+                         r'  EVM_RPC_PATH_FILE=\$RPC_PATH_COPY\nfi\n',
                          HOST.read_text(), re.S)
         self.assertTrue(step, 'install step not found in deploy-host.sh')
-        script = step.group(0).replace('/etc/utexo/evm-rpc-path', str(self.copy))
+        script = step.group(0)
         result = subprocess.run(
             ['bash', '-c', f'set -euo pipefail\n{script}printf %s "$EVM_RPC_PATH_FILE"'],
-            env=dict(EVM_RPC_PATH_FILE=value, INSTALL_LOG=str(self.calls),
+            env=dict(EVM_RPC_PATH_FILE=value, RPC_PATH_COPY=str(self.copy), ENCLAVE_CID='16', INSTALL_LOG=str(self.calls),
                      PATH=f"{self.base / 'bin'}:{os.environ['PATH']}"),
             capture_output=True, text=True, check=True)
         return result.stdout

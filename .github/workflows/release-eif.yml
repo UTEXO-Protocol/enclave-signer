@@ -35,6 +35,12 @@ on:
         type: choice
         options: [mint, burn]
         required: true
+      enclave_cid:
+        description: "Enclave instance to deploy on each host"
+        type: choice
+        options: ["16", "18", "20"]
+        default: "16"
+        required: true
       instances:
         description: "Space-separated EC2 instance ids (blank = secrets.STAGE_INSTANCE_IDS)"
         type: string
@@ -70,6 +76,7 @@ jobs:
         env:
           GIT_SHA: ${{ inputs.git_sha }}
           SIGNER_ROLE: ${{ inputs.signer_role }}
+          ENCLAVE_CID: ${{ inputs.enclave_cid }}
           BUCKET: ${{ vars.EIF_S3_BUCKET }}
           REGION: ${{ vars.AWS_REGION }}
           CLUSTER_DIR: ${{ vars.CLUSTER_DIR }}
@@ -88,6 +95,7 @@ jobs:
             echo '#!/usr/bin/env bash'
             printf 'export GIT_SHA=%q\n' "$GIT_SHA"
             printf 'export SIGNER_ROLE=%q\n' "$SIGNER_ROLE"
+            printf 'export ENCLAVE_CID=%q\n' "$ENCLAVE_CID"
             printf 'export BUCKET=%q\n' "$BUCKET"
             printf 'export AWS_REGION=%q\n' "$REGION"
             printf 'export CLUSTER_DIR=%q\n' "$CLUSTER_DIR"

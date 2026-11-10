@@ -127,18 +127,23 @@ Get the expected main EVM address of **every CID** from the approved
 deployment record, and confirm its on-chain registration. Do not make this
 map from the live keys of the nodes under check.
 
-Run on each enclave host:
+Run the gate on each enclave host, once for every CID that receives traffic.
+Use the artifact directory, the launch file and the independently approved
+address of that CID. For burn CID 18:
 
 ```bash
-CLUSTER_DIR=/path/to/release \
-ENCLAVE_ENV=/etc/utexo/enclave.env \
-CIDS="16 18 20" \
-EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
+CLUSTER_DIR='/path/to/artifacts/enclave-18/<git_sha>/rgb-burn' \
+ENCLAVE_ENV=/etc/utexo/enclave-18.env \
+CIDS="18" \
+EXPECTED_EVM="18=0x<40-hex-address>" \
 bash deploy/verify-identity.sh
 ```
 
-- `CIDS` must list every signer that receives traffic on this host. An unset
-  `CIDS` means `16 18 20`; an empty one is an error.
+- Every CID must pass before it receives traffic. Do not use the launch file
+  or the release directory of one CID to verify another role or release.
+- `CIDS` can list several signers when all of them use the same launch
+  settings and binaries. An unset `CIDS` means `16 18 20`; an empty one is an
+  error.
 - `EXPECTED_EVM` must have exactly one address for each listed CID. An empty
   or partial map, a duplicate or extra CID and a malformed address return
   exit 2 before any enclave is queried.
@@ -153,8 +158,9 @@ bash deploy/verify-identity.sh
 - The script compares the approvals that you supply. It does not read the
   chain.
 
-Routing automation must run this default mode and require exit 0 for the
-full CID list, with the other readiness checks of the deployment. A node
+Routing automation must run this default mode and require exit 0 for each
+CID, or for the full list of a shared configuration, with the other
+readiness checks of the deployment. A node
 failure or an identity mismatch returns exit 1, and a configuration error
 exit 2. Do not route on either, and do not use a partial set of bundles in
 place of the passed gate: a failure can come after some bundles were written.
@@ -162,7 +168,8 @@ place of the passed gate: a failure can come after some bundles were written.
 For a diagnostic check of running enclaves and loaded keys only:
 
 ```bash
-CLUSTER_DIR=/path/to/release CIDS="16 18 20" \
+CLUSTER_DIR='/path/to/artifacts/enclave-18/<git_sha>/rgb-burn' \
+ENCLAVE_ENV=/etc/utexo/enclave-18.env CIDS="18" \
 bash deploy/verify-identity.sh --liveness
 ```
 
