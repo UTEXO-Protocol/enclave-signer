@@ -24,6 +24,18 @@ pub(crate) const ENCLAVE_WAIT_MARGIN_SECS: u64 = 10;
 /// deadline in force, and the CLI uses it when the enclave does not say it.
 pub(crate) const IMAGE_DEADLINE_SECS: u64 = 90;
 
+/// True when the gRPC handler timeout outlasts the wait for the enclave. A
+/// handler that times out first drops a reply after the enclave has committed
+/// its replay key.
+pub fn handler_timeout_covers_enclave_wait(handler_secs: u64, deadline_secs: u64) -> bool {
+    handler_secs > deadline_secs.saturating_add(ENCLAVE_WAIT_MARGIN_SECS)
+}
+
+/// The handler timeout that start-up must use with the image deadline.
+pub fn image_handler_timeout_is_valid(handler_secs: u64) -> bool {
+    handler_timeout_covers_enclave_wait(handler_secs, IMAGE_DEADLINE_SECS)
+}
+
 /// How often the parent reads the deadline in force. The operator changes it
 /// with the CLI, which goes straight to the enclave.
 const DEADLINE_READ_INTERVAL: Duration = Duration::from_secs(5);
@@ -197,6 +209,8 @@ pub struct ParentAdapterService {
     signed: std::sync::Arc<SignedResponses>,
     /// The socket deadline of the enclave, in seconds.
     deadline_secs: std::sync::Arc<AtomicU64>,
+    /// The gRPC handler timeout, in seconds. Zero means it is not known.
+    handler_timeout_secs: u64,
 }
 
 impl ParentAdapterService {
@@ -220,7 +234,15 @@ impl ParentAdapterService {
             target,
             signed,
             deadline_secs: std::sync::Arc::new(AtomicU64::new(IMAGE_DEADLINE_SECS)),
+            handler_timeout_secs: 0,
         }
+    }
+
+    /// Tells the service the gRPC handler timeout, so it can report a
+    /// deadline change that breaks the timeout order.
+    pub fn with_handler_timeout_secs(mut self, secs: u64) -> Self {
+        self.handler_timeout_secs = secs;
+        self
     }
 
     /// Sets the socket deadline that the parent assumes.
@@ -248,6 +270,17 @@ impl ParentAdapterService {
             let current = limits.current.map(|c| c.total_request_timeout_secs);
             if let Some(secs) = current.filter(|&secs| secs != 0) {
                 self.deadline_secs.store(secs, Ordering::Relaxed);
+                if self.handler_timeout_secs != 0
+                    && !handler_timeout_covers_enclave_wait(self.handler_timeout_secs, secs)
+                {
+                    tracing::error!(
+                        deadline_secs = secs,
+                        handler_timeout_secs = self.handler_timeout_secs,
+                        "enclave deadline plus margin reaches the gRPC handler timeout: \
+                         replies can be lost after the enclave commits. Raise \
+                         GRPC_REQUEST_TIMEOUT_SECS and restart the parent."
+                    );
+                }
             }
         }
     }

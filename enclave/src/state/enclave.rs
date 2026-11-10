@@ -150,6 +150,23 @@ impl Default for EnclaveState {
     }
 }
 
+/// Reads an export cap from the image environment. Unset means zero, which
+/// disables the cap. A set value that is not a number stops the boot: a typo
+/// must not turn a custody limit off.
+fn export_cap_from_env(name: &str) -> u64 {
+    parse_export_cap(name, std::env::var(name).ok().as_deref()).unwrap_or_else(|e| panic!("{e}"))
+}
+
+pub(super) fn parse_export_cap(name: &str, raw: Option<&str>) -> std::result::Result<u64, String> {
+    match raw {
+        None => Ok(0),
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("{name} must be an unsigned integer, got {v:?}")),
+    }
+}
+
 impl EnclaveState {
     pub fn new(network: Network) -> Self {
         Self {
@@ -164,14 +181,8 @@ impl EnclaveState {
             refill_rate: super::RefillRateLimit::default(),
             seed_export_count: AtomicU64::new(0),
             seed_export_slots: AtomicU64::new(0),
-            seed_export_soft_cap: std::env::var(CLONE_EXPORT_SOFT_CAP_ENV)
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .unwrap_or(0),
-            seed_export_hard_cap: std::env::var(CLONE_EXPORT_HARD_CAP_ENV)
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .unwrap_or(0),
+            seed_export_soft_cap: export_cap_from_env(CLONE_EXPORT_SOFT_CAP_ENV),
+            seed_export_hard_cap: export_cap_from_env(CLONE_EXPORT_HARD_CAP_ENV),
         }
     }
 

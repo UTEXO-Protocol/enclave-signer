@@ -107,7 +107,7 @@ pub fn validate_source_chain(
 
     tracing::info!(
         proofs_count = merkle_proofs.len(),
-        pinned_blocks = pins.len(),
+        pinned_blocks = pins.pinned_count(),
         "SPV verification passed"
     );
 
@@ -532,12 +532,13 @@ impl ChainPins {
     }
 
     /// Count of pinned blocks. For logs and tests.
-    pub fn len(&self) -> usize {
+    pub fn pinned_count(&self) -> usize {
         self.lock().map(|p| p.len()).unwrap_or(0)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Fails on a poisoned lock, so a caller cannot read it as "no pins".
+    pub fn none_pinned(&self) -> Result<bool> {
+        Ok(self.lock()?.is_empty())
     }
 
     /// Fail on a poisoned lock. A panic left the pin set in an unknown state.

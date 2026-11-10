@@ -357,10 +357,11 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let funds_in_contract = std::env::var("FUNDS_IN_CONTRACT")
-            .ok()
-            .and_then(|s| parse_eth_address(&s).ok())
-            .unwrap_or(bridge_contract);
+        let funds_in_contract = parse_funds_in_contract(
+            std::env::var("FUNDS_IN_CONTRACT").ok().as_deref(),
+            bridge_contract,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
 
         let evm_finality_tag = parse_evm_finality_tag(std::env::var("EVM_FINALITY_TAG"))
             .expect("EVM_FINALITY_TAG must be latest, safe, or finalized");
@@ -542,6 +543,20 @@ pub fn parse_mint_witness_sat(value: Option<&str>) -> std::result::Result<u64, S
              {MIN_MINT_WITNESS_SAT} to {MAX_MINT_WITNESS_SAT}, or leave it unset for \
              {DEFAULT_MINT_WITNESS_SAT}"
         )),
+    }
+}
+
+/// Unset means the Bridge contract. A set value that is not an address stops
+/// the boot: a typo must not move the FundsIn pin to the Bridge.
+fn parse_funds_in_contract(
+    raw: Option<&str>,
+    bridge_contract: [u8; 20],
+) -> std::result::Result<[u8; 20], String> {
+    match raw {
+        None => Ok(bridge_contract),
+        Some(v) => {
+            parse_eth_address(v).map_err(|e| format!("FUNDS_IN_CONTRACT is not an address: {e}"))
+        }
     }
 }
 

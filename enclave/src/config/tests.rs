@@ -648,3 +648,27 @@ fn kms_values_are_refused_without_kms_persistence() {
         assert!(parse_with(edit).is_err());
     }
 }
+
+#[test]
+fn an_unset_funds_in_contract_is_the_bridge_contract() {
+    assert_eq!(parse_funds_in_contract(None, [7; 20]), Ok([7; 20]));
+}
+
+#[test]
+fn a_set_funds_in_contract_is_used() {
+    let addr = format!("0x{}", "ab".repeat(20));
+    assert_eq!(
+        parse_funds_in_contract(Some(&addr), [7; 20]),
+        Ok([0xab; 20])
+    );
+}
+
+#[test]
+fn a_malformed_funds_in_contract_is_refused_not_replaced() {
+    for bad in ["", "0x1234", "not-an-address"] {
+        assert!(
+            parse_funds_in_contract(Some(bad), [7; 20]).is_err(),
+            "{bad}"
+        );
+    }
+}

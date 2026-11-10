@@ -68,7 +68,7 @@ fn chain_of(count: u32) -> HeaderChain {
 fn empty_pin_set_passes() {
     let chain = chain_of(5);
     ChainPins::new().assert_unchanged(&chain).unwrap();
-    assert!(ChainPins::new().is_empty());
+    assert!(ChainPins::new().none_pinned().unwrap());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn extension_leaves_pinned_blocks_alone() {
     submit(&mut chain, 6, 4, 0);
 
     pins.assert_unchanged(&chain).unwrap();
-    assert_eq!(pins.len(), 1);
+    assert_eq!(pins.pinned_count(), 1);
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn a_second_pin_of_a_height_keeps_the_larger_depth() {
     pins.pin(&chain, 3, 1).unwrap();
     pins.pin(&chain, 3, 4).unwrap();
     pins.pin(&chain, 3, 2).unwrap();
-    assert_eq!(pins.len(), 1);
+    assert_eq!(pins.pinned_count(), 1);
     pins.assert_unchanged(&chain).unwrap();
 
     // The same blocks, five of them: height 3 is 3 deep, one short of 4.
@@ -181,4 +181,16 @@ fn two_checks_reading_two_different_chains_fail_closed() {
     pins.pin(&chain_a, 3, 1).unwrap();
     let err = pins.pin(&chain_b, 3, 1).unwrap_err();
     assert!(err.to_string().contains("was pinned as"), "got: {err}");
+}
+
+#[test]
+fn a_poisoned_pin_set_is_not_read_as_empty() {
+    let pins = std::sync::Arc::new(ChainPins::new());
+    let p = pins.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = p.pinned.lock().unwrap();
+        panic!("poison the pin set");
+    })
+    .join();
+    assert!(pins.none_pinned().is_err());
 }

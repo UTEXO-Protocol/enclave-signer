@@ -126,7 +126,27 @@ impl EnclaveError {
             EnclaveError::Spv(_) => 3,          // validation failed
             EnclaveError::NotReady { .. } => 2, // not ready
             EnclaveError::EvmFinalityPending { .. } => 8, // retryable EVM finality wait
-            _ => 1,
+            // Listed so that a new variant must choose its code here.
+            #[cfg(feature = "kms-persistence")]
+            EnclaveError::Custody { .. } => 1,
+            EnclaveError::KeyNotInitialized
+            | EnclaveError::AlreadyInitialized
+            | EnclaveError::InvalidKey(_)
+            | EnclaveError::InvalidRequest(_)
+            | EnclaveError::Framing(_)
+            | EnclaveError::ProtobufDecode(_)
+            | EnclaveError::Io(_)
+            | EnclaveError::Signing(_)
+            | EnclaveError::Internal(_)
+            | EnclaveError::Attestation(_)
+            | EnclaveError::Certificate(_)
+            | EnclaveError::Clone(_)
+            | EnclaveError::PcrMismatch { .. }
+            | EnclaveError::NonceReplay
+            | EnclaveError::ExportCapReached { .. }
+            | EnclaveError::DigestMismatch
+            | EnclaveError::PubkeyMismatch
+            | EnclaveError::IdentityMismatch => 1,
         }
     }
 

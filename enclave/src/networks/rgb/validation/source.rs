@@ -328,7 +328,7 @@ mod indexer_only_source {
             },
         );
         assert!(chain.lock().unwrap().is_empty());
-        assert!(pins.is_empty());
+        assert!(pins.none_pinned().unwrap());
         result
     }
 

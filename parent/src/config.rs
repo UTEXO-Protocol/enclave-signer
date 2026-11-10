@@ -4,6 +4,10 @@ use anyhow::Context;
 
 use crate::header_source::ElectrumSource;
 
+/// Default handler timeout. It must exceed the image deadline plus the wait
+/// margin of `grpc_server`; a test checks it.
+pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 120;
+
 /// Parent Adapter configuration, populated from environment variables.
 pub struct Config {
     /// Bind host for the gRPC server (default 127.0.0.1; use 0.0.0.0 in Docker).
@@ -73,7 +77,11 @@ impl Config {
             grpc_max_concurrent: env_or("GRPC_MAX_CONCURRENT", 128usize).max(1),
             grpc_max_concurrent_sign: env_or("GRPC_MAX_CONCURRENT_SIGN", 8usize).max(1),
             grpc_max_concurrent_per_conn: env_or("GRPC_MAX_CONCURRENT_PER_CONN", 32usize).max(1),
-            grpc_request_timeout_secs: env_or("GRPC_REQUEST_TIMEOUT_SECS", 120u64).max(1),
+            grpc_request_timeout_secs: env_or(
+                "GRPC_REQUEST_TIMEOUT_SECS",
+                DEFAULT_GRPC_REQUEST_TIMEOUT_SECS,
+            )
+            .max(1),
             signed_response_ttl_secs: env_or("SIGNED_RESPONSE_TTL_SECS", 3600u64),
             signed_response_max_entries: env_or("SIGNED_RESPONSE_MAX_ENTRIES", 1024usize),
             signed_response_max_bytes: env_or("SIGNED_RESPONSE_MAX_BYTES", 16usize << 20),
@@ -107,6 +115,17 @@ pub fn header_sync(
             .with_context(|| format!("HEADER_SYNC_INTERVAL_SECS must be 1..=600, got {v:?}"))?,
     };
     Ok((source, Duration::from_secs(secs)))
+}
+
+/// Refuses a vsock setting that is set but not a number. `env_or` would use
+/// the default, which can send calls and credentials to a different enclave.
+pub fn check_vsock_setting(name: &str, raw: Option<&str>) -> anyhow::Result<()> {
+    match raw {
+        Some(v) if v.parse::<u32>().is_err() => {
+            anyhow::bail!("{name} must be an unsigned 32-bit integer, got {v:?}")
+        }
+        _ => Ok(()),
+    }
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -149,6 +168,15 @@ mod tests {
         }
         for secs in ["0", "601", "-1", "ten"] {
             assert!(parse(None, Some(secs)).is_err(), "{secs}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_vsock_setting_is_refused() {
+        assert!(check_vsock_setting("ENCLAVE_VSOCK_CID", None).is_ok());
+        assert!(check_vsock_setting("ENCLAVE_VSOCK_CID", Some("17")).is_ok());
+        for bad in ["", "sixteen", "-1", "4294967296"] {
+            assert!(check_vsock_setting("ENCLAVE_VSOCK_CID", Some(bad)).is_err());
         }
     }
 }

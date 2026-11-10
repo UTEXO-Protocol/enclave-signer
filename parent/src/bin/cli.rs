@@ -833,7 +833,8 @@ fn verify_launch(
     let role = match signer_role {
         "mint" => SignerRole::Mint,
         "burn" => SignerRole::Burn,
-        _ => SignerRole::Combined,
+        "combined" => SignerRole::Combined,
+        other => anyhow::bail!("unknown signer role {other:?}"),
     };
     let expected =
         launch_check::expected_policy(role, &read(image_env)?, &endpoints_request(endpoints))?;
@@ -921,7 +922,8 @@ fn export_attestation(
     } else {
         let role = match signer_role {
             Some("burn") => SignerRole::Burn,
-            _ => SignerRole::Combined,
+            Some("combined") => SignerRole::Combined,
+            other => anyhow::bail!("unknown signer role {other:?}"),
         };
         let image_env = image_env.context("--image-env required")?;
         let endpoints = endpoints_request(endpoints);

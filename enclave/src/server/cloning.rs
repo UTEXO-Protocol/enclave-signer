@@ -157,6 +157,10 @@ pub(super) fn handle_get_clone(
         return Err(EnclaveError::DigestMismatch);
     }
 
+    // 5a. The launch policy is part of the donor commitment. Check it before
+    //     the export slot, the nonce and the seed are touched.
+    let policy_commitment = ctx.launch()?.policy.commitment_bytes();
+
     // 5b. Reserve an export slot after authentication.
     //     The atomic reservation enforces the cap across workers.
     //     A later error releases the slot.
@@ -183,7 +187,7 @@ pub(super) fn handle_get_clone(
     let bundle = build_public_keys_response(state.get_keys()?, &ctx.bridge_config);
     let commitment = clone_commitment(
         &bundle,
-        &ctx.launch()?.policy.commitment_bytes(),
+        &policy_commitment,
         &req_encryption_pk,
         &donor_pubkey,
         &encrypted_seed,

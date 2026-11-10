@@ -212,6 +212,13 @@ pub(super) fn handle_sign(
                         .map(crate::networks::evm::burn_destination::BurnDestinationRecord::from)
                         .as_ref(),
                 )?;
+            } else {
+                // The route check refuses EVM->EVM too. This refusal keeps a
+                // release from being signed without the burn binding if that
+                // check changes.
+                return Err(EnclaveError::InvalidRequest(
+                    "EVM release needs an RGB source".into(),
+                ));
             }
             handle_sign_evm(
                 ctx,

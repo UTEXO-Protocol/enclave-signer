@@ -823,3 +823,21 @@ fn the_mint_guard_follows_the_limits_in_force() {
     }
     assert_eq!(guard.seen_count(), 1_024);
 }
+
+#[test]
+fn an_unset_export_cap_is_zero() {
+    assert_eq!(parse_export_cap("CAP", None), Ok(0));
+}
+
+#[test]
+fn a_set_export_cap_is_parsed() {
+    assert_eq!(parse_export_cap("CAP", Some(" 7 ")), Ok(7));
+}
+
+#[test]
+fn an_unparseable_export_cap_is_refused_not_disabled() {
+    for bad in ["", "ten", "-1", "1.5"] {
+        let err = parse_export_cap("CAP", Some(bad)).unwrap_err();
+        assert!(err.contains("CAP"), "got: {err}");
+    }
+}

@@ -25,7 +25,7 @@ fn sign_with_chain_pins_unchanged<T>(
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
     sign: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if pins.is_empty() {
+    if pins.none_pinned()? {
         return sign();
     }
     // Fail on a poisoned lock, as the validation checks do.

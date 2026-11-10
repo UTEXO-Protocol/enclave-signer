@@ -242,3 +242,26 @@ async fn the_wait_follows_the_deadline_in_force() {
     service.read_enclave_deadline().await;
     assert_eq!(service.enclave_wait(), Duration::from_secs(3_610));
 }
+
+#[test]
+fn handler_timeout_must_outlast_the_enclave_wait() {
+    let wait = IMAGE_DEADLINE_SECS + ENCLAVE_WAIT_MARGIN_SECS;
+    assert!(!handler_timeout_covers_enclave_wait(
+        wait,
+        IMAGE_DEADLINE_SECS
+    ));
+    assert!(handler_timeout_covers_enclave_wait(
+        wait + 1,
+        IMAGE_DEADLINE_SECS
+    ));
+    assert!(!handler_timeout_covers_enclave_wait(120, 111));
+    assert!(!handler_timeout_covers_enclave_wait(120, u64::MAX));
+}
+
+#[test]
+fn the_default_handler_timeout_is_valid_for_the_image_deadline() {
+    assert!(image_handler_timeout_is_valid(
+        crate::config::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS
+    ));
+    assert!(!image_handler_timeout_is_valid(1));
+}

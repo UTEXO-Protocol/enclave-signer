@@ -787,7 +787,10 @@ fn burn_gate_refuses_a_half_of_a_mined_64_byte_tx() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("64-byte transaction"), "{err}");
-    assert!(pins.is_empty(), "no block may be pinned on a refusal");
+    assert!(
+        pins.none_pinned().unwrap(),
+        "no block may be pinned on a refusal"
+    );
 
     let err = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap_err();
     assert!(err.to_string().contains("64-byte transaction"), "{err}");
