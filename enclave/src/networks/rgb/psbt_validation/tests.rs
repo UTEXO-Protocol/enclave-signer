@@ -447,6 +447,73 @@ mod fee_policy {
         }
     }
 
+    #[test]
+    fn taproot_multisig_floor_counts_script_control_block_and_cosigners() {
+        use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGADD, OP_NUMEQUAL};
+        use bitcoin::script::Builder;
+        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
+        use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+
+        let secp = Secp256k1::new();
+        let keys: Vec<_> = (1..=3)
+            .map(|byte| {
+                let secret = SecretKey::from_slice(&[byte; 32]).unwrap();
+                XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&secp, &secret)).0
+            })
+            .collect();
+        let script = Builder::new()
+            .push_x_only_key(&keys[0])
+            .push_opcode(OP_CHECKSIG)
+            .push_x_only_key(&keys[1])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_x_only_key(&keys[2])
+            .push_opcode(OP_CHECKSIGADD)
+            .push_int(2)
+            .push_opcode(OP_NUMEQUAL)
+            .into_script();
+        let info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())
+            .unwrap()
+            .finalize(&secp, keys[0])
+            .unwrap();
+        let control = info
+            .control_block(&(script.clone(), LeafVersion::TapScript))
+            .unwrap();
+        let mut psbt = psbt_with_fee(100_000, 100_000);
+        psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
+            ScriptBuf::new_p2tr_tweaked(info.output_key());
+        psbt.inputs[0]
+            .tap_scripts
+            .insert(control.clone(), (script.clone(), LeafVersion::TapScript));
+
+        let mut tx = psbt.unsigned_tx.clone();
+        tx.input[0].witness = Witness::from_slice(&[
+            vec![0; 65],
+            vec![0; 65],
+            vec![],
+            script.into_bytes(),
+            control.serialize(),
+        ]);
+        let minimum = tx.vsize() as u64;
+        assert!(minimum > psbt.unsigned_tx.vsize() as u64);
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(100_000 - minimum);
+        check_psbt_fee(&psbt, &[], "send-RGB").expect("funded 2-of-3 Taproot witness");
+        psbt.unsigned_tx.output[0].value += Amount::from_sat(1);
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
+        assert!(err.to_string().contains("fee rate too low"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_spend_shape_instead_of_using_unsigned_size() {
+        let mut psbt = psbt_with_fee(100_000, 99_000);
+        psbt.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey = ScriptBuf::new();
+        let err = check_psbt_fee(&psbt, &[], "send-RGB").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot estimate signed PSBT size"),
+            "{err}"
+        );
+    }
+
     /// `psbt_with_fee` plus `extra` zero-value P2WPKH outputs. A large tx hits
     /// the absolute cap before the rate cap.
     fn wide_psbt_with_fee(input_sats: u64, output_sats: u64, extra: usize) -> Psbt {

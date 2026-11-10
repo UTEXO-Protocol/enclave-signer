@@ -265,6 +265,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_secret_accepts_64_hex() {
+        let s = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(s.len(), 64);
+        assert!(validate_cloning_secret(s).is_ok());
+    }
+
+    #[test]
     fn validate_secret_accepts_min_length_boundary() {
         // Exactly 32 bytes.
         let s = "0123456789abcdef0123456789abcdef";

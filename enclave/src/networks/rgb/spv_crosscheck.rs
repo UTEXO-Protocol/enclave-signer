@@ -624,6 +624,13 @@ mod chain_pin_tests {
     }
 
     #[test]
+    fn empty_pin_set_passes() {
+        let chain = chain_of(5);
+        ChainPins::new().assert_unchanged(&chain).unwrap();
+        assert!(ChainPins::new().is_empty());
+    }
+
+    #[test]
     fn pinning_a_height_the_enclave_has_no_header_for_fails() {
         let chain = chain_of(5);
         let err = ChainPins::new().pin(&chain, 99, 1).unwrap_err();

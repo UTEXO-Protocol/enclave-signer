@@ -50,6 +50,17 @@ fn cloning_session_constructors_reject_weak_donor_secrets() {
     }
 }
 
+#[test]
+fn seed_export_counter_increments_monotonically() {
+    // Each successful export increases the counter. (F03-AF-10)
+    let state = EnclaveState::new(Network::Bitcoin);
+    assert_eq!(state.seed_export_count(), 0);
+    assert_eq!(state.record_seed_export(&[1u8; 32]), 1);
+    assert_eq!(state.record_seed_export(&[2u8; 32]), 2);
+    assert_eq!(state.record_seed_export(&[3u8; 32]), 3);
+    assert_eq!(state.seed_export_count(), 3);
+}
+
 // Set the cap directly to avoid environment changes in parallel tests. (F03-AF-10)
 #[test]
 fn export_hard_cap_blocks_after_quota() {
@@ -96,6 +107,20 @@ fn completed_clone_enforces_its_export_hard_cap() {
         Err(EnclaveError::ExportCapReached { used: 1, cap: 1 })
     ));
     assert_eq!(state.seed_export_count(), 1);
+}
+
+// The default cap 0 never blocks exports.
+#[test]
+fn export_hard_cap_disabled_by_default() {
+    let state = EnclaveState::new(Network::Bitcoin);
+    assert_eq!(state.seed_export_hard_cap, 0);
+    let pk = [9u8; 32];
+    for _ in 0..1000 {
+        state.reserve_export_quota().unwrap().commit(&pk);
+    }
+    assert!(state.reserve_export_quota().is_ok());
+    assert_eq!(state.seed_export_count.load(Ordering::Relaxed), 1000);
+    assert_eq!(state.seed_export_slots.load(Ordering::Relaxed), 0);
 }
 
 #[test]

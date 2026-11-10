@@ -359,6 +359,16 @@ async fn attest_verify_cli_missing_pcr_exits_one_not_parse_error() {
     assert_eq!(out.stderr, b"FAIL: --pcr0 required (or pass --mock)\n");
 }
 
+#[tokio::test]
+async fn attest_verify_cli_unknown_argument_exits_two() {
+    let out = run_attest_verify(&["--mock", "--unknown-af06-flag"]).await;
+    assert_cli_failure(&out, 2, "error: unexpected argument '--unknown-af06-flag'");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Usage:"), "{stderr}");
+    assert!(!stderr.contains("FAIL:"), "{stderr}");
+    assert!(!stderr.contains("warning: --mock"), "{stderr}");
+}
+
 /// The `OK` output without the lines that change with the nonce.
 fn key_lines(out: &std::process::Output) -> Vec<String> {
     let stdout = String::from_utf8_lossy(&out.stdout);

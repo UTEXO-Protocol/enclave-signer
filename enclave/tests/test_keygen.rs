@@ -144,8 +144,10 @@ const TEST_MNEMONIC: &str =
 /// caller-supplied seed or mnemonic. The rejection occurs before any state
 /// change, so a later OS-entropy init on the same server succeeds.
 ///
+/// The counterpart is `dev_build_accepts_caller_supplied_seed_and_mnemonic`.
 /// The gate is compile-time, so CI runs this test in a build without
-/// `allow-seed-import` (the `light` job).
+/// `allow-seed-import` (the `light` job), and the counterpart in the signer
+/// test builds.
 #[test]
 #[cfg(not(feature = "allow-seed-import"))]
 fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
@@ -207,5 +209,44 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
         matches!(&entropy_resp.response, Some(Response::InitializeKey(_))),
         "OS-entropy init after a rejected import must still succeed, got {:?}",
         entropy_resp.response
+    );
+}
+
+/// Dev build (`--features allow-seed-import`): the enclave accepts the caller's
+/// seed or mnemonic. Each import uses a fresh server, because init is one-shot.
+#[test]
+#[cfg(feature = "allow-seed-import")]
+fn dev_build_accepts_caller_supplied_seed_and_mnemonic() {
+    // Caller-supplied raw seed -> accepted.
+    let port_seed = common::start_test_server();
+    let seed_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![7u8; 64],
+            mnemonic: String::new(),
+            cloning_secret: String::new(),
+        })),
+    };
+    let seed_resp = common::send_request(port_seed, &seed_req);
+    let seed_init = match &seed_resp.response {
+        Some(Response::InitializeKey(r)) => r,
+        other => panic!("dev build must accept seed import, got {:?}", other),
+    };
+    assert_eq!(seed_init.evm_address.len(), 20);
+    assert!(seed_init.account_xpub_vanilla.starts_with("xpub"));
+
+    // Caller-supplied mnemonic -> accepted (fresh server; init is one-shot).
+    let port_mnemonic = common::start_test_server();
+    let mnemonic_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: TEST_MNEMONIC.into(),
+            cloning_secret: String::new(),
+        })),
+    };
+    let mnemonic_resp = common::send_request(port_mnemonic, &mnemonic_req);
+    assert!(
+        matches!(&mnemonic_resp.response, Some(Response::InitializeKey(_))),
+        "dev build must accept mnemonic import, got {:?}",
+        mnemonic_resp.response
     );
 }

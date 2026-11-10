@@ -643,6 +643,11 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
     }
 }
 
+/// The first RGB bind refusal of a bare PSBT: the mint signer reads the
+/// PSBT's own data and inputs.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+const RGB_BIND_REFUSAL: &str = "witness_utxo";
+
 // An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
 // An empty `evm_tx_hash` does not skip the bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -682,6 +687,63 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
             );
         }
         other => panic!("unexpected response: {:?}", other),
+    }
+}
+
+// A length-valid, all-zero evm_tx_hash is not a "vanilla mode" signal.
+// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
+// consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
+// covers the zero-length hash.
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+#[test]
+fn test_sign_psbt_zero_evm_hash_is_bridge_mode_not_vanilla() {
+    // The deposit stub lets the run pass the FundsIn gate and reach the
+    // consignment bind.
+    let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
+        operation_id: [0x33; 32],
+        gross: 1000,
+        commission: 0,
+        emitter: utexo_bridge_enclave::config::BridgeConfig::from_env().funds_in_contract,
+    }));
+
+    let init_req = EnclaveRequest {
+        request: Some(Request::InitializeKey(InitializeKeyRequest {
+            seed: vec![],
+            mnemonic: String::new(),
+            cloning_secret: String::new(),
+        })),
+    };
+    common::send_request(port, &init_req);
+
+    // An all-zero 32-byte hash passes the length check. The RgbDestination has
+    // no consignment and its PSBT no RGB data, so bridge mode must fail closed.
+    let sign_req = EnclaveRequest {
+        request: Some(Request::Sign(sign_psbt_request(
+            vec![0u8; 32],
+            false,
+            false,
+            1000,
+            0,
+            minimal_valid_psbt_bytes(),
+            500,
+        ))),
+    };
+    let resp = common::send_request(port, &sign_req);
+
+    match &resp.response {
+        Some(Response::Error(e)) => {
+            assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
+            // Bridge mode ran and its RGB bind refused.
+            assert!(
+                e.message.contains(RGB_BIND_REFUSAL),
+                "expected an RGB-binding rejection (bridge mode), got: {}",
+                e.message
+            );
+        }
+        other => panic!(
+            "zero-hash SignPsbt must fail closed in bridge mode, never sign: {:?}",
+            other
+        ),
     }
 }
 
