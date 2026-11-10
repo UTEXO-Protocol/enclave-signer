@@ -90,17 +90,17 @@ pub mod enclave_response {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct InitializeKeyRequest {
-    /// Empty seed and mnemonic generate a new mnemonic from enclave entropy.
-    /// Non-empty = import raw 64-byte seed (requires `allow-seed-import` feature, testing only).
+    /// Both empty: a KMS build (the mint signer) loads or creates its seed through KMS; other builds
+    /// generate a new mnemonic from enclave entropy. Non-empty = import a raw 64-byte seed (`allow-seed-import`, testing only).
     #[prost(bytes="vec", tag="1")]
     pub seed: ::prost::alloc::vec::Vec<u8>,
     /// BIP-39 mnemonic phrase (requires `allow-seed-import` feature, testing only).
     /// If non-empty, takes precedence over seed.
     #[prost(string, tag="2")]
     pub mnemonic: ::prost::alloc::string::String,
-    /// Donor-side cloning secret, delivered at runtime (NOT baked into the EIF, so
-    /// it stays out of the PCRs). Optional: only set for enclaves that will serve
-    /// GetClone. Empty = donor cloning disabled.
+    /// Donor-side cloning secret, delivered at runtime (not in the EIF, so it stays
+    /// out of the PCRs). Set it only on an enclave that serves GetClone. Empty keeps
+    /// any secret loaded at boot. A KMS build refuses a non-empty value.
     #[prost(string, tag="3")]
     pub cloning_secret: ::prost::alloc::string::String,
 }
@@ -115,7 +115,7 @@ pub struct InitializeKeyResponse {
     /// BIP-86 account xpub: m/86'/<coin>'/0'.
     #[prost(string, tag="5")]
     pub account_xpub_vanilla: ::prost::alloc::string::String,
-    /// RGB BIP-86 account xpub: m/86'/827167'/0'.
+    /// RGB BIP-86 account xpub: m/86'/827166'/0' on mainnet, m/86'/827167'/0' on other networks.
     #[prost(string, tag="6")]
     pub account_xpub_colored: ::prost::alloc::string::String,
     /// 64-byte secp256k1 X || Y, without 0x04 prefix.
@@ -124,7 +124,7 @@ pub struct InitializeKeyResponse {
     /// EVM chain ID pinned at enclave boot.
     #[prost(uint64, tag="8")]
     pub chain_id: u64,
-    /// 20-byte bridge contract address pinned at enclave boot.
+    /// 20-byte MultisigProxy address (the EIP-712 verifying contract) pinned at enclave boot.
     #[prost(bytes="vec", tag="9")]
     pub bridge_contract: ::prost::alloc::vec::Vec<u8>,
     /// RGB asset identifier pinned at enclave boot.
@@ -152,7 +152,7 @@ pub struct PublicKeysResponse {
     /// BIP-86 account xpub: m/86'/<coin>'/0'.
     #[prost(string, tag="5")]
     pub account_xpub_vanilla: ::prost::alloc::string::String,
-    /// RGB BIP-86 account xpub: m/86'/827167'/0'.
+    /// RGB BIP-86 account xpub: m/86'/827166'/0' on mainnet, m/86'/827167'/0' on other networks.
     #[prost(string, tag="6")]
     pub account_xpub_colored: ::prost::alloc::string::String,
     /// 64-byte secp256k1 X || Y, without 0x04 prefix.
@@ -161,7 +161,7 @@ pub struct PublicKeysResponse {
     /// EVM chain ID pinned at enclave boot.
     #[prost(uint64, tag="8")]
     pub chain_id: u64,
-    /// 20-byte bridge contract address pinned at enclave boot.
+    /// 20-byte MultisigProxy address (the EIP-712 verifying contract) pinned at enclave boot.
     #[prost(bytes="vec", tag="9")]
     pub bridge_contract: ::prost::alloc::vec::Vec<u8>,
     /// RGB asset identifier pinned at enclave boot.
@@ -182,13 +182,13 @@ pub struct GetAttestedPublicKeyRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetAttestedPublicKeyResponse {
-    /// Public-key bundle bound by the attestation.
+    /// Public-key bundle bound by the attestation. Unset until the keys exist.
     #[prost(message, optional, tag="1")]
     pub public_keys: ::core::option::Option<PublicKeysResponse>,
-    /// COSE_Sign1 NSM document, or raw CBOR in mock mode.
+    /// COSE_Sign1 NSM document, or raw CBOR in mock mode. No public key until the keys exist.
     #[prost(bytes="vec", tag="2")]
     pub attestation_doc: ::prost::alloc::vec::Vec<u8>,
-    /// Policy bytes that attestation user_data commits.
+    /// Policy bytes that attestation user_data commits, with the key bundle once the keys exist.
     #[prost(bytes="vec", tag="3")]
     pub attested_policy: ::prost::alloc::vec::Vec<u8>,
 }
@@ -223,19 +223,19 @@ pub struct EvmSource {
     /// 32-byte source EVM transaction hash.
     #[prost(bytes="vec", tag="1")]
     pub tx_hash: ::prost::alloc::vec::Vec<u8>,
-    /// Whether the listener validated the source EVM event.
+    /// Listener result. The enclave ignores it and reads the deposit log itself.
     #[prost(bool, tag="2")]
     pub event_valid: bool,
-    /// Whether the source EVM event is finalized.
+    /// Listener result. The enclave ignores it and applies its own finality rule.
     #[prost(bool, tag="3")]
     pub event_finalized: bool,
-    /// 20-byte ERC-20 address; empty for native currency.
+    /// 20-byte ERC-20 address; empty for native currency. The enclave does not read it.
     #[prost(bytes="vec", tag="4")]
     pub token: ::prost::alloc::vec::Vec<u8>,
-    /// 20-byte recipient address.
+    /// 20-byte recipient address. The enclave does not read it.
     #[prost(bytes="vec", tag="5")]
     pub recipient: ::prost::alloc::vec::Vec<u8>,
-    /// Commission reported by the source event.
+    /// Commission reported by the source event. It must equal the deposit's tokenCommission.
     #[prost(uint64, tag="6")]
     pub commission: u64,
     /// On-chain BridgeFundsIn.operationId of the source deposit, exactly 32 bytes.
@@ -246,7 +246,7 @@ pub struct EvmSource {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RgbSource {
-    /// Listener-provided RGB validation result.
+    /// Listener result. The enclave ignores it and validates the consignment itself.
     #[prost(bool, tag="1")]
     pub consignment_valid: bool,
     /// RGB asset identifier derived from the consignment.
@@ -261,7 +261,7 @@ pub struct RgbSource {
     /// SPV proofs for witness transactions.
     #[prost(message, repeated, tag="6")]
     pub merkle_proofs: ::prost::alloc::vec::Vec<MerkleProofEntry>,
-    /// Commission reported by the source event.
+    /// Commission reported by the source event. The enclave does not use it.
     #[prost(uint64, tag="7")]
     pub commission: u64,
 }
@@ -285,7 +285,7 @@ pub struct EvmDestination {
     /// Amount pre-extracted from call_data.
     #[prost(uint64, tag="6")]
     pub calldata_amount: u64,
-    /// Commission pre-extracted from call_data.
+    /// Commission pre-extracted from call_data. The enclave does not read it.
     #[prost(uint64, tag="7")]
     pub calldata_commission: u64,
     /// lz_release, if set, signals that this is an lzFundsOutCall release and
@@ -314,7 +314,7 @@ pub struct BurnDestination {
     /// dst_eid is the LayerZero endpoint id. 0 means a direct fundsOut.
     #[prost(uint32, tag="3")]
     pub dst_eid: u32,
-    /// recipient is the chain-native payee address, 1 to 32 bytes.
+    /// recipient is the chain-native payee address: 20 bytes for a direct fundsOut, 1 to 32 bytes for LayerZero.
     #[prost(bytes="vec", tag="4")]
     pub recipient: ::prost::alloc::vec::Vec<u8>,
 }
@@ -335,22 +335,22 @@ pub struct LzReleaseParams {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RgbDestination {
-    /// Destination operation index.
+    /// Destination operation index. The enclave does not read it.
     #[prost(uint64, tag="1")]
     pub operation_idx: u64,
     /// Serialized PSBT to sign.
     #[prost(bytes="vec", tag="2")]
     pub psbt_bytes: ::prost::alloc::vec::Vec<u8>,
-    /// Total non-change output amount.
+    /// Total non-change output amount. The enclave does not read it: the fascia gives the amount.
     #[prost(uint64, tag="3")]
     pub psbt_output_amount: u64,
     /// RGB asset identifier associated with the transfer.
     #[prost(string, tag="4")]
     pub asset_id: ::prost::alloc::string::String,
-    /// Raw destination RGB consignment bytes.
+    /// Raw destination RGB consignment bytes. The enclave does not read it.
     #[prost(bytes="vec", tag="5")]
     pub consignment: ::prost::alloc::vec::Vec<u8>,
-    /// keccak256(consignment).
+    /// keccak256(consignment). The enclave does not read it.
     #[prost(bytes="vec", tag="6")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
     /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
@@ -371,7 +371,7 @@ pub struct MerkleProofEntry {
     /// Transaction position in the block.
     #[prost(uint32, tag="3")]
     pub tx_position: u32,
-    /// 32-byte sibling hashes from leaf to Merkle root.
+    /// 32-byte sibling hashes from leaf to Merkle root, in display byte order.
     #[prost(bytes="vec", repeated, tag="4")]
     pub merkle_path: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
@@ -382,9 +382,9 @@ pub struct EvmSignatureResponse {
     #[prost(bytes="vec", tag="1")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
     /// The request's call_data, unchanged. The enclave validates it as canonical
-    /// ABI and signs the EIP-712 TeeFundsOut digest built from the validated
-    /// fields; it never rewrites the calldata and never signs its keccak256. The
-    /// caller submits these bytes on-chain with the signature.
+    /// ABI and signs the EIP-712 digest built from the validated fields: TeeFundsOut
+    /// on the direct route, TeeLzFundsOut when lz_release is set. It never rewrites
+    /// the calldata or signs its keccak256. The caller submits it with the signature.
     #[prost(bytes="vec", tag="2")]
     pub call_data: ::prost::alloc::vec::Vec<u8>,
 }
@@ -397,8 +397,8 @@ pub struct SignedPsbtResponse {
     #[prost(uint32, tag="2")]
     pub inputs_signed: u32,
 }
-/// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
-/// bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
+/// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Only the mint signer
+/// signs it. Unlike SignRequest, it carries no RGB consignment and no EVM
 /// correlation. The enclave authorises it from the PSBT, never from a listener
 /// flag. It derives which outputs pay back to scripts it co-controls; the rest
 /// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
@@ -412,9 +412,9 @@ pub struct SignBtcRequest {
     pub psbt_bytes: ::prost::alloc::vec::Vec<u8>,
 }
 /// BFA mint wallet rights refill (data_type RGB_RIGHTS_REFILL): one mintRight in,
-/// 2..255 mintRights out to the enclave's own revealed outputs, no tokens. It has no
-/// source and no EVM deposit, so only the mint signer handles it, by shape alone, from
-/// its fascia. Response is a SignedPsbtResponse.
+/// MIN_REFILL_RIGHTS to MAX_REFILL_RIGHTS mintRights out to the enclave's own revealed
+/// outputs, no tokens. It has no source and no EVM deposit, so only the mint signer
+/// handles it, by shape alone, from its fascia. Response is a SignedPsbtResponse.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRightsRefillRequest {
     #[prost(bytes="vec", tag="1")]
@@ -430,19 +430,19 @@ pub struct SignRightsRefillRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawMessageRequest {
-    /// Arbitrary message wrapped and hashed using EIP-191 before signing.
+    /// The enclave refuses this request in every build. It signs no raw message.
     #[prost(bytes="vec", tag="1")]
     pub message: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RawSignatureResponse {
-    /// 65-byte Ethereum signature: r || s || v.
+    /// Never sent: the enclave refuses SignRawMessage.
     #[prost(bytes="vec", tag="1")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawDigestRequest {
-    /// Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
+    /// Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs. Only the burn signer answers this request.
     #[prost(bytes="vec", tag="1")]
     pub digest: ::prost::alloc::vec::Vec<u8>,
     /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist.
@@ -457,7 +457,7 @@ pub struct RawDigestSignatureResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct InitiateCloningRequest {
-    /// Pre-shared operator secret, never sent to the donor.
+    /// Pre-shared operator secret, never sent to the donor. A KMS build refuses cloning.
     #[prost(string, tag="1")]
     pub cloning_secret: ::prost::alloc::string::String,
     /// 20-byte EVM address of the intended donor.
@@ -518,29 +518,29 @@ pub struct SetCloneRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetCloneResponse {
 }
-// Bitcoin header synchronization for in-enclave SPV validation.
+// Bitcoin header synchronization for in-enclave SPV validation. A build without SPV refuses it.
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SubmitHeadersRequest {
-    /// Raw 80-byte Bitcoin headers (batch, contiguous, in ascending height order).
-    /// Listener typically batches up to ~500 to keep gRPC messages small.
+    /// Raw 80-byte Bitcoin headers, contiguous, in ascending height order. All or nothing.
+    /// The parent's header sync sends them. Limits: max_headers_per_submit, max_headers_per_minute.
     #[prost(bytes="vec", repeated, tag="1")]
     pub headers: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
-    /// Block height of headers\[0\]. Headers must connect to the enclave's stored
-    /// chain (i.e. start_height == last_saved_height + 1) — except for the very
-    /// first batch which connects to the compiled-in checkpoint.
+    /// Block height of headers\[0\]: above the checkpoint and at most the tip + 1. The
+    /// tip + 1 extends the chain. A lower start replaces at most MAX_REORG_DEPTH
+    /// headers, and only with more work. An empty batch changes nothing.
     #[prost(uint32, tag="2")]
     pub start_height: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SubmitHeadersResponse {
-    /// enclave's tip after applying this batch
+    /// Height of the enclave's tip after this batch.
     #[prost(uint32, tag="1")]
     pub last_block_height: u32,
-    /// 32 bytes
+    /// 32-byte hash of that tip, in internal byte order.
     #[prost(bytes="vec", tag="2")]
     pub last_block_hash: ::prost::alloc::vec::Vec<u8>,
-    /// number of headers from the batch that validated
+    /// The batch length: a batch is all or nothing.
     #[prost(uint32, tag="3")]
     pub headers_accepted: u32,
 }
@@ -549,10 +549,10 @@ pub struct GetLastSavedBlockRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetLastSavedBlockResponse {
-    /// Height of the latest accepted header.
+    /// Height of the latest accepted header, or the checkpoint before any.
     #[prost(uint32, tag="1")]
     pub block_height: u32,
-    /// 32-byte hash of the latest accepted header.
+    /// 32-byte hash of that header or checkpoint, in internal byte order.
     #[prost(bytes="vec", tag="2")]
     pub block_hash: ::prost::alloc::vec::Vec<u8>,
 }
@@ -564,22 +564,22 @@ pub struct HealthRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthResponse {
-    /// endpoints_set && key_loaded && spv_synced. The only field a caller needs;
-    /// the rest are diagnostics for logs.
+    /// endpoints_set && key_loaded, and on the burn signer also spv_synced. The
+    /// only field a caller needs; the rest are diagnostics for logs.
     #[prost(bool, tag="1")]
     pub ready: bool,
     /// Signing key present, i.e. the phase state machine reached "active".
     #[prost(bool, tag="2")]
     pub key_loaded: bool,
-    /// Header chain tip is recent enough that a signature would pass the same
-    /// staleness gate signing applies. False while the chain is still catching up.
+    /// The header chain passes the checks signing applies: a fresh tip and enough
+    /// blocks above the checkpoint. A build without SPV reports true.
     #[prost(bool, tag="3")]
     pub spv_synced: bool,
-    /// Phase name: "initial", "cloning", or "active".
+    /// Phase name: "initial", "cloning" or "active". A KMS build has "initializing" in place of "cloning".
     #[prost(string, tag="4")]
     pub phase: ::prost::alloc::string::String,
-    /// Height of the latest accepted header (the compiled-in checkpoint height
-    /// when no headers have been accepted yet).
+    /// Height of the latest accepted header, or the compiled-in checkpoint height
+    /// before any. A build without SPV reports 0 in this and the other spv_ numbers.
     #[prost(uint32, tag="5")]
     pub spv_tip_height: u32,
     /// Block timestamp of that header.
@@ -599,7 +599,7 @@ pub struct HealthResponse {
 /// The time, memory and size limits. The operator can change them at run time,
 /// and a change needs no new image. Each limit only sets when the enclave refuses
 /// a request or how long it waits. The attestation does not cover these values.
-/// docs/runtime-limits.md has the rules.
+/// enclave-signer docs/runtime-limits.md has the rules.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Limits {
     #[prost(uint64, tag="1")]
@@ -686,7 +686,7 @@ pub struct LimitsResponse {
 /// value requires it empty.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsRequest {
-    /// ssl://host:port or tcp://host:port.
+    /// ssl://host:port (Electrum) or <https://host\[:port\]> (Esplora). A release image refuses tcp:// and <http://.>
     #[prost(string, tag="1")]
     pub electrum_url: ::prost::alloc::string::String,
     /// TLS name of the EVM RPC. No scheme, path or port.
@@ -707,11 +707,11 @@ pub struct SetEndpointsRequest {
     /// Name of the seed object the parent stores.
     #[prost(string, tag="7")]
     pub kms_seed_id: ::prost::alloc::string::String,
-    /// 20-byte hex EVM address the seed must give. Empty: none.
+    /// 20-byte hex EVM address the seed must give. Empty: create a seed; a saved one is refused.
     #[prost(string, tag="8")]
     pub kms_expected_evm_address: ::prost::alloc::string::String,
-    /// Absolute HTTP path, e.g. /v3/<API_KEY>. Empty means /. No query or fragment.
-    /// May contain credentials: do not log it or publish it in attestation data.
+    /// Absolute ASCII path, e.g. /v3/<API_KEY>. Empty means /. Only letters, digits and /-._~: no authority,
+    /// query, fragment, escape or dot segment. May contain credentials: it is not logged or attested.
     #[prost(string, tag="9")]
     pub evm_rpc_path: ::prost::alloc::string::String,
 }

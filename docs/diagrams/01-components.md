@@ -35,18 +35,18 @@ flowchart TB
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
         EMain[main.rs + bootstrap.rs<br/>boot: a release spv build panics<br/>unless the boot policy is valid Production,<br/>a no-SPV build needs IndexerTrusted,<br/>then listener loop vsock / TCP]
-        EConn[conn.rs<br/>DeadlineStream 10 s idle / 90 s socket deadline<br/>4 worker threads, queue of 16]
+        EConn[conn.rs<br/>DeadlineStream: io_idle_timeout_secs, total_request_timeout_secs<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
-        EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard 1 h TTL<br/>+ op_replay_guard 1 h TTL<br/>refill_rate.rs RR15: 12 refills per hour]
-        EFr[framing.rs<br/>len-prefixed proto, 24 MiB cap]
+        EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard<br/>+ op_replay_guard, mint_replay_ttl_secs<br/>refill_rate.rs RR15: MAX_REFILLS_PER_HOUR]
+        EFr[framing.rs<br/>len-prefixed proto, max_message_bytes]
         BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS<br/>MINT_WITNESS_SAT<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS]
         EKms[kms/ + seed_persistence.rs<br/>KMS seed custody, mint only:<br/>TLS to KMS ends in the enclave]
         VFwd["vsock_forwarder.rs<br/>loopback -> vsock, per-port instances<br/>started at SetEndpoints<br/>Electrum port -> 8001,<br/>EVM RPC TLS port -> 8002,<br/>KMS 443 -> 8003 (mint only)"]
-        KM[keys.rs — KeyManager<br/>BIP-39/32/44/84/86 + SLIP-0010 ed25519<br/>SecretBox seed + keys]
+        KM[keys.rs — KeyManager<br/>BIP-39/32/44/86<br/>SecretBox seed + keys]
 
         subgraph NEVM [networks/evm/]
-            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>96 KiB cap, pins, destinationChainId, deadline]
+            NEV[validation.rs<br/>selectors fundsOut 0x340276aa + lzFundsOut,<br/>canonical ABI decode + re-encode,<br/>max_funds_out_call_data_bytes, pins, destinationChainId, deadline]
             NEC[crosscheck.rs<br/>witnesses-confirmed, BtcRelay proof<br/>anchored to consignment block,<br/>flow amount bind, burn recipient,<br/>sourceBurnTxId bind, settlementData ids]
             NEE[events.rs<br/>independent FundsIn verify,<br/>pinned-TLS RPC,<br/>TLS ends in the enclave]
             NER[reject_list.rs<br/>asset reject list read:<br/>length at finalized and latest,<br/>entries pages at latest]
@@ -123,7 +123,7 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"indexer, no-SPV burn only,<br/>15 s timeout, via loopback"| VFwd
+    NRV -->|"indexer, no-SPV burn only,<br/>per-call timeout, via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum or Esplora, TLS"| Esp
 

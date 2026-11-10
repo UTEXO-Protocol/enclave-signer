@@ -1,10 +1,12 @@
 # Parent mTLS and access to the enclave
 
-The parent serves `parent.ParentService` over gRPC. It requires mTLS unless
-it runs in the loopback test mode. A debug build with the `insecure-dev`
-feature also serves plaintext with no ACL, on any address. Its clients then
-accept plaintext to any host. A release build refuses that feature at compile
-time. Source: `parent/src/transport_security.rs`.
+The parent serves `parent.ParentService` over gRPC. It requires mTLS, and a
+client ACL gives each caller a role. This document lists the settings, the
+roles, and every path into the enclave. Source:
+`parent/src/transport_security.rs`.
+
+The parent decides only who may call the enclave. Every signing check runs
+inside the enclave, on every path.
 
 ## Configuration
 
@@ -19,23 +21,16 @@ time. Source: `parent/src/transport_security.rs`.
 | `GRPC_ATTEST_MAX_PER_MINUTE` | `AttestedPublicKey` calls per minute for all clients, `1..10000`, default `6`. |
 | `GRPC_ALLOW_INSECURE_LOOPBACK` | `true` turns off TLS and the ACL. The parent then requires a loopback bind and no `GRPC_TLS_*` setting. Use it only for tests. |
 
-The parent refuses to start with only some of the four `GRPC_TLS_*` files.
+The parent refuses to start with only some of the four `GRPC_TLS_*` files,
+and with a `GRPC_MAX_CONNECTIONS` or a budget that is out of range or not a
+number. With mTLS, a call over the `Clone` or `AttestedPublicKey` budget gets
+`RESOURCE_EXHAUSTED` before it reaches the enclave. The loopback mode has no
+budget. The other parent settings are in
+[configuration.md](configuration.md#parent-settings).
 
-The parent uses tonic which sends HTTP/2 `GOAWAY` when a connection reaches the configured `max_connection_age` of 300 seconds.
-Accepted RPCs finish on the old connection while signer-node opens a replacement.
-Signer-node waits for the replacement handshake when needed, subject to its call
-deadlines. The parent closes the old connection when its RPCs finish or its
-connection deadline expires.
-
-The socket wrapper sets that deadline after the TLS handshake. It adds
-`GRPC_REQUEST_TIMEOUT_SECS` and 10 seconds to the connection age of 300 seconds.
-With the default request timeout of 120 seconds, the deadline is 430 seconds
-after the handshake. That leaves about 130 seconds for draining after `GOAWAY`.
-Startup logs report the connection age, drain grace, and request timeout.
-
-The parent leaves `max_connection_age_grace` unset. In tonic 0.14.9, combining it
-with `max_connection_age` skips graceful draining and force-closes the connection
-at age plus grace.
+A debug build with the `insecure-dev` feature serves plaintext with no ACL,
+on any address, and its clients accept plaintext to any host. A release build
+refuses that feature at compile time.
 
 ## Roles
 
@@ -51,30 +46,44 @@ caller (`parent/src/grpc_server.rs`). An unknown certificate gets
 `PermissionDenied: client not authorized`. A known certificate that calls
 an RPC outside its role gets `PermissionDenied: RPC not authorized`.
 
+## Clients
+
+`attest-verify` and `cli clone --donor-grpc` use `https://` with
+`PARENT_TLS_CA_FILE`, `PARENT_TLS_CERT_FILE`, `PARENT_TLS_KEY_FILE` and, if
+the certificate name differs from the host, `PARENT_TLS_SERVER_NAME`. They
+use plaintext only to a loopback IP.
+
+## Connection lifetime
+
+The parent sends HTTP/2 `GOAWAY` when a connection reaches its maximum age of
+300 seconds. Accepted RPCs finish on the old connection while the client
+opens a new one. The parent closes the old connection when its RPCs end, or
+at the connection deadline: the connection age plus
+`GRPC_REQUEST_TIMEOUT_SECS` plus 10 seconds, counted from the TLS handshake.
+The startup log reports these values.
+
+The parent leaves `max_connection_age_grace` unset. In tonic 0.14.9, a grace
+together with a maximum age skips the graceful drain and closes the
+connection by force at age plus grace.
+
 ## Host rollout
 
 `deploy/deploy-host.sh` reads `server.pem`, `server.key`, `client-ca.pem` and
 `clients.acl` from `$PARENT_TLS_DIR/<CID>/` (default `/etc/utexo/tls`). It
-stops before it changes a service if one of them is missing or not readable
-by the `ubuntu` user.
-
-Clients (`attest-verify`, `cli clone --donor-grpc`) use `https://` with
-`PARENT_TLS_CA_FILE`, `PARENT_TLS_CERT_FILE`, `PARENT_TLS_KEY_FILE` and, if
-the certificate name differs from the host, `PARENT_TLS_SERVER_NAME`. They
-use plaintext only to a loopback IP.
+stops before it changes a service if one of them is missing, empty or not
+readable by the `ubuntu` user.
 
 ## Access matrix
 
 | Path into the enclave | Who can use it | Checks before the enclave | What it can send |
 | --- | --- | --- | --- |
-| Parent gRPC with mTLS | A client with a certificate from the client CA whose SHA-256 is in the ACL | TLS handshake, ACL pin, role, `Clone` and `AttestedPublicKey` budgets (each on its own RPC), connection cap, concurrency limit, request timeout (`parent/src/main.rs`) | The RPCs of its role |
-| Parent gRPC, insecure loopback | Any process on the parent instance | None | Every parent RPC. `SubmitHeaders` is still refused. |
+| Parent gRPC with mTLS | A client with a certificate from the client CA whose SHA-256 is in the ACL | TLS handshake, ACL pin, role, `Clone` and `AttestedPublicKey` budgets, connection cap, concurrency limit, request timeout (`parent/src/main.rs`) | The RPCs of its role |
+| Parent gRPC, insecure loopback | Any process on the parent instance | Connection cap, concurrency limit, request timeout. No TLS, ACL, role or budget. | Every parent RPC. `SubmitHeaders` is still refused. |
 | Parent `GET /health` (`HEALTH_HOST:HEALTH_PORT`, default `127.0.0.1:5001`) | Any process that reaches that address | None | `Health` only |
-| Parent CLI `utexo-bridge-parent-cli --addr vsock://<CID>:5000` | Any process on the parent instance | None. The CLI opens the vsock connection itself. | Its fixed commands: `init`, `init-seed`, `init-mnemonic`, `get-keys`, `sign-evm`, `sign-psbt`, `get-last-saved-block`, `health`, `set-endpoints`, `verify-launch`, `export-attestation`, `clone`, `interactive` |
+| Parent CLI `utexo-bridge-parent-cli --addr vsock://<CID>:5000` | Any process on the parent instance | None. The CLI opens the vsock connection itself. | Its fixed commands: `init`, `init-seed`, `init-mnemonic`, `get-keys`, `sign-evm`, `sign-psbt`, `get-last-saved-block`, `health`, `set-endpoints`, `verify-launch`, `export-attestation`, `clone`, `limits`, `interactive` |
 | Direct vsock, port 5000 (`enclave/src/main.rs`) | Any process on the parent instance with its own client | None. The enclave does not identify the caller (`enclave/src/server/wire.rs`). | Every `EnclaveRequest` in `enclave-proto/proto/enclave.proto` |
 
-Every signing check lives in the enclave. The parent decides only who may
-call it. The enclave applies the same checks on every path
+The enclave applies the same checks on every path
 (`enclave/src/server/dispatch.rs`):
 
 - `Sign`, `SignBtc`, `SignRightsRefill` and `SignRawDigest` are
@@ -85,6 +94,8 @@ call it. The enclave applies the same checks on every path
 - `SignRawDigest` signs only a gas transaction that passes the pinned
   checks, with the gas key only.
 - `SetEndpoints` is accepted once.
+- `SetLimits` has no check of the caller. It changes only the limits at
+  which the enclave refuses or delays a request, not what the enclave signs.
 - `GetClone` checks the requester attestation and the cloning secret.
 - `Health` has no check.
 

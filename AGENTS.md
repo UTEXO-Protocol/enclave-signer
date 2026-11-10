@@ -29,13 +29,15 @@ requests and relays bytes; it is outside the enclave trust boundary.
 | Enclave validation, signing and lifecycle | `enclave/src/` | [Technical specification](docs/tee-spec.md) |
 | Mint signing, plain BTC and rights refill | `enclave/src/networks/rgb/`, `enclave/src/networks/evm/`, `enclave/src/keys.rs` | [Mint flow](docs/mint-flow.md) |
 | Burn validation and EVM releases | `enclave/src/networks/rgb/`, `enclave/src/networks/evm/` | [Burn flow](docs/burn-flow.md) |
-| Destination records and route bindings | EVM validation and shared vectors | [Record format](docs/burn-destination.md), [integration plan](docs/burn-destination-integration.md) |
+| Destination records and route bindings | EVM validation and shared vectors | [Record format](docs/burn-destination.md) |
 | Attestation and public verification | `attestation-verify/`, enclave attestation, parent verifier | [Attested keys](docs/pubkey-attestation.md), [verify a signer](docs/verify-a-signer.md) |
 | Mint seed recovery | Enclave KMS and parent storage broker | [KMS persistence](docs/kms-persistence.md) |
-| Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md), [clone result codes](docs/clone-cli-results.md) |
+| Burn seed cloning | `enclave/src/cloning.rs`, the parent `clone` command | [Cloning](docs/cloning.md) |
+| Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md) |
 | Runtime limits | `enclave/src/limits.rs`, `enclave/src/memory.rs`, `parent/src/limits.rs` | [Runtime limits](docs/runtime-limits.md) |
+| Work caps of consignment validation | `enclave/src/networks/rgb/validation/cost.rs` | [Cost model](docs/validation-cost-model.md) |
 | Wire schema | `enclave-proto/`, `parent/Cargo.toml` | [Proto provenance and sync procedure](enclave-proto/README.md) |
-| Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [README](README.md), [stage profile](build/profiles/README.md), relevant configuration and rollout instructions |
+| Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [Building](docs/building.md), [configuration](docs/configuration.md), [operations](docs/operations.md), [stage profile](build/profiles/README.md) |
 | Architecture and request sequences | Related handlers and adapters | [Diagram index](docs/diagrams/README.md) |
 
 The root Cargo workspace contains the enclave, vendored enclave protocol and
@@ -50,7 +52,12 @@ A behavior change is incomplete until its affected descriptions agree with it.
 - Update the relevant spec, README sections, flow guide, diagrams, CLI help,
   configuration tables, examples and tests in the same PR as the behavior.
   Search for old names, defaults, feature lists, flags and claims across the
-  repository, including Dockerfiles, workflows and scripts.
+  repository, including Dockerfiles, workflows and scripts. The
+  [documentation index](docs/README.md) lists the documents.
+- State a fact in one document and link to it from the others. A runtime
+  limit has its value in `docs/runtime-limits.md`, and a setting in
+  `docs/configuration.md`. Another document names the limit or the setting;
+  it does not repeat the value.
 - For a new or changed setting, document its source, default, valid values,
   scope, failure behavior and when it takes effect. State whether it is baked
   into the image, supplied at launch, or mutable at runtime, and whether the
@@ -95,8 +102,8 @@ A behavior change is incomplete until its affected descriptions agree with it.
   example `M6`, `RR10`, `PP1`).
 - Preserve the provenance of generated and vendored files. Correct stale
   upstream comments upstream and re-sync the files; do not hand-edit a
-  verbatim copy. Until then, keep its documented comment differences accurate
-  in `enclave-proto/README.md`.
+  verbatim copy. Until the re-sync lands, list each comment difference in
+  `enclave-proto/README.md`.
 - Check that documented commands, flags, paths and links exist on the target
   branch. Examples must use compatible roles, networks, schemas and modes.
 

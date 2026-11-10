@@ -408,7 +408,7 @@ mod tests {
         assert!(ctx.launch.get().is_none());
     }
 
-    /// The README launch: EVM RPC on port 443, and KMS in a mint build.
+    /// The `docs/operations.md` launch: EVM RPC on port 443, KMS in a mint build.
     /// The test maps port 443 to one free port, and other ports to any port.
     #[test]
     fn the_forwarders_bind_together() {

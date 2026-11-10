@@ -44,7 +44,7 @@ sequenceDiagram
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
-    Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(EVM_FINALITY_TAG, false) / block at receipt height (15 s per call)
+    Evt->>Rpc: eth_getTransactionReceipt<br/>eth_getBlockByNumber(EVM_FINALITY_TAG, false) / block at receipt height (evm_rpc_timeout_secs per call)
     Rpc-->>Evt: receipt / selected head / canonical block
     Evt->>Evt: receipt exists + status success
     Evt->>Evt: the ONE BridgeFundsIn from FUNDS_IN_CONTRACT with topic1 == funds_in_operation_id<br/>(none or two ⇒ REFUSE, other deposits ignored, no plain FundsIn fallback)
@@ -58,7 +58,7 @@ sequenceDiagram
     Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one leg, blinded or a witness seal of this tx
     Srv->>Anchor: F7 one input, Colored key path of this enclave
     Srv->>Core: PP1-PP7 parent fascia: core again on its own tx, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
-    Srv->>Anchor: fee ≤ 100 000 sats, ≤ 200 sat/vB (unsigned size),<br/>≥ 1 sat/vB (estimated signed size)
+    Srv->>Anchor: fee ≤ MAX_FEE_SATS, ≤ MAX_FEE_RATE_SAT_VB (unsigned size),<br/>≥ MIN_FEE_RATE_SAT_VB (estimated signed size)
     Srv->>Anchor: M8 blinded: no sat out<br/>witness: exactly MINT_WITNESS_SAT to the seal's output, not ours, nothing else
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
@@ -78,7 +78,6 @@ sequenceDiagram
     Srv->>State: reserve (rolled back on error)
 
     Note over Srv,Km: 7 — sign
-    Srv->>Srv: M8 sats out: none, or MINT_WITNESS_SAT to the seal output
     Srv->>Km: sign_psbt_scoped(psbt, Colored)
     Km->>Km: per input: P2TR, origin fp == ours,<br/>derived key == tap_internal_key,<br/>tweak(internal, merkle_root) == output key<br/>⇒ Schnorr key-path signature
     Km-->>Srv: signed PSBT, inputs_signed
@@ -96,5 +95,4 @@ makes the mint invalid for every receiver. The parent proof pins the one UTXO
 the mint spends, so every signature for the mint spends it. The replay cache
 is in memory and per enclave. It is not a durable deposit ledger.
 
-See [the spec](../tee-spec.md#72-evm-lock---rgb-bridge-psbt) for the deposit
-rules.
+See [mint-flow.md](../mint-flow.md#5-checks-in-order) for each rule.

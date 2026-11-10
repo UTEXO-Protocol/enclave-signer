@@ -6,7 +6,7 @@ Step-by-step text: [burn flow](../burn-flow.md).
 flowchart TD
     start([After role, endpoint and key checks<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
 
-    subgraph P1 ["P1 — RGB source (validate_source)"]
+    subgraph P1 ["1 — RGB source (validate_source)"]
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
@@ -25,19 +25,19 @@ flowchart TD
     end
     start --> p1w
 
-    subgraph P3 ["P2 — SPV / Bitcoin anchoring (feature spv)"]
+    subgraph P3 ["2 — SPV / Bitcoin anchoring (feature spv)"]
         p3stale{"chain tip fresh?<br/>≤ 2 h old, ≤ 2 h future"}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
         p3stale -->|yes| p3net{consignment chain_net == enclave network?}
         p3net -->|no| p3nr[REFUSE — cross-network replay]:::refuse
-        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>position consumed, no 64-byte-tx node,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS (default 3)"]
+        p3net -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>position consumed, no 64-byte-tx node,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS"]
         p3v --> p3q{all proofs pass?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
     p1q -->|yes| p3stale
 
-    subgraph P2 ["P3 — EVM destination (validate_destination)"]
-        p2len{"calldata ≥ 4 bytes AND ≤ 96 KiB?"}
+    subgraph P2 ["3 — EVM destination (validate_destination)"]
+        p2len{"calldata ≥ 4 bytes AND<br/>≤ max_funds_out_call_data_bytes?"}
         p2len -->|no| p2lenr[REFUSE — size]:::refuse
         p2len -->|yes| p2sel{"selector is fundsOut 0x340276aa<br/>or lzFundsOut?"}
         p2sel -->|no| p2selr[REFUSE — unknown selector]:::refuse
@@ -53,14 +53,14 @@ flowchart TD
         p2p -->|no| p2pr[REFUSE — pinned-config mismatch]:::refuse
         p2p -->|yes| p2dc{"calldata destinationChainId:<br/>pools == pin / LZ != pin and > 0?"}
         p2dc -->|no| p2dcr[REFUSE — destination chain]:::refuse
-        p2dc -->|yes| p2d{"deadline strictly in the future,<br/>at most 1 day ahead?"}
+        p2dc -->|yes| p2d{"deadline strictly in the future,<br/>at most MAX_TEE_DEADLINE_SECS ahead?"}
         p2d -->|no| p2dr[REFUSE — expired]:::refuse
     end
     p3q -->|yes| p1e{"settling transition == TS_BURN?<br/>source amount = burnedAsset<br/>(host rgb_amount NOT used)"}
     p1e -->|no| p1er[REFUSE - not a burn]:::refuse
     p1e -->|yes| p2len
 
-    subgraph P4 ["P4 - route, release identity, apply_funds_out_binding<br/>both routes: fundsOut and lzFundsOut"]
+    subgraph P4 ["4 - route, release identity, apply_funds_out_binding<br/>both routes: fundsOut and lzFundsOut"]
         p4r{"route: source amount ≥ destination amount?"}
         p4r -->|no| p4rr[REFUSE — not covered]:::refuse
         p4r -->|yes| p4si{"sourceChainId == 827166 AND sourceAddress empty<br/>AND burnId == in-enclave recompute?"}
@@ -69,7 +69,7 @@ flowchart TD
         p4w -->|no| p4wr[REFUSE — unmined witness]:::refuse
         p4w -->|yes| p4b{"calldata proof non-empty?"}
         p4b -->|no| p4br[REFUSE — missing finality proof]:::refuse
-        p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ 100,<br/>sourceHeight == consignment anchor block,<br/>BTC_RELAY_MODE=required: both commits == enclave-rebuilt relay records (zero ⇒ refuse);<br/>BTC_RELAY_MODE=none (never production): both commits zero?"}
+        p4b -->|yes| p4bv{"proof (sourceHeight, sourceCommit,<br/>latestHeight, latestCommit):<br/>header held at latestHeight,<br/>tip − latestHeight ≤ MAX_RELAY_TIP_LAG_BLOCKS,<br/>sourceHeight == consignment anchor block,<br/>BTC_RELAY_MODE=required: both commits == enclave-rebuilt relay records (zero ⇒ refuse);<br/>BTC_RELAY_MODE=none (never production): both commits zero?"}
         p4bv -->|no| p4bvr[REFUSE — BtcRelay disagreement]:::refuse
         p4bv -->|yes| p4t{"settling transition == TS_BURN AND<br/>burned amount == calldata amount?"}
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
@@ -97,7 +97,7 @@ flowchart TD
 
 ### Notes
 
-- Both routes (`fundsOut` and `lzFundsOut`) run every P4 bind:
+- Both routes (`fundsOut` and `lzFundsOut`) run every bind of step 4:
   `sourceChainId` and `sourceAddress`, `burnId` (`validate_burn_id`),
   `sourceBurnTxId` to the burn OpId, amount and recipient to the burn
   globals `burnedAsset` and `burnReason`, `settlementData` to the deposit
@@ -109,7 +109,7 @@ flowchart TD
   status, and the SPV and BtcRelay gates do not run. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside
-  rgb-lib's validation (P1), and never confirms an anchor or calls plain
+  rgb-lib's validation (step 1), and never confirms an anchor or calls plain
   `validate()` without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
   release builds. A release `spv` build refuses to boot, and `SetEndpoints`

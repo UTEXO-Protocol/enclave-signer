@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 # Parent Adapter (gRPC proxy to Enclave)
-# Private Cargo dependencies require BuildKit secrets (see README, Building): lib_key and
+# Private Cargo dependencies require BuildKit secrets (see docs/building.md): lib_key and
 # rgb_deps_token required, federated_key optional. Keys never enter image layers.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
 #   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN -f build/Dockerfile.parent .

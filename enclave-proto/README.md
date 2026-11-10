@@ -28,49 +28,19 @@ Changes to `proto/enclave.proto` do not change the compiled Rust types.
 The provenance test detects changes that do not match the recorded hashes.
 The file documents the schema. It is not a code-generation input in this crate.
 
-To change the wire protocol: change it upstream, regenerate there, then re-sync
-BOTH files here and update the Provenance tables below.
+To change the wire protocol or a comment: change it upstream, regenerate there,
+then re-sync BOTH files here and update the Provenance tables below.
 `tests/vendored_provenance.rs` fails the test suite if the files and the tables
 disagree, or if the commit recorded below drifts from the `rev` that
 `parent/Cargo.toml` pins.
-
-## Known upstream comment differences
-
-The vendored files remain byte-for-byte copies of the pinned upstream revision.
-Some upstream comments do not match this repository. Use the Rust handlers and the
-[technical specification](../docs/tee-spec.md) for current behavior.
-
-| Wire item | Current behavior in this repository |
-| --- | --- |
-| `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
-| `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
-| `InitializeKeyResponse.account_xpub_colored`, `PublicKeysResponse.account_xpub_colored` | The comment says `m/86'/827167'/0'`. The enclave derives `m/86'/827166'/0'` on mainnet and `m/86'/827167'/0'` on other networks. |
-| `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
-| `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
-| `HealthResponse.phase` | KMS builds can also report `initializing`. |
-| `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
-| `SetEndpointsRequest.evm_rpc_path` | Optional absolute ASCII RPC path; an empty field uses `/`. The enclave rejects authorities, queries, fragments, percent escapes and dot segments. It may contain a provider key and is excluded from image measurements, attestation and KMS context. Nonempty paths are rejected when `evm-rpc` is disabled. |
-| `SetEndpointsRequest.electrum_url` | The comment says `ssl://` or `tcp://`. A release image accepts only `ssl://` (Electrum) or `https://` (Esplora). Only test, debug and dev-feature builds accept `tcp://` or `http://`. |
-| `SignRawMessageRequest` | The enclave refuses this request in every build. It signs no raw message. |
-| `RgbDestination.operation_idx` | This enclave does not read it. |
-| `EvmSource.event_valid`, `EvmSource.event_finalized`, `RgbSource.consignment_valid` | The enclave ignores these listener flags. It checks the deposit and the consignment itself. |
-| `EvmSignatureResponse.call_data` | The comment names only the `TeeFundsOut` digest. On the LayerZero route (`EvmDestination.lz_release` set) the enclave signs the EIP-712 `TeeLzFundsOut` digest (`lz_funds_out_digest`) instead. |
-
-Correct these comments upstream, then synchronize both vendored files and their
-recorded provenance. Do not change only the local generated comments.
-
-After a re-sync, run the enclave tests. The test
-`framing::tests::the_shape_walk_knows_every_repeated_field_of_the_proto` fails
-when a request message gets a new `repeated` field that the wire shape check in
-`enclave/src/framing.rs` does not count.
 
 ## Provenance
 
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `97fad47ab026354d43809f970704dc27cfd09884` (branch `docs/enclave-proto-current-behaviour`, "docs(proto): state the reserved key, source and limit numbers as reserved") |
-| Commit date | 2026-11-10T09:10:13Z |
+| Commit | `15e0d73f26d396691983faa8344bc14d9c173bae` (branch `docs/enclave-proto-match-enclave`, "docs(proto): state reserved numbers and reasons without history or ids") |
+| Commit date | 2026-11-10T13:18:45Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -84,7 +54,7 @@ crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=97fad47ab026354d43809f970704dc27cfd09884
+REV=15e0d73f26d396691983faa8344bc14d9c173bae
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -99,8 +69,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `97e94d1ed57d1a63acff0d658de67cc0dc765002` |
-| `proto/enclave/enclave.proto` | `394a2ac03abecee355b24e5c11a147dda6af1170` |
+| `rust-gen/src/enclave/enclave.rs` | `7c8c3efe3769bc2419a7ae1553f122f3c9069159` |
+| `proto/enclave/enclave.proto` | `87245c41b7496e66830b4dc0470c43a19814ff3a` |
 
 ## Why only `prost`
 
@@ -143,7 +113,17 @@ Then update **both** sides together, or the parent and enclave will disagree
 about the wire format:
 
 1. the provenance table above,
-2. the `rev = "..."` pin in `parent/Cargo.toml`.
+2. the `rev = "..."` pin in `parent/Cargo.toml`,
+3. the `federated-signer-proto` `source` line in `parent/Cargo.lock`.
+
+After a re-sync, run the enclave tests. The test
+`framing::tests::the_shape_walk_knows_every_repeated_field_of_the_proto` fails
+when a request message gets a new `repeated` field that the wire shape check in
+`enclave/src/framing.rs` does not count.
 
 A schema update can change the enclave binary and its measurements.
 Rebuild the EIF after an update. Publish its new reference PCRs.
+
+The generated oneof decoders panic with a source location in `src/enclave.rs`.
+So a comment-only update keeps the enclave binary only if every code line keeps
+its line number: keep each upstream comment block at its line count.

@@ -29,8 +29,9 @@ sequenceDiagram
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
-    Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA, reject list EVM-only
+    Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
+    Rgb->>Rgb: reject list, if the genesis names one, must be an EVM contract
     Rgb->>Rgb: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
     Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
@@ -57,7 +58,7 @@ sequenceDiagram
     loop each MerkleProofEntry
         Spv->>Spv: merkle path depth ≤ 32, position consumed, no 64-byte-tx node
         Spv->>Chain: header_at(block_height)
-        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (default 3, attested)
+        Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (attested)
         Spv->>Spv: verify_merkle_proof(txid, position, path, root)
     end
     Spv->>Chain: pin each proof block (ChainPins)
@@ -66,15 +67,15 @@ sequenceDiagram
 
     Note over Srv,Evm: 2 — validate_destination (EVM)
     Srv->>Evm: validate_destination(EvmDestination)
-    Evm->>Evm: calldata ≥ 4 bytes, ≤ 96 KiB
+    Evm->>Evm: calldata ≥ 4 bytes, ≤ max_funds_out_call_data_bytes
     Evm->>Evm: selector is fundsOut 0x340276aa or lzFundsOut
     Evm->>Evm: lz_release present only with lzFundsOut, else REFUSE
     Evm->>Evm: canonical ABI check: decode FundsOutParams,<br/>then re-encode must byte-equal input
-    Evm->>Evm: lzFundsOut only: 1 ≤ minAmountLD ≤ amount,<br/>extraOptions empty or one lzReceive gas option,<br/>no value, gas ≤ 1 000 000
+    Evm->>Evm: lzFundsOut only: 1 ≤ minAmountLD ≤ amount,<br/>extraOptions empty or one lzReceive gas option,<br/>no value, gas ≤ MAX_LZ_RECEIVE_GAS
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)
     Evm->>Evm: config pinned? chain_id / proxy_contract == env pins<br/>(unconfigured ⇒ REFUSE on bridge builds)
     Evm->>Evm: calldata destinationChainId:<br/>pools route == pinned chain, LZ route != pinned and > 0
-    Evm->>Evm: deadline after now and ≤ now + 24 h
+    Evm->>Evm: deadline after now and ≤ now + MAX_TEE_DEADLINE_SECS
     Evm-->>Srv: Ok / CrossCheck err
 
     Note over Srv: 3 — validate_route_proofs
@@ -85,7 +86,7 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (both routes: fundsOut and lzFundsOut)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= 100,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= MAX_RELAY_TIP_LAG_BLOCKS,<br/>sourceHeight == block anchoring the last witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand, never production): both words must be zero
     Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>burn_destination::resolve(burnReason, record)<br/>V0: burnReason[12..] == calldata recipient, direct only<br/>V1: hash_v1(record) == burnReason, then<br/>destinationChainId, dstEid, recipient == record

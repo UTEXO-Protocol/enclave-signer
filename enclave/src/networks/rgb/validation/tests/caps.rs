@@ -1,8 +1,8 @@
-//! The caps on the work rgb-lib does, checked before it runs, and the
-//! release-mode timings their values come from: `cargo test --release -p
-//! utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib
-//! caps -- --ignored --nocapture --test-threads=1`. The honest burns run with
-//! `GENESIS_RIGHTS=10`, the pinned BFA's mint rights; the forged shapes leave it at 1.
+//! The caps on the work rgb-lib does, checked before it runs, and two
+//! release-mode timings: `cargo test --release -p utexo-bridge-enclave
+//! --no-default-features --features spv,burn-signer --lib caps -- --ignored
+//! --nocapture --test-threads=1`. `docs/validation-cost-model.md` has the
+//! measurements behind the cap values.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};

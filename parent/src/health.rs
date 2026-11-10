@@ -1,5 +1,5 @@
-//! Internal readiness endpoint: `GET /health`. The README shows how deploy
-//! uses it.
+//! Internal readiness endpoint: `GET /health`. `docs/operations.md` shows
+//! how a deploy uses it.
 //!
 //! This is an operations probe, not part of the signing API. It binds to
 //! loopback by default, on a port separate from gRPC. Do not expose it

@@ -136,7 +136,7 @@ case "$POOL_MIB" in
   ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $NITRO_ALLOCATOR_CONFIG, got '$POOL_MIB'" >&2; exit 1 ;;
 esac
 if [ "$POOL_MIB" -lt "$POOL_NEED" ]; then
-  echo "memory_mib in $NITRO_ALLOCATOR_CONFIG is $POOL_MIB MiB, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. Set it to at least $POOL_NEED. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+  echo "memory_mib in $NITRO_ALLOCATOR_CONFIG is $POOL_MIB MiB, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. Set it to at least $POOL_NEED. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (docs/operations.md)." >&2
   exit 1
 fi
 HELD_MIB=0
@@ -149,7 +149,7 @@ for dir in "$NITRO_HUGEPAGES_DIR"/hugepages-*kB; do
   HELD_MIB=$((HELD_MIB + n * kb / 1024))
 done
 if [ "$HELD_MIB" -lt "$POOL_NEED" ]; then
-  echo "the kernel holds $HELD_MIB MiB of hugepages in $NITRO_HUGEPAGES_DIR, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+  echo "the kernel holds $HELD_MIB MiB of hugepages in $NITRO_HUGEPAGES_DIR, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (docs/operations.md)." >&2
   exit 1
 fi
 declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
@@ -326,7 +326,7 @@ if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
   case "$bad" in
     0) ;;
     '') echo "cannot read $ENV_FILE. systemd gives start the values in this file. Run check as root or as a user that can read the file." >&2; exit 1 ;;
-    *) echo "line $bad of $ENV_FILE is not a plain line. Write the file again with plain KEY=value lines, comment lines and blank lines only (README)." >&2; exit 1 ;;
+    *) echo "line $bad of $ENV_FILE is not a plain line. Write the file again with plain KEY=value lines, comment lines and blank lines only (docs/operations.md)." >&2; exit 1 ;;
   esac
   for key in ENCLAVE_MEMORY NITRO_ALLOCATOR_CONFIG NITRO_HUGEPAGES_DIR; do
     value="$(awk -v k="$key" -v q="'" '
@@ -474,12 +474,12 @@ case "$ACTION" in
         ''|0*|*[!0-9]*|????????*) echo "cannot read memory_mib from $POOL_FILE, got '$file'" >&2; exit 1 ;;
       esac
       if [ "$file" -lt "$need" ]; then
-        echo "memory_mib in $POOL_FILE is $file MiB, and one enclave of $MEM MiB needs $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "memory_mib in $POOL_FILE is $file MiB, and one enclave of $MEM MiB needs $need MiB. Set it to at least $need. The allocator applies it when its service starts, and a restart of that service restarts every enclave of this host (docs/operations.md)." >&2
         exit 1
       fi
       held="$(pages_mib nr_hugepages)"
       if [ "$held" -lt "$need" ]; then
-        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and one enclave of $MEM MiB needs $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (README)." >&2
+        echo "the kernel holds $held MiB of hugepages in $PAGES_DIR, and one enclave of $MEM MiB needs $need MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (docs/operations.md)." >&2
         exit 1
       fi
       echo "CID $CID: one enclave of $MEM MiB fits: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"

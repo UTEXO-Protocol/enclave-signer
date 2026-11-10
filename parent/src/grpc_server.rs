@@ -745,9 +745,9 @@ impl ParentService for ParentAdapterService {
             DataType::BtcUtxo => {
                 // Plain-BTC signing, with no source proof or consignment. The
                 // Listener sends the PSBT in `EnrichedBtcPayload.psbt_bytes`.
-                // The enclave signs on the vanilla BIP-86 account. It signs only
-                // if every output pays to its own script and inputs are under
-                // the value cap.
+                // The enclave signs on the vanilla BIP-86 account. Outputs that
+                // do not pay back to its own scripts must fit `BTC_MAX_UNOWNED_SATS`,
+                // the inputs `BTC_MAX_TOTAL_SATS`, and the fee the fee policy.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {
@@ -792,9 +792,9 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Return an enclave public key, selected by `data_type`:
-    /// - EVM_GAS_TX: 64-byte uncompressed X||Y (gas key m/44'/60'/0'/0/1).
-    /// - TRANSACTION, UNSPENDABLE: 33-byte compressed BTC public key.
+    /// Return the enclave gas-tx public key for `data_type` EVM_GAS_TX: the
+    /// 64-byte uncompressed X||Y of the gas key m/44'/60'/0'/0/1. Other data
+    /// types are refused.
     ///
     /// For Nitro evidence binding these public keys to approved measured code,
     /// use `AttestedPublicKey` with a trusted Real verifier. Genuine Nitro
@@ -846,9 +846,10 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Generate fresh enclave keys and set the optional donor secret.
-    /// Map cloning_secret to the enclave cloning_secret field.
-    /// This RPC does not import a mnemonic or seed.
+    /// Initialize the enclave keys and set the optional donor secret. The
+    /// enclave generates a new mnemonic, or a KMS build loads or creates its
+    /// seed through KMS. Map cloning_secret to the enclave cloning_secret
+    /// field. This RPC does not import a mnemonic or seed.
     async fn initialize(
         &self,
         request: Request<InitializeRequest>,
@@ -874,7 +875,7 @@ impl ParentService for ParentAdapterService {
             Some(enclave_response::Response::InitializeKey(_)) => {
                 Ok(Response::new(InitializeResponse {
                     attestation: vec![], // Initialize returns no attestation
-                    // The BTC key is retired, so no public key is returned.
+                    // AttestedPublicKey returns the keys, so Initialize returns none.
                     public_key: Vec::new(),
                 }))
             }
