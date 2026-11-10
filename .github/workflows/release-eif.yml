@@ -184,9 +184,18 @@ jobs:
         if: always()
         env:
           GIT_SHA: ${{ inputs.git_sha }}
+          DEPLOY_ENVIRONMENT: ${{ inputs.deployment_environment }}
           BUCKET: ${{ vars.EIF_S3_BUCKET }}
+          TEST_BUCKET: ${{ vars.RELEASE_TEST_EIF_S3_BUCKET }}
+          SIGNER_ROLE: ${{ inputs.signer_role }}
+          ENCLAVE_CID: ${{ inputs.enclave_cid }}
         run: |
+          if [ "$DEPLOY_ENVIRONMENT" = release-test ]; then
+            BUCKET="$TEST_BUCKET"
+          fi
           echo "### Release EIF" >> "$GITHUB_STEP_SUMMARY"
+          echo "- environment: \`$DEPLOY_ENVIRONMENT\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- signer: \`$SIGNER_ROLE\`, CID \`$ENCLAVE_CID\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- git_sha: \`$GIT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- bucket: \`$BUCKET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bucket: \`${BUCKET:-not configured}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap, then deploy/verify-identity.sh with a complete approved EXPECTED_EVM map to verify identities and write the attestation bundles." >> "$GITHUB_STEP_SUMMARY"

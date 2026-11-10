@@ -71,6 +71,30 @@ elif args[args.index('--query') + 1] == 'Status': print('Success')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.base / 'calls').exists())
 
+    def test_summary_uses_selected_bucket_even_when_test_bucket_is_missing(self):
+        step = self.workflow.split('      - name: Summary\n', 1)[1]
+        self.assertIn('DEPLOY_ENVIRONMENT: ${{ inputs.deployment_environment }}', step)
+        self.assertIn('TEST_BUCKET: ${{ vars.RELEASE_TEST_EIF_S3_BUCKET }}', step)
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        summary = self.base / 'summary.md'
+        for environment, test_bucket, expected in (
+                ('release-test', 'isolated-artifacts', 'isolated-artifacts'),
+                ('stage', 'isolated-artifacts', 'stage-artifacts'),
+                ('release-test', '', 'not configured')):
+            with self.subTest(environment=environment, test_bucket=test_bucket):
+                summary.write_text('')
+                env = dict(self.env, DEPLOY_ENVIRONMENT=environment,
+                           BUCKET='stage-artifacts', TEST_BUCKET=test_bucket,
+                           GITHUB_STEP_SUMMARY=str(summary))
+                result = subprocess.run(['bash', '-euc', script], env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rendered = summary.read_text()
+                self.assertIn(f'- bucket: `{expected}`', rendered)
+                self.assertIn(f'- environment: `{environment}`', rendered)
+                if environment == 'release-test':
+                    self.assertNotIn('stage-artifacts', rendered)
+
 
 if __name__ == '__main__':
     unittest.main()
