@@ -205,9 +205,8 @@ pub fn validate_route_proofs(
 /// Both sides are bridge asset units, not sats. For EVM -> RGB,
 /// `source_amount` is the `FundsIn` amount from
 /// `evm::events::verify_funds_in_event`. For RGB -> EVM, it is the consignment
-/// amount. An RGB
-/// `destination_amount` is the fascia's `mint.issued` in RGB units, issued
-/// 1:1 against the EVM token. The PSBT checks in sats are in
+/// amount. An RGB `destination_amount` is the fascia's `mint.issued` in RGB
+/// units, issued 1:1 against the EVM token. The PSBT checks in sats are in
 /// [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {

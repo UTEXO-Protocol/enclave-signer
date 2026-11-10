@@ -14,8 +14,7 @@ pub struct SubmitRateLimiter {
     headers_in_window: u64,
 }
 
-/// Maximum headers in each [`RATE_LIMIT_WINDOW`]. A cold-start sync from the
-/// mainnet checkpoint to the tip grows by approx 4,300 blocks each month.
+/// Test copy of the runtime limit `max_headers_per_minute`.
 #[cfg(test)]
 const MAX_HEADERS_PER_RATE_WINDOW: u64 = crate::limits::Limits::DEFAULTS.max_headers_per_minute;
 /// Length of the rate-limit window.

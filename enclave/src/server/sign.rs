@@ -82,7 +82,7 @@ pub(super) fn handle_sign(
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    // Builds without a deadline user still take the argument.
+    // Silences the unused warning on builds without a reject-list reader.
     let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.

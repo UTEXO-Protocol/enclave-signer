@@ -1,10 +1,10 @@
 //! Builds BFA consignments in process with the pinned RGB crates: a real
-//! genesis, then mints, transfers of units, propagates of rights and burns,
-//! each in a witness tx that commits its bundle in an OP_RETURN output. Each one is
-//! committed as the pinned rgb-lib does it, through psbtu's `rgb_commit`, which
-//! gives the fascia, then the RGB keys stripped, so its PSBT and fascia are the
-//! ones a signer gets. Tests need no stored V1 fixture. Deterministic: fixed
-//! times, nonces, blinding and entropy.
+//! genesis, then mints, transfers, right propagations and burns. Each one sits
+//! in a witness tx that commits its bundle in an OP_RETURN output. It is
+//! committed as the pinned rgb-lib does it, through psbtu's `rgb_commit`, and
+//! the RGB keys are then stripped, so the PSBT and fascia match what a signer
+//! gets. Tests need no stored fixture. Deterministic: fixed times, nonces,
+//! blinding and entropy.
 //!
 //! It uses only external crates, so integration tests include it with
 //! `#[path]`.

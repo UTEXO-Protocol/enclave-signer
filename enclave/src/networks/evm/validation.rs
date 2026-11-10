@@ -48,7 +48,7 @@ pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize =
 
 /// Latest `deadline` the enclave signs, in seconds after now. Same value as
 /// `MultisigProxy.MAX_TEE_DEADLINE`, which the contract checks only at
-/// execution. Here it makes every signature expire 1 day after signing.
+/// execution. Here it bounds how long each signature stays valid.
 #[cfg(rgb_to_evm)]
 pub const MAX_TEE_DEADLINE_SECS: u64 = 24 * 60 * 60;
 

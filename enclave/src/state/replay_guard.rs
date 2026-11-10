@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{EnclaveError, Result};
 
-/// Default TTL for a recorded nonce. The cloning handshake takes seconds,
-/// so one hour gives a large margin.
+/// Default TTL for a recorded nonce. It is far above the handshake time.
 pub(super) const DEFAULT_NONCE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Default maximum count of recorded nonces.

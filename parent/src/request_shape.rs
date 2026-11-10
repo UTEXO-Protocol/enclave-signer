@@ -49,8 +49,8 @@ use crate::grpc_server::ParentAdapterService;
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
 
 /// The most bytes of the message of any request but `Sign`. The largest one
-/// in use is `Clone`, which carries an attestation document of a few KiB. The
-/// enclave refuses a document of more than 64 KiB.
+/// in use is `Clone`, which carries an attestation document. The enclave has
+/// its own size limit for that document.
 pub const MAX_OTHER_MESSAGE_SIZE: usize = 256 * 1024;
 
 /// The gRPC prefix of each message: a compression flag and a 4-byte length.

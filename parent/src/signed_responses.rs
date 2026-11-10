@@ -30,11 +30,11 @@ use tokio::sync::watch;
 
 use crate::enclave_proto::{EnclaveRequest, SignedPsbtResponse};
 
-/// Default age limit of a stored reply. The enclave's replay window is one
-/// hour too; after it a repeated request is signed again anyway.
+/// Default age limit of a stored reply. It matches the enclave's replay
+/// window; after that window a repeated request is signed again anyway.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Default count limit. A mint reply is a few KB, so this is a few MB.
+/// Default count limit. A mint reply is small, so the count bounds memory loosely.
 pub const DEFAULT_MAX_ENTRIES: usize = 1_024;
 
 /// Default byte limit over all stored replies.

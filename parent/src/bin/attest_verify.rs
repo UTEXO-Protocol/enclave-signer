@@ -138,7 +138,7 @@ struct Cli {
     expect_token_contract: Option<String>,
 
     /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`). Not zero.
-    /// Default: 3, the value of every shipped image.
+    /// Default: the value of every shipped image.
     #[arg(long)]
     expect_spv_min_confirmations: Option<u32>,
 

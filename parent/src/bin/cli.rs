@@ -784,7 +784,7 @@ fn main() {
                 Ok(None) => {
                     println!("CLONE_RESULT_V1=preflight_error");
                     eprintln!(
-                        "Error: a cloning secret is required for clone — pass \
+                        "Error: a cloning secret is required for clone: pass \
                          --cloning-secret-file, set UTEXO_CLONING_SECRET, or pass \
                          --cloning-secret, which `ps` shows"
                     );

@@ -963,8 +963,8 @@ impl EvmReceiptProvider for AlloyEvmClient {
 /// types reach the predicate.
 ///
 /// Fails closed on a missing `block_number` or `block_hash`: both are required
-/// to establish canonical inclusion below the configured finality head. Neither identity field may default
-/// to zero for a pending or malformed receipt.
+/// to establish canonical inclusion below the configured finality head. An
+/// identity field never defaults to zero for a pending or malformed receipt.
 fn map_alloy_receipt(r: alloy::rpc::types::TransactionReceipt) -> Result<ReceiptData> {
     let logs = r
         .inner

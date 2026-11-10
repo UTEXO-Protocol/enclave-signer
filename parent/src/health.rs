@@ -23,11 +23,10 @@ use crate::grpc_server::ParentAdapterService;
 use crate::header_sync::SyncStatus;
 
 /// Time to wait before the answer is "cannot tell". It is shorter than the
-/// 40s enclave timeout, so a probe answers within its poll interval.
+/// enclave request timeout, so a probe answers within its poll interval.
 ///
-/// It limits the answer, not the enclave work. The request runs on a blocking
-/// thread that cannot be cancelled. Transport timeouts limit individual socket
-/// operations. They do not impose a total lifetime on the blocking worker.
+/// It limits the answer, not the enclave work: the request runs on a blocking
+/// thread that cannot be cancelled.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the router. Public so tests can serve the real HTTP path on an

@@ -28,9 +28,9 @@ pub struct Config {
     pub grpc_max_concurrent: usize,
 
     /// Maximum active `Sign` requests across all connections. A `Sign`
-    /// request holds its body and its decoded message, at most about 75 MiB
-    /// (`request_shape`). So the default is 8. The enclave works on 4
-    /// requests at once and queues 16.
+    /// request holds its body and its decoded message (`request_shape`), so
+    /// the default is lower than `grpc_max_concurrent`. It also follows the
+    /// enclave's worker count and queue depth.
     pub grpc_max_concurrent_sign: usize,
 
     /// Maximum in-flight gRPC requests and HTTP/2 streams per connection.
@@ -40,8 +40,8 @@ pub struct Config {
     pub grpc_request_timeout_secs: u64,
 
     /// How long the reply of an EVM->RGB bridge sign is kept for a retry of
-    /// the same request (see `signed_responses`). The enclave's own replay
-    /// window is one hour.
+    /// the same request (see `signed_responses`). It stays within the
+    /// enclave's replay window.
     pub signed_response_ttl_secs: u64,
 
     /// Count limit of kept replies.
@@ -51,8 +51,7 @@ pub struct Config {
     pub signed_response_max_bytes: usize,
 
     /// Host for the `GET /health` readiness endpoint (default loopback).
-    /// Deploy polls it from the parent host. Do not expose it off-host.
-    /// Unlike `grpc_host`, do not set it to 0.0.0.0 in Docker.
+    /// Do not expose it off-host, not even in Docker.
     pub health_host: String,
 
     /// Port for the health endpoint. The gRPC listener is h2 only. The probe

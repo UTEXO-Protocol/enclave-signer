@@ -127,7 +127,7 @@ impl ServerSecurity {
             bail!("mTLS requires GRPC_TLS_CERT_FILE, GRPC_TLS_KEY_FILE, GRPC_TLS_CLIENT_CA_FILE and GRPC_TLS_ACL_FILE");
         };
         let clone_limit = per_minute("GRPC_CLONE_MAX_PER_MINUTE", "30")?;
-        // Each call makes one NSM document. The enclave has 4 workers.
+        // Each call makes one NSM document, so keep the rate low.
         let attest_limit = per_minute("GRPC_ATTEST_MAX_PER_MINUTE", "6")?;
         let access = AccessLayer::from_acl(
             &std::fs::read_to_string(acl)?,

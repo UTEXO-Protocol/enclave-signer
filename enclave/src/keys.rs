@@ -23,7 +23,7 @@ const COLORED_KEYCHAIN: u32 = 0;
 
 /// Keychains the vanilla (BTC) descriptor may use. rgb-lib defaults to
 /// keychain 0 (`KEYCHAIN_BTC`) and lets a wallet pass any u8, so a bridge
-/// may set 1. We accept only 0 or 1.
+/// may set 1. Only those two are accepted.
 const VANILLA_KEYCHAINS: [u32; 2] = [0, 1];
 
 /// True only for a child path `[k, i]`, both steps non-hardened, and `k` a

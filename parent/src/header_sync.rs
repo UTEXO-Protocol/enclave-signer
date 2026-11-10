@@ -26,7 +26,7 @@ use crate::header_source::{ElectrumSource, CALL_TIMEOUT, MAX_HEADERS};
 
 /// Headers above a fork point that a fork repair resends.
 const REWIND: u32 = 99;
-/// Half the enclave's limit of 100,000 headers in 60 seconds.
+/// Half the enclave's header rate limit.
 const RATE_LIMIT: u32 = 50_000;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Failed steps in a row that make the state `stalled`.

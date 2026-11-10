@@ -187,10 +187,7 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// The deploy scripts, `docs/operations.md` and `build/deploy-to-ec2.sh`
 /// carry this value and the minimum as literals, and a test pins them to the
 /// constants. The deploy scripts refuse a smaller `ENCLAVE_MEMORY`, or one
-/// that is not a whole number of GiB. `deploy-host.sh` and
-/// `utexo-enclave-ctl.sh check` also refuse a hugepage pool smaller than the
-/// launch value of the one enclave they check. `utexo-enclave-ctl.sh
-/// start` refuses only when the free hugepages cannot hold its own enclave.
+/// that is not a whole number of GiB, and check the hugepage pool.
 pub const RUN_ENCLAVE_MEMORY_MIB: usize = 4096;
 
 // The largest four requests fit in the part above the baseline. After the
@@ -207,8 +204,7 @@ const _: () = assert!(
         - WORKER_THREADS * crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES
         >= 512 * 1024 * 1024
 );
-// nitro-cli gives an enclave whole 1 GiB pages first, so the launch value is a
-// whole number of GiB.
+// See the hugepage rule in the doc of `RUN_ENCLAVE_MEMORY_MIB`.
 const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 
 /// Refuses to start a release build with less usable memory than
