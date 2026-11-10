@@ -447,9 +447,10 @@ approve their PCRs before you update attestation allowlists or KMS policies.
 `.github/workflows/build-eif.yml` builds the `rgb-mint` and `rgb-burn`
 variants on a plain runner with `nitro-cli 1.4.5` and uploads EIF + PCRs + host
 binaries to `s3://<bucket>/eif/<git_sha>/rgb-mint/` and `rgb-burn/`.
-`release-eif.yml` takes a `signer_role` (`mint` or `burn`): `deploy/deploy-host.sh`
+`release-eif.yml` takes a `signer_role` (`mint` or `burn`) and an
+`enclave_cid` (`16`, `18` or `20`, default `16`): `deploy/deploy-host.sh`
 fetches `eif/<git_sha>/rgb-<role>/utexo-bridge-enclave-<role>.eif` and runs it on one CID.
-The workflow passes no `ENCLAVE_CID`, so it uses the default, CID 16.
+The workflow passes the selected CID as `ENCLAVE_CID` to each target host.
 The `cd-*.yml` workflows push container images for
 the parent and the **dev** enclave images only (`utexo-bridge-enclave-mint`
 and `utexo-bridge-enclave-burn`, both from `Dockerfile.enclave-dev.bfa` with a
@@ -541,11 +542,11 @@ Both deploy scripts read `memory_mib` and the hugepages that the kernel holds.
 `deploy-host.sh` refuses a pool smaller than the launch value of the one
 enclave it deploys, before it downloads or stops anything. It does not count
 pages that another enclave of the host holds. `systemctl restart` stops the old enclave before
-`start` runs. So run `utexo-enclave-ctl.sh check <cid>` before each step of a
-rolling restart. It makes the same checks and changes nothing. `start` refuses
+`start` runs. So run `/usr/local/lib/utexo/<CID>/utexo-enclave-ctl.sh check <CID>`
+before each step of a rolling restart. It makes the same checks and changes nothing. `start` refuses
 only when the free hugepages cannot hold its own enclave.
 
-`check` reads its values from `/etc/utexo/enclave.env`, the file that systemd
+`check` reads its values from `/etc/utexo/enclave-<CID>.env`, the file that systemd
 gives to `start`. Each invocation checks one enclave; there is no enclave-count
 or CID-list setting. A key that is not in the file gets its default. A drop-in
 or the systemd manager can still give `start` a value for such a key, but
@@ -595,10 +596,31 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ./utexo-bridge-parent
 ```
 
-`deploy/deploy-host.sh` installs the systemd template units and starts one
-enclave and its parent. The supported CIDs are 16 / 18 / 20, with parents on
+`deploy/deploy-host.sh` installs explicit systemd instance units and starts
+one enclave and its parent. The supported CIDs are 16 / 18 / 20, with parents on
 ports 50051 / 50052 / 50053. It verifies the EIF checksum and PCR0 against the
-S3 manifest before and after start.
+S3 manifest before and after start. Runtime verification checks only the selected
+CID; another enclave may have a different role or PCR0.
+
+`CLUSTER_DIR` is an artifact root that must be writable by `ubuntu`. Artifacts
+are stored under `<CLUSTER_DIR>/enclave-<CID>/<git_sha>/rgb-<role>/`. The parent
+and enclave use that release's binaries, EIF and manifests. Each CID has its own
+`/etc/utexo/enclave-<CID>.env`, `/etc/utexo/parent-<CID>.env` and control scripts
+under `/usr/local/lib/utexo/<CID>/`. The instance units
+`utexo-enclave@<CID>.service` and `utexo-parent@<CID>.service` take precedence
+over a shared template. Deployment stops and starts only those instances.
+An unmanaged parent occupying the selected ports must be stopped by its operator;
+the script does not kill processes by executable name.
+
+For hosts using `/etc/utexo/enclave.env` and shared template units, redeploy one
+CID at a time with its approved launch inputs. Supply that CID's CA and private
+RPC path explicitly during the migration, including when they reside in the
+shared files. The script copies them into per-CID paths. It leaves shared
+configuration, templates and wrappers in place for CIDs that still use them.
+Do not remove those shared files until every dependent CID has been migrated.
+Verify the selected CID's identity and readiness before routing traffic to it.
+Repeat for each CID, preserving any quorum needed by the other signers.
+
 A restart removes the in-memory keys. Initialize or clone each enclave again.
 Mint signers recover their saved KMS seed through `InitializeKey`. They require
 the verified address pin and do not support peer cloning.
@@ -750,9 +772,9 @@ parent supplies this file, so the key is not hidden from a compromised parent.
 The no-SPV endpoint-approval limitation described above still applies.
 
 `deploy/deploy-host.sh` also takes `EVM_RPC_PATH_FILE`. It keeps a copy in
-`/etc/utexo/evm-rpc-path`, with mode 0600 and the service user as owner, and
-writes that path in `/etc/utexo/enclave.env`. A deploy without the variable keeps
-the copy, so a new deploy does not lose the key. To rotate a key on such a host,
+`/etc/utexo/evm-rpc-path-<CID>`, with mode 0600 and the service user as owner, and
+writes that path in `/etc/utexo/enclave-<CID>.env`. A deploy without the variable keeps
+only that CID's copy, so a new deploy does not lose the key. To rotate a key,
 replace the copy and restart the enclave. To go back to the path `/`, delete the
 copy and deploy again.
 

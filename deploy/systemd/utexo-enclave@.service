@@ -14,11 +14,11 @@ TimeoutStartSec=390
 # EIF path, cpu/memory, CLI, Electrum URL, EVM RPC CA and private RPC path file
 # come from the deploy-written env file. The EVM RPC host and port come from
 # host-prep-evmrpc.sh.
-EnvironmentFile=/etc/utexo/enclave.env
+EnvironmentFile=/etc/utexo/enclave-%i.env
 EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
-ExecStart=/usr/local/bin/utexo-enclave-ctl.sh start %i
+ExecStart=/usr/local/lib/utexo/%i/utexo-enclave-ctl.sh start %i
 # Also runs after a failed or timed-out start, so no enclave stays up.
-ExecStopPost=/usr/local/bin/utexo-enclave-ctl.sh stop %i
+ExecStopPost=/usr/local/lib/utexo/%i/utexo-enclave-ctl.sh stop %i
 
 [Install]
 WantedBy=multi-user.target

@@ -15,7 +15,10 @@ set -uo pipefail
 
 ACTION="${1:?usage: utexo-enclave-ctl.sh start|check|stop <cid>}"
 CID="${2:?cid required}"
-# systemd gives `start` the values in /etc/utexo/enclave.env. `check` takes
+[[ "$CID" =~ ^[1-9][0-9]{0,9}$ ]] && (( CID >= 4 && CID < 4294967295 )) || {
+  echo "invalid enclave CID: $CID" >&2; exit 2;
+}
+# systemd gives `start` the values in /etc/utexo/enclave-<CID>.env. `check` takes
 # the three keys below from this file only, and a key that is not in the file
 # gets its default. A drop-in or the systemd manager can still give `start` a
 # value for such a key, but deploy-host.sh writes all three keys. `check`
@@ -38,7 +41,7 @@ CID="${2:?cid required}"
 # in the value. systemd joins, splits, changes or ignores some other lines, or
 # refuses the file, so `check` refuses a file with them. An empty ENCLAVE_ENV
 # makes `check` use the environment.
-ENV_FILE="${ENCLAVE_ENV-/etc/utexo/enclave.env}"
+ENV_FILE="${ENCLAVE_ENV-/etc/utexo/enclave-$CID.env}"
 if [ "$ACTION" = check ] && [ -n "$ENV_FILE" ]; then
   # The number of the first line that is not plain, or 0. awk can miss a NUL
   # byte, so tr changes it to a byte that is not plain.
@@ -109,7 +112,7 @@ send_limits() {
 }
 # Set endpoints and KMS values once from the unit env.
 set_endpoints() {
-  : "${CLI:?CLI env required (set in /etc/utexo/enclave.env)}"
+  : "${CLI:?CLI env required (set in the per-CID enclave env file)}"
   # systemd sources this via EnvironmentFile; a manual `start` does not, so
   # source it here too (idempotent: harmless if already in the environment).
   if [ -r /etc/nitro_enclaves/vsock-proxy-evmrpc.env ]; then
@@ -222,7 +225,7 @@ case "$ACTION" in
       echo "CID $CID: one enclave of $MEM MiB fits: memory_mib $file MiB, hugepages $held MiB, values from $ENV_FILE"
       exit 0
     fi
-    : "${EIF:?EIF env required (set in /etc/utexo/enclave.env)}"
+    : "${EIF:?EIF env required (set in the per-CID enclave env file)}"
     : "${PCR_FILE:?PCR_FILE env required}" "${IMAGE_ENV:?IMAGE_ENV env required}" "${SIGNER_ROLE:?SIGNER_ROLE env required}"
     # Hold a host-wide lock so only one run-enclave runs at a time (anti-race).
     # `nitro-cli` children are spawned with fd 9 closed (9>&-) so an occasionally

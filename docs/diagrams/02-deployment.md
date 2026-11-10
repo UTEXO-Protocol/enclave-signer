@@ -65,6 +65,10 @@ flowchart TB
   Verifiers must pin approved values. Image changes can require new measurements.
   `build-eif.yml` publishes EIF + `PCR.json` + `SHA256SUMS` to S3 under the git
   sha; `deploy/deploy-host.sh` verifies both before and after start.
+- **Per-CID deployment**: each invocation installs only the selected instance's
+  units, control scripts, launch file and release artifacts. Other CIDs may run
+  different roles and PCRs. Their parents keep running, and their next restart
+  uses their own configuration. See the README for migration from shared units.
 - Without `kms-persistence`, cloned enclaves share **one HD seed** via the
   cloning handshake (`utexo-bridge-parent-cli clone`). Each node holds an identical `KeyManager`
   after `Cloning → Active`. Keys live only in memory; a restart needs re-init or

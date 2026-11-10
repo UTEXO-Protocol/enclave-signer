@@ -45,7 +45,7 @@ stays inside KMS and the enclave. S3 stores the durable `CiphertextBlob`.
 ## Enclave configuration
 
 Set these public values at launch, in `SetEndpoints` (`cli set-endpoints`, or
-`/etc/utexo/enclave.env` with `deploy/deploy-host.sh`). The image does not
+`/etc/utexo/enclave-<CID>.env` with `deploy/deploy-host.sh`). The image does not
 carry them. Production policy commits them; Development policy does not.
 Operators must approve the launch values:
 
@@ -130,7 +130,7 @@ destination, not source CIDs; isolation and process supervision belong to the
 host deployment. Do not run a second listener on `8003` or `8004`.
 
 `deploy/deploy-host.sh` takes `SIGNER_ROLE=mint` or `burn` and deploys one CID per run. It writes
-the KMS values of its environment to `/etc/utexo/enclave.env`, and `utexo-enclave-ctl.sh start`
+the KMS values of its environment to `/etc/utexo/enclave-<CID>.env`, and `utexo-enclave-ctl.sh start`
 sends them in `set-endpoints`. A mint enclave refuses blank KMS values, and `start` then terminates
 it, so you cannot add them by hand after the deploy. `release-eif.yml` exports no KMS value.
 No deployment script provisions the KMS relay, broker storage settings, or AWS policies.
