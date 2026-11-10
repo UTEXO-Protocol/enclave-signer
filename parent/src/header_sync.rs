@@ -24,13 +24,11 @@ use crate::enclave_proto::{
 use crate::grpc_server::ParentAdapterService;
 use crate::header_source::{ElectrumSource, CALL_TIMEOUT, MAX_HEADERS};
 
-/// Headers above a fork point that a fork repair resends: one less than the
-/// enclave's `MAX_REORG_DEPTH`, so a repair replaces the deepest fork that the
-/// enclave accepts. A low batch limit lowers it (`repair_depth`).
+/// How far below the enclave tip a fork repair starts, so that it replaces
+/// `MAX_REORG_DEPTH` headers. `repair_depth` can lower it.
 const REWIND: u32 = 99;
-/// Headers in each `RATE_WINDOW` until the parent has read the limits in force:
-/// half the image value of the enclave's `max_headers_per_minute`. Then the
-/// sync sends half the value in force.
+/// Headers per `RATE_WINDOW` before the first read of the limits in force:
+/// half the image's `max_headers_per_minute`.
 const RATE_LIMIT: u32 = 50_000;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Failed steps in a row that make the state `stalled`.
@@ -225,8 +223,7 @@ impl HeaderSync {
         })
     }
 
-    /// Logs an old header tip of the enclave: a warning at half the enclave's
-    /// `spv_max_tip_age_secs`, and an error at that age, where signing stops.
+    /// Warns at half of `spv_max_tip_age_secs`; errors at it (signing stops).
     fn log_tip_age(&mut self, age: u32, max_age: u32) {
         let level = match age {
             a if a >= max_age => 2,
@@ -356,21 +353,15 @@ impl HeaderSync {
 /// The headers the enclave is missing, from this start height.
 type Batch = (u32, Vec<Header>);
 
-/// The most headers in one batch, and in one `RATE_WINDOW`. The enclave refuses
-/// more than `max_headers_per_submit` in one `SubmitHeaders`, and more than
-/// `max_headers_per_minute` in a minute. So the batch is the source's
-/// `MAX_HEADERS` or the enclave's limit in force, if lower, and the rate is half
-/// the enclave's limit in force. Before the first read of the limits, the sync
-/// uses `MAX_HEADERS` and `RATE_LIMIT`. A batch is never above the rate.
-/// How far below the enclave tip a fork repair starts: `REWIND`, or less when
-/// `max_batch` is low. A repair batch must reach at least one header past the
-/// old tip, because the enclave keeps its own chain when the work is equal. So
-/// the repair starts at most `max_batch - 2` below the tip. A batch limit below
-/// two headers repairs no fork.
+/// The fork repair depth: `REWIND`, at most `max_batch - 2`, so the batch
+/// reaches past the old tip. On equal work the enclave keeps its own chain.
 fn repair_depth(max_batch: u32) -> u32 {
     REWIND.min(max_batch.saturating_sub(2))
 }
 
+/// Batch size and headers per `RATE_WINDOW`: `MAX_HEADERS` capped by
+/// `max_headers_per_submit`, and half of `max_headers_per_minute`
+/// (`RATE_LIMIT` until the first read). The batch never exceeds the rate.
 fn header_limits(limits: Option<&Limits>) -> (u32, u32) {
     let to_u32 = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
     let per_submit = limits.map(|l| l.max_headers_per_submit).filter(|&n| n != 0);
@@ -485,8 +476,7 @@ mod tests {
         assert_eq!(header_limits(Some(&limits(1, 1))), (1, 1));
     }
 
-    /// A repair batch reaches past the old tip, so it can carry more work than
-    /// the headers it replaces.
+    /// A repair batch reaches past the old tip, so it can carry more work.
     #[test]
     fn a_fork_repair_fits_the_batch_limit() {
         assert_eq!(repair_depth(MAX_HEADERS), REWIND);

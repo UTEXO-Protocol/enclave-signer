@@ -51,8 +51,7 @@ use crate::signer::{
     SignatureResponse,
 };
 
-/// Why the parent's own request timeout ends a call before its wait for the
-/// enclave does. Such a call loses a reply that the enclave still sends.
+/// The error when the request timeout ends a call before the enclave answers.
 fn timeout_conflict(request_timeout: Duration, enclave_wait: Duration) -> Option<String> {
     (request_timeout <= enclave_wait).then(|| {
         format!(
@@ -65,8 +64,7 @@ fn timeout_conflict(request_timeout: Duration, enclave_wait: Duration) -> Option
     })
 }
 
-/// Why a mint retry can meet the enclave's replay guard: the parent drops its
-/// reply before the window of the enclave ends.
+/// The warning when kept replies expire inside the enclave's replay window.
 fn reply_ttl_conflict(parent_ttl: Duration, enclave_ttl: Duration) -> Option<String> {
     (parent_ttl < enclave_ttl).then(|| {
         format!(
@@ -237,11 +235,9 @@ pub struct ParentAdapterService {
     signed: std::sync::Arc<SignedResponses>,
     /// The socket deadline of the enclave, in seconds.
     deadline_secs: std::sync::Arc<AtomicU64>,
-    /// The limits in force that the enclave last reported. `None` until the
-    /// first read.
+    /// The limits in force at the last read; `None` before the first.
     limits: std::sync::Arc<std::sync::RwLock<Option<enclave_proto::Limits>>>,
-    /// The parent's own time limit of one gRPC request
-    /// (`GRPC_REQUEST_TIMEOUT_SECS`), when the server has one.
+    /// `GRPC_REQUEST_TIMEOUT_SECS`, when the server has one.
     request_timeout: Option<Duration>,
 }
 
@@ -271,8 +267,7 @@ impl ParentAdapterService {
         }
     }
 
-    /// Sets the parent's own time limit of one gRPC request. The parent logs
-    /// an error when its wait for the enclave reaches it.
+    /// Sets the request timeout to check against the wait for the enclave.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
         self
@@ -322,8 +317,7 @@ impl ParentAdapterService {
         self.report_conflicts(previous.as_ref(), &current);
     }
 
-    /// Logs a parent setting that the limits in force make wrong, once for
-    /// each change of those limits.
+    /// Logs parent settings that conflict with changed limits in force.
     fn report_conflicts(
         &self,
         previous: Option<&enclave_proto::Limits>,
@@ -347,9 +341,8 @@ impl ParentAdapterService {
         }
     }
 
-    /// Keeps the wait of the parent above the socket deadline in force, and
-    /// the header sync within the header limits in force, for the life of the
-    /// parent.
+    /// Re-reads the limits in force for the life of the parent; the wait for
+    /// the enclave and the header sync follow them.
     pub async fn follow_enclave_limits(self) {
         let mut interval = tokio::time::interval(LIMITS_READ_INTERVAL);
         loop {

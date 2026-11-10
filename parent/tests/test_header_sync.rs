@@ -444,10 +444,8 @@ async fn fork_1_and_100_replace_101_stalls() {
     task.abort();
 }
 
-/// A lower `max_headers_per_submit` caps the batch of the parent. A fork repair
-/// then starts closer to the tip, so its batch still reaches past the old tip
-/// and has more work. The relay reports the lower limit to the parent and
-/// leaves the limits of the enclave as they are.
+/// A fork repair under a lower `max_headers_per_submit` still reaches past the
+/// old tip. Only the relay reports the limit: enclave limits are process-wide.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fork_repair_fits_a_lower_batch_limit() {
     let a = extend(&genesis(), 300, 1);
@@ -474,8 +472,7 @@ async fn fork_repair_fits_a_lower_batch_limit() {
     let task = tokio::spawn(sync.run());
     wait(&mut rx, 30, synced_at(300)).await;
 
-    // The parent reads the limits every few seconds. Wait for a read, so the
-    // repair below uses the lower limit.
+    // Wait for a limits read, so the repair below uses the lower limit.
     log.lock().unwrap().clear();
     let t = Instant::now();
     let read = |log: &Log| {
@@ -493,8 +490,7 @@ async fn fork_repair_fits_a_lower_batch_limit() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Forked 1 below the tip: header 300 differs. A 99-deep rewind would send
-    // headers 201..=300, with the same work as the chain of the enclave.
+    // Forked 1 below the tip. A `REWIND`-deep batch ends at 300: equal work.
     log.lock().unwrap().clear();
     let b = extend(&a[..300], 2, 2);
     electrum.set_chain(b.clone());

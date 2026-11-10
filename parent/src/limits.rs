@@ -94,10 +94,8 @@ pub fn table(current: &Limits, image: &Limits) -> String {
     out
 }
 
-/// The limits in force that the parent does not follow, with the reason. The
-/// parent keeps its own frame limit (`framing::MAX_MESSAGE_SIZE`) and its own
-/// limit of protobuf elements (`request_shape::MAX_WIRE_ELEMENTS`), so a higher
-/// value of the enclave changes nothing: the parent refuses the request first.
+/// Notes on limits in force above the parent's own `framing::MAX_MESSAGE_SIZE`
+/// or `request_shape::MAX_WIRE_ELEMENTS`, which the parent applies first.
 pub fn notes(current: &Limits) -> Vec<String> {
     let frame = u64::from(crate::framing::MAX_MESSAGE_SIZE);
     let elements = crate::request_shape::MAX_WIRE_ELEMENTS as u64;
@@ -127,8 +125,7 @@ mod tests {
         values.iter().map(ToString::to_string).collect()
     }
 
-    /// The parent's fixed limits equal the image values of the enclave, so the
-    /// image values need no note and a higher value gets one.
+    /// The fixed limits equal the image values; only a higher one gets a note.
     #[test]
     fn a_limit_above_the_fixed_parent_limit_gets_a_note() {
         let image = utexo_bridge_enclave::limits::Limits::DEFAULTS;
