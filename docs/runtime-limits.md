@@ -274,7 +274,8 @@ old value.
 The header sync of the parent follows the header limits of the same read. It sends
 at most `max_headers_per_submit` headers in one batch, and at most half of
 `max_headers_per_minute` in a minute. Before its first read, it uses the image
-values.
+values. A fork repair resends the headers below the tip, and its batch must reach
+past the old tip. So a lower batch limit also repairs only shallower forks.
 
 The CLI follows the deadline too. Before each request other than `GetLimits`, it
 reads `total_request_timeout_secs` with `GetLimits`. Each socket read and write of

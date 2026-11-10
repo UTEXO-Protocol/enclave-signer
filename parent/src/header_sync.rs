@@ -26,7 +26,7 @@ use crate::header_source::{ElectrumSource, CALL_TIMEOUT, MAX_HEADERS};
 
 /// Headers above a fork point that a fork repair resends: one less than the
 /// enclave's `MAX_REORG_DEPTH`, so a repair replaces the deepest fork that the
-/// enclave accepts.
+/// enclave accepts. A low batch limit lowers it (`repair_depth`).
 const REWIND: u32 = 99;
 /// Headers in each `RATE_WINDOW` until the parent has read the limits in force:
 /// half the image value of the enclave's `max_headers_per_minute`. Then the
@@ -179,12 +179,12 @@ impl HeaderSync {
 
         let (h, hash) = self.enclave_tip().await?;
         self.status.send_modify(|s| s.enclave_tip = Some(h));
-        // A fork repair starts `REWIND` below the tip, but never at or below
-        // the checkpoint: the enclave refuses to rewrite history there.
-        let rewind_to = h
-            .saturating_sub(REWIND)
-            .max(self.floor.map_or(1, |f| f + 1));
         let (max_batch, rate) = header_limits(self.service.limits_in_force().as_ref());
+        // A fork repair starts `repair_depth` below the tip, but never at or
+        // below the checkpoint: the enclave refuses to rewrite history there.
+        let rewind_to = h
+            .saturating_sub(repair_depth(max_batch))
+            .max(self.floor.map_or(1, |f| f + 1));
         let (s, batch) = self
             .source_call(&source, move |src| {
                 fetch(src, h, hash, rewind_to, max_batch)
@@ -362,6 +362,15 @@ type Batch = (u32, Vec<Header>);
 /// `MAX_HEADERS` or the enclave's limit in force, if lower, and the rate is half
 /// the enclave's limit in force. Before the first read of the limits, the sync
 /// uses `MAX_HEADERS` and `RATE_LIMIT`. A batch is never above the rate.
+/// How far below the enclave tip a fork repair starts: `REWIND`, or less when
+/// `max_batch` is low. A repair batch must reach at least one header past the
+/// old tip, because the enclave keeps its own chain when the work is equal. So
+/// the repair starts at most `max_batch - 2` below the tip. A batch limit below
+/// two headers repairs no fork.
+fn repair_depth(max_batch: u32) -> u32 {
+    REWIND.min(max_batch.saturating_sub(2))
+}
+
 fn header_limits(limits: Option<&Limits>) -> (u32, u32) {
     let to_u32 = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
     let per_submit = limits.map(|l| l.max_headers_per_submit).filter(|&n| n != 0);
@@ -474,6 +483,20 @@ mod tests {
         );
         // The smallest limits still send one header.
         assert_eq!(header_limits(Some(&limits(1, 1))), (1, 1));
+    }
+
+    /// A repair batch reaches past the old tip, so it can carry more work than
+    /// the headers it replaces.
+    #[test]
+    fn a_fork_repair_fits_the_batch_limit() {
+        assert_eq!(repair_depth(MAX_HEADERS), REWIND);
+        assert_eq!(repair_depth(REWIND + 2), REWIND);
+        assert_eq!(repair_depth(100), 98);
+        assert_eq!(repair_depth(2), 0);
+        assert_eq!(repair_depth(1), 0);
+        for max_batch in 2..=REWIND + 3 {
+            assert!(repair_depth(max_batch) + 2 <= max_batch, "{max_batch}");
+        }
     }
 
     #[test]

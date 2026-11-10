@@ -20,8 +20,8 @@ use utexo_bridge_enclave::server::{self as enclave_server, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
 use utexo_bridge_parent::enclave_proto::{
     enclave_request, enclave_response, EnclaveRequest, EnclaveResponse, ErrorResponse,
-    GetLastSavedBlockRequest, GetLastSavedBlockResponse, HealthResponse, SubmitHeadersRequest,
-    SubmitHeadersResponse,
+    GetLastSavedBlockRequest, GetLastSavedBlockResponse, HealthResponse, Limits, LimitsResponse,
+    SubmitHeadersRequest, SubmitHeadersResponse,
 };
 use utexo_bridge_parent::enriched::EnrichedBtcPayload;
 use utexo_bridge_parent::framing;
@@ -441,6 +441,67 @@ async fn fork_1_and_100_replace_101_stalls() {
     electrum.set_chain(extend(&c[..=201], 110, 4));
     wait(&mut rx, 20, stalled).await;
     assert_eq!(enclave_tip(enclave), (302, block_hash(&c[302])));
+    task.abort();
+}
+
+/// A lower `max_headers_per_submit` caps the batch of the parent. A fork repair
+/// then starts closer to the tip, so its batch still reaches past the old tip
+/// and has more work. The relay reports the lower limit to the parent and
+/// leaves the limits of the enclave as they are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_repair_fits_a_lower_batch_limit() {
+    let a = extend(&genesis(), 300, 1);
+    let electrum = Electrum::start(a.clone());
+    let enclave = start_real_enclave();
+    let (relay, log) = start_enclave_with(move |req| {
+        if matches!(req.request, Some(enclave_request::Request::GetLimits(_))) {
+            return reply(enclave_response::Response::Limits(LimitsResponse {
+                current: Some(Limits {
+                    max_headers_per_submit: 100,
+                    ..Default::default()
+                }),
+                image: None,
+            }));
+        }
+        let mut s = TcpStream::connect(("127.0.0.1", enclave)).unwrap();
+        framing::write_message(&mut s, &req).unwrap();
+        Some(framing::read_message(&mut s).unwrap())
+    });
+    let service = service(relay);
+    tokio::spawn(Clone::clone(&service).follow_enclave_limits());
+    let source = ElectrumSource::new(&electrum.url).unwrap();
+    let (sync, mut rx) = HeaderSync::new(service, Ok(Some(source)), Duration::from_secs(1));
+    let task = tokio::spawn(sync.run());
+    wait(&mut rx, 30, synced_at(300)).await;
+
+    // The parent reads the limits every few seconds. Wait for a read, so the
+    // repair below uses the lower limit.
+    log.lock().unwrap().clear();
+    let t = Instant::now();
+    let read = |log: &Log| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|(_, r)| matches!(r.request, Some(enclave_request::Request::GetLimits(_))))
+    };
+    while !read(&log) {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the parent read no limits"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Forked 1 below the tip: header 300 differs. A 99-deep rewind would send
+    // headers 201..=300, with the same work as the chain of the enclave.
+    log.lock().unwrap().clear();
+    let b = extend(&a[..300], 2, 2);
+    electrum.set_chain(b.clone());
+    wait(&mut rx, 20, synced_at(301)).await;
+    assert_eq!(enclave_tip(enclave), (301, block_hash(&b[301])));
+    let repair = &submits(&log)[0].1;
+    assert_eq!((repair.start_height, repair.headers.len()), (202, 100));
     task.abort();
 }
 
