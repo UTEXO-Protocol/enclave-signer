@@ -1,17 +1,18 @@
 # Burn destination record
 
-Status: V1 published. This file is the normative format. The enclave code is
+This file is the normative format of the destination that a burn names. V1 is
+published. The enclave code is
 `enclave/src/networks/evm/burn_destination.rs`.
 
-## Why
+## Why a record
 
 A burn has one 32-byte field for the payout target: the BFA global
-`burnReason` (`GS_BURN_REASON`, 3009). rgb-lib treats it as opaque bytes and
-the RGB schema will not grow it. A release
-also needs a destination chain, and non-EVM addresses can be 32 bytes alone.
+`burnReason` (`GS_BURN_REASON`, 3009). rgb-lib treats it as opaque bytes. A
+release also needs a destination chain, and a non-EVM address can be 32 bytes
+alone.
 
-So the field holds a hash of a larger record. The user signs the burn, so the
-user signs the hash. The record itself travels next to the burn. Anyone can
+So the field holds the hash of a larger record. The user signs the burn, so
+the user signs the hash. The record travels next to the burn. Anyone can
 check it: hash the record and compare.
 
 ## Versions
@@ -21,8 +22,8 @@ check it: hash the record and compare.
 | V0 | 12 zero bytes + 20-byte EVM address | Direct `fundsOut` only |
 | V1 | `hash_v1(record)` | Direct `fundsOut` or `lzFundsOut` |
 
-How to tell them apart: if the high 12 bytes are zero, it is V0. Otherwise it
-is a hash. A V1 hash starts with 12 zero bytes with odds of 2^-96.
+If the high 12 bytes are zero, the field is V0. Otherwise it is a hash. A V1
+hash starts with 12 zero bytes with odds of 2^-96.
 
 ## V1
 
@@ -72,6 +73,9 @@ What the enclave checks for V1:
 - `dstEid != 0`: calldata is `lzFundsOut`, calldata `dstEid` == `dstEid`, and
   `recipient` left-padded to 32 bytes == calldata `bytes32 recipient`.
 
+A V0 burn names no chain, so it is released on the direct route only, and its
+request must carry no record.
+
 ## Test vectors
 
 [burn-destination-vectors.json](burn-destination-vectors.json). Each vector
@@ -81,23 +85,37 @@ in your language before you ship.
 
 ## Transport
 
-The record goes to the enclave in proto `EvmDestination.burn_destination`
-(`BurnDestination { version, destination_chain_id, dst_eid, recipient }`). The
-proto bytes are never hashed. The enclave rebuilds the hash from the typed
-fields. A V0 burn must not carry a record.
+The record travels from the wallet to the enclave as typed fields
+(`BurnDestination { version, destination_chain_id, dst_eid, recipient }`).
+The proto bytes are never hashed: the enclave rebuilds the hash from the
+fields.
+
+| Hop | Field |
+|---|---|
+| Backend to listener | node `EvmSignData.burn_destination` (4) |
+| Listener to parent | parent `EnrichedEvmPayload.burn_destination` (10) |
+| Parent to enclave | enclave `EvmDestination.burn_destination` (9) |
+
+What each component does:
+
+- **Wallet.** Builds the record, computes `hash_v1` and passes the hash as
+  the `burnReason` of the burn. Sends the record to the backend with the
+  burn.
+- **Backend.** Checks `hash_v1(record) == burnReason` and refuses a mismatch.
+  Stores the record with the burn: a burn whose record is lost cannot be
+  released. Picks the route from the record: `dstEid == 0` is `fundsOut`,
+  otherwise `lzFundsOut`.
+- **Listener.** Copies the record unchanged. It must not rebuild the record
+  from the calldata: the padded recipient loses its length.
+- **Enclave.** Checks the record against the burn and the calldata, as above.
 
 ## Rules for new versions
 
 - A new version gets a new type string, for example
-  `UtexoBurnDestinationV2(...,bytes refund)`. Its TYPEHASH differs, so a V2
-  hash never equals a V1 hash.
+  `UtexoBurnDestinationV2(...)`. Its TYPEHASH differs, so its hash never
+  equals a V1 hash.
 - Never change a published version. Not the type string, not the field rules.
 - Add new proto fields with new numbers. Keep the old numbers.
-- The enclave keeps every version's verifier forever. A burn on RGB is
+- The enclave keeps the verifier of every version. A burn on RGB is
   permanent, so an old burn must stay releasable.
-- An unknown version is refused (fail closed).
-
-## Planned
-
-- V2: optional `refund` target for stuck burns. It waits for the stuck-burn
-  policy.
+- An unknown version is refused.

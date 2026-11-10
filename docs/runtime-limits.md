@@ -141,7 +141,8 @@ refuses the request and changes nothing.
   `max_message_bytes`. The boot check does not count the files. This check counts
   them, also for a change that keeps the image values. A refusal states how many
   MiB the new limits need. A larger frame or consignment limit can need a larger
-  `run-enclave --memory` value, which needs a new launch.
+  `run-enclave --memory` value, which needs a new launch
+  ([operations.md](operations.md#memory)).
 
 ## The reject list
 
@@ -170,6 +171,11 @@ Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If th
 parent drops a reply first, the enclave refuses the retry until the window ends.
 
 ## Measured times
+
+The work limits (`max_rgb_lib_ms` and the three `..._cost` limits) bound the
+work of rgb-lib on one consignment.
+[validation-cost-model.md](validation-cost-model.md) has the model behind
+them.
 
 These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
 8375C at 2.9 GHz, nitro-cli 1.4.5) on 2026-11-05, with 4096 MiB. `MemTotal` was

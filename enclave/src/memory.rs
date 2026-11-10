@@ -184,7 +184,7 @@ pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
 /// `total_mib` in the "memory check passed" line on `nitro-cli console`. It
 /// must be at least the minimum. Record the reading here.
 ///
-/// The deploy scripts, the README, the spec and `build/deploy-to-ec2.sh`
+/// The deploy scripts, `docs/operations.md` and `build/deploy-to-ec2.sh`
 /// carry this value and the minimum as literals, and a test pins them to the
 /// constants. The deploy scripts refuse a smaller `ENCLAVE_MEMORY`, or one
 /// that is not a whole number of GiB. `deploy-host.sh` and
@@ -531,7 +531,7 @@ mod tests {
             format!("-lt {run} "),
             format!("below the {run} MiB minimum"),
         ];
-        let checks: [(&str, &str, usize, Vec<String>); 5] = [
+        let checks: [(&str, &str, usize, Vec<String>); 4] = [
             // The host script has the check twice: at the top and in the
             // embedded control script.
             (
@@ -547,20 +547,14 @@ mod tests {
                 refusal.to_vec(),
             ),
             (
-                "README.md",
-                include_str!("../../README.md"),
+                "docs/operations.md",
+                include_str!("../../docs/operations.md"),
                 1,
                 vec![
                     format!("--memory {run} "),
                     format!("at least {run} MiB"),
                     format!("needs {min} MiB of usable"),
                 ],
-            ),
-            (
-                "docs/tee-spec.md",
-                include_str!("../../docs/tee-spec.md"),
-                1,
-                vec![format!("({min} MiB)"), format!("at least {run} MiB")],
             ),
             (
                 "build/deploy-to-ec2.sh",

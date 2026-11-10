@@ -1,89 +1,33 @@
 # Verify a burn signer
 
-This guide shows how to check, without access to the operator, that a burn
-signer's EVM address is bound to approved enclave code and is a signer of the
-bridge on Arbitrum One.
+This guide shows how to check, without access to the operator, that the EVM
+address of a burn signer is bound to approved enclave code and is a signer of
+the bridge on Arbitrum One.
 
 The operator publishes one attestation bundle per burn enclave:
-`attestation-<CID>.json`. `deploy/verify-identity.sh` writes it after the
-enclave has its key and the operator supplies the complete approved identity
-map. An attestation failure returns nonzero; other CIDs may already have exported
-bundles. Do not treat individual files as approval of the whole deployment.
-
-The attestation does not cover the time, memory and size limits. The operator can
-change them, and they do not change what the enclave signs
-([Runtime limits](runtime-limits.md)).
-
-## Operator: approve every signer before routing
-
-Obtain the expected main EVM address for **every CID** from the approved deployment
-record and confirm its on-chain registration. Do not generate this map from the
-live keys returned by the nodes you are checking.
-
-Run on each enclave host, replacing the paths and all three addresses:
-
-```bash
-CLUSTER_DIR=/path/to/release \
-ENCLAVE_ENV=/etc/utexo/enclave.env \
-CIDS="16 18 20" \
-EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
-bash deploy/verify-identity.sh
-```
-
-`CIDS` must list every signer that will receive traffic on this host.
-`EXPECTED_EVM` must contain exactly one address for each listed CID. Empty or
-partial maps, duplicate or extra CIDs, and malformed addresses return exit 2
-before any enclave is queried or bundle exported. An explicitly empty `CIDS`
-is also an error; only an unset `CIDS` defaults to `16 18 20`.
-
-For burn/combined signers in normal mode, configure `SIGNER_ROLE`, `PCR_FILE` and
-`IMAGE_ENV` in `ENCLAVE_ENV`, along with the release's launch values. Each export
-receives its approved address through `--expect-evm-address`. Mint or debug mode
-checks the main address with `get-keys`; this is a structural identity check,
-not an attestation. The script compares supplied approvals, not on-chain state.
-
-Routing automation must invoke the default identity mode and require exit 0
-for the full CID list, along with the deployment's other readiness checks.
-Any node failure or identity mismatch returns exit 1; configuration errors
-return exit 2. Do not continue routing on either error or use a partial bundle
-set as a substitute for the successful gate.
-
-For a diagnostic check of running enclaves and initialized keys only:
-
-```bash
-CLUSTER_DIR=/path/to/release CIDS="16 18 20" \
-bash deploy/verify-identity.sh --liveness
-```
-
-This explicit mode needs no identity map or release PCRs, exports no bundles,
-and reports `LIVE` with `identity NOT approved`. Its exit 0 must never enable
-routing. In the default mode, a missing or partial map is a configuration
-error; the mode does not fall back to liveness.
-
-The bundle format is `utexo-signer-attestation/3`. The `verification_mode`
-field tells how the exporter checked the document (`real` or `mock`).
-`attest-verify` refuses a bundle whose mode is not its own, and a bundle of
-any other format.
+`attestation-<CID>.json`. [pubkey-attestation.md](pubkey-attestation.md)
+gives the format and the checks in full.
 
 ## What one bundle proves
 
-The bundle holds an AWS Nitro attestation document for a burn key. Verification
-with independently approved PCRs and expected policy binds the public-key
-bundle and policy to the measured code.
+The bundle holds an AWS Nitro attestation document for a burn key.
+Verification with independently approved PCRs and an expected policy binds
+the public-key bundle and the policy to the measured code.
 
-The release burn build has no seed import, and cloning checks the peer's PCRs.
-These are key-handling rules of the measured code, not an independent proof of
-the key's history. See the [attestation trust limits](pubkey-attestation.md#what-attestation-does-not-prove).
+It does not prove:
 
-## What it does not prove
-
-- Where the key was first created, exclusive custody, or where every signature
-  was produced. Cloned burn enclaves can share the same seed.
+- Where the key was first made, or that only one enclave holds it. Cloned
+  burn enclaves share one seed. The release burn build has no seed import,
+  and cloning checks the PCRs of the peer; these are rules of the measured
+  code, not a proof of the key's history
+  ([limits of an attestation](pubkey-attestation.md#what-an-attestation-proves)).
 - That the enclave runs now. The document is a record of one moment.
-- That the document is fresh. The operator chose the nonce. Use
-  `attest-verify --endpoint` with your own nonce for a live check (see
-  [pubkey-attestation.md](pubkey-attestation.md)).
+- That the document is fresh. The operator chose the nonce. For a live
+  check, run `attest-verify --endpoint` with your own nonce.
 - Anything about the mint signer.
+- Anything about the time, memory and size limits. The operator can change
+  them, and they do not change what the enclave signs
+  ([runtime-limits.md](runtime-limits.md)).
 
 The certificates in the document expire a few hours after it is made.
 `--from-file` checks them at the document's own time. If an AWS signing key
@@ -91,59 +35,47 @@ leaks after its certificate expires, it can sign a backdated document.
 
 ## What you need
 
-- `attest-verify`, built from the release tag: `cd parent && cargo build
-  --release --bin attest-verify`. The build needs the access described in the
-  README.
+- `attest-verify`, built from the release tag:
+  `cd parent && cargo build --release --bin attest-verify`. The build needs
+  the access that [building.md](building.md#requirements) describes.
 - `cast` ([Foundry](https://getfoundry.sh)), and an Arbitrum One RPC URL.
 - The trusted `PCR.json` of the release: the release artifact, or your own
-  rebuild of the EIF. See
-  [Where the expected PCRs come from](pubkey-attestation.md#where-the-expected-pcrs-come-from).
-- The MultisigProxy address. The burn image pins it as
+  rebuild of the EIF
+  ([expected values](pubkey-attestation.md#expected-values)).
+- The `MultisigProxy` address. The burn image pins it as
   `EVM_PROXY_CONTRACT_ADDRESS` in `build/Dockerfile.enclave.burn`.
 
-## Choose the expected launch values
+## Choose the expected values
 
-Endpoint settings are runtime inputs in both SPV and no-SPV images. Rebuilding
-the EIF and checking its image PCRs does not require those settings. The
-production verification below additionally checks the signed runtime policy,
-so it requires independently approved public hosts and CA hashes.
-The no-SPV / IndexerTrusted Development policy does not commit endpoint fields
-and is not accepted by this production verification recipe.
-
-A provider API key in `EVM_RPC_PATH_FILE` is private launch configuration. Do not
-publish it in an attestation bundle or verifier command. The path is excluded
-from the attested policy, so rotating that key on restart does not change the
-image PCRs or the public host/CA expectations. Approval covers accepted paths
-at that endpoint, not a particular provider account.
-
-The bundle's `policy` lists every attested launch value. Do not copy them. Read
+The bundle's `policy` lists every attested value. Do not copy them. Read
 them, and decide whether you accept each one:
 
-| policy field | flag | source |
+| Policy field | Flag | Source |
 |---|---|---|
-| `signer_role` | `--expect-signer-role burn` | always `burn` |
-| `rgb_asset_id` | `--expect-rgb-asset-id` | the BFA asset of the deployment |
-| `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json` |
-| `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json` |
-| `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json` (`safe` or `finalized`; `latest` is refused) |
-| `spv_min_confirmations` | `--expect-spv-min-confirmations` (default 3) | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json` |
-| `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json` |
-| `electrum_host` | `--expect-electrum-host` | the Electrum server you accept |
-| `evm_rpc_tls.host` | `--expect-evm-rpc-host` | the EVM RPC host you accept |
-| `evm_rpc_tls.ca_sha256` | `--expect-evm-rpc-ca-sha256` | SHA-256 of the CA you accept, without `0x` |
+| `signer_role` | `--expect-signer-role burn` | Always `burn`. |
+| `rgb_asset_id` | `--expect-rgb-asset-id` | The BFA asset of the deployment. |
+| `funds_in_contract` | `--expect-funds-in-contract` | `FUNDS_IN_CONTRACT` in `IMAGE-ENV.json`. |
+| `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json`. |
+| `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json`: `safe` or `finalized`. `latest` is refused. |
+| `spv_min_confirmations` | `--expect-spv-min-confirmations` | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json`. |
+| `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json`. |
+| `electrum_host` | `--expect-electrum-host` | The indexer host that you accept. |
+| `evm_rpc_tls.host` | `--expect-evm-rpc-host` | The EVM RPC host that you accept. |
+| `evm_rpc_tls.ca_sha256` | `--expect-evm-rpc-ca-sha256` | The SHA-256 of the CA that you accept, without `0x`. |
 
 The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
 
-Policy version 1 commits to the selected finality tag and the Bitcoin witness
-depth. Production verification
-requires `--expect-evm-finality-tag` with the approved value. Receipt checks
-require coverage by that head and canonical block-hash matching. Use the
-verifier and EIF from the same release with approved PCRs.
-
-The `policy` also lists `clone_peer_pcr3`, the PCR3 of the parent instance IAM
-role. You set no flag for it. `attest-verify` takes the expected value from the
-signed document, and refuses a burn signer whose PCR3 is missing or all zero.
+- The hosts and the CA hash are launch values. They are not in the image, so
+  the PCRs do not cover them. Approve them independently.
+- A provider API key is in the RPC path, which is not attested and is not in
+  the bundle. Approval covers the endpoint, not one provider account.
+- The `policy` also lists `clone_peer_pcr3`, the PCR3 of the parent instance
+  IAM role. You set no flag for it. `attest-verify` takes the expected value
+  from the signed document, and refuses a burn signer whose PCR3 is missing
+  or all zero.
+- This recipe accepts a `Production` policy only. A burn signer built without
+  `spv` attests `Development`, which commits no endpoint, and fails here.
 
 ## Run the check
 
@@ -176,6 +108,59 @@ The script:
 5. Checks that the address is in `MultisigProxy.getEnclaveSigners(827166)`.
    827166 is the bridge's id for the RGB network (`RGB_CHAIN_ID`).
 
-Exit 0 means all checks pass. Exit 1 names the check that failed. Exit 2 is a
-usage error. The script refuses `--mock` with exit 2: a signer is verified in
-real mode only. Run the script once for each published bundle.
+Exit 0 means that all checks pass. Exit 1 names the check that failed. Exit 2
+is a usage error. The script refuses `--mock` with exit 2: a signer is
+verified in real mode only. Run the script once for each published bundle.
+
+The bundle format is `utexo-signer-attestation/3`. Its `verification_mode`
+field tells how the exporter checked the document (`real` or `mock`).
+`attest-verify` refuses a bundle whose mode is not its own, and a bundle of
+any other format.
+
+## Operator: approve every signer before routing
+
+`deploy/verify-identity.sh` writes the bundles. It runs after each enclave
+has its key, and it needs the complete approved identity map.
+
+Get the expected main EVM address of **every CID** from the approved
+deployment record, and confirm its on-chain registration. Do not make this
+map from the live keys of the nodes under check.
+
+Run on each enclave host:
+
+```bash
+CLUSTER_DIR=/path/to/release \
+ENCLAVE_ENV=/etc/utexo/enclave.env \
+CIDS="16 18 20" \
+EXPECTED_EVM="16=0x<40-hex-address> 18=0x<40-hex-address> 20=0x<40-hex-address>" \
+bash deploy/verify-identity.sh
+```
+
+- `CIDS` must list every signer that receives traffic on this host. An unset
+  `CIDS` means `16 18 20`; an empty one is an error.
+- `EXPECTED_EVM` must have exactly one address for each listed CID. An empty
+  or partial map, a duplicate or extra CID and a malformed address return
+  exit 2 before any enclave is queried.
+- For a burn signer in normal mode, set `SIGNER_ROLE`, `PCR_FILE` and
+  `IMAGE_ENV` in `ENCLAVE_ENV`, with the launch values of the release. Each
+  export gets its approved address through `--expect-evm-address`.
+- For a mint signer, or in debug mode, the script compares the main address
+  from `get-keys`. That is a structural identity check, not an attestation.
+- The script compares the approvals that you supply. It does not read the
+  chain.
+
+Routing automation must run this default mode and require exit 0 for the
+full CID list, with the other readiness checks of the deployment. A node
+failure or an identity mismatch returns exit 1, and a configuration error
+exit 2. Do not route on either, and do not use a partial set of bundles in
+place of the passed gate: a failure can come after some bundles were written.
+
+For a diagnostic check of running enclaves and loaded keys only:
+
+```bash
+CLUSTER_DIR=/path/to/release CIDS="16 18 20" \
+bash deploy/verify-identity.sh --liveness
+```
+
+This mode needs no identity map and no PCRs, exports no bundle, and reports
+`LIVE` with `identity NOT approved`. Its exit 0 must never enable routing.

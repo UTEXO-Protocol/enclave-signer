@@ -1,103 +1,92 @@
-# Verify an attested signing key
+# Attested signing keys
 
-Attestation binds a public-key bundle to measured enclave code and its declared
-security policy. The verifier must trust AWS Nitro and approve the expected
-PCR0, PCR1, and PCR2 measurements.
+An attestation binds a public-key bundle to measured enclave code and its
+security policy. This document says what that proves, how the bytes are
+built, and how to verify them. For a step-by-step check of a published
+bundle, see [verify-a-signer.md](verify-a-signer.md).
 
-## Trust statement
+## What an attestation proves
 
-Successful verification shows that measured code answered the verifier's nonce
-with this key bundle and policy. The measured code controls how keys are
-created, recovered, or cloned. The attestation document alone does not prove
-where a private key was first created.
+Successful verification shows one thing: **approved, measured code (PCR0,
+PCR1, PCR2) answered the verifier's fresh nonce with this key bundle and
+this policy.** The verifier must trust AWS Nitro and approve the expected
+measurements.
 
-The policy covers selected settings. These include signer role, bridge pins,
-plain-BTC permission, gas limits, data sources, and mint KMS configuration.
-The enclave resolves the policy once, at `SetEndpoints`. The verifier compares
-its expected policy with the authenticated response.
-
-### What attestation does NOT prove
-
-Real verification proves only that **approved, measured code (PCR0/1/2 = X/Y/Z)
-answered a fresh-nonce request with these public bytes**. It does
-**not** establish any of the following, and consumers MUST NOT rely on them:
+It does **not** show any of these, and a consumer MUST NOT rely on them:
 
 - **Key origin.** The document does not prove where or when the private key
-  was created. The code can attest a generated, recovered, or cloned key.
+  was made. The code can attest a generated, a recovered or a cloned key.
 - **Exclusive custody.** The same seed can exist in several enclaves. Burn
-  replicas can use peer cloning. Mint replicas can recover the same KMS seed.
-- **No previous copy.** Attestation cannot prove that no party previously held
-  or copied the private key.
+  replicas clone it. Mint replicas recover the same KMS seed.
+- **No earlier copy.** Attestation cannot prove that no party held the key
+  before.
+- **Readiness.** The request does not contact the EVM RPC. Verification can
+  succeed while the provider is down, and it does not show that the signer
+  can complete a request now.
+- **Honest data.** The policy names the configured endpoint. It does not
+  prove that the provider's answers are true.
 
-Trust requires both approved measurements and a fresh-nonce response.
-Review the measured code to establish its key-custody rules. See the
-[key management specification](tee-spec.md#5-key-management).
+The rules for how keys are made, kept and cloned come from the measured code,
+not from the document ([tee-spec.md](tee-spec.md#5-keys-and-lifecycle)).
 
-The chain of trust is:
+The chain of trust:
 
 ```
-AWS Nitro Root CA  (public, hardcoded)
+AWS Nitro root CA  (public, embedded in the verifier)
        │ signs
-AWS region intermediate(s)
-       │ signs
-This EC2 instance's NSM signing cert
+AWS region intermediates
+       │ sign
+The NSM signing certificate of this EC2 instance
        │ signs (P-384 ECDSA, COSE_Sign1)
 Attestation document { pcrs, public_key, user_data, nonce, timestamp, ... }
 ```
-
-### Identity is not provider readiness
-
-`AttestedPublicKey` attests the installed public keys and configured policy.
-It does not contact the EVM RPC provider, so verification can succeed while that
-provider is unavailable. It does not show that the node can complete a signing
-request. The `Health` response checks whether endpoints are set, keys
-are loaded and, where required, SPV is ready; it does not probe EVM RPC
-availability either. Routing that requires live provider availability needs
-a separate check.
 
 ## Protocol
 
 ```
 verifier                                 parent gRPC                      enclave (Nitro)
-   │                                          │                                 │
    │ 1. nonce ← rand(32)                      │                                 │
    │ 2. AttestedPublicKey(nonce) ────────────▶│                                 │
    │                                          │ 3. GetAttestedPublicKey(nonce) ▶│
-   │                                          │                                 │ 4. NSM produces COSE_Sign1 doc
-   │                                          │                                 │    binding {nonce,
-   │                                          │                                 │            public_key=evm_uncompressed_pub,
-   │                                          │                                 │            user_data=sha256(bundle || policy)}
-   │                                          │                                 │    to PCR0/1/2
-   │                                          │ ◀── (public_keys, doc) ─────────│
+   │                                          │                                 │ 4. the NSM signs a document
+   │                                          │                                 │    over the PCRs, the nonce,
+   │                                          │                                 │    public_key and user_data
+   │                                          │ ◀── (public_keys, doc, policy) ─│
    │ ◀── AttestedPublicKeyResponse ───────────│                                 │
-   │                                                                            │
-   │ 5. Verify chain → AWS root, COSE sig, validity, PCRs, nonce equal,
-   │    public_key == evm_uncompressed_pub,
-   │    user_data == sha256(bundle || expected_policy).                         │
+   │ 5. verify the chain, the signature, the PCRs, the nonce,
+   │    public_key and user_data.
 ```
 
-## Bindings
+See the [sequence diagram](diagrams/05-seq-attested-pubkey.md).
 
-The NSM attestation document carries three caller-supplied fields. The enclave
-populates them as:
+Until `SetEndpoints`, the enclave refuses the request. Before keys exist it
+attests the policy only: `public_keys` is empty, the document has no
+`public_key`, and `user_data` is
+`sha256("utexo/attested-policy/v1\0" || policy_bytes)`. The deploy reads
+this answer through the CLI for its
+[launch check](operations.md#launch-check). The parent's gRPC
+`AttestedPublicKey` refuses an answer without keys.
 
-| NSM field    | Bound value                                                                                 |
-|--------------|---------------------------------------------------------------------------------------------|
-| `public_key` | `evm_uncompressed_pub` — the bridge's primary signing key (64 bytes, X\|\|Y)              |
-| `user_data`  | `sha256(canonical_bundle \|\| policy_commitment)` — 32-byte commitment over the key bundle *and* the resolved security policy |
-| `nonce`      | the 32-byte nonce supplied by the verifier                                                 |
+## What the document binds
 
-A lightweight verifier can stop at `public_key` (e.g. an EVM contract that
-only cares about the signing address). A thorough verifier rebuilds the
-canonical bundle **and the expected security policy** and checks `user_data` to
-confirm the account xpubs and fingerprint were not swapped by the parent host
-process *and* that the enclave's posture matches what was expected.
+The enclave fills the three caller fields of the NSM document:
+
+| NSM field | Value |
+|-----------|-------|
+| `public_key` | `evm_uncompressed_pub`: the bridge signing key, 64 bytes, X \|\| Y |
+| `user_data` | `sha256(canonical_bundle \|\| policy_commitment)`: 32 bytes over the key bundle and the security policy |
+| `nonce` | The 32-byte nonce of the verifier |
+
+A verifier that needs only the signing address can stop at `public_key`. A
+full verifier rebuilds the bundle and the expected policy and checks
+`user_data`. That shows that the parent swapped no account key, and that the
+posture of the enclave is the expected one.
 
 ### Canonical bundle encoding
 
-Concatenate all fields of `PublicKeysResponse` in proto field order.
-Prefix each field with its length as a big-endian u32. Encode strings as UTF-8.
-`chain_id` is encoded as 8-byte big-endian (length prefix is the constant 8).
+Concatenate every field of `PublicKeysResponse` in proto field order. Prefix
+each field with its length as a big-endian u32. Strings are UTF-8.
+`chain_id` is 8 bytes, big-endian.
 
 ```
 canonical_bundle =
@@ -113,54 +102,33 @@ canonical_bundle =
     u32_be(len(evm_gas_tx_address))          || evm_gas_tx_address            // 20 bytes
 ```
 
-Ten fields. `chain_id`, `bridge_contract` and `rgb_asset_id` are bridge
-config pinned at enclave boot from env (`EVM_CHAIN_ID`,
-`EVM_PROXY_CONTRACT_ADDRESS`, `RGB_ASSET_ID`). They commit the enclave to a
-specific chain / contract / asset triple — a misconfigured or
-maliciously-redirected enclave is observable through this commitment. (The
-attestation-bundle/proto field `bridge_contract` holds the MultisigProxy
-address from `EVM_PROXY_CONTRACT_ADDRESS`.)
-Production deployments MUST set all three; the commitment for a dev /
-mock build with no env is `chain_id=0`, `bridge_contract=20 zero bytes`,
-`rgb_asset_id=""`. The gas-tx key is derived in every
-build, so the bundle has the same shape regardless of features. The bundle
-dropped the retired BTC key and the retired Concordium key: this is a new
-layout (offline bundle format `utexo-signer-attestation/3`), and the image
-measurements change with it.
+Ten fields, in every build. `chain_id`, `bridge_contract` and `rgb_asset_id`
+are the image pins `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS` (the
+`MultisigProxy`) and `RGB_ASSET_ID`. An unpinned dev build commits
+`chain_id=0`, 20 zero bytes and an empty asset id.
 
-The CLI reconstructs policy using the chain/contract/asset pins from the
-response. These values are always authenticated (they are inside the signed
-commitment); to also compare them against the operator's intended deployment,
-pass `--expect-chain-id`, `--expect-bridge-contract` and/or
-`--expect-rgb-asset-id`. When set, verification fails unless the enclave attests
-exactly those pins, so onboarding can reject a valid attestation of the *wrong*
-chain, contract or RGB asset. When omitted, the pins are authenticated but not
-compared. A successful run prints each pin, and every other verified field, as
-one `name: value` line. The names are the paths of the exported bundle. Compare
-the values in that output or in the bundle.
-
-The verifier MUST use the same field set, the same order, and the same
-length-prefix encoding. The reference encoder is `canonical_pubkey_bundle`
-in [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs) and the reference
-decoder/checker is `canonical_bundle` in
-[`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
+A verifier MUST use the same fields, order and length prefixes. The reference
+encoder is `canonical_pubkey_bundle` in
+[`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs). The reference
+decoder is `canonical_bundle` in
+[`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs). The offline
+bundle format is `utexo-signer-attestation/3`.
 
 ### Security policy commitment
 
-The canonical bundle above is followed by the enclave's resolved security
-policy, and `user_data = sha256(canonical_bundle || policy_commitment)`. The
-policy is the single source of truth for the enclave's posture - resolved once
-at launch (`SetEndpoints`) in [`enclave/src/policy.rs`](../enclave/src/policy.rs) and serialized by
-[`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs), which
-both the enclave and every verifier share so the bytes are identical.
+The enclave resolves its policy once, at `SetEndpoints`
+([`enclave/src/policy.rs`](../enclave/src/policy.rs)). The encoding is in
+[`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs),
+which the enclave and every verifier share. The response carries the bytes
+(`attested_policy`).
 
 ```
 policy_commitment =
     u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
-    // Production (release, fully-pinned bridge signer):
+    // Production (release, fully pinned bridge signer):
     u8(0x01)                                        // production discriminant
-    u8(allow_vanilla_psbt)                          // plain-BTC path enabled?
-    u8(signer_role)                                 // 0 combined | 1 mint | 2 burn (from build features)
+    u8(allow_vanilla_psbt)                          // plain-BTC path on?
+    u8(signer_role)                                 // 0 combined | 1 mint | 2 burn
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
     u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 reserved | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
@@ -170,8 +138,8 @@ policy_commitment =
     u32_be(len(rgb_asset_id)) || rgb_asset_id_utf8
     funds_in_contract(20)                           // authorized event emitter
     u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
-    spv_min_confirmations_be4                       // required Bitcoin witness depth (the mint signer does not check it)
-    u32_be(len(electrum_host)) || electrum_host     // Electrum host set at launch
+    spv_min_confirmations_be4                       // required Bitcoin witness depth
+    u32_be(len(electrum_host)) || electrum_host     // indexer host, set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
     // Gas-tx (SignRawDigest) rule:
@@ -179,7 +147,7 @@ policy_commitment =
     gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
-    u32_be(len(selectors)) || selector(4)...        // sorted + deduped 4-byte selectors
+    u32_be(len(selectors)) || selector(4)...        // sorted, without duplicates
     token_contract(20)                              // released ERC-20 (burnId preimage input)
     u8(kms_present)                                 // 0 absent; 1 followed by (set at launch):
       u32_be(len(key_arn)) || key_arn || u32_be(len(region)) || region
@@ -187,314 +155,179 @@ policy_commitment =
       || u8(address_present) [|| expected_evm_address(20)]
     u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
       [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
-    // Development (debug/test/dev-feature/no-SPV/non-bridge/unpinned build):
+    // Development (debug, test, dev-feature, no-SPV, or unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
-V1 commits to `evm_finality_tag`, selected by `EVM_FINALITY_TAG` (`finalized` in
-every image, and the default), and to `spv_min_confirmations`
-(`SPV_MIN_CONFIRMATIONS`: 3 in every image; only the burn signer checks it).
-Every EVM `FundsIn` receipt must be at or below the selected head, with its
-block hash matching the canonical block at that height. The enclave
-revalidates the selected head snapshot to detect a reorg. The enclave trusts
-the pinned RPC for the correctness of these responses. Production verification
-requires `--expect-evm-finality-tag` with the approved `safe` or `finalized`
-value; a production enclave refuses `latest` at boot, and so does the verifier.
+Notes on the fields:
 
-`clone_peer_pcr3` binds clone peers to the parent instance IAM role. A
-verifier does not configure it: it takes PCR3 from the verified document (the
-NSM signs it), requires it to be present and not all zero for a cloning role,
-and expects no value for the mint signer. An enclave on an instance without an
-IAM role therefore fails verification, and does not start.
+- **Development.** A dev or mock enclave, and a real-attestation build
+  without `spv`, commit only `[version, 0x00]`: no endpoint, no pin, no rule.
+- **`evm_finality_tag`.** Production verification requires
+  `--expect-evm-finality-tag` with the approved `safe` or `finalized`. A
+  production enclave refuses `latest`, and so does the verifier.
+- **`spv_min_confirmations`.** Only the burn signer checks it.
+- **`bitcoin_network`.** The network of the header chain and of the accepted
+  consignments. A verifier declares it (`--expect-bitcoin-network`).
+- **The gas rule.** The whole `SignRawDigest` rule is committed, so a
+  verifier can check it. An unset ceiling commits as 0, which is the rule it
+  enforces: no value is signable. So an unset rule and a zero rule give the
+  same bytes.
+- **`clone_peer_pcr3`.** A verifier sets no expected value. It takes PCR3
+  from the verified document, requires it to be present and not all zero for
+  a cloning role, and expects none for the mint signer.
+- **Not committed.** The scheme and port of the indexer URL, the EVM RPC
+  port and path, `BTC_MAX_UNOWNED_SATS`, the value of `BTC_MAX_TOTAL_SATS`
+  (only on or off, as `allow_vanilla_psbt`), `MINT_WITNESS_SAT` and the
+  runtime limits ([tee-spec.md](tee-spec.md#4-security-policy)).
 
-Use enclave images and verifiers from the same release with approved EIF
-measurements. Clone peers must have matching policy commitments.
+## Expected values
 
-`bitcoin_network` is `BITCOIN_NETWORK`, the network of the SPV header chain and
-of the accepted consignments. A verifier declares it (`--expect-bitcoin-network`,
-default `bitcoin`). A production policy pinned to a mainnet EVM chain (`1`,
-`42161`) with another Bitcoin network does not boot. The enclave reads the
-attested value with the same parser as the SPV chain, and an unknown name does
-not boot.
+A verifier must get its expected values from a source outside the response.
+The document under check cannot say what is acceptable.
 
-The tuple omits the sats values, the Electrum/Esplora
-URL scheme and port, and the EVM RPC TLS port. The scheme needs no field: a
-release image accepts only `ssl://` or `https://` for the Electrum/Esplora
-URL, so PCR0 covers it. Only a dev build (and thus a development policy)
-accepts `tcp://` or `http://`. Matching policies do not prove specific
-endpoint ports.
+**PCRs.** PCR0 measures the image, PCR1 the kernel and bootstrap, PCR2 the
+application. This repository publishes the measurements with the EIF
+artifacts (`PCR.json`). A verifier can also rebuild the EIF
+([building.md](building.md#reproducibility)). A file checksum and a PCR are
+different values. An old or weak image still verifies while its PCRs stay
+approved, so the approval of measurements is part of the security.
 
-The sats values are image env, so PCR0 measures them. The policy does not
-commit `BTC_MAX_UNOWNED_SATS` or `MINT_WITNESS_SAT`,
-and `attest-verify` has no flag for them. `BTC_MAX_TOTAL_SATS` shows only as
-`allow_vanilla_psbt`: a non-zero value allows plain-BTC signing, except on a
-burn signer.
+**Policy.** The verifier builds the expected policy from its own settings:
+the role, the image pins and acceptance rules, and the independently approved
+launch values ([configuration.md](configuration.md)). Checking the image
+identity and approving the launch values are two separate checks. The
+launch values are not in the PCRs, and a provider API key is in neither the
+PCRs nor the policy.
 
-Image-baked values remain measured in the EIF. For both SPV and no-SPV builds,
-the endpoints and any digest of them are outside the image; the operator sets
-them and the KMS values once at launch (`SetEndpoints`). Changing launch hosts,
-ports or the RPC CA does not change PCR0/1/2 of the same EIF. The policy commits
-only the fields listed above. Until
-the set, `GetAttestedPublicKey` is refused. The response carries the policy bytes
-that `user_data` commits (`attested_policy`), so a verifier can decode them.
+**Bridge pins.** `attest-verify` reads `chain_id`, `bridge_contract` and
+`rgb_asset_id` from the authenticated response. To compare them with the
+intended deployment, pass `--expect-chain-id`, `--expect-bridge-contract`
+and `--expect-rgb-asset-id`. Without these flags the pins are authenticated
+but not compared: the caller must compare the printed values.
 
-A production enclave commits the full production tuple. A dev/mock enclave,
-and the real-attestation no-SPV / IndexerTrusted profile, commit only
-`[version, 0x00]`, without individual policy settings. The response
-contains this encoding in `attested_policy`. The verifier authenticates and
-decodes those bytes.
-It then constructs the expected policy from its own settings and the authenticated
-bridge pins. The policies must match. Do not use the response itself to decide
-which policy is acceptable.
-
-The gas-tx rule is the `SignRawDigest` allowlist: the pinned
-destination, the `gasLimit`/fee ceilings that bound fee-griefing, the
-native-value ceiling that bounds the payable `lzFundsOutCall` carve-out, and the
-4-byte calldata selectors the gas EOA may invoke. Committing it makes the
-enclave's gas-signing policy externally verifiable instead of a self-protection
-pin the operator has to trust; `attest-verify` declares the expected rule via
-`--expect-gas-tx-to` / `--expect-gas-max-gas-limit` / `--expect-gas-max-fee-per-gas`
-/ `--expect-gas-max-value-wei` / `--expect-gas-selectors`.
-
-An unset `GAS_TX_MAX_VALUE_WEI` commits as `0`, which is exactly the posture it
-enforces (no non-zero value is signable) — so "unpinned" is itself attested, the
-same way an unset destination commits as all-zero. `None` and `Some(0)` therefore
-produce identical bytes; one enforced rule cannot yield two attestations.
-
-## Where the expected PCRs come from
-
-The attestation document contains signed PCR values. A verifier must obtain
-its expected values from a trusted source outside that response.
-
-PCR0 measures the image. PCR1 measures the kernel and bootstrap. PCR2 measures
-the application. Rebuild the EIF to determine whether a change affects them.
-A file checksum and a PCR measurement are different values.
-
-Reproducing the image measurements requires the release's source, toolchain
-and public build inputs, not a member's endpoint hosts, ports or RPC CA.
-This applies to both SPV and no-SPV profiles. Source/dependency access is
-required as described in the README. Endpoint changes reuse the same image
-and its PCR allowlist.
-
-Provider credentials can be supplied through `EVM_RPC_PATH_FILE` at launch.
-The private path is not in the image, attested policy or KMS encryption context.
-Replacing the file and restarting rotates the key without changing those
-values. Verifiers need only the independently approved public fields their
-selected policy commits; they do not need the API key. See the
-[launch path rules](../README.md#enclave).
-
-Checking image identity and approving runtime policy are separate checks.
-The full production verifier still compares independently approved endpoint
-hosts and CA hashes with the signed policy in `user_data`; these values do
-not enter image PCRs. A no-SPV Development commitment contains no such
-settings. Its real attestation can authenticate the image and key, but cannot
-authenticate or approve the operator's endpoint configuration.
-
-This repository publishes measurements with EIF artifacts. Verify those
-artifacts before you use their PCRs. A trusted configuration or registry can
-also distribute approved measurements. Its security depends on how updates
-are authorized, not on where the values are stored.
-
-## Verification recipe (manual)
+## Verification by hand
 
 Given `(public_keys_bundle, attestation_doc, nonce_sent, expected_pcrs)`:
 
-1. Parse `attestation_doc` as `COSE_Sign1` (CBOR array of length 4).
+1. Parse `attestation_doc` as `COSE_Sign1` (a CBOR array of length 4).
    Require ES384 (`alg = -35`) in the protected header.
 2. Parse the inner CBOR payload as `AttestationDocument`.
 3. Verify the certificate chain in `cabundle`:
-    - `cabundle[0]` must equal the AWS Nitro root CA bytewise (DER).
-    - For each `i`, `cabundle[i]` must sign `cabundle[i+1]` (DER ECDSA).
-    - `cabundle[last]` must sign `signing_cert` (the cert in the doc).
-    - Check certificate validity against the local clock, with the implementation
+    - `cabundle[0]` must equal the AWS Nitro root CA, byte for byte (DER).
+    - For each `i`, `cabundle[i]` must sign `cabundle[i+1]`.
+    - `cabundle[last]` must sign `signing_cert`, the certificate in the
+      document.
+    - Check the validity of each certificate against the local clock, with a
       tolerance of 60 seconds.
-    - Require CA `BasicConstraints` on each issuer. Check path-length limits.
-    - If an issuer has `KeyUsage`, require `keyCertSign`.
-    - If the signing certificate has `KeyUsage`, require `digitalSignature`.
+    - Require CA `BasicConstraints` on each issuer. Check the path-length
+      limits.
+    - If an issuer has `KeyUsage`, require `keyCertSign`. If the signing
+      certificate has `KeyUsage`, require `digitalSignature`.
 4. Verify the COSE signature: P-384 ECDSA over
-   `Sig_structure1 = ["Signature1", protected, h"", payload]`. Per RFC 8152
-   §8.1 the COSE signature is raw `r||s` (96 bytes for P-384), not DER.
-5. Reject all-zero PCR0/1/2. Compare each PCR with its expected value, byte for byte.
-   The unsafe `allow-debug-pcrs` feature disables only the all-zero rejection.
-   A release build with this feature does not compile.
-6. Nonce check: `doc.nonce == nonce_sent`.
-7. Pubkey check: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
-8. Commitment check: confirm
-   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || attested_policy)`,
-   decode `attested_policy`, and confirm it equals the expected policy (from
-   the expected posture + the wire pins).
+   `Sig_structure1 = ["Signature1", protected, h"", payload]`. The signature
+   is raw `r||s` (96 bytes), not DER (RFC 8152, section 8.1).
+5. Reject all-zero PCR0, PCR1 and PCR2. Compare each PCR with its expected
+   value, byte for byte. The dev feature `allow-debug-pcrs` turns off the
+   all-zero rejection only; a release build with it does not compile.
+6. Nonce: `doc.nonce == nonce_sent`.
+7. Public key: `doc.public_key == public_keys_bundle.evm_uncompressed_pub`.
+8. Commitment:
+   `doc.user_data == sha256(canonical_bundle(public_keys_bundle) || attested_policy)`.
+   Then decode `attested_policy` and require it to equal the expected policy.
 
-The verifier returns the document timestamp but does not enforce a maximum
-document age. Freshness depends on a new unpredictable nonce and the caller's
-request timing. Do not reuse nonces.
+If all eight checks pass, the EVM address
+(`keccak256(evm_uncompressed_pub)[12..]`) is bound to the measured code, and
+the attested posture is the expected one.
 
-If all eight checks pass, the bridge's EVM address (`keccak256(evm_uncompressed_pub)[12..]`)
-is bound to the running TEE measurement *and* the enclave's attested posture
-equals the expected production policy.
+The verifier returns the document timestamp but enforces no maximum age.
+Freshness comes from a new unpredictable nonce. Do not reuse a nonce.
 
-## Verification recipe (with `attest-verify`)
+## Verification with `attest-verify`
 
-The `attest-verify` CLI in this repo runs the full recipe. Configure the client
-CA/certificate/key environment from [Parent mTLS](parent-mtls.md) first; an
-`observer` certificate is sufficient for verification.
-To check a published bundle offline (`--from-file`), see
-[Verify a burn signer](verify-a-signer.md).
+The `attest-verify` CLI runs the whole recipe. It calls the parent, so
+configure the client certificate first
+([parent-mtls.md](parent-mtls.md#clients)); the `observer` role is enough.
 
 ```bash
-# Production verification (against a real Nitro enclave). By default it expects a
-# production policy with plain-BTC signing DISABLED and the pinned-TLS EVM data
-# source (`--expect-evm-source tls`, what the shipped image uses), which needs the
-# Electrum host, the EVM RPC host and the CA the operator set at launch. Compute
-# the CA hash from the same DER the operator set:
+# The CA hash, from the same DER that the operator set:
 #   openssl x509 -in ca.pem -outform der | openssl dgst -sha256 -hex
 attest-verify \
     --endpoint https://parent.example:50051 \
-    --pcr0 <96-hex-chars> \
-    --pcr1 <96-hex-chars> \
-    --pcr2 <96-hex-chars> \
+    --pcr0 <96-hex-chars> --pcr1 <96-hex-chars> --pcr2 <96-hex-chars> \
     --expect-signer-role burn \
-    --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-funds-in-contract 0x6711f1a319B37847fa0234181C34D883774c4951 \
-    --expect-evm-finality-tag finalized \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
+    --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
+    --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
-
-# --expect-signer-role is required: `mint` for the mint signer image
-# (Dockerfile.enclave.mint), `burn` for the burn signer
-# (Dockerfile.enclave.burn), `combined` for a build with no signer role. A burn signer that
-# attests `mint` fails verification. A role attests the other role's path as
-# off whatever its env says: a burn signer never attests plain-BTC signing
-# (omit --expect-vanilla-psbt), a mint signer never attests a gas rule (omit
-# the --expect-gas-* flags). A mint signer also needs --expect-kms-key-arn,
-# --expect-kms-region and --expect-kms-seed-id, and --expect-kms-evm-address
-# when the operator set one.
-
-# Gas signing: also supply the image's exact expected rule when configured:
-# --expect-gas-tx-to <hex20> --expect-gas-max-gas-limit <units>
-# --expect-gas-max-fee-per-gas <wei> --expect-gas-max-value-wei <wei>
-# --expect-gas-selectors <comma-separated-hex4>
-# Omitted flags expect an unpinned gas rule, not values discovered from the enclave.
-
-# Deployment pins: compare the attested chain/contract/asset against the
-# operator's intended deployment (otherwise they are authenticated but not
-# compared). Verification fails on any mismatch:
-# --expect-chain-id <u64> --expect-bridge-contract <hex20> \
-# --expect-rgb-asset-id <asset>   # empty string pins "no RGB asset"
-# --expect-bitcoin-network <bitcoin|testnet3|testnet4|signet|signetcustom|regtest>   # default bitcoin
-
-# Expect the plain-BTC path enabled:
-attest-verify --endpoint https://parent.example:50051 \
-    --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
-    --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
-    --expect-evm-finality-tag finalized \
-    --expect-spv-min-confirmations 3 \
-    --expect-electrum-host <electrum host> \
-    --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
-    --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
-    --expect-vanilla-psbt
-
-# Dev / CI verification (against an enclave built with --features mock-attestation).
-# --mock implies the expected policy is Development.
-# For this loopback plaintext example, remove PARENT_TLS_* and explicitly
-# enable GRPC_ALLOW_INSECURE_LOOPBACK=true on the loopback-bound Parent.
-attest-verify --endpoint http://127.0.0.1:50051 --mock
 ```
 
-Exit codes:
+| Flags | Expected value |
+|-------|----------------|
+| `--pcr0`, `--pcr1`, `--pcr2` | The approved measurements. |
+| `--expect-signer-role` | Required: `mint`, `burn`, or `combined` for a build with no signer role. |
+| `--expect-evm-finality-tag` | Required: `safe` or `finalized`. |
+| `--expect-funds-in-contract`, `--expect-token-contract` | The image pins. Required. |
+| `--expect-spv-min-confirmations`, `--expect-bitcoin-network` | The image values. Defaults: 3 and `bitcoin`. |
+| `--expect-electrum-host`, `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | The approved launch values. |
+| `--expect-evm-source` | `tls` (the default, and what the images use), `raw` or `disabled`. |
+| `--expect-gas-tx-to`, `--expect-gas-max-gas-limit`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. |
+| `--expect-vanilla-psbt` | A mint signer with plain-BTC signing on. |
+| `--expect-kms-key-arn`, `--expect-kms-region`, `--expect-kms-seed-id`, `--expect-kms-evm-address` | The KMS values of a mint signer. The address only when the operator set one. |
+| `--expect-chain-id`, `--expect-bridge-contract`, `--expect-rgb-asset-id` | Optional: compare the bridge pins. |
+| `--from-file <bundle.json>` | Verify a published bundle offline ([verify-a-signer.md](verify-a-signer.md)). |
+| `--mock` | Dev and CI only: a `mock-attestation` enclave. Expects a `Development` policy. |
 
-| Code | Meaning                                                         |
-|------|-----------------------------------------------------------------|
-| 0    | All eight checks passed                                         |
-| 1    | Error after argument parsing: verification, connection, file I/O or missing/invalid settings (e.g. PCR hex); see stderr |
-| 2    | Command-line argument parsing failed (e.g. unknown/conflicting flags or non-numeric `--expect-chain-id`) |
+A role attests the path of the other role as off, whatever its env says. A
+burn signer never attests plain-BTC signing, so omit `--expect-vanilla-psbt`.
+A mint signer never attests a gas rule, so omit the `--expect-gas-*` flags.
 
-## Launch check at deploy
+A successful run prints every verified field as one `name: value` line. The
+names are the paths of the exported bundle.
 
-Before keys exist, `GetAttestedPublicKey` returns a policy-only answer:
-`public_keys` is empty, the document has no `public_key`, and `user_data` is
-`sha256("utexo/attested-policy/v1\0" || policy_bytes)`. The parent gRPC
-`AttestedPublicKey` still refuses an answer without keys.
-
-`deploy/deploy-host.sh` deploys one enclave per run, for `SIGNER_ROLE=mint` or
-`burn`. `utexo-enclave-ctl.sh start` then runs `set-endpoints` and
-`utexo-bridge-parent-cli verify-launch --signer-role <role>` on that enclave.
-`verify-launch` verifies the document for a fresh nonce
-against `PCR.json`, and compares every attested policy field with the deploy
-inputs: the image role, `IMAGE-ENV.json` (the env of the measured image, from
-the build) and the `set-endpoints` values. On a mismatch it names the field,
-the expected value and the attested value. The enclave is then terminated,
-its unit stops, and the deploy exits 1 before a parent starts. The deploy
-inputs do not give `clone_peer_pcr3`: `verify-launch` takes it from the
-verified document, as described above.
-
-These production-policy checks do not accept the no-SPV Development posture.
-The `export-attestation --allow-development-policy` option for real
-burn/combined exports verifies approved nonzero image PCRs, not individual
-endpoint settings. Approve those launch inputs separately; the enclave does
-not receive an authorization from this host-side verification command.
-
-`ENCLAVE_DEBUG_MODE=1` skips this check, because the PCRs are zero.
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | All checks passed. |
+| 1 | An error after argument parsing: verification, connection, file I/O, or a missing or invalid setting. See stderr. |
+| 2 | Argument parsing failed, for example an unknown flag or a missing `--expect-evm-finality-tag`. |
 
 ## Threat model
 
-Trusted: AWS Nitro root CA private key (off-machine), the running enclave
-image (PCR-pinned), the verifier's own machine.
+Trusted: the AWS Nitro root CA, the enclave image with the approved PCRs, and
+the verifier's own machine.
 
-NOT trusted: the parent host process, the network between parent and
-verifier, any TLS-terminating proxy, any operator with shell on the EC2
-instance. None of them can forge an attestation document because none
-holds the AWS Nitro per-instance signing key.
+Not trusted: the parent, the network between the parent and the verifier, a
+proxy that ends TLS, and an operator with a shell on the EC2 instance. None
+of them holds the NSM signing key, so none can forge a document.
 
-Defended:
+| Attack | Defense |
+|--------|---------|
+| Replay of an old document | The verifier's nonce is in the signed document. |
+| The parent swaps the signing key | `public_key` is in the signed document. |
+| The parent swaps an account xpub or another bundle field | `user_data` commits the whole bundle. |
+| A weaker posture: plain-BTC signing on, another EVM source, a dev build | `user_data` commits the policy, and the verifier compares it with the expected one. |
+| Another enclave image | The PCRs differ. |
 
-- **Replay** — the verifier-supplied nonce is signed into the doc and checked
-  for equality on response. An old doc is rejected.
-- **Pubkey swap by parent** — `public_key` is inside the signed payload.
-- **Account xpub swap** — `user_data` commits to the full bundle. A parent
-  cannot change one field of `PublicKeysResponse` without breaking the
-  commitment match.
-- **Posture downgrade** — `user_data` also commits to the resolved
-  security policy (signing modes, pins, attestation mode, data sources). An
-  enclave that shipped with a weaker posture than expected — plain-BTC signing
-  enabled, a different EVM source, or a dev build — fails
-  the commitment match against the verifier's expected policy.
-- **Fork to a different enclave image** — PCR mismatch on verify.
-- **Unapproved image** — verification rejects measurements outside the expected
-  PCR set. An old or vulnerable image still passes if its PCRs remain approved.
-
-NOT defended (out of scope for attestation):
-
-- AWS hardware key compromise (same trust assumption as TLS roots).
-- Bugs in the enclave code _after_ measurement (PCRs only attest the
-  binary; runtime correctness is a separate problem solved by code review,
-  fuzzing, audits).
-- **Key origin / exclusivity.** The document does not prove where the private
-  key was generated, that it lives in only one enclave, or that no cloned or
-  imported copy exists — seed cloning is an explicit feature, so the same key
-  can run in multiple same-measurement enclaves. Constraints on how keys are
-  generated, sealed and cloned come from reviewing the PCR-pinned code, not from
-  the attestation document itself. See *What attestation does NOT prove* above.
+Out of scope for attestation: a compromise of the AWS hardware keys, and a
+bug in the measured code. The PCRs identify the binary; they do not show
+that it is correct.
 
 ## Code references
 
-- Enclave-side handler: [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs)
+- Enclave handler: [`enclave/src/server/keys.rs`](../enclave/src/server/keys.rs)
   (`handle_get_attested_public_key`).
 - Parent gRPC handler: [`parent/src/grpc_server.rs`](../parent/src/grpc_server.rs)
   (`attested_public_key`).
 - Verifier crate: [`attestation-verify/src/lib.rs`](../attestation-verify/src/lib.rs).
-- Verifier library (`verify_attested_pubkey`, `ExpectedPolicy`): [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
-- CLI binary: [`parent/src/bin/attest_verify.rs`](../parent/src/bin/attest_verify.rs).
-- Security policy: resolved in [`enclave/src/policy.rs`](../enclave/src/policy.rs);
-  shared canonical encoding in [`attestation-verify/src/policy.rs`](../attestation-verify/src/policy.rs).
-- Wire definitions:
-  - Enclave wire: [`enclave-proto/proto/enclave.proto`](../enclave-proto/proto/enclave.proto)
-    (`GetAttestedPublicKeyRequest`/`Response`).
-  - Parent gRPC: `proto/enclave/parent.proto` in the upstream
-    `federated-signer-proto` repo (`ParentService.AttestedPublicKey`).
-- Tests:
-  - Enclave handler: [`enclave/tests/test_attested_pubkey.rs`](../enclave/tests/test_attested_pubkey.rs).
-  - End-to-end gRPC: [`parent/tests/test_grpc_bridge.rs`](../parent/tests/test_grpc_bridge.rs)
-    (`grpc_attested_public_key_*`).
+- Verifier library (`verify_attested_pubkey`, `ExpectedPolicy`):
+  [`parent/src/attest_verify.rs`](../parent/src/attest_verify.rs).
+- CLI: [`parent/src/bin/attest_verify.rs`](../parent/src/bin/attest_verify.rs).
+- Wire: [`enclave-proto/proto/enclave.proto`](../enclave-proto/proto/enclave.proto)
+  (`GetAttestedPublicKeyRequest`), and `proto/enclave/parent.proto` in
+  `federated-signer-proto` (`ParentService.AttestedPublicKey`).
+- Tests: [`enclave/tests/test_attested_pubkey.rs`](../enclave/tests/test_attested_pubkey.rs),
+  [`parent/tests/test_grpc_bridge.rs`](../parent/tests/test_grpc_bridge.rs).

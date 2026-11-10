@@ -5,25 +5,27 @@
 (RGB-Tools bfa 66bae096).
 Deployment was not checked.
 
-This document tells how the burn signer checks and signs a release. The
-[spec](tee-spec.md) describes the rules and known limits. If the code and this
-document differ, investigate the difference. Either can contain an error.
+This document gives the checks of the burn signer, in order. The
+[specification](tee-spec.md) gives the trust model, the SPV rules and the
+known limits. If the code and this document differ, investigate the
+difference. Either can contain an error.
 
 ## 1. What the burn flow does
 
 1. The user burns RGB units on Bitcoin.
 2. The burn records how many units it destroys (`burnedAsset`) and which
    destination gets the tokens (`burnReason`: an EVM address, or the hash of a
-   destination record, see [burn-destination.md](burn-destination.md)). A
-   burn has no outputs: rgb-lib first splits the units in a transfer of the
-   same bundle, which keeps the change, and the burn destroys the split's
-   other output.
+   destination record, see [burn-destination.md](burn-destination.md)).
 3. The burn signer checks the burn.
 4. The burn signer signs an EIP-712 release for `MultisigProxy`.
 5. `MultisigProxy` needs M of N such signatures. Then the Bridge contract
    releases the tokens to the user.
 
 The burn signer signs nothing on Bitcoin.
+
+rgb-lib builds a burn as two transitions in one transaction. A transfer first
+splits the units and keeps the change. The burn then destroys the other
+output of the split. So a burn transition has no outputs.
 
 ## 2. Who does what
 
@@ -35,32 +37,24 @@ The burn signer signs nothing on Bitcoin.
 | Burn signer | Nitro Enclave | Checks and keys | Checks the burn. Signs the release and the gas transaction. |
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
-The burn signer checks request claims before it signs. It derives the burn
-amount from the consignment. The image above reads no Bitcoin indexer, and reads the EVM
-RPC only for an asset whose genesis names a reject list (Stage 3b): the
-deposits behind the burn are derived, and the witnesses are checked on chain against
-the enclave's own header chain. One call of rgb-lib's
-`validate_consignment_with_resolver` runs RGB consensus. It takes each witness
-transaction from the consignment, but the enclave's resolver treats it as mined
-only if a Merkle proof in the request places it at least
-`SPV_MIN_CONFIRMATIONS` deep in that chain. An unmined witness anywhere in the
-history fails consensus. So two conflicting
-off-chain transfers of the same units cannot both back a burn: only one of
-them can be mined.
+The burn signer takes no claim of the request as evidence. It reads the
+amount and the destination from the consignment. It derives the deposits
+behind the burn from the mints in the history. It reads no Bitcoin indexer.
+It reads the EVM RPC only for an asset whose genesis names a reject list
+(Stage 3b).
 
-**A build without `spv`.** The stage-signet profile builds the burn signer with
-`--no-default-features --features vsock,burn-signer`. That build runs on public
-Signet only and attests `Development`. The resolver takes each witness status and depth from the
-pinned indexer, and the signer trusts that answer: TLS authenticates the
-endpoint and proves no Bitcoin consensus. Stage 3 does not run. B5.5 is reversed:
-the request must carry no Merkle proofs and an empty `proof`. See
-[Known limits](tee-spec.md#13-implementation-status).
+RGB consensus counts a witness transaction as mined only when a Merkle proof
+of the request places it at least `SPV_MIN_CONFIRMATIONS` deep in the
+enclave's own header chain. An unmined witness anywhere in the history fails
+consensus. So two conflicting transfers of the same units cannot both back a
+burn: only one of them can be mined.
 
-On mainnet and testnet4, SPV checks witness inclusion against the enclave
-header chain with proof of work. On testnet4, min-difficulty blocks count as
-confirmations and freshness, for testing convenience: testnets carry no
-production value. Signet and regtest do not enforce proof of work. See
-[Bitcoin network limits](tee-spec.md#8-rgb--bitcoin--spv-verification).
+**A build without `spv`.** The stage-signet profile builds the burn signer
+without `spv`. That build runs on public Signet only and attests
+`Development`. It takes the status and depth of each witness from the pinned
+indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
+the request must carry no Merkle proofs and an empty `proof`
+([known limits](tee-spec.md#10-known-limits)).
 
 ## 3. Sequence
 
@@ -74,13 +68,13 @@ sequenceDiagram
     participant C as MultisigProxy + Bridge (EVM)
 
     U->>BT: burn transaction
-    loop every 10 s
-        P->>E: SubmitHeaders (own header sync)
+    loop header sync
+        P->>E: SubmitHeaders
     end
     L->>P: Sign(RgbSource -> EvmDestination)
     P->>E: forward over vsock
-    E->>E: Stage 1: payload caps
-    E->>E: Stage 2: work caps, then rgb-lib consensus: mint anchors bound to<br/>derived deposits, each witness mined per its SPV proof, reject list
+    E->>E: Stage 1: payload limits
+    E->>E: Stage 2: work caps, then rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
     E->>E: Stage 3: SPV freshness, proof coverage, block pins
     E->>E: Stage 4: decode and check calldata
     E->>E: Stage 5: bind release to burn
@@ -95,24 +89,31 @@ sequenceDiagram
     C-->>U: tokens released
 ```
 
+The [sequence diagram in code order](diagrams/03-seq-sign-evm.md) and the
+[signing gate](diagrams/10-signing-gate.md) show the same path in more detail.
+
 ## 4. Key values
 
 | Name | Value | Meaning |
 |------|-------|---------|
 | `TS_BURN` | 8010 | Burn transition. The only settling transition the burn signer accepts. |
-| `TS_MINT` | 8013 | Mint transition. It shows in the burn's history (the ancestry). |
+| `TS_MINT` | 8013 | Mint transition. Each mint in the history of the burn needs a deposit. |
 | `GS_BURNED_ASSET` | 2015 | Burn global: the number of units destroyed (u64). Required. |
-| `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list is. The enclave reads only an `IRgbRejectList` contract on `EVM_CHAIN_ID` (B3.7). |
-| `GS_BURN_REASON` | 3009 | Burn global: 32 bytes. A left-padded EVM address (V0), or the hash of a destination record (V1). See [burn-destination.md](burn-destination.md). Required. |
+| `GS_BURN_REASON` | 3009 | Burn global: 32 bytes that name the destination. Required. |
+| `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list of the asset is. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `SPV_MIN_CONFIRMATIONS` | 3 | Minimum depth of each Bitcoin transaction. Image env, attested. Zero stops the boot. |
-| `SPV_MAX_TIP_AGE_SECS` | 7200 | Maximum age of the header-chain tip. |
-| `SPV_MAX_TIP_FUTURE_SECS` | 7200 | Maximum time the tip can be in the future. |
-| `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | Maximum distance from the BtcRelay tip to the enclave tip. |
-| `fundsOut` selector | `0x340276aa` | Pools route. |
+| `fundsOut` selector | `0x340276aa` | Direct (pools) route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
-| Calldata cap | 96 KiB | Maximum calldata size. |
+| `MAX_TEE_DEADLINE_SECS` | 1 day | The longest time a signature stays valid. The same value as `MultisigProxy.MAX_TEE_DEADLINE`. |
+| `MAX_LZ_RECEIVE_GAS` | 1,000,000 | The most gas a LayerZero `lzReceive` option may ask for. |
+| `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | The largest distance from the BtcRelay tip to the enclave tip. |
 | EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Tests compare it with contract fixtures. |
+
+`SPV_MIN_CONFIRMATIONS` is an image setting
+([configuration.md](configuration.md)). The size and work limits named below
+(`max_...`) are runtime limits ([runtime-limits.md](runtime-limits.md)). The
+other SPV constants are in the
+[specification](tee-spec.md#7-bitcoin-header-chain-spv).
 
 ## 5. Checks, in order
 
@@ -121,188 +122,126 @@ error.
 
 ### Stage 0 - Can this enclave do this request?
 
-- **B0.1** The endpoints must be set (`SetEndpoints`).
+- **B0.1** The launch values must be set (`SetEndpoints`).
 - **B0.2** The source must be RGB and the destination must be EVM. The burn
   signer refuses a mint request.
 - **B0.3** The enclave must be `Active`. While the keys are not ready, the
   burn signer refuses the request before any validation.
 
-### Stage 1 - Is the request within the caps?
+### Stage 1 - Is the request within the limits?
 
-- **B1.1** The consignment must not be larger than the runtime limit
-  `max_consignment_bytes` (10 MiB in the image). The image env
-  `MAX_CONSIGNMENT_BYTES` can only lower it: a larger value stops the boot,
-  because at the image frame the request memory model holds only up to 10 MiB.
-  The operator can change the limit on a running enclave. The enclave refuses a
-  value at which the densest consignment does not fit the memory of a frame
-  ([runtime limits](runtime-limits.md)).
-- **B1.2** Proof count must be at most `max_merkle_proofs` (16384 in the image).
-  Proof bytes must be at most `max_total_proof_bytes` (8 MiB in the image). The
-  image env `MAX_MERKLE_PROOFS` and `MAX_TOTAL_PROOF_BYTES` can lower them, and
-  both are runtime limits too.
+- **B1.1** The consignment must be at most `max_consignment_bytes`.
+- **B1.2** The request must carry at most `max_merkle_proofs` proofs, of at
+  most `max_total_proof_bytes` together.
 - **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
-- **B2.1** The bytes must be a V1 transfer file (`TFR`). The genesis schema
-  must be BFA. If the genesis names a reject list (`GS_REJECT_LIST`), it must
-  be an EVM contract; a URL list is refused.
+- **B2.1** The bytes must be a V1 transfer file. The genesis schema must be
+  BFA. If the genesis names a reject list (`GS_REJECT_LIST`), it must be an
+  EVM contract; a URL list is refused.
 - **B2.2** Before rgb-lib runs, the contract id must pass the asset bind
-  (B2.7), so a foreign genesis never reaches rgb-lib, and no foreign contract
-  is ever read as its list. Then the enclave bounds rgb-lib's work on the
-  parsed transfer (`validation/cost.rs`). In phase 1, before any witness is
-  checked, rgb-lib checks each transition of every BFA against the whole
-  witness tx, anchor and input map of its bundle. So the sum over bundles of
-  transitions x (tx bytes + Tapret partner leaf bytes) plus seals x tx inputs
-  must be at most `max_witness_check_cost`, and the sum over bundles of
-  (transitions + 1) x input map entries at most `max_bundle_id_cost`. The
-  operations DAG rgb-lib builds in the same pass costs one step per spent
-  opout (rgb-consensus af0b751d), so it has no cap of its own: the time
-  budget covers it. Each opout costs rgb-lib far more than its bytes, since it
-  hashes every opout into its operation id more than once, so the budget
-  counts opouts on their own. It also hashes every genesis global and
-  assignment into the contract id once per operation (`validate_state`), so
-  the budget counts those leaves times the operations. If the genesis names a
-  reject list, the enclave also
-  counts a reject walk (B3.10), one walk per origin with no list entry to cut
-  it short, which must be at most `max_reject_walk_cost`. rgb-lib's own walk is
-  shared across origins (section 10), so this count is a model. Once
-  validation passed, rgb-lib's inspection reads the summary from the same file
-  (B2.8): it reads the file again, hashes every operation id three times more
-  and each witness tx once per transition. The caps add up on top of the
-  file's own cost, so the modeled rgb-lib time of validation (the file bytes,
-  its opouts, the genesis hashes and the three costs) and of the inspection
-  (the file bytes, its opouts, its operations and the witness checks) together
-  must be at most `max_rgb_lib_ms` (30 s). The caps and the timings behind
-  them are in [Work caps](#10-work-caps).
+  (B2.7). So a foreign genesis never reaches rgb-lib, and it cannot choose
+  what the enclave reads. Then the enclave bounds the work that rgb-lib would
+  do on the transfer and refuses one above a work cap
+  ([section 10](#10-work-caps)).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
-  consensus phase 1 over the whole history under the BFA rules from
-  `rgb-schemas`, then phase 2 through three resolvers of the enclave: the
-  witness resolver (B2.9), the anchor resolver (B2.4, B2.5) and the reject-list
-  resolver (Stage 3b). No `safe_height` is passed: the witness resolver already
-  enforces the depth. rgb-lib must report the transfer the enclave parsed (same
-  consignment id) and no warning; neither of its warnings can arise with this
-  resolver, so one refuses. Each mint leaves a claim (`Claim::Lock`, an
-  "anchor" in the code): its OpId, its witness txid and its `issuedSupply`.
-- **B2.4** The anchor resolver asks the binder once with no anchor: the
-  genesis `bridgeLocation` must name the pinned `FUNDS_IN_CONTRACT` on
-  `EVM_CHAIN_ID`, and rgb-lib compares that chain id with the genesis one. Then
-  it asks once per anchor. For each anchor, the burn signer derives the
+  RGB consensus over the whole history, under the BFA rules of the pinned
+  `rgb-schemas`. rgb-lib asks three resolvers of the enclave: for each
+  witness (B2.9), for each mint (B2.4, B2.5) and for the reject list (Stage
+  3b). A resolver error refuses the request, and so does any rgb-lib warning.
+  rgb-lib must report the consignment that the enclave parsed.
+- **B2.4** For each mint in the history, the burn signer derives the
   `operationId` of the one deposit that can back it:
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
-  EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, lockId, minted units))`, where
-  lockId = `LockId(mint OpId, mint witness txid)` as rgb-lib computes it. It
-  reads nothing from the chain. `TOKEN_CONTRACT` and `EVM_CHAIN_ID` must be
-  pinned.
-- **B2.5** rgb-lib confirms each anchor only against its derived lock, one
-  for one; rgb-lib makes no RPC for it. The Bridge holds a record under that id only if a
-  deposit of exactly the minted units was made for that mint, and the release
-  checks each cited record, so a mint with no deposit fails on chain. The
-  burn signer does not check the mint's `beforeBlock`. The mint signer
-  checked it before it signed the mint. A mint to a witness seal needs no
-  rule of its own: its tx is one more witness, and its anchor binds the same way.
-- **B2.6** The result is a list of locks: deposit `operationId`s. One burn
-  has one list, so one `settlementData`; `burnId` does not hash it. Stage 5
-  uses this list.
+  EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, lockId, minted units))`. The
+  lockId is `LockId(mint OpId, mint witness txid)`
+  ([mint-flow.md](mint-flow.md#the-lockid)). The genesis `bridgeLocation` must
+  name the pinned `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`. The burn signer reads
+  nothing from the chain here.
+- **B2.5** rgb-lib confirms each mint only against its derived deposit, one
+  for one. The Bridge holds a record under that id only if a deposit of
+  exactly the minted units was made for that mint, and the release checks
+  each cited record on chain. So a mint with no deposit fails on chain. The
+  burn signer does not check the `beforeBlock` of a mint; the mint signer
+  checked it before it signed the mint.
+- **B2.6** The result is the list of the deposit `operationId`s of the
+  history. Stage 5 uses it.
 - **B2.7** The contract id must equal the declared `asset_id` and the pinned
   `RGB_ASSET_ID`.
-- **B2.8** The settling transition must be `TS_BURN`: the burn of the last
-  witness, so one tx also carries rgb-lib's split (or a plain transfer). Two
-  burns there are refused. The amount comes from `burnedAsset`, never from
-  the outputs or the host. The flat summary of each transition (the split's
-  outputs included) comes from rgb-lib's `inspect_consignment` over every
-  bundle (`BundleFilter::All`), run on the scratch file rgb-lib just validated,
-  which is removed after it. rgb-lib's validation returns no amounts or burn
-  facts, so these are read from the same bytes once it passed them. The burn
-  facts themselves (`burnedAsset`, `burnReason`, the OpId) come from the
-  validated rgbstd transition, and the summary must name the same settling
-  transition. The bridge reads the same fields with consignment-utils, and the
-  tests compare both readings on every generated shape.
-- **B2.9** The witness resolver resolves every witness, the burn included, on
-  chain: the transaction comes from the consignment, its block from the
-  request's Merkle proof for it. That proof must pass B3.4 and B3.5 first. A
-  witness with no such proof is unmined and fails consensus. A proof the
-  consignment itself carries is never used: the resolver serves no block
-  headers, so rgb-lib asks it instead. Stage 3 runs these proof checks again
-  with coverage and pins.
+- **B2.8** The settling transition must be a `TS_BURN`: the burn of the last
+  witness bundle. Two burns there are refused. The amount comes from
+  `burnedAsset`, never from the outputs or the host. The burn signer reads
+  the burn facts (`burnedAsset`, `burnReason`, the OpId) from the validated
+  transfer, and a summary of every transition from rgb-lib's
+  `inspect_consignment` on the same file. The two readings must name the same
+  settling transition.
+- **B2.9** The witness resolver counts a witness transaction as mined only
+  through the Merkle proof that the request carries for it. That proof must
+  pass B3.4 and B3.5 first. A witness with no such proof is unmined and fails
+  consensus. A proof inside the consignment is never used.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 
-The parent sends block headers. The burn signer builds its own header chain.
-On mainnet and the testnets, it checks linkage, proof of work, and `nBits`.
-On testnet4 it applies the 20-minute rule and BIP94 (retarget from the first
-block of the period, the timewarp rule). On every network a header may be at
-most 2 hours ahead of the enclave clock, so a host cannot date free blocks
-ahead to lower its fork's difficulty. A header must also be newer than the
-median time past of the eleven blocks below it, as in Bitcoin Core. A chain
-from genesis, as on regtest, takes the median of the blocks it has. Above any
-other checkpoint, the rule starts at the eleventh block above the checkpoint.
-The signer accepts a replacement chain only when that chain has more work and
-meets the reorganization limits. Signet and regtest skip proof-of-work and
-`nBits` checks.
+The parent sends block headers, and the burn signer builds its own header
+chain from them. The [specification](tee-spec.md#7-bitcoin-header-chain-spv)
+gives the header rules and the limits of each network.
 
-- **B3.1** The chain tip must not be older than 2 hours, nor more than 2
-  hours in the future. On the testnets a min-difficulty tip counts.
+- **B3.1** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old and at
+  most `SPV_MAX_TIP_FUTURE_SECS` in the future.
 - **B3.2** The consignment's network (`chain_net`) must equal the enclave's
   Bitcoin network.
 - **B3.3** The Merkle proofs must be exactly the set of witness transactions
   in the consignment. None missing. None extra. No duplicates.
-- **B3.4** Each Merkle path must be at most 32 levels. Each proof must verify
-  against the header that the enclave stores at that height. The transaction
-  position must be consumed by the path, one bit per level. No node hashed on
-  the path may be a 64-byte transaction (CVE-2017-12842).
+- **B3.4** Each Merkle path must be at most `MAX_MERKLE_PATH_DEPTH` levels.
+  Each proof must verify against the header that the enclave stores at that
+  height. The path must use up the transaction position, one bit per level.
+  No node hashed on the path may be a 64-byte transaction (CVE-2017-12842).
 - **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
-  blocks deep (default 3). On the testnets min-difficulty blocks count.
-- **B3.6** The enclave records the heights, hashes and required depths it
-  used. Just before it uses the key, it checks that no hash changed and no
-  block is shallower than the depth its check required.
+  blocks deep.
+- **B3.6** The enclave records the heights, hashes and required depths that
+  it used. Just before it uses the key, it checks that no hash changed and
+  that no block is shallower than its check required.
 
 ### Stage 3b - Did the issuer reject the burned units?
 
-Only for an asset whose genesis names a reject list. rgb-lib runs it at the
-end of its validation (B2.3), once every witness and anchor passed, through
-the enclave's reject-list resolver. So it refuses, and reads the EVM RPC,
-before the Stage 3 checks that run after rgb-lib (B3.1, B3.3 and B3.6); B3.4
-and B3.5 already passed for every proof the witness resolver uses. The asset
-bind ran before rgb-lib (B2.2), so a foreign genesis cannot make the signer read a contract of its
-choice. The resolver reads only the list that genesis names, and a failed
-read refuses with the reader's own error. The reads trust the pinned EVM RPC for their
-contents, as the trust table in tee-spec.md states: TLS authenticates the
-endpoint, not the answers.
+This stage runs only for an asset whose genesis names a reject list. rgb-lib
+runs it at the end of its validation (B2.3), once every witness and mint
+passed. The enclave reads only the list that the pinned asset's genesis
+names. It trusts the pinned EVM RPC for the content of the list: TLS
+authenticates the endpoint, not the answers.
 
-- **B3.7** The list must be on `EVM_CHAIN_ID`, and the node must report it.
-  Another chain is refused: the enclave has no RPC for it.
-- **B3.8** Over the pinned EVM RPC: the latest block and the `finalized`
-  block (capped at the latest), `length()` at both, then `entries` in pages of
-  1000 at the latest block (`reject_list_page_entries`). Any RPC error, no code
-  at the latest block, a list shorter at the latest block, a bad or short page,
-  or more than 20,000 entries (`max_reject_list_entries`) refuses. Both values
-  are the defaults. About 5 calls plus one per 1000 entries; the history
-  length does not matter. A call that, at the pace of the slowest call so
-  far, would end within 2 s of the request deadline is not started:
-  the read refuses with "exceeded the request budget".
-- **B3.9** Decisions: the latest finalized entry for an opout wins. A
-  pending reject counts at once, also over a finalized allow. A pending allow
-  does not count. `finalized` is fixed in code, not `EVM_FINALITY_TAG`, so the
-  signer never releases what an rgb-lib wallet still refuses.
-- **B3.10** rgb-lib's rule: the origins are the inputs and the outputs of
-  every terminal operation of the consignment, the ones nothing in it builds
-  on. Each origin's history is checked back through rgb-lib's operations DAG (a
-  history origins share is walked once, section 10). An allowed
-  opout stops its branch. A rejected opout on a branch nothing stopped refuses
-  the release ("Consignment rejected by the reject list"). The burn has no
-  outputs, so its inputs are origins; its input is the split's output, so the
-  walk goes through the split to the burned units. The split itself is not
-  terminal (the burn spends its output), so the change on it is not checked.
-  This rule is stricter than the burn's inputs alone: a companion transfer of
-  the same bundle is terminal too, so a rejected line behind it refuses the
-  release even when the burned units do not descend from it.
+- **B3.7** The list must be on `EVM_CHAIN_ID`, and the node must report that
+  chain id. A list on another chain is refused.
+- **B3.8** The enclave reads the whole list on each request: `length()` at
+  the `finalized` block and at the latest block, then the entries at the
+  latest block, in pages of `reject_list_page_entries`. It refuses on any RPC
+  error, on a contract with no code, on a list that is shorter at the latest
+  block, on a bad or short page, on more than `max_reject_list_entries`
+  entries, and on a read that cannot end before the request deadline.
+- **B3.9** The latest finalized entry for an output decides. A pending
+  reject counts at once, also over a finalized allow. A pending allow does
+  not count. The `finalized` tag is fixed in code here, not taken from
+  `EVM_FINALITY_TAG`. So the signer never releases what an rgb-lib wallet
+  still refuses.
+- **B3.10** rgb-lib starts from the inputs and outputs of every terminal
+  operation: the operations that nothing in the consignment builds on. It
+  walks the history of each one back. An allowed output stops its branch. A
+  rejected output on a branch that nothing stopped refuses the release. Three
+  things follow:
+  - The burn has no outputs, so the walk starts from its inputs and reaches
+    the burned units through the split.
+  - The split is not terminal, because the burn spends its output. So the
+    change of the split is not checked.
+  - A companion transfer in the same bundle is terminal too. A rejected line
+    behind it refuses the release, even when the burned units are clean.
 
 ### Stage 4 - Is the calldata correct?
 
-- **B4.1** Calldata must be at least 4 bytes and at most 96 KiB.
-- **B4.2** The selector must be `fundsOut` (`0x340276aa`) or `lzFundsOut`.
+- **B4.1** The calldata must be at least 4 bytes and at most
+  `max_funds_out_call_data_bytes`.
+- **B4.2** The selector must be `fundsOut` or `lzFundsOut`.
 - **B4.3** The burn signer decodes the calldata and encodes it again. The two
   must be byte-equal. This stops a non-canonical encoding.
 - **B4.4** The decoded amount must equal the request's `calldata_amount`. It
@@ -310,107 +249,119 @@ endpoint, not the answers.
 - **B4.5** `chain_id` must equal the pinned `EVM_CHAIN_ID`. `proxy_contract`
   must equal the pinned `EVM_PROXY_CONTRACT_ADDRESS`.
 - **B4.6** `destinationChainId`:
-  - pools route: must equal `EVM_CHAIN_ID`;
+  - direct route: must equal `EVM_CHAIN_ID`;
   - LayerZero route: must not be zero, and must not equal `EVM_CHAIN_ID`.
-- **B4.7** The deadline must be in the future, and at most 1 day after now
-  (`MAX_TEE_DEADLINE_SECS`, the same value as `MultisigProxy.MAX_TEE_DEADLINE`).
-  So every signature expires 1 day after signing.
-- **B4.8** LayerZero route only: `minAmountLD` must be > 0 and at most `amount`.
-  The backend sets it from the net quoted at signing.
+- **B4.7** The deadline must be in the future, and at most
+  `MAX_TEE_DEADLINE_SECS` after now. So every signature expires.
+- **B4.8** LayerZero route only: `minAmountLD` must be above 0 and at most
+  `amount`. The request's `lz_release` (`dst_eid`, `min_amount_ld`,
+  `recipient`) must match the decoded calldata.
 - **B4.9** LayerZero route only: `extraOptions` must be empty or one executor
-  `lzReceive` gas option (type 3, no value), with gas at most
-  `MAX_LZ_RECEIVE_GAS`. Native drop, compose and every other option are refused.
+  `lzReceive` gas option with no value and at most `MAX_LZ_RECEIVE_GAS`. A
+  native drop, a compose option and every other option are refused: they move
+  native tokens that the burn did not name.
 
 ### Stage 5 - Does the release belong to this burn?
 
 Both routes (`fundsOut` and `lzFundsOut`), in this order:
 
 - **B5.1** The burned amount must be at least the calldata amount.
-- **B5.2** `sourceChainId` must equal 827166 (`RGB_CHAIN_ID`).
+- **B5.2** `sourceChainId` must equal `RGB_CHAIN_ID`. The contracts choose
+  the verifier, the settlement module and the commission by the pair of
+  source and destination chain, so this field decides which contracts judge
+  the release.
 - **B5.3** `sourceAddress` must be empty. RGB has no source address.
-- **B5.4** The burn signer calculates `burnId` the same way as
-  `Bridge._deriveBurnIdFromFields`. It uses the pinned `FUNDS_IN_CONTRACT`,
-  `EVM_CHAIN_ID` and `TOKEN_CONTRACT`, and the calldata fields. The calldata
-  `burnId` must be equal.
-- **B5.5** With `spv` enabled, the calldata BtcRelay `proof` is
+- **B5.4** The burn signer computes `burnId` as
+  `Bridge._deriveBurnIdFromFields` does: from the pinned `FUNDS_IN_CONTRACT`,
+  `EVM_CHAIN_ID` and `TOKEN_CONTRACT`, and the calldata `amount`,
+  `sourceChainId`, `sourceAddress` and `sourceBurnTxId`. The calldata
+  `burnId` must be equal. `burnId` does not hash the recipient, the
+  destination chain, the `proof` or `settlementData`. So one burn has one
+  `burnId`, whatever the route.
+- **B5.5** The calldata BtcRelay `proof` is
   `(sourceHeight, sourceCommit, latestHeight, latestCommit)`, 128 bytes.
   - `sourceHeight` must be the block that holds the last witness transaction.
   - `latestHeight` must not be below `sourceHeight`.
-  - The enclave must have a header at `latestHeight`. That header must be at
-    most 100 blocks below the enclave tip.
-  - With `BTC_RELAY_MODE=required` (the production mode), each commit word must
-    equal `keccak256` of the 160-byte BtcRelay record that the enclave builds
-    from its own chain. A zero word is refused. To build a record, the
-    checkpoint must carry its chain work. Each proof height must be at least
-    10 blocks above the checkpoint, and its epoch start must not be below it.
-  - With `BTC_RELAY_MODE=none` (local stand only), both words must be zero.
+  - The enclave must have a header at `latestHeight`, at most
+    `MAX_RELAY_TIP_LAG_BLOCKS` below its tip.
+  - With `BTC_RELAY_MODE=required` (the production mode), each commit word
+    must equal `keccak256` of the 160-byte BtcRelay record that the enclave
+    builds from its own chain. A zero word is refused. To build a record, the
+    checkpoint must carry its chainwork, each proof height must be at least
+    10 blocks above the checkpoint, and its epoch start must not be below the
+    checkpoint.
+  - With `BTC_RELAY_MODE=none` (a local stand only), both words must be zero.
     A production policy does not boot in this mode.
-
-  With `spv` disabled, these BtcRelay checks do not run. The signer instead
-  requires empty RGB `merkle_proofs` and an empty calldata `proof`.
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
-  OpId of the burn transition.
+  OpId of the burn transition, the same transition that gives the amount.
 - **B5.8** Destination: `burnReason` must be present.
   - High 12 bytes zero (V0): the low 20 bytes are an EVM address. The request
-    must carry no `burn_destination`. Pools route only. The calldata
+    must carry no `burn_destination`. Direct route only. The calldata
     `recipient` must equal the address.
   - Otherwise (V1): the request must carry `burn_destination`, and its hash
     must equal the 32 bytes ([burn-destination.md](burn-destination.md)).
-    `destinationChainId` must equal the record. `dstEid == 0` means the pools
-    route, with a 20-byte `recipient` equal to the calldata. `dstEid != 0`
-    means the LayerZero route: the calldata `dstEid` must equal it, and the
-    left-padded record `recipient` must equal the LayerZero `recipient`.
+    `destinationChainId` must equal the record. `dstEid == 0` means the
+    direct route, with a 20-byte `recipient` equal to the calldata.
+    `dstEid != 0` means the LayerZero route: the calldata `dstEid` must equal
+    it, and the left-padded record `recipient` must equal the LayerZero
+    `recipient`.
 - **B5.9** Settlement: `settlementData` is
   `abi.encode(bytes32[] operationIds)`. It must be canonical. The ids must be
   in strictly ascending order, so no id repeats. They must equal, as a set,
-  the locks consensus confirmed in Stage 2. An empty list is refused.
+  the deposits of Stage 2 (B2.6). An empty list is refused.
 
-> **Note - LayerZero route.** Only a V1 burn can leave via LayerZero, because
-> only V1 names a chain. `min_amount_ld` is checked against the request only.
+Only a V1 burn can leave through LayerZero, because only V1 names a chain.
+The burn does not name `minAmountLD`: B4.8 checks it against the request
+only.
 
 ### Stage 6 - Sign
 
 - **B6.1** The domain is `("MultisigProxy", "1", chainId, verifyingContract)`.
 - **B6.2** The digest uses the **decoded fields**, never the raw bytes:
-  - pools route: `TeeFundsOut(recipient, amount, burnId, sourceChainId,
+  - direct route: `TeeFundsOut(recipient, amount, burnId, sourceChainId,
     destinationChainId, sourceAddress, proof, settlementData,
     sourceBurnTxId, nonce, deadline)`;
   - LayerZero route: `TeeLzFundsOut(...)`, 14 fields.
 - **B6.3** The burn signer signs with the EVM bridge key `m/44'/60'/0'/0/0`.
-  The signature is 65 bytes (`r || s || v`). `v` is the raw recovery id, 0 to 3, with no +27.
+  The signature is 65 bytes (`r || s || v`). `v` is the raw recovery id, 0 to
+  3, with no +27.
 - **B6.4** The response has the signature and the calldata. The calldata is
   not changed.
 
-This path creates only `TeeFundsOut` and `TeeLzFundsOut` digests. It does not
-create a batch digest. The receiving contract must interpret these signatures
-according to the same ABI.
+The burn signer builds only these two digests. It builds no batch digest. The
+receiving contract must read the signature under the same ABI.
 
 ## 6. The gas transaction (`SignRawDigest`)
 
 The burn signer also signs the EVM transaction that sends the release. It
 uses the gas key `m/44'/60'/0'/0/1`.
 
-- **G1** The request must have the unsigned transaction. The enclave
-  calculates the digest itself.
-- **G2** RLP decode must be strict and canonical. The enclave accepts EIP-1559
-  and legacy EIP-155. A transaction has at most 1024 RLP items and at most
-  1 MiB. So the input bounds the decoder's memory.
+- **G1** The request must carry the unsigned transaction. The enclave
+  computes the digest itself. It signs no digest that a caller supplies.
+- **G2** The RLP decode must be strict and canonical. The enclave accepts
+  EIP-1559 and legacy EIP-155 transactions, of at most `max_gas_tx_bytes` and
+  `max_rlp_items`. So the input bounds the memory of the decoder.
 - **G3** `chain_id` must equal `EVM_CHAIN_ID`. `to` must equal
   `GAS_TX_ALLOWED_TO`. Contract creation is refused.
-- **G4** `gasLimit` must be at most `GAS_TX_MAX_GAS_LIMIT`. Each fee field must
-  be at most `GAS_TX_MAX_FEE_PER_GAS`.
-- **G5** Calldata must start with a selector in `GAS_TX_ALLOWED_SELECTORS`.
-  Empty calldata is refused.
-- **G6** `value` must be zero. One exception: the payable `lzFundsOutCall` to
-  `EVM_PROXY_CONTRACT_ADDRESS`, with `value` at most `GAS_TX_MAX_VALUE_WEI`.
-- **G7** The destination, gas ceiling, fee ceiling, and selector allowlist
-  must be configured. An unset value ceiling prevents non-zero `value`. It
-  does not prevent a transaction with zero `value`.
+- **G4** `gasLimit` must be at most `GAS_TX_MAX_GAS_LIMIT`. Each fee field
+  must be at most `GAS_TX_MAX_FEE_PER_GAS`. Together they bound the fee of
+  one transaction.
+- **G5** The calldata must start with a selector in
+  `GAS_TX_ALLOWED_SELECTORS`. Empty calldata is refused: a bare call still
+  runs the `fallback` or `receive` function of the destination.
+- **G6** `value` must be zero. One exception: the payable `lzFundsOutCall`,
+  which carries the LayerZero messaging fee. It needs `to` equal to
+  `EVM_PROXY_CONTRACT_ADDRESS` and `value` at most `GAS_TX_MAX_VALUE_WEI`,
+  and its selector must still be in the allowlist.
+- **G7** The destination, the gas ceiling, the fee ceiling and the selector
+  allowlist must be set. An unset value refuses the request. An unset value
+  ceiling refuses only a non-zero `value`.
 
-The gas rule is part of the attested policy. The gas transaction is not
-linked to one checked release. The limits apply to one transaction, not to a
-sum of transactions.
+The gas rule is part of the attested policy, so a verifier can check it. The
+limits apply to one transaction, not to a sum of transactions. A gas
+transaction is not linked to one checked release, and the LayerZero fee is
+not a field of `TeeLzFundsOut`.
 
 ## 7. Replay
 
@@ -429,7 +380,6 @@ On both routes, `burnId` is bound to the burn through B5.3, B5.6 and B5.7.
 | `Sign` with an EVM source or an RGB destination (mint) | Refused: wrong signer role. |
 | `SignBtc` | Refused: wrong signer role. |
 | `SignRightsRefill` | Refused: wrong signer role. The burn signer holds no mint rights. |
-| `SignCcd` | Refused: removed. |
 | `SignRawMessage` | Refused in every build. |
 
 ## 9. The main idea
@@ -448,237 +398,28 @@ they are the deposits behind this burn (B5.9). Each half needs the other.
 
 ## 10. Work caps
 
-The request deadline is 90 s by default (`total_request_timeout_secs`), and a
-worker is not
-interrupted when it passes. So before rgb-lib runs, the burn signer bounds the
-two parts of rgb-lib's work that grow faster than the file and a per-origin
-count of its reject walk (B2.2, `validation/cost.rs`), and then their sum with
-the file, its opouts, its
-operations and the genesis hashes, for rgb-lib's validation and for its
-inspection, which reads the summary from the same file once validation
-passed (B2.8):
+The request deadline does not stop a worker. So the burn signer bounds the
+work of rgb-lib on a consignment before rgb-lib runs (B2.2). Four runtime
+limits apply:
 
-| Cap | Cost of a consignment | Value | Honest burn of 2810 mints |
-|-----|-----------------------|-------|---------------------------|
-| `max_witness_check_cost` | per bundle: transitions x (tx bytes + Tapret partner leaf bytes) + seals x tx inputs | 134,217,728 (128 Mi) | 8,539,773 |
-| `max_bundle_id_cost` | per bundle: (transitions + 1) x input map entries | 262,144 (256 Ki) | 11,242 |
-| `max_reject_walk_cost` | listed asset only: the steps of a walk from each origin on its own (a model, see below) | 67,108,864 (64 Mi) | 14,050 |
-| `max_rgb_lib_ms` | modeled rgb-lib time. Validation: 1100 ns per file byte, 55,000 per opout (each one the genesis or a transition creates, and each one a transition spends), 15,000 per genesis leaf hash (each genesis global and assignment, once for the genesis and once per transition), 14 per witness step, 4500 per bundle id step, 75 per walk step. Inspection: 650 per file byte, 65,000 per opout, 90,000 per operation (the genesis and each transition), 8 per witness step | 30,000 ms (30 s) | 6.1 s on the pinned genesis of 10 mint rights, listed: 3.7 s of validation and 2.4 s of inspection (5.0 to 6.3 s measured end to end) |
+| Limit | What it bounds |
+|-------|----------------|
+| `max_witness_check_cost` | The checks of each transition against the witness transaction and the anchor of its bundle. |
+| `max_bundle_id_cost` | The hashing of bundle ids over the input map of each bundle. |
+| `max_reject_walk_cost` | For an asset with a reject list: the steps of the walk of B3.10. |
+| `max_rgb_lib_ms` | The modeled time of rgb-lib's validation and inspection: the file, its outputs, its operations and the three costs above. |
 
-Each cap alone holds its part to a few seconds, but the parts add up with
-the file's own cost: a listed merge of 1400 lines after 23,900 transfers is
-12.1 MB, within the size cap and each cap (its walk at 66.98M), and took
-rgb-lib 1ae1c160 19.5 to 19.9 s to validate, 15.0 to 15.2 s of it without the
-walk. So
-the gate also models rgb-lib's whole time, from release timings rounded up,
-and refuses past 30 s. A file alone models at 1.75 us per byte (1.1 to
-validate, 0.65 to inspect), so the budget holds a file to about 17 MB,
-above the 10 MiB limit, whatever it holds. On the pinned genesis of 10 mint
-rights the 2810-mint burn's opouts, operations, genesis hashes and costs model
-at 2.5 s besides its file. On a genesis of 255 its genesis hashes alone model
-at 11.0 s (below). The budget is rgb-lib's alone: the burn signer's own parse,
-gate and reads of the validated transfer run outside it, in the rest of the
-deadline. End to end, the 2810-mint burn with 3 transfers a line took 1.1 to 1.6 s
-more than rgb-lib's validation and inspection timed alone (2.3 s at a load of
-5.6).
+The first three bound work that grows faster than the file: an honest bundle
+has one or two transitions, and a forged bundle can have thousands. The time
+budget bounds the sum. A refusal names the limit that it passed.
 
-The opout term counts work that a per-byte model misses. rgb-consensus
-merklizes every opout an operation creates or spends into the operation id,
-and it computes that id three times or more per operation
-(`validate_transition`, `validate_state` and the state it evolves; in a profile
-of a fan-out to 65,535 outputs these hashes took most of rgb-lib's time). So an
-opout costs rgb-lib about 35 to 55 us beyond its bytes, however few they are: a
-right of a propagate is 14 bytes. A forged chain of 13 propagates of 65,535
-rights each is 11.9 MB with 852k opouts, within the size cap and every cap. A
-model of 1300 ns per byte alone puts it at 15.5 s. It took rgb-lib 42.8 to
-44.3 s, and its inspection 51.3 s more. The model counts 123.1 s and refuses
-it.
+An honest burn is far below the caps. The widest burn that the bridge
+expects, 2810 mints burned by one transition, uses about 6 percent of the
+witness cap and 4 percent of the bundle id cap, and it models at about a
+fifth of the time budget.
 
-The genesis term counts the work that grows with the pinned asset's genesis.
-For every operation it validates, rgb-consensus `validate_state` takes the
-contract id from `genesis.contract_id()`, which merklizes every genesis global
-and assignment again (`logic.rs`). A BFA genesis has
-5 globals (up to 8 with details, a reject list and the contract it is linked
-from) and one assignment per mint right (one more with a link right).
-Chains of 2000 one-right propagates, nothing mined, took rgb-lib 0.94 to
-0.97 s from a genesis of 1 right, 2.68 to 2.73 s from 64 and 7.83 to 7.86 s
-from 255: 13.6 to 13.7 us per genesis leaf and operation, linear in both. The
-model counts 15,000 ns and puts the 255-right chain's validation at 9.1 s. On
-the pinned genesis of 10 rights (15 leaves, 16 with a reject list) this adds
-about 0.23 ms an operation, part of which the per-byte and per-opout rates
-already held. On a genesis of 255 rights an operation costs rgb-lib 3.6 ms and
-the model 3.9 ms, so the 30 s budget admits about 5,900 operations, whatever
-their size: a chain of 5000 one-right propagates (2.3 MB) models at 25.3 s
-(`tests/caps.rs`). Without this term the gate would let through about 27,000
-such propagates under the size cap, which would take rgb-lib about 110 s.
-Rights a propagate or a refill makes later do not widen the genesis. The
-inspection hashes the genesis a fixed few times per call, not per operation.
-
-rgb-consensus builds the operations DAG with one edge per spent opout and no
-scan of the edges already there (af0b751d, "restructure dag for
-performance"), so the DAG has no cap of its own. A forged burn of n rights
-costs rgb-lib the same per byte at every n (1.16 to 1.24 us per byte at 4096,
-16,384 and 65,535 rights): the 65,535-right burn takes 9.0 to 9.3 s to
-validate and 9.7 to 9.8 s to inspect. Its validation alone models at 16.3 s;
-with the inspection it models at 29.9 s and is refused before rgb-lib.
-
-The inspection term. rgb-lib's validation returns no amounts, so the summary
-is read by its `inspect_consignment` over every bundle, on the scratch file
-validation just read (B2.8). No cap bounds it, and it costs about as much per
-opout as validation: it strict-decodes the file again through an unbuffered
-`File` (about 0.46 us per byte of `read` calls), computes each transition id
-three times more (about 15 us per opout and pass at opt-level z), serializes
-every bundle again for the consignment id and formats every output. Two of its
-steps are superlinear, and the witness cap holds both: it hashes the bundle's
-witness tx once per transition (about 6.4 ns per byte) and scans its inputs
-once per input (about 2 ns a step), the two terms of the witness cost, so
-under 1.1 s at the cap. A third, its scan of the bundle's transitions once per
-input, is at most the bundle id cost at a few ns a step, as long as no bundle
-lists a transition twice. A bundle may (its transitions are a list, and every
-copy passes the inspection's commitment check), but rgb-lib refuses the copy:
-its inputs are already spent by the first ("references previous state"), and
-the inspection runs only on what validation passed (`tests/caps.rs`). Measured
-on the shapes below, the inspection takes 0.46 to 0.5 us per byte, about 46 to
-54 us per right and 60 us per asset output beyond the bytes, and up to about
-130 us more per operation of one small transition per bundle. The model's
-rates (650 ns per byte, 65 us per opout, 90 us per operation, 8 ns per witness
-step) hold every shape measured at a load under 4 by 8 percent or more: the
-honest 2810-mint burn closest (2.2 s at a load of 4 against 2.4 s), then the
-fan-outs (11 to 13 percent). Every witness of what the inspection reads is
-mined.
-
-The honest burn here is 2810 mints, each on its own right, all burned by one
-transition (2810 allocations in one tx), the widest the bridge expects, on the
-pinned asset's genesis of 10 mint rights; the timings below also run it with
-3 transfers a line. rgb-lib's own burn (a split, then the burn of the split's
-output) has one origin.
-
-rgb-consensus checks each transition against its bundle: it clones, hashes
-and compares the whole witness tx and the anchor's Tapret partner leaf (a
-script of any length), scans the tx inputs for each seal, and hashes the
-bundle id, a commitment to the whole input map (`validate_transition`, and
-the bundle id once more per bundle). An honest bundle carries one or two
-transitions, so these stay linear; a forged one of thousands of transitions does not.
-
-rgb-lib's reject walk (`rejected_opouts`, `history_rejected`) shares one map of
-settled operations across its origins, so a shared history is walked once: at
-most two scans per operation and one push per spent opout, plus a constant per
-origin. It is linear. `reject_walk_cost` counts a walk from each origin on its
-own instead, with no list entry to cut it short, stopping just past the cap.
-So the walk cost is a model, not rgb-lib's steps: it counts a shared history
-once per origin, and where nothing is shared it falls short of rgb-lib's
-visits and scans by up to 2x (a chain of n transitions on the genesis counts
-2n + 1, rgb-lib takes 4n + 1). In the count, a burn of separate lines costs
-2L + 5 steps for a line of L transfers whose right is one propagate from the
-genesis, 2 more per further propagate, and only origins that share a long
-history cost much. The cap and its 75 ns rate are a model, fitted to the
-per-origin walk of rgb-lib 1ae1c160 and not measured on the shared walk. It
-overcounts a shared history, so it can refuse a shape rgb-lib would finish. It
-undercounts an unshared one by up to 2x, small next to the 55,000 ns it counts
-per opout.
-
-Measured in release mode on an Apple M1 Pro with the timing tests of
-`validation/tests/caps.rs` (`cargo test --release -p utexo-bridge-enclave
---no-default-features --features spv,burn-signer --lib caps -- --ignored
---nocapture --test-threads=1`); commit 8cd5cb7 has those tests. Measured
-on rgb-lib 1ae1c160, 2026-10-30, at a load under 4 unless a cell names more,
-two runs each; a row marked "one run" ran once. rgb-lib 1ae1c160 walks each
-origin on its own, and nothing here was measured on 5010eefa: the "of which the
-walk" figures overstate the shared walk, and the walk rate was not measured on
-it. The enclave's CPU may be slower; the times scale with it. The honest burns
-are on the pinned genesis of 10 mint rights (`GENESIS_RIGHTS=10`) unless their
-row names more; each forged history is on a genesis of 1 right
-(`GENESIS_RIGHTS` unset) unless its row names more. Each model is validation
-plus inspection, the genesis hashes included, and the honest rows give the
-listed asset's. The end-to-end times include our parse of the transfer and the
-gate (0.1 to 0.5 s), the inspection and our read of the last bundle, 3 to 21 ms
-on these burns.
-
-| Consignment | Bytes | Opouts | Cost against its cap, model (validation + inspection) | rgb-lib validation (of which its file load) | rgb-lib inspection |
-|-------------|-------|--------|--------------------------------------------------------|---------------------------------------------|--------------------|
-| Honest burn, 1404 mints | 1.0 MB | 5.6k | witness 2.3M, walk 7k, model 3.0 s (1.8 + 1.2) | 1.37 to 1.45 s (0.4 s) | 0.94 to 0.98 s; 2.5 to 2.6 s end to end |
-| Honest burn, 1404 mints, 3 transfers a line | 3.0 MB | 14k | witness 2.8M, walk 15k, model 8.9 s (5.5 + 3.4) | 4.5 to 4.7 s (1.3 s) | 2.8 to 2.9 s; 7.9 to 8.3 s end to end |
-| Honest burn, 2810 mints | 2.0 MB | 11k | witness 8.5M, walk 14k, model 6.1 s (3.7 + 2.4) | 2.7 to 2.8 s (0.9 to 1.1 s), one run 3.5 s | 1.9 to 2.2 s; 5.0 to 6.3 s end to end |
-| Honest burn, 2810 mints, 3 transfers a line | 6.0 MB | 28k | witness 9.6M, walk 31k, model 17.9 s (11.1 + 6.8) | 8.8 to 9.2 s (2.5 to 2.6 s) | 5.7 to 5.8 s; 15.9 to 16.2 s end to end |
-| Honest burn, 2810 mints, genesis of 255 rights (one run) | 2.1 MB | 11k | model 16.5 s (14.1 + 2.4) | 12.5 to 13.4 s (0.9 s) | 2.0 s (3.7 s at a load of 11); 15.3 to 16.2 s end to end |
-| Forged chain of 2000 one-right propagates | 0.9 MB | 4k | model 2.5 s (1.4 + 1.0) | 0.94 to 0.97 s (0.4 s) | 0.87 to 0.89 s |
-| Forged chain of 2000 one-right propagates, genesis of 64 rights | 0.9 MB | 4k | model 4.4 s (3.3 + 1.0) | 2.68 to 2.73 s (0.4 s) | 0.88 to 0.90 s |
-| Forged chain of 2000 one-right propagates, genesis of 255 rights | 0.9 MB | 4k | model 10.1 s (9.1 + 1.1) | 7.83 to 7.86 s (0.4 s) | 0.88 to 0.89 s |
-| Forged burn of 4096 rights | 0.5 MB | 8k | ids 8k, model 1.9 s (1.0 + 0.8) | 0.59 to 0.60 s (0.2 s) | 0.60 to 0.61 s |
-| Forged burn of 16,384 rights | 1.9 MB | 33k | ids 33k, model 7.5 s (4.1 + 3.4) | 2.28 to 2.34 s (0.9 s) | 2.42 to 2.44 s (2.9 s at a load of 4.5) |
-| Forged burn of 65,535 rights | 7.7 MB | 131k | ids 131k, model 29.9 s (16.3 + 13.5) | 9.0 to 9.3 s (3.5 s) | 9.7 to 9.8 s (14.2 s at a load of 4.5) |
-| Forged fan-out to 16,384 outputs | 0.4 MB | 16k | model 2.6 s (1.3 + 1.3) | 1.18 to 1.22 s (0.1 s) | 1.15 to 1.16 s |
-| Forged fan-out to 65,535 outputs | 1.5 MB | 66k | model 10.5 s (5.3 + 5.2) | 4.69 to 4.70 s (0.5 s) | 4.65 to 4.67 s |
-| Forged chain of 13 propagates of 65,535 rights (refused, one run) | 11.9 MB | 852k | model 123.1 s (60.0 + 63.1) | 44.3 s (5.5 s), plus 4.0 s of our pre-checks | 51.3 s |
-| Forged chain of 217 propagates of 4096 rights (refused) | 12.5 MB | 889k | model 128.7 s (62.7 + 66.0) | 44.9 to 46.1 s (6.0 to 7.2 s), plus 4.2 s of our pre-checks | 54.3 s (one run) |
-| Forged file at the size cap: 150 burns of 700 rights, genesis of 150 rights (refused) | 12.5 MB | 210k | model 48.8 s (27.0 + 21.8) | 16.1 to 16.5 s (5.7 to 5.8 s) | 16.8 s (one run, at a load of 5) |
-| Forged file at the size cap: 13 burns of 8192 rights, genesis of 13 rights (refused) | 12.6 MB | 213k | model 48.5 s (26.5 + 22.0) | 14.6 to 14.9 s (5.8 to 6.0 s) | 15.9 s (one run, at a load of 5) |
-| Forged bundle of 64 burns, tx of 49,900 dummy inputs | 2.4 MB | 130 | witness 134.1M (at the cap), model 7.2 s (4.6 + 2.7) | 1.94 to 1.95 s (0.9 s) | 1.96 to 1.97 s |
-| Forged bundle of 256 burns, tx of 12,480 dummy inputs (refused) | 0.7 MB | 514 | witness 134.2M (126 over the cap) | 1.58 to 1.59 s (0.2 s) | 1.16 s |
-| Forged bundle of 64 burns, Tapret partner leaf of 2.09 MB | 2.1 MB | 130 | witness 133.8M (at the cap), model 6.7 s (4.2 + 2.5) | 2.26 to 2.27 s (0.9 s) | 1.00 to 1.03 s |
-| Forged bundle of 256 burns, Tapret partner leaf of 523 KB | 0.6 MB | 514 | witness 133.9M (at the cap), model 4.4 s (2.9 + 1.5) | 1.89 s (0.3 s) | 0.31 s |
-| Forged bundle of 511 burns, Tapret partner leaf of 262 KB | 0.4 MB | 1k | witness 133.9M (at the cap), ids 261,634, model 5.0 s (3.6 + 1.4) | 2.57 to 2.58 s (0.2 s) | 0.26 s |
-| Forged burn of 8192 rights, tx of 16,000 dummy inputs | 1.7 MB | 16k | witness 131.7M (seal scans), model 8.0 s (4.7 + 3.2) | 1.54 s (0.7 s) | 1.82 s |
-| Forged bundle of 512 burns (one over the bundle id cap) | 0.1 MB | 1k | ids 262,658 | 1.16 s (0.05 s) | 0.14 s |
-| Forged bundle of 2048 burns (refused) | 0.4 MB | 4k | ids 4.2M | 15.5 to 15.8 s (0.2 s) | 0.55 to 0.56 s |
-| Forged fan-out of 65,535 after 500 transfers, listed | 1.7 MB | 67k | walk 65.9M, model 16.1 s (10.6 + 5.5) | 9.5 to 9.6 s, of which the walk 4.4 to 4.7 s | 4.86 s |
-| Forged merge of 4096 lines after 8180 transfers, listed (refused) | 6.6 MB | 33k | walk 67.1M (at the cap), model 23.5 s (15.8 + 7.7) | 12.8 to 12.9 s, of which the walk 4.8 s | 6.29 to 6.32 s |
-| Forged merge of 1400 lines after 23,900 transfers, listed (refused) | 12.1 MB | 53k | walk 67.0M, model 38.0 s (24.3 + 13.7) | 19.5 to 19.9 s, of which the walk 4.5 to 4.6 s (5.2 s) | 11.6 s (14.0 s at a 5-minute load of 10) |
-| Forged merge of 600 lines after 23,900 transfers, listed (refused) | 11.6 MB | 50k | walk 28.7M, model 33.5 s (20.5 + 13.0) | 16.6 to 16.8 s, of which the walk 2.1 to 2.3 s (4.9 to 5.0 s) | 11.0 s |
-
-The forged burns are schema-valid, with no witness mined, so rgb-lib refuses
-them only after phase 1 ran in full. The inspection runs only once validation
-passed, so it is timed on the forged files directly; it checks no witness. The
-walk runs only once every witness passed, so a forged walk needs mined
-transactions. One step of the per-origin walk took 45 to 73 ns, so the walk cap
-held that walk under about 5 s; the enclave's own count of it took 0.2 s at the
-cap. One
-bundle id entry takes about 3.5 to 4 us, one byte of a forged tx or partner
-leaf about 7 to 11 ns, one seal scan about 2 ns. Every shape measured at a
-load under 4 stays within its model, on the genesis of its row. The validation rates' margin is
-about the spread between runs: one of nine runs of the 4096-line merge, while
-the machine was still settling from other load, took 16.2 s against the 15.8 s
-its validation models. A busy or slower host runs past the model by that much:
-at a load of 4.5 the 65,535-right burn's inspection took 14.2 s, 5 percent
-over its 13.5 s.
-
-What the caps do not bound: rgb-lib's work that is linear in the file, its
-opouts and its operations. Validation takes about 0.8 to 1.1 us per byte
-(strict-decoding the file through an unbuffered `File` takes about 0.45 us per
-byte of `read` calls), about 35 to 55 us per opout beyond its bytes, and
-13.7 us per genesis leaf for each operation; the inspection about 0.5 us per
-byte, 46 to 60 us per opout and up to 130 us per operation. That part is
-bounded by `MAX_CONSIGNMENT_BYTES` (10 MiB by default) and by
-`max_rgb_lib_ms`, which holds the modeled sum of file, opouts, operations,
-genesis hashes and capped parts to 30 s: at most about 2.5 s of witness checks
-in validation and 1.1 s in the inspection, 1.2 s of bundle ids and 5 s of
-modeled walk on top of the file. It is what dominates an honest burn with a long history:
-on the pinned genesis the 2810-mint burn with 3 transfers a line takes 15.9 to
-16.2 s end to end. The validation rates are rounded up from the shapes above,
-5 to 12 percent above the costliest per opout (fan-outs) and per byte (merges
-of transfers and honest burns), and 9 percent above the genesis chains; the
-inspection rates 8 percent above the costliest, the honest 2810-mint burn. A
-shape that costs rgb-lib more per byte, per opout, per operation or per genesis
-leaf than those measured would run past it by that much. The genesis rate
-double counts on a small genesis: its leaves an operation were already in the
-measured shapes the other rates come from.
-
-What the caps can refuse in an honest history. The walk cap (listed asset
-only) can refuse an exact-amount burn: with no change there is no split, so
-each of its k inputs is an origin, and the count walks each on its own. If those
-k allocations were paid off one payer chain after D earlier links, the count
-is 2kD + k^2 + 4k steps: k = 3478 (2 allocations per input) and D = 8000
-cost 67.8M. At one allocation per input (k <= 1739) it needs D of at least
-18.4k, more witnesses than `MAX_MERKLE_PROOFS`. A burn with change has one
-origin, the split's output, which walks its ancestry once. The time budget
-refuses an honest history past about 30 s of modeled work, validation and
-inspection together. On the pinned genesis of 10 rights a history of
-transfers alone is about 230 bytes per opout, and each opout models at about
-0.7 ms, so it reaches 30 s at about 10 MB, about the size limit. The 2810-mint
-burn with 3 transfers a line (6.0 MB) passes at 17.9 s. A
-history of 10,000 transfers with an SPV proof on each (8.9 MB) has more bytes
-for each opout, and it passes at 19.95 s. On a
-genesis of 255 rights each operation adds 3.9 ms, so the budget refuses a
-history past about 5,900 operations, whatever its size. The 2810-mint burn
-passes there at 16.5 s, 14.1 s of it validation. 2810 mints with 3 transfers
-a line are refused there; they would take rgb-lib 45.9 s to validate.
+The time budget can refuse an honest burn with a very long history. The
+operator can raise each limit on a running enclave
+([runtime-limits.md](runtime-limits.md)).
+[validation-cost-model.md](validation-cost-model.md) has the model, its
+measurements and the honest shapes that it refuses.
