@@ -175,13 +175,17 @@ fn refuses_genesis_parent() {
 }
 
 /// A parent propagate that sends one right to the seals `seals`, and its first right.
-fn parent_with_seals(seals: Vec<GraphSeal>) -> (History, Made, Utxo) {
+fn parent_with_seals<S: Into<BuilderSeal<GraphSeal>>>(seals: Vec<S>) -> (History, Made, Utxo) {
     parent_made_by("propagate", &[0xA0], seals)
 }
 
 /// A parent `name` transition that spends the genesis rights on `tags` and
 /// makes rights on `seals`, and its first right.
-fn parent_made_by(name: &'static str, tags: &[u8], seals: Vec<GraphSeal>) -> (History, Made, Utxo) {
+fn parent_made_by<S: Into<BuilderSeal<GraphSeal>>>(
+    name: &'static str,
+    tags: &[u8],
+    seals: Vec<S>,
+) -> (History, Made, Utxo) {
     let (mut history, rights) = issued(tags);
     let mut send = history.transition(name);
     for right in &rights {
@@ -250,6 +254,21 @@ fn refuses_parent_right_with_explicit_txid_seal() {
     );
     let err = refusal(&child, &parent, right, &history);
     assert!(err.contains("of another transaction"), "{err}");
+}
+
+/// PP5: a right sent to a blind invoice sits on a concealed seal. The enclave
+/// cannot prove which UTXO that is, so it is not a parent. Both rights of the
+/// parent are on concealed seals here, as a blind seed send would make them.
+#[test]
+fn refuses_parent_right_on_a_blinded_recipient_seal() {
+    let blinded = |vout, blinding| {
+        BuilderSeal::Concealed(GraphSeal::with_blinded_vout(vout, blinding).to_secret_seal())
+    };
+    let (mut history, parent, right) =
+        parent_with_seals(vec![blinded(1u32, 1), blinded(2u32, 2)]);
+    let child = refill(&mut history, right);
+    let err = refusal(&child, &parent, right, &history);
+    assert!(err.contains("is on blinded seal"), "{err}");
 }
 
 #[test]
