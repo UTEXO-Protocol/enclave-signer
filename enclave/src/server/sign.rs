@@ -82,7 +82,7 @@ pub(super) fn handle_sign(
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    // Builds without a deadline user still take the argument.
+    // Silences the unused warning on builds without a reject-list reader.
     let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.
@@ -212,6 +212,13 @@ pub(super) fn handle_sign(
                         .map(crate::networks::evm::burn_destination::BurnDestinationRecord::from)
                         .as_ref(),
                 )?;
+            } else {
+                // The route check refuses EVM->EVM too. This refusal keeps a
+                // release from being signed without the burn binding if that
+                // check changes.
+                return Err(EnclaveError::InvalidRequest(
+                    "EVM release needs an RGB source".into(),
+                ));
             }
             handle_sign_evm(
                 ctx,

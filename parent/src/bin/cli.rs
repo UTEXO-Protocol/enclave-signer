@@ -784,7 +784,7 @@ fn main() {
                 Ok(None) => {
                     println!("CLONE_RESULT_V1=preflight_error");
                     eprintln!(
-                        "Error: a cloning secret is required for clone — pass \
+                        "Error: a cloning secret is required for clone: pass \
                          --cloning-secret-file, set UTEXO_CLONING_SECRET, or pass \
                          --cloning-secret, which `ps` shows"
                     );
@@ -833,7 +833,8 @@ fn verify_launch(
     let role = match signer_role {
         "mint" => SignerRole::Mint,
         "burn" => SignerRole::Burn,
-        _ => SignerRole::Combined,
+        "combined" => SignerRole::Combined,
+        other => anyhow::bail!("unknown signer role {other:?}"),
     };
     let expected =
         launch_check::expected_policy(role, &read(image_env)?, &endpoints_request(endpoints))?;
@@ -921,7 +922,8 @@ fn export_attestation(
     } else {
         let role = match signer_role {
             Some("burn") => SignerRole::Burn,
-            _ => SignerRole::Combined,
+            Some("combined") => SignerRole::Combined,
+            other => anyhow::bail!("unknown signer role {other:?}"),
         };
         let image_env = image_env.context("--image-env required")?;
         let endpoints = endpoints_request(endpoints);

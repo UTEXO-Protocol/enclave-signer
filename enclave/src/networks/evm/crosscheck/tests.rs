@@ -1420,7 +1420,7 @@ mod btc_relay {
         let (chain, hashes) = chain();
         let pins = check_pinning(&chain, &hashes);
         // The anchor block, and the relay's `latest` header.
-        assert_eq!(pins.len(), 2);
+        assert_eq!(pins.pinned_count(), 2);
     }
 
     #[test]

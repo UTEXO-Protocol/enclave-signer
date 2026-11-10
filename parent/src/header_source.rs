@@ -21,7 +21,7 @@ use rustls::pki_types::ServerName;
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum headers per call.
 pub const MAX_HEADERS: u32 = 2016;
-/// Maximum bytes per call. 2,016 headers in hex are about 323 KB.
+/// Maximum bytes per call. It holds `MAX_HEADERS` headers in hex.
 const MAX_READ_BYTES: usize = 1 << 20;
 
 pub struct ElectrumSource {

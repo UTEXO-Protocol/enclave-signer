@@ -249,6 +249,10 @@ deadline.
 Two timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS`
 on the parent (default 120 s), and the timeout of the backend (2 minutes). A deadline
 above 110 s also needs a change of these two values.
+The parent refuses to start when `GRPC_REQUEST_TIMEOUT_SECS` does not exceed the image
+deadline plus the wait margin. After a runtime deadline change, it logs an error when the
+deadline plus the margin reaches that timeout. It does not stop; restart it with a larger
+value.
 
 The parent has its own frame limit (`parent/src/framing.rs`). A value of
 `max_message_bytes` above 24 MiB has no effect until the parent limit also changes.

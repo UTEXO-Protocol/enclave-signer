@@ -25,7 +25,7 @@ All of the first three are required for a `Production` policy.
 | `EVM_CHAIN_ID` | `0` | Pinned chain id. It must match the destination chain and the `destinationChainId` of the direct route. |
 | `EVM_PROXY_CONTRACT_ADDRESS` | zero | The `MultisigProxy` address: the EIP-712 `verifyingContract`, and the `to` of the payable `lzFundsOutCall`. Attested as `bridge_contract`. |
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. There is no default asset. |
-| `FUNDS_IN_CONTRACT` | the proxy address | The emitter of `FundsIn` and `BridgeFundsIn`. Attested. It must be non-zero in production. |
+| `FUNDS_IN_CONTRACT` | the proxy address | The emitter of `FundsIn` and `BridgeFundsIn`. Unset uses the proxy address; a set value that is not an address stops the boot. Attested. It must be non-zero in production. |
 | `TOKEN_CONTRACT` | zero | The ERC-20 that the Bridge releases. An input of `burnId` and of the deposit id. Attested. It must be non-zero in production. |
 | `BTC_RELAY_MODE` | `required` | `required` checks both BtcRelay words of a release against the enclave's own records. `none` requires both words to be zero. A production policy refuses to boot on `none`, and a build without `spv` boots only on `none`. Any other value acts as `required`, with a warning at boot. |
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin` (or `mainnet`), `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom` or `regtest`. It selects the SPV rules and checkpoint, the RGB chain network, the coin types and the xpub prefix. An unknown value stops the boot. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
@@ -74,7 +74,7 @@ See the
 | `MAX_CONSIGNMENT_BYTES` | the image value of `max_consignment_bytes` | It can only lower the image value of that [runtime limit](runtime-limits.md); a larger value stops the boot. Unset, zero or a non-number gives the default. No supplied image sets it. |
 | `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES` | the image values of `max_merkle_proofs` and `max_total_proof_bytes` | Each replaces the image value of its runtime limit with any positive number, lower or higher. Unset, zero or a non-number gives the default. No supplied image sets them. |
 | `CLONE_EXPORT_SOFT_CAP` | unset | Seed exports of one enclave process before a warning. It blocks nothing. |
-| `CLONE_EXPORT_HARD_CAP` | unset | Seed exports of one enclave process. A restart resets the count. Unset, zero or a non-number means no cap. No supplied image sets it. |
+| `CLONE_EXPORT_HARD_CAP` | unset | Seed exports of one enclave process. A restart resets the count. Unset or zero means no cap. A set value that is not an unsigned integer stops the boot. No supplied image sets it. |
 | `UTEXO_CLONING_SECRET` | unset | For dev images: the donor cloning secret, read from the image env at boot. Every build without `kms-persistence` reads it, a release burn image too, so no release recipe may set it. |
 | `SPV_CHECKPOINT` | unset | Dev builds only: `height:hash:bits:time[:chainwork]` moves the SPV anchor forward. `bits` and `time` are those of that block. Without `chainwork`, a release fails under `BTC_RELAY_MODE=required`. A production-shaped build refuses to boot when it is set. |
 
@@ -159,8 +159,8 @@ parent uses their defaults. The TLS and ACL settings are in
 | `GRPC_ATTEST_MAX_PER_MINUTE` | `6` | `AttestedPublicKey` calls per minute for all clients, with the same rules. Each call makes one NSM attestation. |
 | `ENCLAVE_ADDR` | `127.0.0.1:5000` | Enclave TCP address (dev). |
 | `USE_VSOCK` | `false` | `true` or `1` selects vsock (Linux only). |
-| `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. |
-| `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. |
+| `ENCLAVE_VSOCK_CID` | `16` | Enclave CID. With `USE_VSOCK`, a set value that is not a number stops the parent at start. |
+| `ENCLAVE_VSOCK_PORT` | `5000` | Enclave vsock port. With `USE_VSOCK`, a set value that is not a number stops the parent at start. |
 | `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM -> RGB sign and answers a retry of the same request from it. Keep it at or above the enclave's `mint_replay_ttl_secs`. With `0`, no retry gets a kept reply. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. `0` still keeps one reply. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. The parent does not keep a larger reply. `0` keeps none. |

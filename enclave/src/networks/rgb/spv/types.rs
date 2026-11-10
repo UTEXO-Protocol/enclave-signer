@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Bitcoin block height. `u32` overflows only after approx 80,000 years.
+/// Bitcoin block height.
 pub type BlockHeight = u32;
 
 /// Block hash in Bitcoin internal byte order (32 bytes).

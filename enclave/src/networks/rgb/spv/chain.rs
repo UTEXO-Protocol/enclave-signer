@@ -45,8 +45,8 @@ use crate::networks::rgb::spv::validation::{
     Predecessor, MEDIAN_TIME_SPAN, RETARGET_INTERVAL,
 };
 
-/// Maximum reorg depth. Real reorgs are almost always <= 2 blocks. 100 bounds
-/// the worst-case reorg work. A deeper split needs the operator.
+/// Maximum reorg depth. It bounds the worst-case reorg work. A deeper split
+/// needs the operator.
 pub const MAX_REORG_DEPTH: BlockHeight = 100;
 
 // Retention: the chain keeps every validated header above the checkpoint.
@@ -64,10 +64,10 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 /// The chain does not prune, so no anchor is lost. The operator must move the
 /// compile-time checkpoint forward.
 ///
-/// Worst case is approx 112 MB (x 112 B per header). The real chain reaches it
-/// in approx 19 years on mainnet. The UTEXO signet reaches it far sooner: it
-/// makes a block each [`super::UTEXO_SIGNET_BLOCK_TIME_SECS`] seconds. Tune it
-/// to the enclave memory reservation.
+/// The worst case is this many headers at about 112 B each. The UTEXO signet
+/// reaches it sooner than mainnet: it makes a block each
+/// [`super::UTEXO_SIGNET_BLOCK_TIME_SECS`] seconds. Tune it to the enclave
+/// memory reservation.
 pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
 /// The image value of `max_headers_per_submit`: the most headers in one

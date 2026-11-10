@@ -21,8 +21,7 @@ use nix::time::{clock_gettime, clock_settime, ClockId};
 /// Hypervisor PTP clock exposed to the enclave by the built-in `ptp_kvm` driver.
 const PTP_DEVICE: &str = "/dev/ptp0";
 
-/// Attempt to synchronize the clock every five minutes. This is not an
-/// accuracy guarantee; synchronization failures leave the current clock unchanged.
+/// Time between sync attempts. A failed attempt leaves the clock unchanged.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Linux `FD_TO_CLOCKID(fd)` = `((~(clockid_t)fd) << 3) | CLOCKFD`, with

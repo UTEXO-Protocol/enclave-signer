@@ -42,6 +42,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("HEADER_SYNC_INTERVAL_SECS").ok(),
     )?;
 
+    if cfg.use_vsock {
+        for name in ["ENCLAVE_VSOCK_CID", "ENCLAVE_VSOCK_PORT"] {
+            utexo_bridge_parent::config::check_vsock_setting(
+                name,
+                std::env::var(name).ok().as_deref(),
+            )?;
+        }
+    }
+
     let target = if cfg.use_vsock {
         #[cfg(target_os = "linux")]
         {
@@ -71,6 +80,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // connection, and handler duration. The enclave still authenticates clones.
     let per_conn = cfg.grpc_max_concurrent_per_conn;
     let connection_age = Duration::from_secs(300);
+    if !utexo_bridge_parent::grpc_server::image_handler_timeout_is_valid(
+        cfg.grpc_request_timeout_secs,
+    ) {
+        return Err(format!(
+            "GRPC_REQUEST_TIMEOUT_SECS={} must exceed the enclave deadline plus the wait margin",
+            cfg.grpc_request_timeout_secs
+        )
+        .into());
+    }
     let request_timeout = Duration::from_secs(cfg.grpc_request_timeout_secs);
     let connection_grace = request_timeout.saturating_add(Duration::from_secs(10));
     tracing::info!(
@@ -93,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.signed_response_max_entries,
             cfg.signed_response_max_bytes,
         ),
-    );
+    )
+    .with_handler_timeout_secs(cfg.grpc_request_timeout_secs);
 
     tokio::spawn(service.clone().follow_enclave_deadline());
 

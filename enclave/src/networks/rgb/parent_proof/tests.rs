@@ -285,7 +285,7 @@ fn refuses_parent_right_on_another_vout() {
     assert!(err.contains("does not spend"), "{err}");
 }
 
-/// Review P1: a mined mint's transition, committed again in a tx that spends
+/// A mined mint's transition, committed again in a tx that spends
 /// another Colored UTXO. Every F and M rule would pass; PP7 does not.
 #[test]
 fn refuses_replay_spending_another_colored_utxo() {

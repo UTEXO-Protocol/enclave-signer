@@ -106,8 +106,8 @@ a failed `clone`, wait for the session to expire or restart the requester.
   signer on a new image makes a new seed, so it has a new signing address.
 - **The export cap is per enclave.** `CLONE_EXPORT_HARD_CAP` limits the seed
   exports of one enclave process. It is not a limit on the replicas of a
-  cluster. Unset, zero or a non-number means no cap, and no supplied image
-  sets it.
+  cluster. Unset or zero means no cap, and no supplied image sets it. A set
+  value that is not an unsigned integer stops the boot.
 - **The replay guard is per donor.** Each donor refuses an attestation nonce
   that it recorded. Another donor accepts the same requester attestation. An
   entry leaves the guard when it expires or when the guard is full.

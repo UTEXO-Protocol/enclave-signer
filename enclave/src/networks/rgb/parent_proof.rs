@@ -2,7 +2,8 @@
 //! a mint or a refill spends. It pins that right's UTXO, so signatures that
 //! share the supplied parent spend the same outpoint and a replay conflicts
 //! with the first. A different parent tx conflicts with the real one on
-//! Bitcoin; requests are not compared with each other. The rule ids are those of `docs/mint-flow.md` section 5, Stage 5.
+//! Bitcoin; requests are not compared with each other. The rule ids are those
+//! of `docs/mint-flow.md` section 5, Stage 5.
 
 use bitcoin::psbt::Psbt;
 use bitcoin::OutPoint;

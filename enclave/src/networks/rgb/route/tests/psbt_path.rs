@@ -343,7 +343,7 @@ fn refuses_a_mint_whose_right_a_mint_made() {
     assert!(err.contains("not a propagate"), "{err}");
 }
 
-/// Review P1: the mined mint's transition in a new tx that spends another of
+/// The mined mint's transition in a new tx that spends another of
 /// our Colored UTXOs.
 #[test]
 fn refuses_replay_with_a_different_input() {
@@ -650,8 +650,7 @@ fn refuses_a_witness_seal_on_another_tx() {
     assert!(err.contains("vout 1 of another transaction"), "{err}");
 }
 
-/// The OpId commits the seal's vout, not the script on it (V1 risk, CTO
-/// 2026-10-30). One mint transition in a tx paying the user and in one paying
+/// The OpId commits the seal's vout, not the script on it. One mint transition in a tx paying the user and in one paying
 /// anyone else passes every route rule under one OpId. The lockId commits the
 /// tx too, so M6 binds the user's lock to the user's tx alone.
 #[test]
