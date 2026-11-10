@@ -293,10 +293,10 @@ pub struct EvmDestination {
     /// crosscheck. Absent for direct fundsOutCall releases.
     #[prost(message, optional, tag="8")]
     pub lz_release: ::core::option::Option<LzReleaseParams>,
-    /// burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
-    /// Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
-    /// holds the EVM address itself. Transport only: the enclave hashes the
-    /// typed fields, never these protobuf bytes.
+    /// burn_destination is the preimage of the hash in the burn's burnReason
+    /// global (GS_BURN_REASON). Required for a V1+ burn. Absent for a V0 burn,
+    /// whose burnReason holds the EVM address itself. Transport only: the enclave
+    /// hashes the typed fields, never these protobuf bytes.
     #[prost(message, optional, tag="9")]
     pub burn_destination: ::core::option::Option<BurnDestination>,
 }
@@ -399,12 +399,12 @@ pub struct SignedPsbtResponse {
 }
 /// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
 /// bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
-/// correlation. The enclave authorises it ONLY against an operator-pinned output
-/// allowlist + amount cap (env BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS), never a
-/// listener-supplied flag, and signs on the vanilla BIP-86 account so it can
-/// never co-sign a colored (RGB-allocated) input. A production (rgb-validation)
-/// build refuses to sign when the allowlist/cap are unconfigured (fail-closed).
-/// Response is a SignedPsbtResponse, same as the RGB-send path. Audit M-01 / #69.
+/// correlation. The enclave authorises it from the PSBT, never from a listener
+/// flag. It derives which outputs pay back to scripts it co-controls; the rest
+/// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
+/// BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
+/// requires the cap. It signs only vanilla BIP-86 inputs, never a colored
+/// (RGB-allocated) one. Response is a SignedPsbtResponse. Audit M-01 / #69.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignBtcRequest {
     /// Raw PSBT to sign (plain BTC; no consignment).
@@ -442,10 +442,10 @@ pub struct RawSignatureResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawDigestRequest {
-    /// Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
+    /// Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
     #[prost(bytes="vec", tag="1")]
     pub digest: ::prost::alloc::vec::Vec<u8>,
-    /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required in release builds for shape/allowlist gating (audit TEE-XC-09 / #68).
+    /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist (audit TEE-XC-09 / #68).
     #[prost(bytes="vec", tag="2")]
     pub unsigned_tx: ::prost::alloc::vec::Vec<u8>,
 }
@@ -556,8 +556,8 @@ pub struct GetLastSavedBlockResponse {
     #[prost(bytes="vec", tag="2")]
     pub block_hash: ::prost::alloc::vec::Vec<u8>,
 }
-// Readiness probe used by deploy orchestration to replace a fixed sleep between
-// sequential enclave restarts. Internal only: never expose outside the host.
+// Readiness probe: answers whether the enclave is ready to sign. Deploy
+// orchestration polls it. Internal only: never expose outside the host.
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthRequest {
@@ -592,7 +592,7 @@ pub struct HealthResponse {
     /// Max age spv_tip_age_secs is compared against.
     #[prost(uint32, tag="8")]
     pub spv_max_tip_age_secs: u32,
-    /// SetEndpoints was accepted.
+    /// The endpoints from SetEndpoints are in force.
     #[prost(bool, tag="9")]
     pub endpoints_set: bool,
 }

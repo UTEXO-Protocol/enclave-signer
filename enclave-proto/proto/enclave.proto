@@ -158,7 +158,7 @@ message RgbSource {
   bytes consignment_hash = 5; // keccak256(consignment).
   repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
   uint64 commission = 7; // Commission reported by the source event.
-  // 8 was mint_ancestors, dropped: deposit ids are derived from the mint.
+  // 8 is reserved. Do not use it.
   reserved 8;
   reserved "mint_ancestors";
 }
@@ -175,10 +175,10 @@ message EvmDestination {
   // carries the LZ-specific fields for TeeLzFundsOut digest derivation and
   // crosscheck. Absent for direct fundsOutCall releases.
   optional LzReleaseParams lz_release = 8;
-  // burn_destination is the preimage of the burn's MS_BURN_RECIPIENT hash.
-  // Required for a V1+ burn. Absent for a legacy (V0) burn, whose metadata
-  // holds the EVM address itself. Transport only: the enclave hashes the
-  // typed fields, never these protobuf bytes.
+  // burn_destination is the preimage of the hash in the burn's burnReason
+  // global (GS_BURN_REASON). Required for a V1+ burn. Absent for a V0 burn,
+  // whose burnReason holds the EVM address itself. Transport only: the enclave
+  // hashes the typed fields, never these protobuf bytes.
   optional BurnDestination burn_destination = 9;
 }
 
@@ -215,10 +215,10 @@ message RgbDestination {
   string asset_id = 4; // RGB asset identifier associated with the transfer.
   bytes consignment = 5; // Raw destination RGB consignment bytes.
   bytes consignment_hash = 6; // keccak256(consignment).
-  // 7 was mint_ancestors, dropped: deposit ids are derived from the mint.
+  // 7 is reserved. Do not use it.
   reserved 7;
   reserved "mint_ancestors";
-  // 8 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  // 8 is reserved. Do not use it.
   reserved 8;
   reserved "parent_psbt";
   // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
@@ -252,12 +252,12 @@ message SignedPsbtResponse {
 
 // Plain-BTC PSBT signing (create_utxo / plain withdrawals). Distinct from the
 // bridge/RGB-send path (SignRequest): carries NO RGB consignment and NO EVM
-// correlation. The enclave authorises it ONLY against an operator-pinned output
-// allowlist + amount cap (env BTC_ALLOWED_SCRIPTS / BTC_MAX_TOTAL_SATS), never a
-// listener-supplied flag, and signs on the vanilla BIP-86 account so it can
-// never co-sign a colored (RGB-allocated) input. A production (rgb-validation)
-// build refuses to sign when the allowlist/cap are unconfigured (fail-closed).
-// Response is a SignedPsbtResponse, same as the RGB-send path. Audit M-01 / #69.
+// correlation. The enclave authorises it from the PSBT, never from a listener
+// flag. It derives which outputs pay back to scripts it co-controls; the rest
+// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
+// BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
+// requires the cap. It signs only vanilla BIP-86 inputs, never a colored
+// (RGB-allocated) one. Response is a SignedPsbtResponse. Audit M-01 / #69.
 message SignBtcRequest {
   bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
 }
@@ -271,7 +271,7 @@ message SignRightsRefillRequest {
   reserved "consignment", "consignment_hash";
   bytes psbt_bytes = 1;
   string asset_id = 4;
-  // 5 was parent_psbt, dropped: parent_fascia carries the parent tx.
+  // 5 is reserved. Do not use it.
   reserved 5;
   reserved "parent_psbt";
   // Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
@@ -289,8 +289,8 @@ message RawSignatureResponse {
 }
 
 message SignRawDigestRequest {
-  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx). Dev-mode legacy path signs it directly.
-  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required in release builds for shape/allowlist gating (audit TEE-XC-09 / #68).
+  bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
+  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist (audit TEE-XC-09 / #68).
 }
 
 message RawDigestSignatureResponse {
@@ -354,8 +354,8 @@ message GetLastSavedBlockResponse {
   bytes block_hash = 2; // 32-byte hash of the latest accepted header.
 }
 
-// Readiness probe used by deploy orchestration to replace a fixed sleep between
-// sequential enclave restarts. Internal only: never expose outside the host.
+// Readiness probe: answers whether the enclave is ready to sign. Deploy
+// orchestration polls it. Internal only: never expose outside the host.
 
 message HealthRequest {}
 
@@ -380,7 +380,7 @@ message HealthResponse {
   uint32 spv_tip_age_secs = 7;
   // Max age spv_tip_age_secs is compared against.
   uint32 spv_max_tip_age_secs = 8;
-  // SetEndpoints was accepted.
+  // The endpoints from SetEndpoints are in force.
   bool endpoints_set = 9;
 }
 

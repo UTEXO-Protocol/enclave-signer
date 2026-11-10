@@ -5,13 +5,13 @@ requires no credentials or private dependencies.
 
 Current caveat: the enclave takes rgb-lib from the private
 `UTEXO-Protocol/rgb-lib-bfa` mirror (deploy key `lib_key`). The RGB protocol
-crates are public, but the build scripts still require the token
-`rgb_deps_token`, so an enclave build needs both. That is a separate
+crates are public. The build scripts require the token `rgb_deps_token` as
+well, so an enclave build needs both. That is a separate
 dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
-`parent/` still consumes the full crate from upstream, over SSH.
+`parent/` consumes the full crate from upstream, over SSH.
 
 ## `enclave.proto` is NOT compiled
 
@@ -21,7 +21,8 @@ sets compiler configuration flags. It does not generate protobuf code.
 
 That is deliberate: generating at build time would put `protoc` in the enclave
 builder image and make PCR0 depend on which `protoc` / `prost-build` version
-built it, so the same commit would no longer reproduce the same measurement.
+built it, so one commit could give different measurements on different
+builders.
 
 Changes to `proto/enclave.proto` do not change the compiled Rust types.
 The provenance test detects changes that do not match the recorded hashes.
@@ -36,7 +37,7 @@ disagree, or if the commit recorded below drifts from the `rev` that
 ## Known upstream comment differences
 
 The vendored files remain byte-for-byte copies of the pinned upstream revision.
-Some upstream comments describe older behavior. Use the Rust handlers and the
+Some upstream comments do not match this repository. Use the Rust handlers and the
 [technical specification](../docs/tee-spec.md) for current behavior.
 
 | Wire item | Current behavior in this repository |
@@ -44,15 +45,12 @@ Some upstream comments describe older behavior. Use the Rust handlers and the
 | `InitializeKeyRequest` | Empty seed and mnemonic use KMS on mint builds. Other builds generate a seed from OS entropy. |
 | `cloning_secret` | An empty field leaves a donor secret loaded at boot unchanged. KMS builds reject a non-empty field. |
 | `InitializeKeyResponse.account_xpub_colored`, `PublicKeysResponse.account_xpub_colored` | The comment says `m/86'/827167'/0'`. The enclave derives `m/86'/827166'/0'` on mainnet and `m/86'/827167'/0'` on other networks. |
-| `SignBtcRequest` | The enclave derives output ownership and applies value budgets. There is no `BTC_ALLOWED_SCRIPTS` setting. |
 | `SubmitHeadersRequest` | Bounded chain replacements are permitted. The parent denies client gRPC submissions. Its internal sync sends headers directly. |
 | `HealthResponse.ready` | Mint readiness does not require `spv_synced`. Other builds with an SPV release path require it. |
 | `HealthResponse.phase` | KMS builds can also report `initializing`. |
 | `GetAttestedPublicKeyResponse` | Before keys exist, `public_keys` is empty, the document has no public key, and `user_data` commits only the policy bytes. |
-| `EvmDestination.burn_destination` | The record hash is the burn's `burnReason` global (`GS_BURN_REASON`, 3009), not metadata `MS_BURN_RECIPIENT`. A V0 burn's `burnReason` holds the address. See [burn-destination.md](../docs/burn-destination.md). |
 | `SetEndpointsRequest.evm_rpc_path` | Optional absolute ASCII RPC path; an empty field uses `/`. The enclave rejects authorities, queries, fragments, percent escapes and dot segments. It may contain a provider key and is excluded from image measurements, attestation and KMS context. Nonempty paths are rejected when `evm-rpc` is disabled. |
 | `SetEndpointsRequest.electrum_url` | The comment says `ssl://` or `tcp://`. A release image accepts only `ssl://` (Electrum) or `https://` (Esplora). Only test, debug and dev-feature builds accept `tcp://` or `http://`. |
-| `SignRawDigestRequest.digest`, `SignRawDigestRequest.unsigned_tx` | Every build requires `unsigned_tx`. No path signs a bare `digest`. A non-empty `digest` must equal `keccak256(unsigned_tx)`. |
 | `SignRawMessageRequest` | The enclave refuses this request in every build. It signs no raw message. |
 | `RgbDestination.operation_idx` | This enclave does not read it. |
 | `EvmSource.event_valid`, `EvmSource.event_finalized`, `RgbSource.consignment_valid` | The enclave ignores these listener flags. It checks the deposit and the consignment itself. |
@@ -71,22 +69,22 @@ when a request message gets a new `repeated` field that the wire shape check in
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `fdb54884ba1067805b8391509f289a6a2ffa9596` (branch `feat/drop-ccd-and-legacy-btc-key`, "feat(proto): drop the Concordium and retired BTC keys from the enclave schema") |
-| Commit date | 2026-11-09T13:45:52Z |
+| Commit | `3f5dcd19efa5d8c2026bad74fdf876b47077f266` (branch `docs/enclave-proto-current-behaviour`, "docs(proto): describe current enclave behaviour in enclave.proto comments") |
+| Commit date | 2026-11-10T09:09:37Z |
 
-This is the same commit `parent/Cargo.toml` still pins as a git dependency, so
-both crates compile against one schema version. Keep them in lockstep.
+This is the commit `parent/Cargo.toml` pins as a git dependency, so both
+crates compile against one schema version. Keep them in lockstep.
 
 | File | Upstream path | Status |
 |---|---|---|
 | `src/enclave.rs` | `rust-gen/src/enclave/enclave.rs` | verbatim, do not edit |
 | `proto/enclave.proto` | `proto/enclave/enclave.proto` | verbatim, source of truth |
-| `src/lib.rs` | — | local shim (`include!`), replaces upstream's `mod.rs` |
+| `src/lib.rs` | — | local shim (`include!`) in place of upstream's `mod.rs` |
 
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=fdb54884ba1067805b8391509f289a6a2ffa9596
+REV=3f5dcd19efa5d8c2026bad74fdf876b47077f266
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -101,20 +99,20 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `7e924d5009f8abe141edb754ad0f25f335bac78f` |
-| `proto/enclave/enclave.proto` | `cec30ebbd0d4be50c4b4f6f2e7b295e1bc413773` |
+| `rust-gen/src/enclave/enclave.rs` | `b85c763bd1daebb1e11c9063f5953cc02c3803fb` |
+| `proto/enclave/enclave.proto` | `ca1fb4cf5059550ba6f5b1f068ab657f2bc14f48` |
 
 ## Why only `prost`
 
 `enclave.proto` declares **no gRPC services** and **imports nothing** — not even
 `google.protobuf`. The generated code references only `::prost`.
 
-That matters for the TEE. When the enclave shared the full proto crate with the
-parent, it inherited `tonic` (with the `server` and `channel` features) and with
-it hyper, tower, and h2 — a gRPC server stack the enclave never uses, linked
-into the binary measured by PCR0. This slice drops all of it. The enclave speaks
-its own length-prefixed protobuf framing over vsock (`enclave/src/framing.rs`);
-gRPC terminates at the parent.
+That matters for the TEE. The full proto crate, which the parent uses, depends
+on `tonic` (with the `server` and `channel` features) and with it hyper, tower,
+and h2 — a gRPC server stack the enclave never uses. This slice keeps that stack
+out of the binary measured by PCR0. The enclave speaks its own length-prefixed
+protobuf framing over vsock (`enclave/src/framing.rs`); gRPC terminates at the
+parent.
 
 ## Why pre-generated code is committed
 

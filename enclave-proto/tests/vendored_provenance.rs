@@ -6,9 +6,8 @@
 //! Editing only `proto/enclave.proto` leaves the Rust types unchanged. These
 //! tests detect changes that do not match the recorded provenance.
 //!
-//! Nothing but prose stood between us and that drift, and the prose has already
-//! been wrong once (the blob-hash table shipped with two incorrect hashes). So
-//! assert it instead:
+//! The README tables are prose, and no build reads prose. So these tests assert
+//! the two invariants:
 //!
 //!   1. README's blob-hash table == the files actually on disk. Catches any
 //!      edit to `enclave.rs` or `enclave.proto`, including a hand-edit of the
