@@ -404,7 +404,7 @@ pub struct SignedPsbtResponse {
 /// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
 /// BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
 /// requires the cap. It signs only vanilla BIP-86 inputs, never a colored
-/// (RGB-allocated) one. Response is a SignedPsbtResponse. Audit M-01 / #69.
+/// (RGB-allocated) one. Response is a SignedPsbtResponse.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignBtcRequest {
     /// Raw PSBT to sign (plain BTC; no consignment).
@@ -445,7 +445,7 @@ pub struct SignRawDigestRequest {
     /// Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
     #[prost(bytes="vec", tag="1")]
     pub digest: ::prost::alloc::vec::Vec<u8>,
-    /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist (audit TEE-XC-09 / #68).
+    /// Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist.
     #[prost(bytes="vec", tag="2")]
     pub unsigned_tx: ::prost::alloc::vec::Vec<u8>,
 }

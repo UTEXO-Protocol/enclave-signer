@@ -71,9 +71,7 @@ message InitializeKeyRequest {
 }
 
 message InitializeKeyResponse {
-  // 2 and 3 were the retired BTC key (m/84'/0'/0'/0/0) and its xpub, and 13
-  // was the retired Concordium key. They signed nothing and are gone from the
-  // key bundle.
+  // 2, 3 and 13 are reserved. Do not use them.
   reserved 2, 3, 13;
   reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
 
@@ -94,7 +92,7 @@ message GetPublicKeyRequest {
 }
 
 message PublicKeysResponse {
-  // 2, 3 and 13: see InitializeKeyResponse.
+  // 2, 3 and 13 are reserved. Do not use them.
   reserved 2, 3, 13;
   reserved "btc_compressed_pub", "btc_xpub", "ccd_ed25519_pub";
 
@@ -121,7 +119,7 @@ message GetAttestedPublicKeyResponse {
 }
 
 message SignRequest {
-  // 6 was ccd_source: Concordium sources are gone.
+  // 6 is reserved. Do not use it.
   reserved 6;
   reserved "ccd_source";
 
@@ -257,7 +255,7 @@ message SignedPsbtResponse {
 // must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
 // BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
 // requires the cap. It signs only vanilla BIP-86 inputs, never a colored
-// (RGB-allocated) one. Response is a SignedPsbtResponse. Audit M-01 / #69.
+// (RGB-allocated) one. Response is a SignedPsbtResponse.
 message SignBtcRequest {
   bytes psbt_bytes = 1; // Raw PSBT to sign (plain BTC; no consignment).
 }
@@ -290,7 +288,7 @@ message RawSignatureResponse {
 
 message SignRawDigestRequest {
   bytes digest = 1; // Optional; if set must equal keccak256(unsigned_tx), the hash the enclave signs.
-  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist (audit TEE-XC-09 / #68).
+  bytes unsigned_tx = 2; // Unsigned gas-tx preimage (EIP-1559 / legacy EIP-155). Required: the enclave checks its shape against the gas-tx allowlist.
 }
 
 message RawDigestSignatureResponse {
@@ -389,7 +387,7 @@ message HealthResponse {
 // a request or how long it waits. The attestation does not cover these values.
 // docs/runtime-limits.md has the rules.
 message Limits {
-  // 26 and 27 were the limits of the mint reply cache, which is gone.
+  // 26 and 27 are reserved. Do not use them.
   reserved 26, 27;
   reserved "mint_reply_ttl_secs", "mint_reply_max_entries";
 
