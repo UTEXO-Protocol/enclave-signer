@@ -213,11 +213,11 @@ For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
 | `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
 | Backend request timeout | At least 340 s |
 
-Verified on 2026-11-10: all 12 consignment shapes passed two CPU timing runs
-on the burn host's Xeon Platinum 8375C. The largest validation-plus-inspection
-time was **96.9% of its model**. A real Nitro enclave with 2 vCPUs and
-4096 MiB accepted **30000 ms / 320 s**; readback confirmed both values and
-that all other limits stayed unchanged.
+The CPU times behind these values are in
+[validation-cost-model.md](validation-cost-model.md#measurements). Checked on
+2026-11-10 on a Nitro enclave with 2 vCPUs and 4096 MiB: `limits set` accepts
+the two enclave limits, and `limits show` reads them back with every other
+limit at its image value.
 
 The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: keep the admitted histories,
 reserve twice the CPU time, account for four workers sharing one core, and
