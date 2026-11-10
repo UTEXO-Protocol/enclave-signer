@@ -1,7 +1,8 @@
 # Enclave-to-enclave seed cloning - three-message handshake
 
 This lifecycle applies to burn signers and other builds without `kms-persistence`.
-Mint signers use [KMS seed persistence](../kms-persistence.md) instead.
+Mint signers use [KMS seed persistence](../kms-persistence.md) instead. Text:
+[cloning.md](../cloning.md).
 
 ```mermaid
 sequenceDiagram

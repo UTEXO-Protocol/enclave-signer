@@ -50,7 +50,7 @@ Provide the `RGB_LIB_BFA_DEPLOY_KEY`, `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` and
 
 For Actions, choose `build_profile=stage-signet`.
 For local builds, configure Docker, Nitro CLI and private dependency access as
-described in the repository README, then run:
+[docs/building.md](../../docs/building.md) describes, then run:
 
 ```sh
 BUILD_PROFILE=stage-signet DOCKERFILE=Dockerfile.enclave.mint \

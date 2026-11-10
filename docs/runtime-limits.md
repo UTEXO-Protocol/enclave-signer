@@ -99,9 +99,10 @@ checks them at launch.
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 
-The image env can lower `max_consignment_bytes`, `max_merkle_proofs` and
-`max_total_proof_bytes`. Then `limits show` prints those values as the image
-values.
+The image env can set the image values of `max_consignment_bytes` (to a lower
+value only), `max_merkle_proofs` and `max_total_proof_bytes`
+([configuration.md](configuration.md#transport-limits-and-dev-settings)). Then
+`limits show` prints those values as the image values.
 
 The lowest values keep the enclave reachable, so the operator can always send a
 new `limits set`. The highest values are very wide on purpose, because validation
@@ -138,10 +139,12 @@ refuses the request and changes nothing.
   limits, a consignment scratch file for each request, and the baseline. rgb-lib
   reads a consignment only from a file, and the enclave keeps that file in RAM. A
   file takes up to `max_consignment_bytes`, and never more than
-  `max_message_bytes`. The boot check does not count the files. This check counts
+  `max_message_bytes`. The enclave removes the file when rgb-lib ends, also after
+  a refusal. The boot check does not count the files. This check counts
   them, also for a change that keeps the image values. A refusal states how many
   MiB the new limits need. A larger frame or consignment limit can need a larger
-  `run-enclave --memory` value, which needs a new launch.
+  `run-enclave --memory` value, which needs a new launch
+  ([operations.md](operations.md#memory)).
 
 ## The reject list
 
@@ -170,6 +173,11 @@ Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If th
 parent drops a reply first, the enclave refuses the retry until the window ends.
 
 ## Measured times
+
+The work limits (`max_rgb_lib_ms` and the three `..._cost` limits) bound the
+work of rgb-lib on one consignment.
+[validation-cost-model.md](validation-cost-model.md) has the model behind
+them.
 
 These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
 8375C at 2.9 GHz, nitro-cli 1.4.5) on 2026-11-05, with 4096 MiB. `MemTotal` was
