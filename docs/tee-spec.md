@@ -594,9 +594,10 @@ deployed.
   signer. A burn signer built this way trusts the indexer for witness status
   and depth, and checks no request-supplied Merkle proof or BtcRelay proof.
   The adapter uses rgb-lib's upstream resolver, checks the network and
-  transaction identity, and enforces confirmation depth against the session's
-  starting tip. It does not independently verify Bitcoin inclusion or headers
-  ([burn flow](burn-flow.md#2-who-does-what)).
+  transaction identity, and supplies rgb-lib's `safe_height` from the session's
+  starting tip and required confirmation depth. The enclave refuses rgb-lib's
+  `UnsafeHistory` warning. It does not independently verify Bitcoin inclusion
+  or headers ([burn flow](burn-flow.md#2-who-does-what)).
   `attest-verify` and `verify-launch` refuse this policy.
 - **Test networks.** Testnet4 SPV is test-grade: a host can make
   min-difficulty blocks at almost no cost, and they count for depth and
