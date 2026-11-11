@@ -1,21 +1,14 @@
-//! Runs RGB consensus over a consignment: one call of rgb-lib's
-//! `validate_consignment_with_resolver`.
+//! Validates consignments through rgb-lib's `validate_consignment_with_resolver`.
 //!
-//! This is the only place where raw consignment bytes become a
-//! [`super::types::ValidatedConsignment`]. rgb-lib runs both phases and the
-//! reject-list check, and asks three resolvers for what is outside the file:
+//! This is the only path from raw bytes to [`super::types::ValidatedConsignment`].
+//! It binds the asset and checks work limits before using these resolvers:
 //!
-//! - each witness gets its on-chain status from a [`WitnessCheck`]. An `spv`
-//!   build answers with the positions it proved, each at
-//!   `SPV_MIN_CONFIRMATIONS` depth from the enclave's tip. A build without
-//!   `spv` passes the indexer's resolver and the safe height from its tip, and
-//!   refuses rgb-lib's warning about a shallower or unmined witness;
-//! - each BFA mint claim is confirmed only against the lock an
-//!   [`AnchorBinder`] binds to its `LockId`, with no RPC;
-//! - the reject list comes from the enclave's reader, after the asset bind.
+//! - [`WitnessCheck`] selects SPV-verified positions or trusted indexer results.
+//! - [`AnchorBinder`] binds each mint claim to its lock, without RPC.
+//! - The enclave's reader supplies the asset's reject list.
 //!
-//! Validation returns no amounts or burn facts, so rgb-lib's
-//! `inspect_consignment` reads the summary from the same file once it passed.
+//! Every validation warning rejects the consignment. The burn summary is read
+//! from the same file only after validation succeeds.
 
 use std::collections::BTreeSet;
 use std::io::Cursor;
@@ -43,10 +36,8 @@ use crate::error::{EnclaveError, Result};
 impl RgbValidator {
     /// Validates raw consignment bytes and returns the extracted data.
     ///
-    /// `bind` binds every mint anchor to a lock. With `None`, a consignment
-    /// with any mint in its history is refused. `witnesses` says where the
-    /// on-chain status of the witness txs comes from.
-    /// `lists` binds the asset before rgb-lib runs, and reads its reject list.
+    /// `bind` is required for histories containing mints. `witnesses` selects
+    /// the chain evidence; `lists` binds the asset and supplies its reject list.
     pub fn validate_consignment(
         &self,
         consignment_bytes: &[u8],
@@ -99,8 +90,7 @@ impl RgbValidator {
         Ok(validated)
     }
 
-    /// The witness resolver rgb-lib asks, and the safe height it checks them
-    /// against. The indexer path connects here, after the cheap checks.
+    /// Selects chain evidence after asset binding and work-limit checks.
     fn witness_resolver<'a>(
         &self,
         transfer: &Transfer,
@@ -118,8 +108,8 @@ impl RgbValidator {
         })
     }
 
-    /// rgb-lib reads only a file: it validates `transfer`, then reads its summary.
-    /// `safe_height` delegates the indexer's confirmation policy to rgb-lib.
+    /// Validates the file before inspecting it. `safe_height` sets the no-SPV
+    /// confirmation boundary; SPV positions already have their depth checked.
     fn run_rgb_lib(
         &self,
         consignment_bytes: &[u8],
@@ -229,9 +219,7 @@ pub(super) fn check_validation(
             validation.consignment_id, validation.is_transfer
         )));
     }
-    // No resolver serves block headers, so a carried proof raises no
-    // InvalidSpvProof. The indexer's safe height can raise UnsafeHistory.
-    // Any warning refuses.
+    // UnsafeHistory enforces confirmation depth. Every other warning also refuses.
     match validation.warnings.first() {
         None => Ok(()),
         Some(ValidationWarning::UnsafeHistory { txids }) => Err(EnclaveError::CrossCheck(format!(
@@ -244,8 +232,7 @@ pub(super) fn check_validation(
     }
 }
 
-/// The witnesses above the safe height or unmined, counted, with the first one
-/// named: a long history can have thousands.
+/// Keeps the error bounded by naming only the first unsafe witness.
 fn unsafe_history(validation: &ConsignmentValidation, txids: &[String]) -> String {
     let first = txids.first().map_or_else(
         || "none".to_string(),

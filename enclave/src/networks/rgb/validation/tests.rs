@@ -1576,8 +1576,7 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     }
 }
 
-/// An UnsafeHistory warning refuses with the witnesses it names: counted, and
-/// the first one with its block or as unmined.
+/// Unsafe-history errors stay bounded while identifying one failing witness.
 #[test]
 fn an_unsafe_history_warning_names_its_first_witness() {
     use super::consensus::check_validation;

@@ -3,10 +3,8 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the indexer client: the no-SPV burn's witness resolver and
-//!   safe height.
-//! - `witness.rs`: where consensus gets witness status, and the resolver of
-//!   SPV-proven positions.
+//! - `indexer.rs`: indexer connections and the confirmation boundary.
+//! - `witness.rs`: witness sources and the SPV resolver.
 //! - `consensus.rs`: run rgb-lib validation over the consignment bytes.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `scratch.rs`: the file rgb-lib reads the bytes from.

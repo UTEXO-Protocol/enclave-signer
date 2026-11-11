@@ -91,7 +91,7 @@ values from its environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 
 | CLI flag / variable | Build | Description |
 |---------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | mint, burn | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). TLS ends inside the enclave. A release image refuses the plaintext forms `tcp://` and `http://`; only a test, debug or dev-feature build accepts them. An Electrum server must serve verbose `blockchain.transaction.get`, as rgb-lib requires. For a burn built without `spv`, rgb-lib checks the indexer's genesis block on each validation. An Electrum server must then also return the public-Signet probe transaction that rgb-ops pins, plain and verbose. rgb-lib reports a failed plain fetch, a timeout included, as a wrong network. |
+| `--electrum-url` / `ELECTRUM_URL` | mint, burn | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora), serving the configured Bitcoin network. Electrum must support verbose transaction lookup. TLS ends inside the enclave. Plaintext `tcp://` and `http://` URLs are allowed only in test, debug or dev-feature builds. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | mint, burn | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | mint, burn | TLS port, 1 to 65535, not the indexer port. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | mint, burn | DER of the only CA that the EVM RPC connection trusts. |
