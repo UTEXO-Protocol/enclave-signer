@@ -1948,6 +1948,11 @@ mod electrum_indexer {
                 )
                 .header)),
                 Some(h) if h == u64::from(BLOCK) => json!(hex(&server.header)),
+                // Another block at each other height up to the tip.
+                Some(h) if h <= u64::from(server.tip) => json!(hex(&Header {
+                    nonce: h as u32,
+                    ..server.header
+                })),
                 other => return Err(format!("no header at {other:?}")),
             },
             "blockchain.headers.subscribe" => {
@@ -2066,16 +2071,37 @@ mod electrum_indexer {
         assert!(err.contains("does not match block"), "{err}");
     }
 
-    /// The tip moved between the tx answer and the tip read, so the depth
-    /// points at another block.
+    /// The node behind the server is a block ahead of its index, so the tx
+    /// answer counts one confirmation more than the tip implies.
     #[test]
-    fn refuses_a_block_hash_that_is_not_the_block_at_its_depth() {
+    fn finds_the_block_when_the_node_counts_one_more_confirmation() {
+        let pos = confirmed(Server {
+            confirmations: Some(7),
+            ..server()
+        })
+        .unwrap();
+        assert_eq!(pos.height().get(), BLOCK);
+    }
+
+    /// A block arrived between the tx answer and the tip read.
+    #[test]
+    fn finds_the_block_when_a_block_arrives_between_the_calls() {
+        let pos = confirmed(Server {
+            confirmations: Some(5),
+            ..server()
+        })
+        .unwrap();
+        assert_eq!(pos.height().get(), BLOCK);
+    }
+
+    #[test]
+    fn refuses_a_block_hash_that_no_nearby_block_has() {
         let err = confirmed(Server {
             block_hash: bitcoin::BlockHash::all_zeros(),
             ..server()
         })
         .unwrap_err();
-        assert!(err.contains("tip moved"), "{err}");
+        assert!(err.contains("no block within"), "{err}");
     }
 
     #[test]

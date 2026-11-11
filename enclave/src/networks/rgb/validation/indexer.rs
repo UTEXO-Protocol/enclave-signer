@@ -324,12 +324,8 @@ fn electrum_tx(
         [Param::String(txid.to_string()), Param::Bool(true)],
     ) {
         Ok(details) => details,
-        Err(e)
-            if e.to_string()
-                .contains("No such mempool or blockchain transaction") =>
-        {
-            return Ok(ElectrumTx::Unknown);
-        }
+        // bitcoind's text, with or without -txindex.
+        Err(e) if e.to_string().contains("No such mempool") => return Ok(ElectrumTx::Unknown),
         Err(e) => return Err(format!("electrum transaction lookup failed: {e}")),
     };
     let confirmations = match details.get("confirmations") {
@@ -354,34 +350,53 @@ fn electrum_tx(
     })
 }
 
-/// The height and header of the block `confirmations` deep, which must be
-/// `block_hash`.
+/// How far from the height its confirmations give the tx's block may sit.
+const BLOCK_SEARCH_SPAN: u32 = 2;
+
+/// The height and header of `block_hash`, found near the height that
+/// `confirmations` gives below a fresh tip.
 fn electrum_block(
     client: &electrum_client::Client,
     confirmations: u32,
     block_hash: bitcoin::BlockHash,
 ) -> std::result::Result<(NonZeroU32, bitcoin::block::Header), String> {
     use electrum_client::ElectrumApi;
-    // Read after the tx: a block found in between makes the height too high,
-    // and the hash check below refuses it.
+    // The session tip is stale after a long validation. The server counts
+    // confirmations on its node, which can run a block ahead of its index, and
+    // a block can arrive between the calls, so search a few heights around.
     let tip = client
         .block_headers_subscribe()
         .map_err(|e| format!("electrum tip lookup failed: {e}"))?
         .height;
-    let height = u32::try_from(tip)
-        .ok()
-        .and_then(|tip| tip.checked_add(1)?.checked_sub(confirmations))
-        .and_then(NonZeroU32::new)
+    let tip = u32::try_from(tip).map_err(|_| format!("electrum tip {tip} is not a u32"))?;
+    let near = tip
+        .checked_add(1)
+        .and_then(|next| next.checked_sub(confirmations))
         .ok_or_else(|| format!("{confirmations} confirmation(s) do not fit the tip {tip}"))?;
-    let header = client
-        .block_header(height.get() as usize)
-        .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
-    if header.block_hash() != block_hash {
-        return Err(format!(
-            "block {height} is not the tx's block {block_hash}: the tip moved or the indexer is inconsistent"
-        ));
+    for height in search_heights(near, tip) {
+        let header = client
+            .block_header(height.get() as usize)
+            .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
+        if header.block_hash() == block_hash {
+            return Ok((height, header));
+        }
     }
-    Ok((height, header))
+    Err(format!(
+        "no block within {BLOCK_SEARCH_SPAN} of height {near} is the tx's block {block_hash}"
+    ))
+}
+
+/// `near` first, then the heights around it, nearest first. Height 0 and
+/// heights above `tip` are left out: no witness is in the genesis block, and the
+/// server has no header above its tip.
+fn search_heights(near: u32, tip: u32) -> impl Iterator<Item = NonZeroU32> {
+    let around =
+        (1..=BLOCK_SEARCH_SPAN).flat_map(move |d| [near.checked_sub(d), near.checked_add(d)]);
+    std::iter::once(Some(near))
+        .chain(around)
+        .flatten()
+        .filter(move |h| *h <= tip)
+        .filter_map(NonZeroU32::new)
 }
 
 /// `proof` places `txid` in the block of `header`, at `height`.
