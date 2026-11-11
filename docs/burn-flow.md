@@ -59,12 +59,11 @@ the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
 The indexer adapter uses the upstream witness resolvers that rgb-lib uses.
-The enclave checks the returned transaction's txid and enforces the required
-depth against the session's starting tip. For Electrum, it also checks the
-Merkle proof with its shared verifier and binds the verbose answer's block
-hash to the header. The pinned resolver returns neither the proof nor the
-block hash with its witness answer, so these checks need separate reads.
-The header still comes from the trusted indexer, not an enclave header chain.
+The enclave checks the network and returned transaction's txid, then enforces
+the required depth against the session's starting tip. It trusts the
+resolver's mined status, height and block time. It does not separately fetch
+or verify the witness's block header, block hash or Merkle proof; independent
+Bitcoin inclusion verification requires the SPV path.
 
 Electrum block discovery follows the pinned upstream resolver: it refreshes
 the tip for each witness, accounts for queued header notifications, and

@@ -1885,6 +1885,7 @@ mod electrum_indexer {
     use bitcoin::hashes::{sha256d, Hash};
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::{Arc, Mutex};
 
     const BLOCK: u32 = 200;
     const SIBLING: [u8; 32] = [0x5b; 32];
@@ -1904,6 +1905,7 @@ mod electrum_indexer {
         block_hash: bitcoin::BlockHash,
         block_time: i64,
         proof_pos: usize,
+        requests: Arc<Mutex<Vec<String>>>,
     }
 
     fn witness() -> bitcoin::Transaction {
@@ -1944,10 +1946,12 @@ mod electrum_indexer {
             confirmations: Some(6),
             block_time: i64::from(header.time),
             proof_pos: 1,
+            requests: Arc::default(),
         }
     }
 
     fn answer(server: &Server, method: &str, params: &Value) -> std::result::Result<Value, String> {
+        server.requests.lock().unwrap().push(method.to_owned());
         let hex = |h: &Header| bitcoin::consensus::encode::serialize_hex(h);
         let txid = server.tx.compute_txid().to_string();
         Ok(match method {
@@ -2077,12 +2081,33 @@ mod electrum_indexer {
     }
 
     #[test]
-    fn refuses_a_merkle_proof_that_does_not_match_the_block() {
+    fn trusts_the_resolver_for_inclusion() {
         let mut lying = server();
         lying.header.merkle_root = bitcoin::TxMerkleNode::from_byte_array([0x11; 32]);
-        lying.block_hash = lying.header.block_hash();
-        let err = confirmed(lying).unwrap_err();
-        assert!(err.contains("does not match block"), "{err}");
+        lying.block_hash = bitcoin::BlockHash::all_zeros();
+        lying.proof_pos = 3;
+        // The no-SPV policy trusts the resolver's mined status. Inclusion
+        // verification belongs to the SPV path, with its own header chain.
+        assert_eq!(confirmed(lying).unwrap().height().get(), BLOCK);
+    }
+
+    #[test]
+    fn resolves_without_duplicate_electrum_reads() {
+        let server = server();
+        let requests = Arc::clone(&server.requests);
+        confirmed(server).unwrap();
+        let requests = requests.lock().unwrap();
+        for method in [
+            "blockchain.block.header", // Only the network's genesis header.
+            "blockchain.transaction.get",
+            "blockchain.transaction.get_merkle",
+        ] {
+            assert_eq!(
+                requests.iter().filter(|m| *m == method).count(),
+                1,
+                "{requests:?}"
+            );
+        }
     }
 
     /// The node behind the server is a block ahead of its index, so the tx
@@ -2110,6 +2135,18 @@ mod electrum_indexer {
             .unwrap();
             assert_eq!(pos.height().get(), BLOCK);
         }
+    }
+
+    #[test]
+    fn a_newer_resolver_tip_does_not_increase_the_accepted_depth() {
+        let err = confirmed(Server {
+            tip: BLOCK + 4,
+            resolution_tip: Some(BLOCK + 8),
+            confirmations: Some(9),
+            ..server()
+        })
+        .unwrap_err();
+        assert!(err.contains("only 5 confirmation(s)"), "{err}");
     }
 
     #[test]
@@ -2148,31 +2185,11 @@ mod electrum_indexer {
     }
 
     #[test]
-    fn uses_the_proven_header_time() {
+    fn uses_the_resolvers_block_time() {
         let mut server = server();
-        let expected = i64::from(server.header.time);
-        server.block_time = expected + 600;
+        let expected = i64::from(server.header.time) + 600;
+        server.block_time = expected;
         assert_eq!(confirmed(server).unwrap().timestamp(), expected);
-    }
-
-    #[test]
-    fn refuses_a_proof_position_the_path_cannot_reach() {
-        let err = confirmed(Server {
-            proof_pos: 3,
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("PositionOutOfRange"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_block_hash_that_is_not_the_proven_block() {
-        let err = confirmed(Server {
-            block_hash: bitcoin::BlockHash::all_zeros(),
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("is not the tx's block"), "{err}");
     }
 
     #[test]
@@ -2204,7 +2221,7 @@ mod electrum_indexer {
             ..server()
         })
         .unwrap_err();
-        assert!(err.contains("transaction lookup failed"), "{err}");
+        assert!(err.contains("indexer lookup failed"), "{err}");
     }
 
     #[test]
@@ -3184,148 +3201,3 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
 
 mod caps;
 mod summary;
-
-/// `assert_in_block` checks Electrum's proof with the shared verifier, so it
-/// gets the same position and node-shape rules, plus the path cap the burn
-/// path applies in `proof_txid`.
-mod electrum_merkle_proof_shape {
-    use super::*;
-    use crate::networks::rgb::spv::MAX_MERKLE_PATH_DEPTH;
-    use bitcoin::block::Header;
-    use bitcoin::hashes::{sha256d, Hash};
-    use rgbstd::indexers::electrum_blocking::electrum_client;
-    use std::num::NonZeroU32;
-
-    const BLOCK: u32 = 200;
-
-    fn pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-        let mut buf = [0u8; 64];
-        buf[..32].copy_from_slice(left);
-        buf[32..].copy_from_slice(right);
-        sha256d::Hash::hash(&buf).to_byte_array()
-    }
-
-    fn display(internal: [u8; 32]) -> [u8; 32] {
-        let mut display = internal;
-        display.reverse();
-        display
-    }
-
-    /// One input (empty scriptSig), one output (4-byte scriptPubKey): 64 bytes.
-    fn transaction_of_64_bytes() -> bitcoin::Transaction {
-        use bitcoin::{
-            absolute::LockTime, transaction::Version, Amount, ScriptBuf, Sequence, TxIn, TxOut,
-            Txid, Witness,
-        };
-        bitcoin::Transaction {
-            version: Version::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: Txid::from_byte_array([0x5C; 32]),
-                    vout: 7,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x6a; 4]),
-            }],
-        }
-    }
-
-    /// The block commits [X, t1, t2, t3]. Returns (header, a, b, t1, n23).
-    fn block() -> (Header, [u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
-        let tx = transaction_of_64_bytes();
-        let x = bitcoin::consensus::serialize(&tx);
-        assert_eq!(x.len(), 64);
-        let a: [u8; 32] = x[..32].try_into().unwrap();
-        let b: [u8; 32] = x[32..].try_into().unwrap();
-        let txid_x = pair(&a, &b);
-        assert_eq!(txid_x, tx.compute_txid().to_byte_array());
-        let t1 = [0x11u8; 32];
-        let n23 = pair(&[0x22u8; 32], &[0x33u8; 32]);
-        let root = pair(&pair(&txid_x, &t1), &n23);
-        let header = Header {
-            version: bitcoin::block::Version::ONE,
-            prev_blockhash: bitcoin::BlockHash::all_zeros(),
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
-            time: 1_700_000_000,
-            bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        };
-        (header, a, b, t1, n23)
-    }
-
-    fn height() -> NonZeroU32 {
-        NonZeroU32::new(BLOCK).unwrap()
-    }
-
-    #[test]
-    fn refuses_a_half_of_a_64_byte_tx() {
-        let (header, a, b, t1, n23) = block();
-        let proof = electrum_client::GetMerkleRes {
-            block_height: BLOCK as usize,
-            pos: 1,
-            merkle: vec![display(a), display(t1), display(n23)],
-        };
-        let err = assert_in_block(bitcoin::Txid::from_byte_array(b), height(), &header, &proof)
-            .unwrap_err();
-        assert!(err.contains("TransactionShapedNode"), "{err}");
-    }
-
-    #[test]
-    fn accepts_the_64_byte_tx_itself() {
-        let (header, a, b, t1, n23) = block();
-        let proof = electrum_client::GetMerkleRes {
-            block_height: BLOCK as usize,
-            pos: 0,
-            merkle: vec![display(t1), display(n23)],
-        };
-        assert_in_block(
-            bitcoin::Txid::from_byte_array(pair(&a, &b)),
-            height(),
-            &header,
-            &proof,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn refuses_a_position_the_path_cannot_reach() {
-        let (header, a, b, t1, n23) = block();
-        let proof = electrum_client::GetMerkleRes {
-            block_height: BLOCK as usize,
-            pos: 4,
-            merkle: vec![display(t1), display(n23)],
-        };
-        let err = assert_in_block(
-            bitcoin::Txid::from_byte_array(pair(&a, &b)),
-            height(),
-            &header,
-            &proof,
-        )
-        .unwrap_err();
-        assert!(err.contains("PositionOutOfRange"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_path_deeper_than_any_block() {
-        let (header, a, b, _, _) = block();
-        let proof = electrum_client::GetMerkleRes {
-            block_height: BLOCK as usize,
-            pos: 0,
-            merkle: vec![[0u8; 32]; MAX_MERKLE_PATH_DEPTH + 1],
-        };
-        let err = assert_in_block(
-            bitcoin::Txid::from_byte_array(pair(&a, &b)),
-            height(),
-            &header,
-            &proof,
-        )
-        .unwrap_err();
-        assert!(err.contains("siblings"), "{err}");
-    }
-}

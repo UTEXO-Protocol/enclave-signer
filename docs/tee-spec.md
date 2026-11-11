@@ -593,9 +593,10 @@ deployed.
   endpoints: its own indexer for a burn signer, its own EVM RPC for a mint
   signer. A burn signer built this way trusts the indexer for witness status
   and depth, and checks no request-supplied Merkle proof or BtcRelay proof.
-  Its Electrum adapter checks inclusion against an indexer-supplied header
-  ([burn flow](burn-flow.md#2-who-does-what)); this checks the consistency of
-  the indexer's answers, not Bitcoin consensus.
+  The adapter uses rgb-lib's upstream resolver, checks the network and
+  transaction identity, and enforces confirmation depth against the session's
+  starting tip. It does not independently verify Bitcoin inclusion or headers
+  ([burn flow](burn-flow.md#2-who-does-what)).
   `attest-verify` and `verify-launch` refuse this policy.
 - **Test networks.** Testnet4 SPV is test-grade: a host can make
   min-difficulty blocks at almost no cost, and they count for depth and
