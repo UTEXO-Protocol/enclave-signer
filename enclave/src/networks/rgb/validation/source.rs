@@ -246,14 +246,17 @@ mod indexer_only_source {
                                     json!(header_hex(&headers[height - 100]))
                                 }
                             }
-                            "blockchain.scripthash.get_history" => json!(txids
-                                .iter()
-                                .enumerate()
-                                .map(|(i, id)| json!({
-                                    "height": if mined { 100 + i } else { 0 },
-                                    "tx_hash": id.to_string()
-                                }))
-                                .collect::<Vec<_>>()),
+                            "blockchain.transaction.get" => {
+                                let txid = params[0].as_str().unwrap();
+                                let i = txids.iter().position(|id| id.to_string() == txid);
+                                let i = i.expect("a witness of the history");
+                                if mined {
+                                    json!({"confirmations": tip as usize + 1 - (100 + i),
+                                        "blockhash": headers[i].block_hash().to_string()})
+                                } else {
+                                    json!({})
+                                }
+                            }
                             "blockchain.transaction.get_merkle" => json!({
                                 "block_height": params[1], "pos": 0, "merkle": []
                             }),

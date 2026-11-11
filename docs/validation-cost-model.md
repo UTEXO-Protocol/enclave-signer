@@ -47,28 +47,29 @@ Why each term is there:
 ## Measurements
 
 Release mode, Intel Xeon Platinum 8375C at 2.90 GHz (the CPU of the burn
-hosts), 2026-11-10, two runs of each shape. Source `34721c5eb5d4`, rgb-lib
-`5010eefa355b`, rgb-consensus `d4bbbce212e4`, Rust 1.96.1. The honest burns
-use the pinned genesis of 10 mint rights, and the forged histories a genesis
-of 1 right, unless the row names more.
+hosts), 2026-11-11, two runs of each shape. Source `7363f141780c`, rgb-lib
+`2f7b21d8637b`, rgb-consensus `d4bbbce212e4`, Rust 1.96.1. One test thread
+on the two threads of one core, scratch files in RAM, no other load on the
+host. The honest burns use the pinned genesis of 10 mint rights, and the
+forged histories a genesis of 1 right, unless the row names more.
 
 | Consignment | Size | Outputs | Model (s) | Validation (s) | Inspection (s) | Largest total / model | Allowance (s) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Honest burn, 2810 mints | 2.0 MB | 11k | 6.100 | 3.079–3.086 | 1.846–1.851 | 0.809 | 10 |
-| Honest burn, 2810 mints, 3 transfers a line | 6.0 MB | 28k | 17.910 | 10.149–10.165 | 5.571–5.574 | 0.879 | 35 |
-| Honest burn, 2810 mints, genesis of 255 rights | 2.1 MB | 11k | 16.487 | 13.448–13.541 | 1.865–1.871 | 0.934 | 35 |
-| Forged chain of 2000 one-right propagates | 0.9 MB | 4k | 2.471 | 0.931–0.933 | 0.850–0.852 | 0.722 | 5 |
-| The same chain, genesis of 255 rights | 0.9 MB | 4k | 10.145 | 8.587–8.610 | 0.873–0.878 | 0.935 | 20 |
-| Forged fan-out to 65,535 outputs | 1.5 MB | 66k | 10.505 | 5.097–5.122 | 5.030–5.054 | 0.969 | 25 |
-| Forged burn of 65,535 rights | 7.7 MB | 131k | 29.855 | 8.736–8.769 | 9.474–9.526 | 0.613 | 40 |
-| Forged chain of 13 propagates of 65,535 rights (refused) | 11.9 MB | 852k | 123.122 | 47.664–47.899 | 55.380–55.675 | 0.841 | 210 |
-| Forged bundle of 64 burns, transaction of 49,900 dummy inputs, at the witness cap | 2.4 MB | 130 | 7.213 | 1.898–1.904 | 1.282–1.299 | 0.444 | 10 |
-| Forged bundle of 512 burns, just over the bundle id cap (refused) | 0.1 MB | 1k | 1.581 | 1.337–1.362 | 0.135–0.135 | 0.947 | 5 |
-| Forged bundle of 2048 burns (refused) | 0.4 MB | 4k | 20.472 | 17.677–18.010 | 0.536–0.537 | 0.906 | 40 |
-| Forged fan-out of 65,535 after 500 transfers, with a reject list, near the walk cap | 1.7 MB | 67k | 16.078 | 5.446–5.455 | 5.261–5.294 | 0.669 | 25 |
+| Honest burn, 2810 mints | 2.0 MB | 11k | 6.100 | 3.061–3.084 | 1.857–1.860 | 0.810 | 10 |
+| Honest burn, 2810 mints, 3 transfers a line | 6.0 MB | 28k | 17.910 | 10.094–10.122 | 5.603–5.610 | 0.878 | 35 |
+| Honest burn, 2810 mints, genesis of 255 rights | 2.1 MB | 11k | 16.487 | 13.623–13.912 | 1.883–1.893 | 0.959 | 35 |
+| Forged chain of 2000 one-right propagates | 0.9 MB | 4k | 2.471 | 0.936–0.941 | 0.857–0.861 | 0.729 | 5 |
+| The same chain, genesis of 255 rights | 0.9 MB | 4k | 10.145 | 8.691–8.734 | 0.882–0.884 | 0.948 | 20 |
+| Forged fan-out to 65,535 outputs | 1.5 MB | 66k | 10.505 | 5.127–5.157 | 5.096–5.128 | 0.979 | 25 |
+| Forged burn of 65,535 rights | 7.7 MB | 131k | 29.855 | 8.847–8.918 | 9.606–9.676 | 0.620 | 40 |
+| Forged chain of 13 propagates of 65,535 rights (refused) | 11.9 MB | 852k | 123.122 | 48.472–48.711 | 56.381–56.409 | 0.854 | 215 |
+| Forged bundle of 64 burns, transaction of 49,900 dummy inputs, at the witness cap | 2.4 MB | 130 | 7.213 | 1.870–1.896 | 1.276–1.283 | 0.441 | 10 |
+| Forged bundle of 512 burns, just over the bundle id cap (refused) | 0.1 MB | 1k | 1.581 | 1.337–1.337 | 0.137–0.137 | 0.933 | 5 |
+| Forged bundle of 2048 burns (refused) | 0.4 MB | 4k | 20.472 | 17.752–17.834 | 0.543–0.544 | 0.898 | 40 |
+| Forged fan-out of 65,535 after 500 transfers, with a reject list, near the walk cap | 1.7 MB | 67k | 16.078 | 5.483–5.519 | 5.326–5.362 | 0.677 | 25 |
 
 - The model is validation plus inspection. On every shape, validation,
-  inspection and their sum are within the model. The largest sum is 96.9
+  inspection and their sum are within the model. The largest sum is 97.9
   percent of its model.
 - The allowance is twice the largest measured sum, rounded up to five
   seconds. [The smaller-host profile](runtime-limits.md#smaller-production-host)
@@ -115,7 +116,7 @@ The operator can raise each limit on a running enclave.
 
 ## What the model does not prove
 
-- The measurements cover one CPU model. The closest shape leaves about 3
+- The measurements cover one CPU model. The closest shape leaves about 2
   percent of its modeled time, and repeated runs do not prove an upper
   bound. A shape that costs rgb-lib more per byte, output, operation or
   genesis leaf than the measured ones runs past its modeled time. So does a

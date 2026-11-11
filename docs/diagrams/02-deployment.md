@@ -13,7 +13,7 @@ flowchart TB
     subgraph EC2 [EC2 instance — Nitro-enabled, UNTRUSTED parent host]
         Parent[utexo-bridge-parent<br/>tonic gRPC, GRPC_HOST:GRPC_PORT<br/>-<br/>Default 127.0.0.1:5000.<br/>Deployed hosts: private ENI IP, ports 50051-50053,<br/>mTLS + client ACL - GRPC_TLS_*,<br/>one parent per enclave CID 16 / 18 / 20.<br/>Waits longer than the request deadline for each enclave RPC.<br/>Keeps each RGB sign reply for SIGNED_RESPONSE_TTL_SECS;<br/>a retry of the same request is answered from it.<br/>USE_VSOCK=true in production.<br/>Header sync from HEADER_ELECTRUM_URL.]
         Cli[utexo-bridge-parent-cli<br/>attest-verify CLI]
-        VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl://.]
+        VP[vsock-proxy port 8001<br/>―<br/>Allowlist → Electrum ssl:// or Esplora https://.]
         VPk["vsock-proxy 8003<br/>-<br/>mint signers only.<br/>8003 -> KMS 443. Relays TLS bytes only."]
         VPe["vsock-proxy 8002<br/>―<br/>Mint and burn builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
 
@@ -29,7 +29,7 @@ flowchart TB
         end
     end
 
-    Esp{{Electrum}}
+    Esp{{Electrum or Esplora indexer}}
     EvmRpc{{EVM JSON-RPC}}
     Kms{{AWS KMS}}
 
@@ -53,7 +53,7 @@ flowchart TB
     Fwd -->|"vsock CID 3:8003, mint only"| VPk
     VPk -->|"TLS bytes (ends in enclave)"| Kms
     Bin -->|"vsock CID 3:8004, mint only<br/>seed custody broker"| Parent
-    VP -->|"Electrum TCP/TLS"| Esp
+    VP -->|"Electrum or Esplora, TLS"| Esp
     VPe -->|"TLS bytes (ends in enclave)"| EvmRpc
 ```
 
