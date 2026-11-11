@@ -23,7 +23,7 @@ flowchart TB
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
             Replay[(NonceReplayGuard — cloning<br/>+ op_replay_guard — bridge ops<br/>each bounded in entries and in time)]
             Fwd["vsock_forwarder<br/>loopback -> vsock, per-port<br/>Electrum port / EVM RPC TLS port / KMS 443<br/>Electrum and KMS hosts pinned to loopback in /etc/hosts"]
-            RgbVal["RgbValidator<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof.<br/>Indexer only on a no-SPV burn,<br/>which needs Esplora."]
+            RgbVal["RgbValidator<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof.<br/>Indexer only on a no-SPV burn."]
             EvmVer[events.rs verifier<br/>pinned TLS RPC<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end

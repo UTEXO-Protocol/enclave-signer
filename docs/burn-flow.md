@@ -58,16 +58,6 @@ indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
 the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
-On Electrum the signer finds each witness of the history by an output script,
-and Electrum does not index an `OP_RETURN`. So the signer refuses a burn if
-any witness in its history has no output but the `OP_RETURN`. rgb-lib builds
-such a witness when it has no recipient output and no BTC change output. An
-operation that pays no one, such as a burn, has no dust output, and a transfer
-to a blinded UTXO pays an existing UTXO. When the BTC change is below dust,
-the transaction has no change output, and rgb-lib keeps the RGB change on
-existing UTXOs. Esplora finds a witness by its txid, so this build needs an
-Esplora `https://` URL in `ELECTRUM_URL`.
-
 ## 3. Sequence
 
 ```mermaid

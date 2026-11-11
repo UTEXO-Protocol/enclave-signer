@@ -5,8 +5,8 @@
 //! reads witness status from SPV proofs instead, and needs no indexer to sign.
 //! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora
 //! (`https://`, `http://`), through the host vsock forwarder. Each call
-//! crosses the trust boundary and has a timeout. Electrum calls are
-//! non-verbose, so any Electrum server works.
+//! crosses the trust boundary and has a timeout. An Electrum server must
+//! serve verbose `blockchain.transaction.get`, as rgb-lib requires.
 
 use std::cell::OnceCell;
 use std::num::NonZeroU32;
@@ -251,9 +251,6 @@ fn esplora_session(
     })
 }
 
-// Electrum, with non-verbose calls only: servers such as romanz/electrs do not
-// serve verbose transactions.
-
 /// Checks the server's genesis block, then reads its tip.
 fn electrum_session(
     client: electrum_client::Client,
@@ -280,33 +277,23 @@ fn electrum_session(
     })
 }
 
-/// Finds `tx` in the history of its first non-OP_RETURN output, then proves
-/// its block with a merkle proof against that block's header.
+/// Finds `tx` by its txid, then proves its block with a merkle proof against
+/// that block's header.
 fn electrum_place(
     client: &electrum_client::Client,
     tx: &bitcoin::Transaction,
 ) -> std::result::Result<TxPlace, String> {
     use electrum_client::ElectrumApi;
     let txid = tx.compute_txid();
-    let script = tx
-        .output
-        .iter()
-        .map(|o| o.script_pubkey.as_script())
-        .find(|s| !s.is_op_return())
-        .ok_or("it has no output an Electrum server indexes")?;
-    let history = client
-        .script_get_history(script)
-        .map_err(|e| format!("electrum history lookup failed: {e}"))?;
-    let Some(entry) = history.iter().find(|h| h.tx_hash == txid) else {
-        return Ok(TxPlace::Unknown);
+    let (confirmations, block_hash) = match electrum_tx(client, txid)? {
+        ElectrumTx::Unknown => return Ok(TxPlace::Unknown),
+        ElectrumTx::Unmined => return Ok(TxPlace::Unmined),
+        ElectrumTx::Mined {
+            confirmations,
+            block_hash,
+        } => (confirmations, block_hash),
     };
-    // 0 is the mempool, -1 the mempool with unconfirmed parents.
-    let Some(height) = u32::try_from(entry.height).ok().and_then(NonZeroU32::new) else {
-        return Ok(TxPlace::Unmined);
-    };
-    let header = client
-        .block_header(height.get() as usize)
-        .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
+    let (height, header) = electrum_block(client, confirmations, block_hash)?;
     let proof = client
         .transaction_get_merkle(&txid, height.get() as usize)
         .map_err(|e| format!("electrum merkle lookup failed: {e}"))?;
@@ -314,6 +301,87 @@ fn electrum_place(
     WitnessPos::bitcoin(height, i64::from(header.time))
         .map(TxPlace::Mined)
         .ok_or_else(|| format!("block {height} has an invalid time {}", header.time))
+}
+
+/// What a verbose `blockchain.transaction.get` says about a tx.
+enum ElectrumTx {
+    Unknown,
+    Unmined,
+    Mined {
+        confirmations: u32,
+        block_hash: bitcoin::BlockHash,
+    },
+}
+
+/// Asks the server about `txid` with a verbose `blockchain.transaction.get`.
+fn electrum_tx(
+    client: &electrum_client::Client,
+    txid: bitcoin::Txid,
+) -> std::result::Result<ElectrumTx, String> {
+    use electrum_client::{ElectrumApi, Param};
+    let details = match client.raw_call(
+        "blockchain.transaction.get",
+        [Param::String(txid.to_string()), Param::Bool(true)],
+    ) {
+        Ok(details) => details,
+        Err(e)
+            if e.to_string()
+                .contains("No such mempool or blockchain transaction") =>
+        {
+            return Ok(ElectrumTx::Unknown);
+        }
+        Err(e) => return Err(format!("electrum transaction lookup failed: {e}")),
+    };
+    let confirmations = match details.get("confirmations") {
+        None => 0,
+        Some(c) => c
+            .as_u64()
+            .and_then(|c| u32::try_from(c).ok())
+            .ok_or_else(|| format!("electrum gave invalid confirmations {c}"))?,
+    };
+    if confirmations == 0 {
+        return Ok(ElectrumTx::Unmined);
+    }
+    let block_hash = details
+        .get("blockhash")
+        .and_then(|v| v.as_str())
+        .ok_or("electrum gave no block hash for a mined tx")?
+        .parse()
+        .map_err(|e| format!("electrum gave an invalid block hash: {e}"))?;
+    Ok(ElectrumTx::Mined {
+        confirmations,
+        block_hash,
+    })
+}
+
+/// The height and header of the block `confirmations` deep, which must be
+/// `block_hash`.
+fn electrum_block(
+    client: &electrum_client::Client,
+    confirmations: u32,
+    block_hash: bitcoin::BlockHash,
+) -> std::result::Result<(NonZeroU32, bitcoin::block::Header), String> {
+    use electrum_client::ElectrumApi;
+    // Read after the tx: a block found in between makes the height too high,
+    // and the hash check below refuses it.
+    let tip = client
+        .block_headers_subscribe()
+        .map_err(|e| format!("electrum tip lookup failed: {e}"))?
+        .height;
+    let height = u32::try_from(tip)
+        .ok()
+        .and_then(|tip| tip.checked_add(1)?.checked_sub(confirmations))
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| format!("{confirmations} confirmation(s) do not fit the tip {tip}"))?;
+    let header = client
+        .block_header(height.get() as usize)
+        .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
+    if header.block_hash() != block_hash {
+        return Err(format!(
+            "block {height} is not the tx's block {block_hash}: the tip moved or the indexer is inconsistent"
+        ));
+    }
+    Ok((height, header))
 }
 
 /// `proof` places `txid` in the block of `header`, at `height`.

@@ -1878,8 +1878,7 @@ fn burn_path_asks_about_every_witness() {
     assert_eq!(asked, all);
 }
 
-/// A fake Electrum server that serves only non-verbose calls, as
-/// romanz/electrs does. One block at [`BLOCK`] holds a sibling, then `tx`.
+/// A fake Electrum server. One block at [`BLOCK`] holds a sibling, then `tx`.
 mod electrum_indexer {
     use super::*;
     use bitcoin::block::Header;
@@ -1895,9 +1894,12 @@ mod electrum_indexer {
         tx: bitcoin::Transaction,
         header: Header,
         tip: u32,
-        history_height: i32,
         known: bool,
-        unspent_height: Option<u32>,
+        verbose: bool,
+        /// What the tx answer says; `None` leaves the field out, as for a
+        /// mempool tx.
+        confirmations: Option<u32>,
+        block_hash: bitcoin::BlockHash,
     }
 
     fn witness() -> bitcoin::Transaction {
@@ -1926,11 +1928,12 @@ mod electrum_indexer {
         };
         Server {
             tx,
+            block_hash: header.block_hash(),
             header,
             tip: BLOCK + 5,
-            history_height: BLOCK as i32,
             known: true,
-            unspent_height: Some(BLOCK),
+            verbose: true,
+            confirmations: Some(6),
         }
     }
 
@@ -1950,21 +1953,26 @@ mod electrum_indexer {
             "blockchain.headers.subscribe" => {
                 json!({"height": server.tip, "hex": hex(&server.header)})
             }
-            "blockchain.scripthash.get_history" if server.known => {
-                json!([{"height": server.history_height, "tx_hash": txid}])
+            "blockchain.transaction.get" if params[1] != json!(true) || !server.verbose => {
+                return Err("verbose transactions are currently unsupported".into())
             }
-            "blockchain.scripthash.get_history" => json!([]),
+            "blockchain.transaction.get" if !server.known => {
+                return Err("No such mempool or blockchain transaction".into())
+            }
+            "blockchain.transaction.get" => {
+                let mut details = json!({"txid": txid,
+                    "hex": bitcoin::consensus::encode::serialize_hex(&server.tx)});
+                if let Some(confirmations) = server.confirmations {
+                    details["confirmations"] = json!(confirmations);
+                    details["blockhash"] = json!(server.block_hash.to_string());
+                }
+                details
+            }
             "blockchain.transaction.get_merkle" => {
                 let mut sibling = SIBLING;
                 sibling.reverse();
                 json!({"block_height": BLOCK, "pos": 1, "merkle": [hex::encode(sibling)]})
             }
-            "blockchain.scripthash.listunspent" => match server.unspent_height {
-                Some(height) => {
-                    json!([{"height": height, "tx_hash": txid, "tx_pos": 0, "value": 1000}])
-                }
-                None => json!([]),
-            },
             other => return Err(format!("unsupported method {other}")),
         })
     }
@@ -2014,8 +2022,27 @@ mod electrum_indexer {
     }
 
     #[test]
-    fn confirms_a_mined_witness_with_non_verbose_calls_only() {
+    fn confirms_a_mined_witness() {
         let pos = confirmed(server()).unwrap();
+        assert_eq!(pos.height().get(), BLOCK);
+    }
+
+    /// A witness with no BTC change and no recipient output: the OP_RETURN is
+    /// its only output, so only its txid finds it.
+    #[test]
+    fn confirms_a_witness_whose_only_output_is_an_op_return() {
+        let mut server = server();
+        server.tx.output = vec![bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::new_op_return([0x11; 32]),
+        }];
+        let mut leaves = [0u8; 64];
+        leaves[..32].copy_from_slice(&SIBLING);
+        leaves[32..].copy_from_slice(&server.tx.compute_txid().to_byte_array());
+        server.header.merkle_root =
+            bitcoin::TxMerkleNode::from_byte_array(sha256d::Hash::hash(&leaves).to_byte_array());
+        server.block_hash = server.header.block_hash();
+        let pos = confirmed(server).unwrap();
         assert_eq!(pos.height().get(), BLOCK);
     }
 
@@ -2023,6 +2050,7 @@ mod electrum_indexer {
     fn refuses_a_witness_one_block_too_shallow() {
         let err = confirmed(Server {
             tip: BLOCK + 4,
+            confirmations: Some(5),
             ..server()
         })
         .unwrap_err();
@@ -2033,24 +2061,37 @@ mod electrum_indexer {
     fn refuses_a_merkle_proof_that_does_not_match_the_block() {
         let mut lying = server();
         lying.header.merkle_root = bitcoin::TxMerkleNode::from_byte_array([0x11; 32]);
+        lying.block_hash = lying.header.block_hash();
         let err = confirmed(lying).unwrap_err();
         assert!(err.contains("does not match block"), "{err}");
     }
 
+    /// The tip moved between the tx answer and the tip read, so the depth
+    /// points at another block.
+    #[test]
+    fn refuses_a_block_hash_that_is_not_the_block_at_its_depth() {
+        let err = confirmed(Server {
+            block_hash: bitcoin::BlockHash::all_zeros(),
+            ..server()
+        })
+        .unwrap_err();
+        assert!(err.contains("tip moved"), "{err}");
+    }
+
     #[test]
     fn sees_a_mempool_witness_as_unmined() {
-        for height in [0, -1] {
+        for confirmations in [None, Some(0)] {
             let err = confirmed(Server {
-                history_height: height,
+                confirmations,
                 ..server()
             })
             .unwrap_err();
-            assert!(err.contains("unmined"), "{height}: {err}");
+            assert!(err.contains("unmined"), "{confirmations:?}: {err}");
         }
     }
 
     #[test]
-    fn sees_a_witness_missing_from_the_history_as_unknown() {
+    fn sees_a_witness_the_server_does_not_know_as_unknown() {
         let err = confirmed(Server {
             known: false,
             ..server()
@@ -2059,17 +2100,14 @@ mod electrum_indexer {
         assert!(err.contains("does not know"), "{err}");
     }
 
-    /// A witness with no BTC change and no recipient output: the OP_RETURN is
-    /// its only output, and Electrum indexes no OP_RETURN script.
     #[test]
-    fn refuses_a_witness_whose_only_output_is_an_op_return() {
-        let mut server = server();
-        server.tx.output = vec![bitcoin::TxOut {
-            value: bitcoin::Amount::ZERO,
-            script_pubkey: bitcoin::ScriptBuf::new_op_return([0x11; 32]),
-        }];
-        let err = confirmed(server).unwrap_err();
-        assert!(err.contains("no output an Electrum"), "{err}");
+    fn refuses_a_server_without_verbose_transactions() {
+        let err = confirmed(Server {
+            verbose: false,
+            ..server()
+        })
+        .unwrap_err();
+        assert!(err.contains("transaction lookup failed"), "{err}");
     }
 
     #[test]
