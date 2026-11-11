@@ -844,7 +844,7 @@ fn consensus(
             )
         })
         .collect();
-    let witnesses = validation::WitnessCheck { chain: &chain };
+    let witnesses = validation::WitnessCheck::Proven(&chain);
     let anchors = RefCell::new(Vec::new());
     let bind = |bridge: &validation::BfaBridge, seen: &[validation::MintAnchor]| {
         anchors.borrow_mut().extend_from_slice(seen);

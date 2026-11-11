@@ -1,9 +1,12 @@
-//! On-chain witness resolution: the tx from the consignment, its status from a
-//! trusted source. An unmined witness fails, so single-use seals hold.
+//! How consensus learns that the witnesses are mined. An unmined witness
+//! fails, so single-use seals hold.
+//!
+//! An `spv` build proves each witness position itself, and [`OnChainResolver`]
+//! serves those positions with the txs of the consignment. A build without
+//! `spv` hands rgb-lib the indexer's resolver instead (`indexer.rs`).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 
 use bitcoin::{Transaction, Txid};
 use rgbstd::containers::Transfer;
@@ -13,16 +16,9 @@ use rgbstd::ChainNet;
 
 /// The on-chain status of witness txs.
 pub trait ConfirmedWitnesses {
-    /// The block position of a mined `tx`. The source either verifies depth
-    /// itself or supplies `safe_height` for rgb-lib to enforce it.
+    /// The block position of `tx` if it is mined at the required depth.
     /// `Err` says why not: unknown, unmined, too shallow or a failed lookup.
     fn confirmed(&self, tx: &Transaction) -> std::result::Result<WitnessPos, String>;
-
-    /// The latest height rgb-lib may accept without an `UnsafeHistory` warning.
-    /// `None` means this source has already checked confirmation depth.
-    fn safe_height(&self) -> std::result::Result<Option<NonZeroU32>, String> {
-        Ok(None)
-    }
 }
 
 /// Positions already proven, as the burn path's verified SPV proofs give them.
@@ -36,9 +32,14 @@ impl ConfirmedWitnesses for BTreeMap<Txid, WitnessPos> {
     }
 }
 
-/// How consensus learns that the witnesses are mined.
-pub struct WitnessCheck<'a> {
-    pub chain: &'a dyn ConfirmedWitnesses,
+/// Where consensus gets the on-chain status of the witnesses.
+pub enum WitnessCheck<'a> {
+    /// Positions the enclave proved, each at the required depth. rgb-lib gets
+    /// no safe height: the resolver marks a witness mined only deep enough.
+    Proven(&'a dyn ConfirmedWitnesses),
+    /// The pinned indexer, trusted. rgb-lib warns about a witness less than
+    /// `min_confirmations` deep below the indexer tip, or unmined.
+    Indexer { min_confirmations: u32 },
 }
 
 type Answer = std::result::Result<WitnessPos, String>;
@@ -48,7 +49,7 @@ type Answer = std::result::Result<WitnessPos, String>;
 pub(super) struct OnChainResolver<'a> {
     txes: BTreeMap<Txid, Transaction>,
     chain_net: ChainNet,
-    check: &'a WitnessCheck<'a>,
+    chain: &'a dyn ConfirmedWitnesses,
     /// Answers given so far, so each witness costs at most one lookup.
     answers: RefCell<BTreeMap<Txid, Answer>>,
 }
@@ -58,7 +59,7 @@ impl<'a> OnChainResolver<'a> {
     pub(super) fn new(
         transfer: &Transfer,
         chain_net: ChainNet,
-        check: &'a WitnessCheck<'a>,
+        chain: &'a dyn ConfirmedWitnesses,
     ) -> Self {
         let txes: BTreeMap<Txid, Transaction> = transfer
             .bundles
@@ -68,7 +69,7 @@ impl<'a> OnChainResolver<'a> {
         Self {
             txes,
             chain_net,
-            check,
+            chain,
             answers: RefCell::new(BTreeMap::new()),
         }
     }
@@ -77,7 +78,7 @@ impl<'a> OnChainResolver<'a> {
         if let Some(known) = self.answers.borrow().get(&txid) {
             return known.clone();
         }
-        let answer = self.check.chain.confirmed(tx);
+        let answer = self.chain.confirmed(tx);
         self.answers.borrow_mut().insert(txid, answer.clone());
         answer
     }

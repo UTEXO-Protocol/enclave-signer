@@ -593,11 +593,14 @@ deployed.
   endpoints: its own indexer for a burn signer, its own EVM RPC for a mint
   signer. A burn signer built this way trusts the indexer for witness status
   and depth, and checks no request-supplied Merkle proof or BtcRelay proof.
-  The adapter uses rgb-lib's upstream resolver, checks the network and
-  transaction identity, and supplies rgb-lib's `safe_height` from the session's
-  starting tip and required confirmation depth. The enclave refuses rgb-lib's
-  `UnsafeHistory` warning. It does not independently verify Bitcoin inclusion
-  or headers ([burn flow](burn-flow.md#2-who-does-what)).
+  rgb-lib resolves the witnesses with the rgb-ops resolver it uses itself,
+  and checks the indexer's network and the txid of each answer. The enclave
+  gives rgb-lib a `safe_height` from the indexer tip and
+  `SPV_MIN_CONFIRMATIONS`, and refuses rgb-lib's `UnsafeHistory` warning about
+  a shallower or unmined witness. rgb-lib asks the indexer about every
+  witness and ignores a Merkle proof that the consignment carries. The
+  enclave does not independently verify Bitcoin inclusion or headers
+  ([burn flow](burn-flow.md#2-who-does-what)).
   `attest-verify` and `verify-launch` refuse this policy.
 - **Test networks.** Testnet4 SPV is test-grade: a host can make
   min-difficulty blocks at almost no cost, and they count for depth and

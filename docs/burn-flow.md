@@ -58,22 +58,29 @@ indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
 the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
-The indexer adapter uses the upstream witness resolvers that rgb-lib uses.
-The enclave checks the network and returned transaction's txid. It passes
-`safe_height = session_tip - SPV_MIN_CONFIRMATIONS + 1` to rgb-lib, which
-reports witnesses above that height as `UnsafeHistory`. The enclave refuses
-that warning, as it does every validation warning. A chain too short to
-provide a positive safe height also refuses; it never disables the policy.
-The adapter trusts the resolver's mined status, height and block time. It does
-not separately fetch or verify the witness's block header, block hash or
-Merkle proof; independent Bitcoin inclusion verification requires the SPV path.
+In place of B2.9, rgb-lib resolves each witness through the indexer, with the
+rgb-ops resolver for Electrum or Esplora that rgb-lib uses itself. rgb-lib
+checks that the indexer serves the enclave's Bitcoin network, and that each
+answer is the transaction with the witness txid. The enclave reads the
+indexer tip once per validation and passes
+`safe_height = tip - SPV_MIN_CONFIRMATIONS + 1` to rgb-lib: the highest block
+that is `SPV_MIN_CONFIRMATIONS` deep. rgb-lib reports a witness above that
+height, or unmined, in an `UnsafeHistory` warning. The enclave refuses that
+warning, as it does every validation warning. A chain too short to give a
+positive safe height also refuses; it never disables the policy.
+
+The enclave trusts the resolver's mined status, height and block time, and
+checks no request-supplied Merkle proof and no BtcRelay proof. The resolver
+serves rgb-lib no block headers, so rgb-lib asks the indexer about every
+witness and ignores a Merkle proof that the consignment carries.
+Independent Bitcoin inclusion verification requires the SPV path.
 
 Electrum block discovery follows the pinned upstream resolver: it refreshes
 the tip for each witness, accounts for queued header notifications, and
 searches around its estimated height. Without notifications, it tries the
-estimate and one block on either side. The safe height stays based on the
-session's starting tip. A node further ahead of its index can make resolution
-fail; the enclave does not fall back to unchecked status.
+estimate and one block on either side. A newer tip does not move the safe
+height. A node further ahead of its index can make resolution fail; the
+enclave does not fall back to unchecked status.
 The server requirements are in [configuration](configuration.md#launch-values).
 
 ## 3. Sequence

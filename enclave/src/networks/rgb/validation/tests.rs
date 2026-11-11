@@ -116,7 +116,7 @@ fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<Valida
 
 /// The burn path's check: no witness may be unmined.
 fn on_chain(chain: &dyn ConfirmedWitnesses) -> WitnessCheck<'_> {
-    WitnessCheck { chain }
+    WitnessCheck::Proven(chain)
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
@@ -1460,42 +1460,54 @@ fn stalled_host() -> std::net::SocketAddr {
     addr
 }
 
-#[test]
-fn stalled_electrum_session_times_out_instead_of_hanging() {
-    let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "bitcoin")
-        .unwrap()
-        .with_timeout(2);
-    let tx = bitcoin::Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![],
-    };
+/// A stalled indexer at `url` fails the connection within its read timeout.
+fn assert_stalled_indexer_times_out(url: String) {
+    let validator = RgbValidator::new(url, "bitcoin").unwrap().with_timeout(2);
     let start = std::time::Instant::now();
-    let err = validator.indexer_witnesses(1).confirmed(&tx).unwrap_err();
+    let err = validator
+        .indexer_resolver(1)
+        .err()
+        .expect("a stalled indexer gives no resolver");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(60),
-        "stalled Electrum must be bounded by the socket timeout: {err}"
+        "a stalled indexer must be bounded by the read timeout: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("indexer cannot resolve the witnesses"),
+        "{err}"
     );
 }
 
 #[test]
-fn stalled_esplora_session_times_out_instead_of_hanging() {
-    let validator = RgbValidator::new(format!("http://{}", stalled_host()), "bitcoin")
-        .unwrap()
-        .with_timeout(2);
-    let tx = bitcoin::Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![],
-    };
-    let start = std::time::Instant::now();
-    let err = validator.indexer_witnesses(1).confirmed(&tx).unwrap_err();
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(60),
-        "stalled Esplora must be bounded by the HTTP timeout: {err}"
-    );
+fn a_stalled_electrum_indexer_times_out_instead_of_hanging() {
+    assert_stalled_indexer_times_out(format!("tcp://{}", stalled_host()));
+}
+
+#[test]
+fn a_stalled_esplora_indexer_times_out_instead_of_hanging() {
+    assert_stalled_indexer_times_out(format!("http://{}", stalled_host()));
+}
+
+/// A block at height `h` has `tip - h + 1` confirmations. A chain with no
+/// block `minimum` deep has no safe height, and a zero minimum is no policy.
+#[test]
+fn a_short_chain_never_disables_the_confirmation_policy() {
+    for (tip, minimum) in [(0, 1), (5, 6), (4, 6), (100, 0)] {
+        assert!(
+            confirmation_height(tip, minimum).is_err(),
+            "{tip}, {minimum}"
+        );
+    }
+}
+
+#[test]
+fn safe_height_arithmetic_handles_the_full_height_range() {
+    assert_eq!(confirmation_height(100, 6).unwrap().get(), 95);
+    assert_eq!(confirmation_height(100, 1).unwrap().get(), 100);
+    assert_eq!(confirmation_height(6, 6).unwrap().get(), 1);
+    assert_eq!(confirmation_height(u32::MAX, 1).unwrap().get(), u32::MAX);
+    assert_eq!(confirmation_height(u32::MAX, u32::MAX).unwrap().get(), 1);
 }
 
 /// The burn path reads witness status from its SPV proofs, never the indexer.
@@ -1528,8 +1540,7 @@ fn rgb_lib_report(bytes: &[u8]) -> rgb_lib::no_wallet::ConsignmentValidation {
     }
 }
 
-/// rgb-lib must have validated our transfer, and any warning refuses,
-/// including UnsafeHistory from the indexer's safe_height policy.
+/// rgb-lib must have validated our transfer, and any warning refuses.
 #[test]
 fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     use super::consensus::check_validation;
@@ -1546,7 +1557,6 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     };
     assert!(check_validation(&contract, &transfer).is_err());
     for warning in [
-        ValidationWarning::UnsafeHistory { txids: vec![] },
         ValidationWarning::InvalidSpvProof {
             bundle_id: "b".into(),
             txid: "t".into(),
@@ -1563,6 +1573,48 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
             .unwrap_err()
             .to_string();
         assert!(err.contains("with the warning"), "{err}");
+    }
+}
+
+/// An UnsafeHistory warning refuses with the witnesses it names: counted, and
+/// the first one with its block or as unmined.
+#[test]
+fn an_unsafe_history_warning_names_its_first_witness() {
+    use super::consensus::check_validation;
+    use rgb_lib::no_wallet::{ValidatedWitness, ValidationWarning, WitnessValidationStatus};
+    let bytes = burn_bytes();
+    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes[..])).unwrap();
+    let witness = |txid: &str, status| ValidatedWitness {
+        txid: txid.into(),
+        status,
+        from_consignment: false,
+    };
+    let shallow = WitnessValidationStatus::Mined {
+        height: 101,
+        timestamp: 1_700_000_000,
+    };
+    for (status, first) in [
+        (shallow, "the first: 1111 in block 101"),
+        (
+            WitnessValidationStatus::Tentative,
+            "the first: 1111 unmined",
+        ),
+    ] {
+        let warned = rgb_lib::no_wallet::ConsignmentValidation {
+            safe_height: Some(100),
+            witnesses: vec![witness("1111", status), witness("2222", status)],
+            warnings: vec![ValidationWarning::UnsafeHistory {
+                txids: vec!["1111".into(), "2222".into()],
+            }],
+            ..rgb_lib_report(&bytes)
+        };
+        let err = check_validation(&warned, &transfer)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2 witness tx(s)"), "{err}");
+        assert!(err.contains("(safe height 100)"), "{err}");
+        assert!(err.contains(first), "{err}");
+        assert!(!err.contains("2222"), "{err}");
     }
 }
 
@@ -1794,8 +1846,7 @@ fn a_consignment_spv_proof_does_not_prove_a_witness() {
     use rgbstd::validation::{ResolveWitness, WitnessResolverError};
     let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes)).unwrap();
     let chain = mined(&witness_ids(&bytes));
-    let check = on_chain(&chain);
-    let resolver = OnChainResolver::new(&transfer, rgbstd::ChainNet::BitcoinRegtest, &check);
+    let resolver = OnChainResolver::new(&transfer, rgbstd::ChainNet::BitcoinRegtest, &chain);
     let header = resolver.get_block_header(std::num::NonZeroU32::new(900_000).unwrap());
     assert!(
         matches!(header, Err(WitnessResolverError::NotSupported)),
@@ -1876,503 +1927,6 @@ fn burn_path_asks_about_every_witness() {
     let mut all = ids.clone();
     all.sort();
     assert_eq!(asked, all);
-}
-
-/// A fake Electrum server. One block at [`BLOCK`] holds a sibling, then `tx`.
-mod electrum_indexer {
-    use super::*;
-    use bitcoin::block::Header;
-    use bitcoin::hashes::{sha256d, Hash};
-    use serde_json::{json, Value};
-    use std::io::{BufRead, BufReader, Write};
-    use std::sync::{Arc, Mutex};
-
-    const BLOCK: u32 = 200;
-    const SIBLING: [u8; 32] = [0x5b; 32];
-
-    #[derive(Clone)]
-    struct Server {
-        tx: bitcoin::Transaction,
-        header: Header,
-        tip: u32,
-        /// The tip on subscriptions after the session starts.
-        resolution_tip: Option<u32>,
-        known: bool,
-        verbose: bool,
-        /// What the tx answer says; `None` leaves the field out, as for a
-        /// mempool tx.
-        confirmations: Option<u32>,
-        block_hash: bitcoin::BlockHash,
-        block_time: i64,
-        proof_pos: usize,
-        requests: Arc<Mutex<Vec<String>>>,
-    }
-
-    fn witness() -> bitcoin::Transaction {
-        bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn {
-                previous_output: gen::outpoint(0x42, 0),
-                ..Default::default()
-            }],
-            output: vec![gen::dust(7)],
-        }
-    }
-
-    /// `witness` mined at [`BLOCK`], 6 deep.
-    fn server() -> Server {
-        let tx = witness();
-        let mut leaves = [0u8; 64];
-        leaves[..32].copy_from_slice(&SIBLING);
-        leaves[32..].copy_from_slice(&tx.compute_txid().to_byte_array());
-        let root = sha256d::Hash::hash(&leaves).to_byte_array();
-        let header = Header {
-            version: bitcoin::block::Version::ONE,
-            prev_blockhash: bitcoin::BlockHash::all_zeros(),
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
-            time: 1_700_000_000,
-            bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        };
-        Server {
-            tx,
-            block_hash: header.block_hash(),
-            header,
-            tip: BLOCK + 5,
-            resolution_tip: None,
-            known: true,
-            verbose: true,
-            confirmations: Some(6),
-            block_time: i64::from(header.time),
-            proof_pos: 1,
-            requests: Arc::default(),
-        }
-    }
-
-    fn answer(server: &Server, method: &str, params: &Value) -> std::result::Result<Value, String> {
-        server.requests.lock().unwrap().push(method.to_owned());
-        let hex = |h: &Header| bitcoin::consensus::encode::serialize_hex(h);
-        let txid = server.tx.compute_txid().to_string();
-        Ok(match method {
-            "server.version" => json!(["fake-electrs", "1.4"]),
-            "blockchain.block.header" => match params[0].as_u64() {
-                Some(0) => json!(hex(&bitcoin::constants::genesis_block(
-                    bitcoin::Network::Regtest
-                )
-                .header)),
-                Some(h) if h == u64::from(BLOCK) => json!(hex(&server.header)),
-                other => return Err(format!("no header at {other:?}")),
-            },
-            "blockchain.headers.subscribe" => {
-                json!({"height": server.tip, "hex": hex(&server.header)})
-            }
-            "blockchain.transaction.get" if params[1] != json!(true) || !server.verbose => {
-                return Err("verbose transactions are currently unsupported".into())
-            }
-            "blockchain.transaction.get" if !server.known => {
-                return Err("No such mempool or blockchain transaction".into())
-            }
-            "blockchain.transaction.get" => {
-                let mut details = json!({"txid": txid,
-                    "hex": bitcoin::consensus::encode::serialize_hex(&server.tx)});
-                if let Some(confirmations) = server.confirmations {
-                    details["confirmations"] = json!(confirmations);
-                    details["blockhash"] = json!(server.block_hash.to_string());
-                    details["blocktime"] = json!(server.block_time);
-                }
-                details
-            }
-            "blockchain.transaction.get_merkle" if params[1].as_u64() != Some(u64::from(BLOCK)) => {
-                return Err("tx not found in that block".into())
-            }
-            "blockchain.transaction.get_merkle" => {
-                let mut sibling = SIBLING;
-                sibling.reverse();
-                json!({"block_height": BLOCK, "pos": server.proof_pos, "merkle": [hex::encode(sibling)]})
-            }
-            other => return Err(format!("unsupported method {other}")),
-        })
-    }
-
-    /// Serves `server` and returns its `tcp://` URL.
-    fn serve(server: Server) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { break };
-                let mut server = server.clone();
-                std::thread::spawn(move || {
-                    let mut out = stream.try_clone().unwrap();
-                    for line in BufReader::new(stream).lines() {
-                        let Ok(line) = line else { break };
-                        let req: Value = serde_json::from_str(&line).unwrap();
-                        let method = req["method"].as_str().unwrap_or_default();
-                        let body = match answer(&server, method, &req["params"]) {
-                            Ok(result) => {
-                                json!({"jsonrpc": "2.0", "id": req["id"], "result": result})
-                            }
-                            Err(message) => json!({"jsonrpc": "2.0", "id": req["id"],
-                                "error": {"code": -32601, "message": message}}),
-                        };
-                        if writeln!(out, "{body}").is_err() {
-                            break;
-                        }
-                        if method == "blockchain.headers.subscribe" {
-                            if let Some(tip) = server.resolution_tip {
-                                server.tip = tip;
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        format!("tcp://{addr}")
-    }
-
-    fn validator_for(server: Server, network: &str) -> RgbValidator {
-        RgbValidator::new(serve(server), network)
-            .unwrap()
-            .with_timeout(5)
-    }
-
-    fn confirmed(server: Server) -> std::result::Result<WitnessPos, String> {
-        let tx = server.tx.clone();
-        validator_for(server, "regtest")
-            .indexer_witnesses(6)
-            .confirmed(&tx)
-    }
-
-    #[test]
-    fn confirms_a_mined_witness() {
-        let pos = confirmed(server()).unwrap();
-        assert_eq!(pos.height().get(), BLOCK);
-    }
-
-    /// A witness with no BTC change and no recipient output: the OP_RETURN is
-    /// its only output, so only its txid finds it.
-    #[test]
-    fn confirms_a_witness_whose_only_output_is_an_op_return() {
-        let mut server = server();
-        server.tx.output = vec![bitcoin::TxOut {
-            value: bitcoin::Amount::ZERO,
-            script_pubkey: bitcoin::ScriptBuf::new_op_return([0x11; 32]),
-        }];
-        let mut leaves = [0u8; 64];
-        leaves[..32].copy_from_slice(&SIBLING);
-        leaves[32..].copy_from_slice(&server.tx.compute_txid().to_byte_array());
-        server.header.merkle_root =
-            bitcoin::TxMerkleNode::from_byte_array(sha256d::Hash::hash(&leaves).to_byte_array());
-        server.block_hash = server.header.block_hash();
-        let pos = confirmed(server).unwrap();
-        assert_eq!(pos.height().get(), BLOCK);
-    }
-
-    #[test]
-    fn passes_a_shallow_position_to_rgb_lib_with_a_lower_safe_height() {
-        let validator = validator_for(
-            Server {
-                tip: BLOCK + 4,
-                confirmations: Some(5),
-                ..server()
-            },
-            "regtest",
-        );
-        let source = validator.indexer_witnesses(6);
-        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
-        assert_eq!(source.confirmed(&witness()).unwrap().height().get(), BLOCK);
-    }
-
-    #[test]
-    fn trusts_the_resolver_for_inclusion() {
-        let mut lying = server();
-        lying.header.merkle_root = bitcoin::TxMerkleNode::from_byte_array([0x11; 32]);
-        lying.block_hash = bitcoin::BlockHash::all_zeros();
-        lying.proof_pos = 3;
-        // The no-SPV policy trusts the resolver's mined status. Inclusion
-        // verification belongs to the SPV path, with its own header chain.
-        assert_eq!(confirmed(lying).unwrap().height().get(), BLOCK);
-    }
-
-    #[test]
-    fn resolves_without_duplicate_electrum_reads() {
-        let server = server();
-        let requests = Arc::clone(&server.requests);
-        confirmed(server).unwrap();
-        let requests = requests.lock().unwrap();
-        for method in [
-            "blockchain.block.header", // Only the network's genesis header.
-            "blockchain.transaction.get",
-            "blockchain.transaction.get_merkle",
-        ] {
-            assert_eq!(
-                requests.iter().filter(|m| *m == method).count(),
-                1,
-                "{requests:?}"
-            );
-        }
-    }
-
-    /// The node behind the server is a block ahead of its index, so the tx
-    /// answer counts one confirmation more than the session tip implies.
-    #[test]
-    fn finds_the_block_when_the_node_counts_one_more_confirmation() {
-        let pos = confirmed(Server {
-            confirmations: Some(7),
-            ..server()
-        })
-        .unwrap();
-        assert_eq!(pos.height().get(), BLOCK);
-    }
-
-    /// The resolver reads the tip for each witness. Confirmations still use
-    /// the conservative tip captured when the enclave session started.
-    #[test]
-    fn finds_the_block_when_the_index_advances_since_the_session_started() {
-        for advanced in [3, 4] {
-            let pos = confirmed(Server {
-                resolution_tip: Some(BLOCK + 5 + advanced),
-                confirmations: Some(6 + advanced),
-                ..server()
-            })
-            .unwrap();
-            assert_eq!(pos.height().get(), BLOCK);
-        }
-    }
-
-    #[test]
-    fn a_newer_resolver_tip_does_not_increase_the_accepted_depth() {
-        let validator = validator_for(
-            Server {
-                tip: BLOCK + 4,
-                resolution_tip: Some(BLOCK + 8),
-                confirmations: Some(9),
-                ..server()
-            },
-            "regtest",
-        );
-        let source = validator.indexer_witnesses(6);
-        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
-        assert_eq!(source.confirmed(&witness()).unwrap().height().get(), BLOCK);
-        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
-    }
-
-    #[test]
-    fn refuses_a_node_ahead_of_the_upstream_search_window() {
-        // With no header notifications, the pinned resolver searches one
-        // block either side of its estimate. A further gap must fail closed.
-        for ahead in [2, 3, 4] {
-            let err = confirmed(Server {
-                confirmations: Some(6 + ahead),
-                ..server()
-            })
-            .unwrap_err();
-            assert!(err.contains("can't be located"), "{ahead}: {err}");
-        }
-    }
-
-    #[test]
-    fn refuses_a_resolver_answer_for_another_transaction() {
-        let mut other = server();
-        other.tx.output = vec![gen::dust(8)];
-        let err = validator_for(other, "regtest")
-            .indexer_witnesses(6)
-            .confirmed(&witness())
-            .unwrap_err();
-        assert!(err.contains("answered with tx"), "{err}");
-    }
-
-    #[test]
-    fn refuses_confirmations_above_the_resolver_tip() {
-        let err = confirmed(Server {
-            confirmations: Some(BLOCK + 6),
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("lookup failed"), "{err}");
-    }
-
-    #[test]
-    fn uses_the_resolvers_block_time() {
-        let mut server = server();
-        let expected = i64::from(server.header.time) + 600;
-        server.block_time = expected;
-        assert_eq!(confirmed(server).unwrap().timestamp(), expected);
-    }
-
-    #[test]
-    fn sees_a_mempool_witness_as_unmined() {
-        for confirmations in [None, Some(0)] {
-            let err = confirmed(Server {
-                confirmations,
-                ..server()
-            })
-            .unwrap_err();
-            assert!(err.contains("unmined"), "{confirmations:?}: {err}");
-        }
-    }
-
-    #[test]
-    fn sees_a_witness_the_server_does_not_know_as_unknown() {
-        let err = confirmed(Server {
-            known: false,
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("does not know"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_server_without_verbose_transactions() {
-        let err = confirmed(Server {
-            verbose: false,
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("indexer lookup failed"), "{err}");
-    }
-
-    #[test]
-    fn refuses_a_server_of_another_network() {
-        let server = server();
-        let tx = server.tx.clone();
-        let err = validator_for(server, "bitcoin")
-            .indexer_witnesses(1)
-            .confirmed(&tx)
-            .unwrap_err();
-        assert!(err.contains("does not serve"), "{err}");
-    }
-}
-
-mod indexer_answer {
-    use super::*;
-    use rgbstd::validation::WitnessStatus;
-    use rgbstd::vm::WitnessOrd;
-    use std::num::NonZeroU32;
-
-    fn tx() -> bitcoin::Transaction {
-        bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![],
-            output: vec![gen::dust(1)],
-        }
-    }
-
-    fn pos(height: u32) -> WitnessPos {
-        let height = std::num::NonZeroU32::new(height).unwrap();
-        WitnessPos::bitcoin(height, 1_700_000_000).unwrap()
-    }
-
-    struct ReportedHistory {
-        positions: BTreeMap<bitcoin::Txid, WitnessPos>,
-        tip: u32,
-        min_confirmations: u32,
-    }
-
-    impl ConfirmedWitnesses for ReportedHistory {
-        fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-            self.positions.confirmed(tx)
-        }
-
-        fn safe_height(&self) -> std::result::Result<Option<NonZeroU32>, String> {
-            confirmation_height(self.tip, self.min_confirmations).map(Some)
-        }
-    }
-
-    fn validate_at(height: u32, tip: u32, min_confirmations: u32) -> Result<ValidatedConsignment> {
-        let bytes = burn_bytes();
-        let source = ReportedHistory {
-            positions: witness_ids(&bytes)
-                .into_iter()
-                .map(|id| (id, pos(height)))
-                .collect(),
-            tip,
-            min_confirmations,
-        };
-        validator().validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
-    }
-
-    #[test]
-    fn rgb_lib_accepts_exactly_min_confirmations() {
-        validate_at(100, 105, 6).unwrap();
-    }
-
-    #[test]
-    fn rgb_lib_refuses_one_confirmation_short() {
-        let err = validate_at(101, 105, 6).unwrap_err().to_string();
-        assert!(err.contains("UnsafeHistory"), "{err}");
-    }
-
-    #[test]
-    fn rgb_lib_refuses_a_witness_above_the_indexer_tip() {
-        let err = validate_at(106, 105, 1).unwrap_err().to_string();
-        assert!(err.contains("UnsafeHistory"), "{err}");
-    }
-
-    #[test]
-    fn rgb_lib_checks_safe_height_for_every_history_witness() {
-        let bytes = burn_bytes();
-        let ids = witness_ids(&bytes);
-        assert!(ids.len() > 1);
-        for unsafe_id in &ids {
-            let source = ReportedHistory {
-                positions: ids
-                    .iter()
-                    .map(|id| (*id, pos(if id == unsafe_id { 101 } else { 100 })))
-                    .collect(),
-                tip: 105,
-                min_confirmations: 6,
-            };
-            let err = validator()
-                .validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("UnsafeHistory"), "{unsafe_id}: {err}");
-        }
-    }
-
-    #[test]
-    fn a_short_chain_never_disables_the_confirmation_policy() {
-        for (tip, minimum) in [(0, 1), (5, 6), (4, 6), (100, 0)] {
-            assert!(
-                confirmation_height(tip, minimum).is_err(),
-                "{tip}, {minimum}"
-            );
-        }
-        let err = validate_at(1, 5, 6).unwrap_err().to_string();
-        assert!(err.contains("cannot provide a safe height"), "{err}");
-    }
-
-    #[test]
-    fn safe_height_arithmetic_handles_the_full_height_range() {
-        assert_eq!(confirmation_height(6, 6).unwrap().get(), 1);
-        assert_eq!(confirmation_height(u32::MAX, 1).unwrap().get(), u32::MAX);
-        assert_eq!(confirmation_height(u32::MAX, u32::MAX).unwrap().get(), 1);
-    }
-
-    #[test]
-    fn indexer_answer_for_another_tx_is_refused() {
-        let asked = gen::outpoint(0x55, 0).txid;
-        let answer = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        let err = indexer_position(answer, asked).unwrap_err();
-        assert!(err.contains("answered with tx"), "{err}");
-    }
-
-    #[test]
-    fn indexer_answer_requires_a_mined_witness() {
-        let txid = tx().compute_txid();
-        let mined = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        assert_eq!(indexer_position(mined, txid).unwrap(), pos(90));
-        let tentative = WitnessStatus::Resolved(tx(), WitnessOrd::Tentative);
-        assert!(indexer_position(tentative, txid)
-            .unwrap_err()
-            .contains("unmined"));
-        assert!(indexer_position(WitnessStatus::Unresolved, txid)
-            .unwrap_err()
-            .contains("does not know"));
-    }
 }
 
 // ===== asset binding rule =====
