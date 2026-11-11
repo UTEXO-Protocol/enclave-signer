@@ -3,8 +3,10 @@
 //! This module only wires the submodules:
 //!
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
-//! - `indexer.rs`: the indexer client, and the no-SPV burn's witness source.
-//! - `witness.rs`: the on-chain witness resolver consensus runs with.
+//! - `indexer.rs`: the indexer client: the no-SPV burn's witness resolver and
+//!   safe height.
+//! - `witness.rs`: where consensus gets witness status, and the resolver of
+//!   SPV-proven positions.
 //! - `consensus.rs`: run rgb-lib validation over the consignment bytes.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `scratch.rs`: the file rgb-lib reads the bytes from.
@@ -38,7 +40,7 @@ mod tests;
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{lock_id, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
-pub use indexer::{IndexerWitnesses, RgbValidator};
+pub use indexer::RgbValidator;
 pub use reject_list::{
     decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,
     RejectListReader,

@@ -5,10 +5,11 @@
 //! [`super::types::ValidatedConsignment`]. rgb-lib runs both phases and the
 //! reject-list check, and asks three resolvers for what is outside the file:
 //!
-//! - each witness takes its tx from the consignment and its on-chain status
-//!   from a [`WitnessCheck`]: it must be mined, at `SPV_MIN_CONFIRMATIONS`
-//!   depth. SPV checks that depth against the enclave's tip; an indexer source
-//!   supplies `safe_height` for rgb-lib to check it against the indexer's tip;
+//! - each witness gets its on-chain status from a [`WitnessCheck`]. An `spv`
+//!   build answers with the positions it proved, each at
+//!   `SPV_MIN_CONFIRMATIONS` depth from the enclave's tip. A build without
+//!   `spv` passes the indexer's resolver and the safe height from its tip, and
+//!   refuses rgb-lib's warning about a shallower or unmined witness;
 //! - each BFA mint claim is confirmed only against the lock an
 //!   [`AnchorBinder`] binds to its `LockId`, with no RPC;
 //! - the reject list comes from the enclave's reader, after the asset bind.
@@ -22,10 +23,11 @@ use std::num::NonZeroU32;
 
 use rgb_lib::no_wallet::{
     validate_consignment_with_resolver, ConsignmentValidation, ResolveRejectList,
-    ValidationOptions, WitnessValidationStatus,
+    ValidationOptions, ValidationWarning, WitnessValidationStatus,
 };
 use rgb_lib::BitcoinNetwork;
 use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
+use rgbstd::validation::ResolveWitness;
 
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
@@ -42,8 +44,8 @@ impl RgbValidator {
     /// Validates raw consignment bytes and returns the extracted data.
     ///
     /// `bind` binds every mint anchor to a lock. With `None`, a consignment
-    /// with any mint in its history is refused. `witnesses` says which witness
-    /// txs are mined.
+    /// with any mint in its history is refused. `witnesses` says where the
+    /// on-chain status of the witness txs comes from.
     /// `lists` binds the asset before rgb-lib runs, and reads its reject list.
     pub fn validate_consignment(
         &self,
@@ -63,12 +65,9 @@ impl RgbValidator {
         );
 
         let (transfer, list) = load_bounded(consignment_bytes, lists)?;
-        let safe_height = witnesses
-            .chain
-            .safe_height()
-            .map_err(|e| EnclaveError::CrossCheck(format!("witness confirmation policy: {e}")))?;
+        let (witness_resolver, safe_height) = self.witness_resolver(&transfer, witnesses)?;
         let resolvers = Resolvers {
-            witnesses: OnChainResolver::new(&transfer, self.chain_net, witnesses),
+            witnesses: witness_resolver,
             anchors: bind.map(|bind| BindingResolver::new(&transfer, bind)),
             list: list
                 .zip(lists.read)
@@ -100,6 +99,25 @@ impl RgbValidator {
         Ok(validated)
     }
 
+    /// The witness resolver rgb-lib asks, and the safe height it checks them
+    /// against. The indexer path connects here, after the cheap checks.
+    fn witness_resolver<'a>(
+        &self,
+        transfer: &Transfer,
+        check: &WitnessCheck<'a>,
+    ) -> Result<(Box<dyn ResolveWitness + 'a>, Option<NonZeroU32>)> {
+        Ok(match check {
+            WitnessCheck::Proven(chain) => (
+                Box::new(OnChainResolver::new(transfer, self.chain_net, *chain)),
+                None,
+            ),
+            WitnessCheck::Indexer { min_confirmations } => {
+                let (resolver, safe_height) = self.indexer_resolver(*min_confirmations)?;
+                (resolver, Some(safe_height))
+            }
+        })
+    }
+
     /// rgb-lib reads only a file: it validates `transfer`, then reads its summary.
     /// `safe_height` delegates the indexer's confirmation policy to rgb-lib.
     fn run_rgb_lib(
@@ -122,7 +140,7 @@ impl RgbValidator {
             })?;
             let validation = validate_consignment_with_resolver(
                 path,
-                &resolvers.witnesses,
+                resolvers.witnesses.as_ref(),
                 resolvers.anchors.as_ref().map(|a| a as &dyn ResolveClaim),
                 resolvers.list.as_ref().map(|l| l as &dyn ResolveRejectList),
                 safe_height,
@@ -178,7 +196,7 @@ fn load_bounded(
 
 /// The three resolvers rgb-lib asks, over one parsed transfer.
 struct Resolvers<'a> {
-    witnesses: OnChainResolver<'a>,
+    witnesses: Box<dyn ResolveWitness + 'a>,
     anchors: Option<BindingResolver<'a>>,
     list: Option<ListResolver<'a>>,
 }
@@ -211,13 +229,44 @@ pub(super) fn check_validation(
             validation.consignment_id, validation.is_transfer
         )));
     }
-    // UnsafeHistory enforces safe_height; every other warning also refuses.
-    if let Some(warning) = validation.warnings.first() {
-        return Err(EnclaveError::CrossCheck(format!(
+    // No resolver serves block headers, so a carried proof raises no
+    // InvalidSpvProof. The indexer's safe height can raise UnsafeHistory.
+    // Any warning refuses.
+    match validation.warnings.first() {
+        None => Ok(()),
+        Some(ValidationWarning::UnsafeHistory { txids }) => Err(EnclaveError::CrossCheck(format!(
+            "{} - refusing to sign",
+            unsafe_history(validation, txids)
+        ))),
+        Some(warning) => Err(EnclaveError::CrossCheck(format!(
             "rgb-lib validated the consignment with the warning {warning:?} - refusing to sign"
-        )));
+        ))),
     }
-    Ok(())
+}
+
+/// The witnesses above the safe height or unmined, counted, with the first one
+/// named: a long history can have thousands.
+fn unsafe_history(validation: &ConsignmentValidation, txids: &[String]) -> String {
+    let first = txids.first().map_or_else(
+        || "none".to_string(),
+        |txid| {
+            let status = validation.witnesses.iter().find(|w| &w.txid == txid);
+            match status.map(|w| w.status) {
+                Some(WitnessValidationStatus::Mined { height, .. }) => {
+                    format!("{txid} in block {height}")
+                }
+                _ => format!("{txid} unmined"),
+            }
+        },
+    );
+    let safe_height = validation
+        .safe_height
+        .map_or_else(|| "none".to_string(), |h| h.to_string());
+    format!(
+        "{} witness tx(s) are unmined or less than SPV_MIN_CONFIRMATIONS deep below the \
+         indexer tip (safe height {safe_height}); the first: {first}",
+        txids.len()
+    )
 }
 
 /// Reads what the rest of the enclave binds from the validated consignment.
@@ -270,7 +319,7 @@ fn summarize(
 }
 
 /// Witnesses rgb-lib did not see mined, in display order. A passing validation
-/// leaves none: the resolver refuses every unmined witness.
+/// leaves none: the proven resolver, or the safe height, refuses each one.
 fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32]>> {
     let mut txids = BTreeSet::new();
     for witness in &validation.witnesses {
