@@ -32,6 +32,7 @@ hand.
 | Document | What it gives |
 |----------|---------------|
 | [building.md](building.md) | Build the binaries and the enclave image. Reproducible measurements. The stage Signet profile is in [build/profiles/README.md](../build/profiles/README.md). |
+| [github-releases.md](github-releases.md) | Publish a verified Stage Signet build and its PCRs for cosigners. |
 | [configuration.md](configuration.md) | The settings: image settings, launch values, parent settings. |
 | [operations.md](operations.md) | Launch, launch check, readiness, restart. |
 | [runtime-limits.md](runtime-limits.md) | The limits that an operator can change on a running enclave. |
