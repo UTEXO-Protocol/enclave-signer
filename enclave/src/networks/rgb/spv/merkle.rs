@@ -26,9 +26,8 @@ pub type Sha256d = [u8; 32];
 /// Maximum sibling hashes in one Merkle path. Depth d covers up to 2^d
 /// transactions, and a 4 MB block holds far fewer than 2^17, so 32 never
 /// refuses a real proof and bounds the hashing a hostile prover can cause.
-/// Both callers check it before any hashing: `spv_crosscheck::proof_txid` for
-/// the request proofs of the burn path and `validation::indexer::assert_in_block`
-/// for Electrum proofs. Compile-time and in PCR0, so the host cannot change it.
+/// `spv_crosscheck::proof_txid` checks it before hashing request proofs on the
+/// burn path. Compile-time and in PCR0, so the host cannot change it.
 pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 
 /// Merkle inclusion check error. Bad input and a root mismatch are separate

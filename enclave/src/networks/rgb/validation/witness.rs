@@ -1,5 +1,5 @@
-//! On-chain witness resolution: the tx from the consignment, its status from a
-//! trusted source. An unmined witness fails, so single-use seals hold.
+//! Witness source selection and the adapter for enclave-verified SPV positions.
+//! No-SPV validation uses the indexer resolver in `indexer.rs`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -28,29 +28,32 @@ impl ConfirmedWitnesses for BTreeMap<Txid, WitnessPos> {
     }
 }
 
-/// How consensus learns that the witnesses are mined.
-pub struct WitnessCheck<'a> {
-    pub chain: &'a dyn ConfirmedWitnesses,
+/// Where consensus gets the on-chain status of the witnesses.
+pub enum WitnessCheck<'a> {
+    /// Positions whose inclusion and depth the enclave has verified.
+    Proven(&'a dyn ConfirmedWitnesses),
+    /// Trusted indexer results, with confirmation depth enforced by rgb-lib.
+    Indexer { min_confirmations: u32 },
 }
 
 type Answer = std::result::Result<WitnessPos, String>;
 
-/// The consensus resolver. No `get_block_header`: a proof the consignment
-/// carries then falls through to `resolve_witness`, never marking a tx mined.
+/// Feeds verified positions to rgb-lib. Header lookups stay disabled so a
+/// proof in the consignment cannot substitute for enclave verification.
 pub(super) struct OnChainResolver<'a> {
     txes: BTreeMap<Txid, Transaction>,
     chain_net: ChainNet,
-    check: &'a WitnessCheck<'a>,
+    chain: &'a dyn ConfirmedWitnesses,
     /// Answers given so far, so each witness costs at most one lookup.
     answers: RefCell<BTreeMap<Txid, Answer>>,
 }
 
 impl<'a> OnChainResolver<'a> {
-    /// Built from our parsed transfer before rgb-lib runs; owns its txs.
+    /// Combines consignment transactions with their verified positions.
     pub(super) fn new(
         transfer: &Transfer,
         chain_net: ChainNet,
-        check: &'a WitnessCheck<'a>,
+        chain: &'a dyn ConfirmedWitnesses,
     ) -> Self {
         let txes: BTreeMap<Txid, Transaction> = transfer
             .bundles
@@ -60,7 +63,7 @@ impl<'a> OnChainResolver<'a> {
         Self {
             txes,
             chain_net,
-            check,
+            chain,
             answers: RefCell::new(BTreeMap::new()),
         }
     }
@@ -69,7 +72,7 @@ impl<'a> OnChainResolver<'a> {
         if let Some(known) = self.answers.borrow().get(&txid) {
             return known.clone();
         }
-        let answer = self.check.chain.confirmed(tx);
+        let answer = self.chain.confirmed(tx);
         self.answers.borrow_mut().insert(txid, answer.clone());
         answer
     }

@@ -693,8 +693,7 @@ fn time_rgb_lib(
     chain: &BTreeMap<bitcoin::Txid, WitnessPos>,
 ) -> (Option<String>, Duration) {
     let transfer = load(bytes);
-    let check = on_chain(chain);
-    let witnesses = OnChainResolver::new(&transfer, ChainNet::BitcoinRegtest, &check);
+    let witnesses = OnChainResolver::new(&transfer, ChainNet::BitcoinRegtest, chain);
     let anchors = BindingResolver::new(&transfer, &bind_all);
     let list = reject_list(&transfer.genesis)
         .unwrap()

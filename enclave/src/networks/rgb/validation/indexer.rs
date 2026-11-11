@@ -1,47 +1,34 @@
-//! The indexer client of `RgbValidator`.
+//! Electrum and Esplora connections for no-SPV burn validation.
 //!
-//! It serves the on-chain status of the consignment witnesses
-//! ([`IndexerWitnesses`]) to a burn signer built without `spv`. An `spv` build
-//! reads witness status from SPV proofs instead, and needs no indexer to sign.
-//! The URL scheme selects Electrum (`ssl://`, `tcp://`) or Esplora
-//! (`https://`, `http://`), through the host vsock forwarder. Each call
-//! crosses the trust boundary and has a timeout. An Electrum server must
-//! serve verbose `blockchain.transaction.get`, as rgb-lib requires.
+//! rgb-lib checks witnesses through its upstream resolvers, using the safe
+//! height supplied here. This path trusts the indexer's chain view.
+//! `LookupsOnly` prevents consignment proofs from bypassing those lookups.
 
-use std::cell::OnceCell;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use bitcoin::constants::ChainHash;
-use bitcoin::hashes::Hash;
-
 #[cfg(test)]
 use super::types::ValidatedConsignment;
-use super::witness::ConfirmedWitnesses;
 use crate::error::EnclaveError;
 use crate::error::Result;
-use crate::networks::rgb::spv::{verify_merkle_proof, Network, MAX_MERKLE_PATH_DEPTH};
-use rgbstd::indexers::electrum_blocking::electrum_client;
-use rgbstd::indexers::esplora_blocking::esplora_client;
-use rgbstd::indexers::esplora_blocking::EsploraClient;
-use rgbstd::validation::{ResolveWitness, WitnessStatus};
-use rgbstd::vm::{WitnessOrd, WitnessPos};
+use crate::networks::rgb::spv::Network;
+use bitcoin::Txid;
+use rgbstd::indexers::electrum_blocking::{electrum_client, ElectrumClient};
+use rgbstd::indexers::esplora_blocking::{esplora_client, EsploraClient};
+use rgbstd::validation::{ResolveWitness, WitnessResolverError, WitnessStatus};
 use rgbstd::ChainNet;
 
-/// Validates RGB consignments using rgbstd, and fetches transactions.
+/// Validates RGB consignments and configures the no-SPV indexer connection.
 ///
-/// Production uses Electrum at an `ssl://` URL through the vsock forwarder.
-/// TLS ends inside the enclave against the real server cert, so the host
-/// relays only ciphertext. Dev signet uses Esplora at an `https://` URL.
+/// A release client uses TLS through the vsock forwarder. TLS ends inside
+/// the enclave against the configured server's cert.
 #[derive(Debug)]
 pub struct RgbValidator {
     pub(super) indexer_url: String,
     pub(super) chain_net: ChainNet,
-    /// The indexer read timeout of a test. Other callers read the limit
-    /// ([`crate::limits`]).
+    /// Test override for the read timeout in [`crate::limits`].
     pub(super) timeout_secs: Option<u64>,
-    /// Canned validation result, so tests run the signing path with no
-    /// indexer.
+    /// Test result that bypasses consignment validation.
     #[cfg(test)]
     pub(super) canned: Option<ValidatedConsignment>,
 }
@@ -87,28 +74,37 @@ impl RgbValidator {
         v
     }
 
-    /// Sets a short timeout for the stalled-host test.
+    /// Sets a short indexer timeout for tests.
     #[cfg(test)]
     pub(super) fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = Some(secs);
         self
     }
 
-    /// The timeout of an indexer read: `limit`, or the value of a test.
     fn timeout_of(&self, limit: u64) -> u64 {
         self.timeout_secs.unwrap_or(limit)
     }
-}
 
-impl RgbValidator {
-    /// The witness source of a no-SPV burn, at `min_confirmations` depth. It
-    /// connects on the first witness it is asked about.
-    pub fn indexer_witnesses(&self, min_confirmations: u32) -> IndexerWitnesses<'_> {
-        IndexerWitnesses {
-            validator: self,
-            min_confirmations,
-            session: OnceCell::new(),
-        }
+    /// Builds the resolver and fixes the confirmation boundary from one tip read.
+    pub(super) fn indexer_resolver(
+        &self,
+        min_confirmations: u32,
+    ) -> Result<(Box<dyn ResolveWitness>, NonZeroU32)> {
+        let (resolver, tip): (Box<dyn ResolveWitness>, u32) = if is_electrum_url(&self.indexer_url)
+        {
+            let inner = self.electrum_client()?;
+            let tip = electrum_tip(&inner)?;
+            (Box::new(LookupsOnly(ElectrumClient { inner })), tip)
+        } else {
+            let inner = self.esplora_client();
+            let tip = inner
+                .get_height()
+                .map_err(|e| indexer_error(format!("esplora tip lookup failed: {e}")))?;
+            (Box::new(LookupsOnly(EsploraClient { inner })), tip)
+        };
+        let safe_height = confirmation_height(tip, min_confirmations)
+            .map_err(|e| EnclaveError::CrossCheck(format!("witness confirmation policy: {e}")))?;
+        Ok((resolver, safe_height))
     }
 
     fn esplora_client(&self) -> esplora_client::BlockingClient {
@@ -117,310 +113,68 @@ impl RgbValidator {
             .build_blocking()
     }
 
-    fn electrum_client(&self) -> std::result::Result<electrum_client::Client, String> {
+    fn electrum_client(&self) -> Result<electrum_client::Client> {
         let cfg = electrum_client::Config::builder()
             .timeout(Some(Duration::from_secs(
                 self.timeout_of(crate::limits::get().electrum_timeout_secs),
             )))
             .build();
-        electrum_client::Client::from_config(&self.indexer_url, cfg).map_err(|e| e.to_string())
-    }
-
-    /// A session on the indexer, after it proved it serves our network.
-    fn connect(&self) -> std::result::Result<IndexerSession, String> {
-        if is_electrum_url(&self.indexer_url) {
-            electrum_session(self.electrum_client()?, self.chain_net)
-        } else {
-            esplora_session(self.esplora_client(), self.chain_net)
-        }
+        electrum_client::Client::from_config(&self.indexer_url, cfg)
+            .map_err(|e| indexer_error(format!("electrum connection failed: {e}")))
     }
 }
 
-/// The witness status of a no-SPV burn, from the pinned indexer. TLS ends in the
-/// enclave on a release image, so the host can only make a lookup fail.
-pub struct IndexerWitnesses<'a> {
-    validator: &'a RgbValidator,
-    min_confirmations: u32,
-    session: OnceCell<IndexerSession>,
-}
+/// Disables header lookups so embedded proofs cannot bypass witness lookup.
+/// The upstream proof verifier lacks the 64-byte-node check (CVE-2017-12842).
+struct LookupsOnly<R>(R);
 
-enum Backend {
-    Electrum(Box<electrum_client::Client>),
-    Esplora(EsploraClient),
-}
+impl<R: ResolveWitness> ResolveWitness for LookupsOnly<R> {
+    fn resolve_witness(
+        &self,
+        txid: Txid,
+    ) -> std::result::Result<WitnessStatus, WitnessResolverError> {
+        self.0.resolve_witness(txid)
+    }
 
-struct IndexerSession {
-    backend: Backend,
-    tip: u32,
-}
-
-impl IndexerWitnesses<'_> {
-    fn session(&self) -> std::result::Result<&IndexerSession, String> {
-        if self.session.get().is_none() {
-            let _ = self.session.set(self.validator.connect()?);
-        }
-        self.session
-            .get()
-            .ok_or_else(|| "indexer session was not kept".into())
+    fn check_chain_net(
+        &self,
+        chain_net: ChainNet,
+    ) -> std::result::Result<(), WitnessResolverError> {
+        self.0.check_chain_net(chain_net)
     }
 }
 
-impl ConfirmedWitnesses for IndexerWitnesses<'_> {
-    fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-        let session = self.session()?;
-        let place = match &session.backend {
-            Backend::Electrum(client) => electrum_place(client, tx, session.tip)?,
-            Backend::Esplora(resolver) => {
-                let txid = tx.compute_txid();
-                let status = resolver
-                    .resolve_witness(txid)
-                    .map_err(|e| format!("indexer lookup failed: {e}"))?;
-                esplora_place(status, txid)?
-            }
-        };
-        mined_deep_enough(place, session.tip, self.min_confirmations)
-    }
-}
-
-/// Where the indexer places a tx.
-#[derive(Debug)]
-pub(super) enum TxPlace {
-    Unknown,
-    Unmined,
-    Mined(WitnessPos),
-}
-
-/// The position of `place` if it is `min_confirmations` deep below `tip`.
-/// Testnet min-difficulty blocks count too: no header chain tells them apart.
-pub(super) fn mined_deep_enough(
-    place: TxPlace,
-    tip: u32,
-    min_confirmations: u32,
-) -> std::result::Result<WitnessPos, String> {
-    let pos = match place {
-        TxPlace::Mined(pos) => pos,
-        TxPlace::Unmined => return Err("the indexer reports it unmined".into()),
-        TxPlace::Unknown => return Err("the indexer does not know it".into()),
-    };
-    let height = pos.height().get();
-    let depth = tip
-        .checked_sub(height)
-        .map(|d| d + 1)
-        .ok_or_else(|| format!("its block {height} is above the indexer tip {tip}"))?;
-    if depth < min_confirmations {
-        return Err(format!(
-            "only {depth} confirmation(s) at block {height}, need {min_confirmations}"
-        ));
-    }
-    Ok(pos)
-}
-
-/// The place of an Esplora answer for `txid`.
-pub(super) fn esplora_place(
-    status: WitnessStatus,
-    txid: bitcoin::Txid,
-) -> std::result::Result<TxPlace, String> {
-    let (tx, ord) = match status {
-        WitnessStatus::Resolved(tx, ord) => (tx, ord),
-        WitnessStatus::Unresolved => return Ok(TxPlace::Unknown),
-    };
-    let got = tx.compute_txid();
-    if got != txid {
-        return Err(format!("the indexer answered with tx {got}"));
-    }
-    Ok(match ord {
-        WitnessOrd::Mined(pos) => TxPlace::Mined(pos),
-        _ => TxPlace::Unmined,
-    })
-}
-
-fn esplora_session(
-    inner: esplora_client::BlockingClient,
-    chain_net: ChainNet,
-) -> std::result::Result<IndexerSession, String> {
-    let tip = inner
-        .get_height()
-        .map_err(|e| format!("esplora tip lookup failed: {e}"))?;
-    let resolver = EsploraClient { inner };
-    resolver
-        .check_chain_net(chain_net)
-        .map_err(|e| format!("indexer does not serve {chain_net}: {e}"))?;
-    Ok(IndexerSession {
-        backend: Backend::Esplora(resolver),
-        tip,
-    })
-}
-
-/// Checks the server's genesis block, then reads its tip.
-fn electrum_session(
-    client: electrum_client::Client,
-    chain_net: ChainNet,
-) -> std::result::Result<IndexerSession, String> {
+fn electrum_tip(client: &electrum_client::Client) -> Result<u32> {
     use electrum_client::ElectrumApi;
-    let genesis = client
-        .block_header(0)
-        .map_err(|e| format!("electrum genesis lookup failed: {e}"))?
-        .block_hash();
-    if ChainHash::from_genesis_block_hash(genesis) != chain_net.chain_hash() {
-        return Err(format!(
-            "indexer does not serve {chain_net}: its genesis block is {genesis}"
-        ));
-    }
     let tip = client
         .block_headers_subscribe()
-        .map_err(|e| format!("electrum tip lookup failed: {e}"))?
+        .map_err(|e| indexer_error(format!("electrum tip lookup failed: {e}")))?
         .height;
-    let tip = u32::try_from(tip).map_err(|_| format!("electrum tip {tip} is not a u32"))?;
-    Ok(IndexerSession {
-        backend: Backend::Electrum(Box::new(client)),
-        tip,
-    })
+    u32::try_from(tip).map_err(|_| indexer_error(format!("electrum tip {tip} is not a u32")))
 }
 
-/// Finds `tx` by its txid, then proves its block with a merkle proof against
-/// that block's header. `tip` is the session tip.
-fn electrum_place(
-    client: &electrum_client::Client,
-    tx: &bitcoin::Transaction,
+/// Computes `tip - min_confirmations + 1`. Rejects zero or underflow, since
+/// passing no safe height would disable rgb-lib's confirmation policy.
+pub(super) fn confirmation_height(
     tip: u32,
-) -> std::result::Result<TxPlace, String> {
-    use electrum_client::ElectrumApi;
-    let txid = tx.compute_txid();
-    let (confirmations, block_hash) = match electrum_tx(client, txid)? {
-        ElectrumTx::Unknown => return Ok(TxPlace::Unknown),
-        ElectrumTx::Unmined => return Ok(TxPlace::Unmined),
-        ElectrumTx::Mined {
-            confirmations,
-            block_hash,
-        } => (confirmations, block_hash),
-    };
-    let (height, proof) = electrum_merkle(client, txid, confirmations, tip)?;
-    let header = client
-        .block_header(height.get() as usize)
-        .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
-    if header.block_hash() != block_hash {
-        return Err(format!("block {height} is not the tx's block {block_hash}"));
-    }
-    assert_in_block(txid, height, &header, &proof)?;
-    WitnessPos::bitcoin(height, i64::from(header.time))
-        .map(TxPlace::Mined)
-        .ok_or_else(|| format!("block {height} has an invalid time {}", header.time))
-}
-
-/// What a verbose `blockchain.transaction.get` says about a tx.
-enum ElectrumTx {
-    Unknown,
-    Unmined,
-    Mined {
-        confirmations: u32,
-        block_hash: bitcoin::BlockHash,
-    },
-}
-
-/// Asks the server about `txid` with a verbose `blockchain.transaction.get`.
-fn electrum_tx(
-    client: &electrum_client::Client,
-    txid: bitcoin::Txid,
-) -> std::result::Result<ElectrumTx, String> {
-    use electrum_client::{ElectrumApi, Param};
-    let details = match client.raw_call(
-        "blockchain.transaction.get",
-        [Param::String(txid.to_string()), Param::Bool(true)],
-    ) {
-        Ok(details) => details,
-        // bitcoind's text, with or without -txindex.
-        Err(e) if e.to_string().contains("No such mempool") => return Ok(ElectrumTx::Unknown),
-        Err(e) => return Err(format!("electrum transaction lookup failed: {e}")),
-    };
-    let confirmations = match details.get("confirmations") {
-        None => 0,
-        Some(c) => c
-            .as_u64()
-            .and_then(|c| u32::try_from(c).ok())
-            .ok_or_else(|| format!("electrum gave invalid confirmations {c}"))?,
-    };
-    if confirmations == 0 {
-        return Ok(ElectrumTx::Unmined);
-    }
-    let block_hash = details
-        .get("blockhash")
-        .and_then(|v| v.as_str())
-        .ok_or("electrum gave no block hash for a mined tx")?
-        .parse()
-        .map_err(|e| format!("electrum gave an invalid block hash: {e}"))?;
-    Ok(ElectrumTx::Mined {
-        confirmations,
-        block_hash,
-    })
-}
-
-/// How many blocks above its lowest possible height a witness's block may sit.
-pub(super) const BLOCK_SEARCH_SPAN: u32 = 3;
-
-/// The height and merkle proof of `txid`'s block. The server counts
-/// `confirmations` on its node, which is never behind its index and so never
-/// behind the session `tip`: unless a reorg shortened the chain, the block is
-/// at `tip + 1 - confirmations` or above. It is higher when the node is ahead
-/// of the index, or when blocks arrived since the session started.
-fn electrum_merkle(
-    client: &electrum_client::Client,
-    txid: bitcoin::Txid,
-    confirmations: u32,
-    tip: u32,
-) -> std::result::Result<(NonZeroU32, electrum_client::GetMerkleRes), String> {
-    use electrum_client::ElectrumApi;
-    let first = tip.saturating_add(1).saturating_sub(confirmations);
-    let mut last_error = String::from("no height to try");
-    for height in (first..=first.saturating_add(BLOCK_SEARCH_SPAN)).filter_map(NonZeroU32::new) {
-        match client.transaction_get_merkle(&txid, height.get() as usize) {
-            Ok(proof) => return Ok((height, proof)),
-            Err(e) => last_error = e.to_string(),
-        }
-    }
-    Err(format!(
-        "no block from height {first} to {} holds it: {last_error}",
-        first.saturating_add(BLOCK_SEARCH_SPAN)
-    ))
-}
-
-/// `proof` places `txid` in the block of `header`, at `height`.
-pub(super) fn assert_in_block(
-    txid: bitcoin::Txid,
-    height: NonZeroU32,
-    header: &bitcoin::block::Header,
-    proof: &electrum_client::GetMerkleRes,
-) -> std::result::Result<(), String> {
-    if proof.block_height != height.get() as usize {
-        return Err(format!(
-            "the merkle proof is for block {}, not {height}",
-            proof.block_height
-        ));
-    }
-    let pos = u32::try_from(proof.pos).map_err(|_| "the merkle position is not a u32")?;
-    // Bound the hashing before it starts, as the burn path does in `proof_txid`.
-    if proof.merkle.len() > MAX_MERKLE_PATH_DEPTH {
-        return Err(format!(
-            "its merkle proof has {} siblings, more than any block's tree has levels ({MAX_MERKLE_PATH_DEPTH})",
-            proof.merkle.len()
-        ));
-    }
-    // Electrum sends the path in display order.
-    let path: Vec<[u8; 32]> = proof
-        .merkle
-        .iter()
-        .map(|node| {
-            let mut node = *node;
-            node.reverse();
-            node
+    min_confirmations: u32,
+) -> std::result::Result<NonZeroU32, String> {
+    min_confirmations
+        .checked_sub(1)
+        .and_then(|offset| tip.checked_sub(offset))
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| {
+            format!(
+                "indexer tip {tip} cannot provide a safe height for {min_confirmations} \
+                 confirmation(s)"
+            )
         })
-        .collect();
-    verify_merkle_proof(
-        &txid.to_byte_array(),
-        pos,
-        &path,
-        &header.merkle_root.to_byte_array(),
-    )
-    .map_err(|e| format!("its merkle proof does not match block {height}: {e:?}"))
+}
+
+fn indexer_error(reason: String) -> EnclaveError {
+    EnclaveError::CrossCheck(format!(
+        "the Bitcoin indexer cannot resolve the witnesses: {reason} - refusing to sign"
+    ))
 }
 
 fn is_electrum_url(url: &str) -> bool {

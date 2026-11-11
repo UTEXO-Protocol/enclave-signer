@@ -58,6 +58,19 @@ indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
 the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
+In place of B2.9, rgb-lib uses its Electrum or Esplora resolver to check each
+witness, including the network and transaction ID. The enclave passes
+`safe_height = tip - SPV_MIN_CONFIRMATIONS + 1`, using one tip read per
+validation. rgb-lib warns about unmined or shallower witnesses; the enclave
+rejects every warning. If no positive safe height exists, validation fails.
+
+This path trusts the indexer for inclusion, height and time. Proofs embedded
+in the consignment cannot replace an indexer lookup. Independent Bitcoin
+verification requires an SPV build.
+
+See [configuration](configuration.md#launch-values) for server requirements
+and [operations](operations.md#indexer-errors) for lookup failures.
+
 ## 3. Sequence
 
 ```mermaid
