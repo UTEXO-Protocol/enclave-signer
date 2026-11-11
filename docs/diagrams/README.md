@@ -9,7 +9,7 @@ validation; a dev-only bypass is not an authorization guarantee.
 | File | What it shows |
 |---|---|
 | [`01-components.md`](01-components.md) | Crate-level component structure across `enclave`, `parent`, `attestation-verify`, and the external infrastructure (NSM, Electrum, vsock-proxy). |
-| [`02-deployment.md`](02-deployment.md) | Deployment (stage layout, `deploy/deploy-host.sh`): Orchestrator -> EC2 (parent) -> Nitro Enclave -> vsock-proxy -> Electrum, EVM RPC and KMS (mint), with trust zones. |
+| [`02-deployment.md`](02-deployment.md) | Deployment (stage layout, `deploy/deploy-host.sh`): Orchestrator -> EC2 (parent) -> Nitro Enclave -> vsock-proxy -> Electrum or Esplora, EVM RPC and KMS (mint), with trust zones. |
 | [`03-seq-sign-evm.md`](03-seq-sign-evm.md) | **Burn** (RGB -> EVM) on the burn signer: mint-ancestry deposits, RGB validation, SPV gate, calldata checks, release-to-burn binds (both routes), BtcRelay proof, EIP-712 signature. |
 | [`04-seq-sign-psbt.md`](04-seq-sign-psbt.md) | **Mint** (EVM → RGB) on the mint signer, in code order: role check, replay precheck, deposit receipt, the fascia core (F1-F6), mint rules (M1-M5, M7), F7 key path, parent proof (PP1-PP7), fee, M8 sats, M6 deposit bind, recipient, Taproot key-path signing on the colored BIP-86 account. No consignment. |
 | [`05-seq-attested-pubkey.md`](05-seq-attested-pubkey.md) | External verifier ↔ enclave attested-pubkey protocol (`attest-verify` CLI, NSM, COSE_Sign1, cert-chain to AWS Nitro root, PCR + nonce + bundle-and-policy commitment). |

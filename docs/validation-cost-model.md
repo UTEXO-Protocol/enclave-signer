@@ -50,7 +50,9 @@ Release mode, Intel Xeon Platinum 8375C at 2.90 GHz (the CPU of the burn
 hosts), 2026-11-10, two runs of each shape. Source `34721c5eb5d4`, rgb-lib
 `5010eefa355b`, rgb-consensus `d4bbbce212e4`, Rust 1.96.1. The honest burns
 use the pinned genesis of 10 mint rights, and the forged histories a genesis
-of 1 right, unless the row names more.
+of 1 right, unless the row names more. The pin has since moved to rgb-lib
+`2f7b21d8637b`, and no shape was measured on it yet
+([when to measure again](#when-to-measure-again)).
 
 | Consignment | Size | Outputs | Model (s) | Validation (s) | Inspection (s) | Largest total / model | Allowance (s) |
 |---|---:|---:|---:|---:|---:|---:|---:|

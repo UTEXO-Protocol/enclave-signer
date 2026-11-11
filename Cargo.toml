@@ -27,7 +27,7 @@ codegen-units = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-# rgb-lib 5010eefa's root [patch.crates-io]: a dependency's patch does not apply.
+# rgb-lib 2f7b21d's root [patch.crates-io]: a dependency's patch does not apply.
 # parent/Cargo.toml carries a copy; build/tests/test_private_deps.py checks they match.
 [patch.crates-io]
 rgb-aluvm = { git = "https://github.com/rgb-protocol/rgb-aluvm", rev = "eb956ccaadf64930990e2ed08f6c4232caee24f9" }

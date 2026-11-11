@@ -682,7 +682,7 @@ mod reject_list_rules {
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib 5010eefa `SCHEMA_ID_BFA`.
+/// it must fail loudly here. rgb-lib 2f7b21d `SCHEMA_ID_BFA`.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(
@@ -2057,6 +2057,19 @@ mod electrum_indexer {
         })
         .unwrap_err();
         assert!(err.contains("does not know"), "{err}");
+    }
+
+    /// A witness with no BTC change and no recipient output: the OP_RETURN is
+    /// its only output, and Electrum indexes no OP_RETURN script.
+    #[test]
+    fn refuses_a_witness_whose_only_output_is_an_op_return() {
+        let mut server = server();
+        server.tx.output = vec![bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::new_op_return([0x11; 32]),
+        }];
+        let err = confirmed(server).unwrap_err();
+        assert!(err.contains("no output an Electrum"), "{err}");
     }
 
     #[test]
