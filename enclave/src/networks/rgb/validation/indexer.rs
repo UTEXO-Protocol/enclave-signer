@@ -1,17 +1,8 @@
-//! The indexer client of `RgbValidator`.
+//! Electrum and Esplora connections for no-SPV burn validation.
 //!
-//! A burn signer built without `spv` gives rgb-lib the rgb-ops witness
-//! resolver of the pinned indexer without its block headers
-//! ([`RgbValidator::indexer_resolver`]), and a safe height from the indexer
-//! tip. rgb-lib then asks the indexer about every witness and ignores a Merkle
-//! proof that the consignment carries. It checks the network and each answer's
-//! txid, and warns about a witness above the safe height or unmined. The
-//! enclave trusts the indexer for inclusion, height and time.
-//! An `spv` build reads witness status from SPV proofs instead, and needs no
-//! indexer to sign. The URL scheme selects Electrum (`ssl://`, `tcp://`) or
-//! Esplora (`https://`, `http://`), through the host vsock forwarder. Each call
-//! crosses the trust boundary and has a timeout. An Electrum server must
-//! serve verbose `blockchain.transaction.get`, as the rgb-ops resolver requires.
+//! rgb-lib checks witnesses through its upstream resolvers, using the safe
+//! height supplied here. This path trusts the indexer's chain view.
+//! `LookupsOnly` prevents consignment proofs from bypassing those lookups.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -27,8 +18,7 @@ use rgbstd::indexers::esplora_blocking::{esplora_client, EsploraClient};
 use rgbstd::validation::{ResolveWitness, WitnessResolverError, WitnessStatus};
 use rgbstd::ChainNet;
 
-/// Validates RGB consignments with rgb-lib, and builds the indexer's witness
-/// resolver for a burn without `spv`.
+/// Validates RGB consignments and configures the no-SPV indexer connection.
 ///
 /// A release client uses TLS through the vsock forwarder. TLS ends inside
 /// the enclave against the configured server's cert.
@@ -36,11 +26,9 @@ use rgbstd::ChainNet;
 pub struct RgbValidator {
     pub(super) indexer_url: String,
     pub(super) chain_net: ChainNet,
-    /// The indexer read timeout of a test. Other callers read the limit
-    /// ([`crate::limits`]).
+    /// Test override for the read timeout in [`crate::limits`].
     pub(super) timeout_secs: Option<u64>,
-    /// Canned validation result, so tests run the signing path with no
-    /// indexer.
+    /// Test result that bypasses consignment validation.
     #[cfg(test)]
     pub(super) canned: Option<ValidatedConsignment>,
 }
@@ -93,13 +81,11 @@ impl RgbValidator {
         self
     }
 
-    /// The timeout of an indexer read: `limit`, or the value of a test.
     fn timeout_of(&self, limit: u64) -> u64 {
         self.timeout_secs.unwrap_or(limit)
     }
 
-    /// The rgb-ops resolver of the indexer, without block headers, and the safe
-    /// height for `min_confirmations` below its tip. It reads the tip once.
+    /// Builds the resolver and fixes the confirmation boundary from one tip read.
     pub(super) fn indexer_resolver(
         &self,
         min_confirmations: u32,
@@ -138,8 +124,8 @@ impl RgbValidator {
     }
 }
 
-/// Serves no block headers, so rgb-consensus asks the indexer about every witness and ignores
-/// a carried Merkle proof, which it would accept with a 64-byte tx node (CVE-2017-12842).
+/// Disables header lookups so embedded proofs cannot bypass witness lookup.
+/// The upstream proof verifier lacks the 64-byte-node check (CVE-2017-12842).
 struct LookupsOnly<R>(R);
 
 impl<R: ResolveWitness> ResolveWitness for LookupsOnly<R> {
@@ -167,8 +153,8 @@ fn electrum_tip(client: &electrum_client::Client) -> Result<u32> {
     u32::try_from(tip).map_err(|_| indexer_error(format!("electrum tip {tip} is not a u32")))
 }
 
-/// `tip - min_confirmations + 1`, without overflow or disabling the policy
-/// when the chain is too short to contain a safely confirmed witness.
+/// Computes `tip - min_confirmations + 1`. Rejects zero or underflow, since
+/// passing no safe height would disable rgb-lib's confirmation policy.
 pub(super) fn confirmation_height(
     tip: u32,
     min_confirmations: u32,

@@ -222,6 +222,21 @@ other hosts. The deploy script gives the three parents the health ports
 utexo-bridge-parent-cli --addr vsock://16:5000 health
 ```
 
+## Indexer errors
+
+For a burn signer without `spv`:
+
+- **Wrong network:** check that the server serves the configured Bitcoin
+  network. If it does, check connectivity and historical transaction access.
+  rgb-lib can report a failed lookup during its server check as a network
+  mismatch, including on timeout.
+- **Transaction cannot be located:** check that the Electrum server is synced
+  with its Bitcoin node, then retry. Also confirm that the transaction exists
+  on the configured network.
+
+Electrum requires verbose transaction lookup. See
+[configuration](configuration.md#launch-values) for supported URL formats.
+
 ## Lost `SetEndpoints` reply
 
 `utexo-enclave-ctl.sh start` terminates the enclave that it launched if

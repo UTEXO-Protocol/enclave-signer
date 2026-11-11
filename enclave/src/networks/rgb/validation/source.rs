@@ -23,28 +23,16 @@ use sha3::{Digest, Keccak256};
 #[cfg(all(rgb_to_evm, feature = "spv"))]
 use std::time::SystemTime;
 
-/// Validates all fields and source-chain evidence of an RGB source.
+/// Validates the source payload, asset binding, mint backing and RGB history.
 ///
-/// It does not examine the destination network. The source-chain proof is:
+/// SPV builds require proof of every witness at `SPV_MIN_CONFIRMATIONS` depth
+/// in the enclave's header chain, with those blocks pinned until signing.
+/// Without SPV, rgb-lib checks depth against the trusted indexer's chain view.
+/// An unmined or shallow witness rejects the history in either mode.
 ///
-/// 1. raw consignment bytes are present, hash-bound, and pass full
-///    in-enclave RGB validation. Consensus sees a witness mined only if its
-///    Merkle proof verified against the in-enclave header chain at
-///    `SPV_MIN_CONFIRMATIONS` depth, so an unmined witness anywhere in the
-///    history fails it;
-/// 2. the validated asset matches the listener-declared `asset_id` and, if
-///    configured, the operator-pinned `RGB_ASSET_ID`;
-/// 3. the proofs cover exactly the witness txs, and the blocks they use are
-///    pinned until signing;
-/// 4. for an asset with a reject list, rgb-lib refuses a consignment whose
-///    terminal operations (the burn, and any companion transfer of its
-///    bundle) descend from a rejected opout. The list is read after the
-///    asset bind.
-///
-/// Without SPV, rgb-lib resolves the witnesses through the trusted indexer. In
-/// step 1 the enclave refuses rgb-lib's warning about a witness less than
-/// `SPV_MIN_CONFIRMATIONS` deep below the indexer tip, or unmined. No SPV
-/// blocks are pinned.
+/// The asset is bound before external reads. For listed assets, rgb-lib also
+/// checks the burn and companion transfers for rejected ancestry.
+/// Destination checks run separately.
 #[cfg(rgb_to_evm)]
 pub fn validate_source(
     source: &RgbSource,
@@ -190,9 +178,7 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
     Ok(())
 }
 
-/// A burn without SPV through `validate_source`, against a fake indexer that
-/// answers what the rgb-ops resolvers ask. No chain backs its answers: the
-/// indexer is trusted, and rgb-lib checks what it says.
+/// No-SPV source validation with real consignments and mock indexer responses.
 #[cfg(all(test, not(feature = "spv"), feature = "burn-signer"))]
 mod indexer_only_source {
     use super::*;
@@ -212,7 +198,7 @@ mod indexer_only_source {
     const MIN_CONFIRMATIONS: u32 = 6;
     /// The block of the first witness. Each next witness is one block higher.
     const FIRST_BLOCK: u32 = 100;
-    /// The signet tx the Electrum resolver gets to probe for verbose answers.
+    /// Transaction used by rgb-ops to check verbose support.
     const SIGNET_PROBE: &str = "8153034f45e695453250a8fb7225a5e545144071d8ed7b0d3211efa1f3c92ad8";
 
     /// What the fake indexer serves.
@@ -254,8 +240,7 @@ mod indexer_only_source {
             }
         }
 
-        /// The tip where the last witness, at `FIRST_BLOCK + len - 1`, is
-        /// `depth` confirmations deep, plus `advance` after the first tip read.
+        /// Advances after the first read to test a fixed confirmation boundary.
         fn tip(&self) -> u32 {
             let grown = if self.tip_reads.load(Ordering::SeqCst) > 0 {
                 self.advance
@@ -570,9 +555,7 @@ mod indexer_only_source {
         }
     }
 
-    /// One witness is one block short of `MIN_CONFIRMATIONS`, the other deep
-    /// enough: the burn, then the mint when their blocks swap. Only the safe
-    /// height rgb-lib gets catches it.
+    /// Swap mint and burn heights so each is tested as the only shallow witness.
     #[test]
     fn refuses_a_witness_one_block_too_shallow() {
         for serve in both_indexers() {
@@ -594,8 +577,7 @@ mod indexer_only_source {
         }
     }
 
-    /// Esplora reports the block height itself, so it can place a witness
-    /// above its own tip. The safe height refuses it.
+    /// Esplora can report a witness height above its own tip.
     #[test]
     fn refuses_a_witness_above_the_indexer_tip() {
         let history = burn_history(false);
@@ -612,9 +594,7 @@ mod indexer_only_source {
         assert!(err.contains(&format!("{burn} in block 101")), "{err}");
     }
 
-    /// Only the genesis block is `min_confirmations` deep below the indexer
-    /// tip, and no witness can be in it: there is no safe height, and the
-    /// enclave refuses.
+    /// A zero safe height must reject instead of disabling confirmation checks.
     #[test]
     fn refuses_an_indexer_chain_shorter_than_the_required_depth() {
         for serve in both_indexers() {
@@ -628,8 +608,7 @@ mod indexer_only_source {
         }
     }
 
-    /// The chain grows after the enclave reads the tip, and the resolver sees
-    /// the new tip. The depth still counts from the first tip.
+    /// Resolver tip updates must not move the confirmation boundary.
     #[test]
     fn a_newer_resolver_tip_does_not_increase_the_accepted_depth() {
         let history = burn_history(false);
@@ -646,9 +625,7 @@ mod indexer_only_source {
         assert!(err.contains(&format!("{burn} in block 101")), "{err}");
     }
 
-    /// The Electrum resolver estimates the block from the tip and the
-    /// confirmations, then tries the blocks around it. A node one block ahead
-    /// of its index still finds each witness.
+    /// A one-block node/index gap is within the upstream search window.
     #[test]
     fn finds_the_block_when_the_node_is_one_block_ahead_of_its_index() {
         let history = burn_history(false);
@@ -659,8 +636,7 @@ mod indexer_only_source {
         validate(&history, serve_electrum(indexer)).unwrap();
     }
 
-    /// A node further ahead leaves the search window, and a count above the
-    /// tip is invalid. The lookup fails, and the enclave refuses.
+    /// Larger gaps and impossible confirmation counts must fail lookup.
     #[test]
     fn refuses_a_node_further_ahead_than_the_search_window() {
         let history = burn_history(false);
@@ -761,9 +737,7 @@ mod indexer_only_source {
         }
     }
 
-    /// Puts a proof of each witness in the consignment, with `path` as its
-    /// Merkle path. With an empty path, the proof matches the header that the
-    /// fake indexer serves for the witness's block.
+    /// An empty path matches the mock indexer's single-transaction blocks.
     fn carry_proofs(history: &mut History, path: Vec<TxMerkleNode>) {
         for (bundle, height) in history.bundles.iter_mut().zip(FIRST_BLOCK..) {
             bundle.spv_proof = Some(rgbstd::validation::SpvProof {
@@ -774,9 +748,7 @@ mod indexer_only_source {
         }
     }
 
-    /// The burn carries a proof that matches the indexer's header, but the
-    /// indexer does not know the burn. The indexer is asked, and the enclave
-    /// refuses.
+    /// A carried proof must not bypass an unknown-witness response.
     #[test]
     fn refuses_a_carried_proof_of_a_witness_the_indexer_does_not_know() {
         for serve in both_indexers() {
@@ -792,8 +764,7 @@ mod indexer_only_source {
         }
     }
 
-    /// The carried proofs do not match the indexer's headers. rgb-lib does not
-    /// check them: the indexer's answer alone judges each witness.
+    /// Even with a bad carried proof, the indexer's answer decides witness status.
     #[test]
     fn ignores_a_carried_proof_that_does_not_match_the_header() {
         for serve in both_indexers() {
