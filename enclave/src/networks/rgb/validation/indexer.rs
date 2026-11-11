@@ -169,7 +169,7 @@ impl ConfirmedWitnesses for IndexerWitnesses<'_> {
     fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
         let session = self.session()?;
         let place = match &session.backend {
-            Backend::Electrum(client) => electrum_place(client, tx)?,
+            Backend::Electrum(client) => electrum_place(client, tx, session.tip)?,
             Backend::Esplora(resolver) => {
                 let txid = tx.compute_txid();
                 let status = resolver
@@ -278,10 +278,11 @@ fn electrum_session(
 }
 
 /// Finds `tx` by its txid, then proves its block with a merkle proof against
-/// that block's header.
+/// that block's header. `tip` is the session tip.
 fn electrum_place(
     client: &electrum_client::Client,
     tx: &bitcoin::Transaction,
+    tip: u32,
 ) -> std::result::Result<TxPlace, String> {
     use electrum_client::ElectrumApi;
     let txid = tx.compute_txid();
@@ -293,10 +294,13 @@ fn electrum_place(
             block_hash,
         } => (confirmations, block_hash),
     };
-    let (height, header) = electrum_block(client, confirmations, block_hash)?;
-    let proof = client
-        .transaction_get_merkle(&txid, height.get() as usize)
-        .map_err(|e| format!("electrum merkle lookup failed: {e}"))?;
+    let (height, proof) = electrum_merkle(client, txid, confirmations, tip)?;
+    let header = client
+        .block_header(height.get() as usize)
+        .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
+    if header.block_hash() != block_hash {
+        return Err(format!("block {height} is not the tx's block {block_hash}"));
+    }
     assert_in_block(txid, height, &header, &proof)?;
     WitnessPos::bitcoin(height, i64::from(header.time))
         .map(TxPlace::Mined)
@@ -350,53 +354,33 @@ fn electrum_tx(
     })
 }
 
-/// How far from the height its confirmations give the tx's block may sit.
-const BLOCK_SEARCH_SPAN: u32 = 2;
+/// How many blocks above its lowest possible height a witness's block may sit.
+pub(super) const BLOCK_SEARCH_SPAN: u32 = 3;
 
-/// The height and header of `block_hash`, found near the height that
-/// `confirmations` gives below a fresh tip.
-fn electrum_block(
+/// The height and merkle proof of `txid`'s block. The server counts
+/// `confirmations` on its node, which is never behind its index and so never
+/// behind the session `tip`: unless a reorg shortened the chain, the block is
+/// at `tip + 1 - confirmations` or above. It is higher when the node is ahead
+/// of the index, or when blocks arrived since the session started.
+fn electrum_merkle(
     client: &electrum_client::Client,
+    txid: bitcoin::Txid,
     confirmations: u32,
-    block_hash: bitcoin::BlockHash,
-) -> std::result::Result<(NonZeroU32, bitcoin::block::Header), String> {
+    tip: u32,
+) -> std::result::Result<(NonZeroU32, electrum_client::GetMerkleRes), String> {
     use electrum_client::ElectrumApi;
-    // The session tip is stale after a long validation. The server counts
-    // confirmations on its node, which can run a block ahead of its index, and
-    // a block can arrive between the calls, so search a few heights around.
-    let tip = client
-        .block_headers_subscribe()
-        .map_err(|e| format!("electrum tip lookup failed: {e}"))?
-        .height;
-    let tip = u32::try_from(tip).map_err(|_| format!("electrum tip {tip} is not a u32"))?;
-    let near = tip
-        .checked_add(1)
-        .and_then(|next| next.checked_sub(confirmations))
-        .ok_or_else(|| format!("{confirmations} confirmation(s) do not fit the tip {tip}"))?;
-    for height in search_heights(near, tip) {
-        let header = client
-            .block_header(height.get() as usize)
-            .map_err(|e| format!("electrum header lookup of block {height} failed: {e}"))?;
-        if header.block_hash() == block_hash {
-            return Ok((height, header));
+    let first = tip.saturating_add(1).saturating_sub(confirmations);
+    let mut last_error = String::from("no height to try");
+    for height in (first..=first.saturating_add(BLOCK_SEARCH_SPAN)).filter_map(NonZeroU32::new) {
+        match client.transaction_get_merkle(&txid, height.get() as usize) {
+            Ok(proof) => return Ok((height, proof)),
+            Err(e) => last_error = e.to_string(),
         }
     }
     Err(format!(
-        "no block within {BLOCK_SEARCH_SPAN} of height {near} is the tx's block {block_hash}"
+        "no block from height {first} to {} holds it: {last_error}",
+        first.saturating_add(BLOCK_SEARCH_SPAN)
     ))
-}
-
-/// `near` first, then the heights around it, nearest first. Height 0 and
-/// heights above `tip` are left out: no witness is in the genesis block, and the
-/// server has no header above its tip.
-fn search_heights(near: u32, tip: u32) -> impl Iterator<Item = NonZeroU32> {
-    let around =
-        (1..=BLOCK_SEARCH_SPAN).flat_map(move |d| [near.checked_sub(d), near.checked_add(d)]);
-    std::iter::once(Some(near))
-        .chain(around)
-        .flatten()
-        .filter(move |h| *h <= tip)
-        .filter_map(NonZeroU32::new)
 }
 
 /// `proof` places `txid` in the block of `header`, at `height`.

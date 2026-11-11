@@ -1880,6 +1880,7 @@ fn burn_path_asks_about_every_witness() {
 
 /// A fake Electrum server. One block at [`BLOCK`] holds a sibling, then `tx`.
 mod electrum_indexer {
+    use super::super::indexer::BLOCK_SEARCH_SPAN;
     use super::*;
     use bitcoin::block::Header;
     use bitcoin::hashes::{sha256d, Hash};
@@ -1948,11 +1949,6 @@ mod electrum_indexer {
                 )
                 .header)),
                 Some(h) if h == u64::from(BLOCK) => json!(hex(&server.header)),
-                // Another block at each other height up to the tip.
-                Some(h) if h <= u64::from(server.tip) => json!(hex(&Header {
-                    nonce: h as u32,
-                    ..server.header
-                })),
                 other => return Err(format!("no header at {other:?}")),
             },
             "blockchain.headers.subscribe" => {
@@ -1972,6 +1968,9 @@ mod electrum_indexer {
                     details["blockhash"] = json!(server.block_hash.to_string());
                 }
                 details
+            }
+            "blockchain.transaction.get_merkle" if params[1].as_u64() != Some(u64::from(BLOCK)) => {
+                return Err("tx not found in that block".into())
             }
             "blockchain.transaction.get_merkle" => {
                 let mut sibling = SIBLING;
@@ -2072,7 +2071,7 @@ mod electrum_indexer {
     }
 
     /// The node behind the server is a block ahead of its index, so the tx
-    /// answer counts one confirmation more than the tip implies.
+    /// answer counts one confirmation more than the session tip implies.
     #[test]
     fn finds_the_block_when_the_node_counts_one_more_confirmation() {
         let pos = confirmed(Server {
@@ -2083,11 +2082,11 @@ mod electrum_indexer {
         assert_eq!(pos.height().get(), BLOCK);
     }
 
-    /// A block arrived between the tx answer and the tip read.
+    /// Blocks arrived since the session read its tip, up to the search span.
     #[test]
-    fn finds_the_block_when_a_block_arrives_between_the_calls() {
+    fn finds_the_block_at_the_end_of_the_search_span() {
         let pos = confirmed(Server {
-            confirmations: Some(5),
+            confirmations: Some(6 + BLOCK_SEARCH_SPAN),
             ..server()
         })
         .unwrap();
@@ -2095,13 +2094,23 @@ mod electrum_indexer {
     }
 
     #[test]
-    fn refuses_a_block_hash_that_no_nearby_block_has() {
+    fn refuses_a_block_past_the_search_span() {
+        let err = confirmed(Server {
+            confirmations: Some(7 + BLOCK_SEARCH_SPAN),
+            ..server()
+        })
+        .unwrap_err();
+        assert!(err.contains("no block from height"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_block_hash_that_is_not_the_proven_block() {
         let err = confirmed(Server {
             block_hash: bitcoin::BlockHash::all_zeros(),
             ..server()
         })
         .unwrap_err();
-        assert!(err.contains("no block within"), "{err}");
+        assert!(err.contains("is not the tx's block"), "{err}");
     }
 
     #[test]
