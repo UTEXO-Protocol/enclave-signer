@@ -317,7 +317,8 @@ jobs:
 
       - name: Test (burn without SPV)
         run: |
-          cargo test $ENCLAVE --features burn-signer --lib indexer_only
+          cargo test $ENCLAVE --features burn-signer --lib -- \
+            indexer_only electrum_indexer electrum_merkle_proof_shape indexer_answer
           cargo test $ENCLAVE --features burn-signer --test test_indexer_only
 
   # The one check name that branch protection watches. It passes only when

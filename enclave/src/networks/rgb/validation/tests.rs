@@ -1880,7 +1880,6 @@ fn burn_path_asks_about_every_witness() {
 
 /// A fake Electrum server. One block at [`BLOCK`] holds a sibling, then `tx`.
 mod electrum_indexer {
-    use super::super::indexer::BLOCK_SEARCH_SPAN;
     use super::*;
     use bitcoin::block::Header;
     use bitcoin::hashes::{sha256d, Hash};
@@ -1895,19 +1894,26 @@ mod electrum_indexer {
         tx: bitcoin::Transaction,
         header: Header,
         tip: u32,
+        /// The tip on subscriptions after the session starts.
+        resolution_tip: Option<u32>,
         known: bool,
         verbose: bool,
         /// What the tx answer says; `None` leaves the field out, as for a
         /// mempool tx.
         confirmations: Option<u32>,
         block_hash: bitcoin::BlockHash,
+        block_time: i64,
+        proof_pos: usize,
     }
 
     fn witness() -> bitcoin::Transaction {
         bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![],
+            input: vec![bitcoin::TxIn {
+                previous_output: gen::outpoint(0x42, 0),
+                ..Default::default()
+            }],
             output: vec![gen::dust(7)],
         }
     }
@@ -1932,9 +1938,12 @@ mod electrum_indexer {
             block_hash: header.block_hash(),
             header,
             tip: BLOCK + 5,
+            resolution_tip: None,
             known: true,
             verbose: true,
             confirmations: Some(6),
+            block_time: i64::from(header.time),
+            proof_pos: 1,
         }
     }
 
@@ -1966,6 +1975,7 @@ mod electrum_indexer {
                 if let Some(confirmations) = server.confirmations {
                     details["confirmations"] = json!(confirmations);
                     details["blockhash"] = json!(server.block_hash.to_string());
+                    details["blocktime"] = json!(server.block_time);
                 }
                 details
             }
@@ -1975,7 +1985,7 @@ mod electrum_indexer {
             "blockchain.transaction.get_merkle" => {
                 let mut sibling = SIBLING;
                 sibling.reverse();
-                json!({"block_height": BLOCK, "pos": 1, "merkle": [hex::encode(sibling)]})
+                json!({"block_height": BLOCK, "pos": server.proof_pos, "merkle": [hex::encode(sibling)]})
             }
             other => return Err(format!("unsupported method {other}")),
         })
@@ -1988,7 +1998,7 @@ mod electrum_indexer {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
-                let server = server.clone();
+                let mut server = server.clone();
                 std::thread::spawn(move || {
                     let mut out = stream.try_clone().unwrap();
                     for line in BufReader::new(stream).lines() {
@@ -2004,6 +2014,11 @@ mod electrum_indexer {
                         };
                         if writeln!(out, "{body}").is_err() {
                             break;
+                        }
+                        if method == "blockchain.headers.subscribe" {
+                            if let Some(tip) = server.resolution_tip {
+                                server.tip = tip;
+                            }
                         }
                     }
                 });
@@ -2082,25 +2097,72 @@ mod electrum_indexer {
         assert_eq!(pos.height().get(), BLOCK);
     }
 
-    /// Blocks arrived since the session read its tip, up to the search span.
+    /// The resolver reads the tip for each witness. Confirmations still use
+    /// the conservative tip captured when the enclave session started.
     #[test]
-    fn finds_the_block_at_the_end_of_the_search_span() {
-        let pos = confirmed(Server {
-            confirmations: Some(6 + BLOCK_SEARCH_SPAN),
-            ..server()
-        })
-        .unwrap();
-        assert_eq!(pos.height().get(), BLOCK);
+    fn finds_the_block_when_the_index_advances_since_the_session_started() {
+        for advanced in [3, 4] {
+            let pos = confirmed(Server {
+                resolution_tip: Some(BLOCK + 5 + advanced),
+                confirmations: Some(6 + advanced),
+                ..server()
+            })
+            .unwrap();
+            assert_eq!(pos.height().get(), BLOCK);
+        }
     }
 
     #[test]
-    fn refuses_a_block_past_the_search_span() {
+    fn refuses_a_node_ahead_of_the_upstream_search_window() {
+        // With no header notifications, the pinned resolver searches one
+        // block either side of its estimate. A further gap must fail closed.
+        for ahead in [2, 3, 4] {
+            let err = confirmed(Server {
+                confirmations: Some(6 + ahead),
+                ..server()
+            })
+            .unwrap_err();
+            assert!(err.contains("can't be located"), "{ahead}: {err}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_resolver_answer_for_another_transaction() {
+        let mut other = server();
+        other.tx.output = vec![gen::dust(8)];
+        let err = validator_for(other, "regtest")
+            .indexer_witnesses(6)
+            .confirmed(&witness())
+            .unwrap_err();
+        assert!(err.contains("answered with tx"), "{err}");
+    }
+
+    #[test]
+    fn refuses_confirmations_above_the_resolver_tip() {
         let err = confirmed(Server {
-            confirmations: Some(7 + BLOCK_SEARCH_SPAN),
+            confirmations: Some(BLOCK + 6),
             ..server()
         })
         .unwrap_err();
-        assert!(err.contains("no block from height"), "{err}");
+        assert!(err.contains("lookup failed"), "{err}");
+    }
+
+    #[test]
+    fn uses_the_proven_header_time() {
+        let mut server = server();
+        let expected = i64::from(server.header.time);
+        server.block_time = expected + 600;
+        assert_eq!(confirmed(server).unwrap().timestamp(), expected);
+    }
+
+    #[test]
+    fn refuses_a_proof_position_the_path_cannot_reach() {
+        let err = confirmed(Server {
+            proof_pos: 3,
+            ..server()
+        })
+        .unwrap_err();
+        assert!(err.contains("PositionOutOfRange"), "{err}");
     }
 
     #[test]
@@ -2195,25 +2257,25 @@ mod indexer_answer {
     }
 
     #[test]
-    fn esplora_answer_for_another_tx_is_refused() {
+    fn indexer_answer_for_another_tx_is_refused() {
         let asked = gen::outpoint(0x55, 0).txid;
         let answer = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        let err = esplora_place(answer, asked).unwrap_err();
+        let err = indexer_place(answer, asked).unwrap_err();
         assert!(err.contains("answered with tx"), "{err}");
     }
 
     #[test]
-    fn esplora_answer_maps_to_mined_unmined_and_unknown() {
+    fn indexer_answer_maps_to_mined_unmined_and_unknown() {
         let txid = tx().compute_txid();
         let mined = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        assert!(matches!(esplora_place(mined, txid), Ok(TxPlace::Mined(p)) if p == pos(90)));
+        assert!(matches!(indexer_place(mined, txid), Ok(TxPlace::Mined(p)) if p == pos(90)));
         let tentative = WitnessStatus::Resolved(tx(), WitnessOrd::Tentative);
         assert!(matches!(
-            esplora_place(tentative, txid),
+            indexer_place(tentative, txid),
             Ok(TxPlace::Unmined)
         ));
         assert!(matches!(
-            esplora_place(WitnessStatus::Unresolved, txid),
+            indexer_place(WitnessStatus::Unresolved, txid),
             Ok(TxPlace::Unknown)
         ));
     }

@@ -58,6 +58,21 @@ indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
 the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
+The indexer adapter uses the upstream witness resolvers that rgb-lib uses.
+The enclave checks the returned transaction's txid and enforces the required
+depth against the session's starting tip. For Electrum, it also checks the
+Merkle proof with its shared verifier and binds the verbose answer's block
+hash to the header. The pinned resolver returns neither the proof nor the
+block hash with its witness answer, so these checks need separate reads.
+The header still comes from the trusted indexer, not an enclave header chain.
+
+Electrum block discovery follows the pinned upstream resolver: it refreshes
+the tip for each witness, accounts for queued header notifications, and
+searches around its estimated height. Without notifications, it tries the
+estimate and one block on either side. A node further ahead of its index can
+make resolution fail; the enclave does not fall back to unchecked status.
+The server requirements are in [configuration](configuration.md#launch-values).
+
 ## 3. Sequence
 
 ```mermaid

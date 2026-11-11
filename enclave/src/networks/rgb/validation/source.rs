@@ -199,6 +199,11 @@ mod indexer_only_source {
     /// chain. That is the indexer trust assumption this test exercises.
     fn indexer(history: &History, depth: u32, mined: bool, correct_network: bool) -> String {
         let txids: Vec<_> = history.bundles.iter().map(|b| b.witness_id()).collect();
+        let transactions: Vec<_> = history
+            .bundles
+            .iter()
+            .map(|b| bitcoin::consensus::encode::serialize_hex(&b.tx))
+            .collect();
         let headers: Vec<_> = txids
             .iter()
             .enumerate()
@@ -218,6 +223,7 @@ mod indexer_only_source {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
                 let txids = txids.clone();
+                let transactions = transactions.clone();
                 let headers = headers.clone();
                 std::thread::spawn(move || {
                     let mut output = stream.try_clone().unwrap();
@@ -252,9 +258,11 @@ mod indexer_only_source {
                                 let i = i.expect("a witness of the history");
                                 if mined {
                                     json!({"confirmations": tip as usize + 1 - (100 + i),
-                                        "blockhash": headers[i].block_hash().to_string()})
+                                        "blockhash": headers[i].block_hash().to_string(),
+                                        "blocktime": headers[i].time,
+                                        "hex": transactions[i]})
                                 } else {
-                                    json!({})
+                                    json!({"hex": transactions[i]})
                                 }
                             }
                             "blockchain.transaction.get_merkle" => json!({
