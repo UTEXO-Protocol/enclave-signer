@@ -183,6 +183,10 @@ and the other measured inputs, the tool versions, the checksums and the PCRs.
 An upload to S3 is not a public release, and it is not proof of a
 deployment.
 
+To publish a Stage Signet build and its measurements for cosigners, use
+[Publish EIF Release](github-releases.md). It promotes existing build artifacts
+without rebuilding or deploying them.
+
 ## Parent image
 
 ```bash

@@ -1,0 +1,107 @@
+name: Publish EIF Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: Branch containing the approved build commit
+        type: choice
+        options: [stage, dev]
+        default: stage
+      git_sha:
+        description: Full 40-character SHA already built and uploaded to S3
+        required: true
+        type: string
+      build_run_id:
+        description: Successful Build EIF run ID (both roles; Actions artifacts must exist)
+        required: true
+        type: string
+      release_tag:
+        description: New tag, for example stage-signet-v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-eif-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    # Only reviewed workflow code can receive the S3 read role.
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/stage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      artifact_id: ${{ steps.bundle.outputs.artifact-id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      RELEASE_SHA: ${{ inputs.git_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EIF_S3_BUCKET: ${{ vars.EIF_S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate source and successful build
+        run: python3 build/publish-eif-release.py validate
+      - name: Check AWS publication settings
+        env:
+          READ_ROLE: ${{ secrets.EIF_RELEASE_READ_ROLE_ARN }}
+          ACCOUNT_ID: ${{ vars.EIF_RELEASE_AWS_ACCOUNT_ID }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          test -n "$READ_ROLE" && test -n "$REGION" && test -n "$EIF_S3_BUCKET"
+          [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+      - name: Read build artifacts from S3
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.EIF_RELEASE_READ_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.EIF_RELEASE_AWS_ACCOUNT_ID }}
+      - name: Verify and package the existing build
+        run: python3 build/publish-eif-release.py prepare
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: bundle
+        with:
+          name: verified-eif-release
+          path: release-output/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Configure reviewers and restrict this environment to dev/stage.
+    environment: eif-release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_SHA: ${{ inputs.git_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: release-output
+          merge-multiple: true
+      - name: Publish a complete Stage Signet prerelease
+        run: python3 build/publish-eif-release.py publish
