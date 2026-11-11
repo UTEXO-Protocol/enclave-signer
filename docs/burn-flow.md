@@ -59,17 +59,21 @@ the request must carry no Merkle proofs and an empty `proof`
 ([known limits](tee-spec.md#10-known-limits)).
 
 The indexer adapter uses the upstream witness resolvers that rgb-lib uses.
-The enclave checks the network and returned transaction's txid, then enforces
-the required depth against the session's starting tip. It trusts the
-resolver's mined status, height and block time. It does not separately fetch
-or verify the witness's block header, block hash or Merkle proof; independent
-Bitcoin inclusion verification requires the SPV path.
+The enclave checks the network and returned transaction's txid. It passes
+`safe_height = session_tip - SPV_MIN_CONFIRMATIONS + 1` to rgb-lib, which
+reports witnesses above that height as `UnsafeHistory`. The enclave refuses
+that warning, as it does every validation warning. A chain too short to
+provide a positive safe height also refuses; it never disables the policy.
+The adapter trusts the resolver's mined status, height and block time. It does
+not separately fetch or verify the witness's block header, block hash or
+Merkle proof; independent Bitcoin inclusion verification requires the SPV path.
 
 Electrum block discovery follows the pinned upstream resolver: it refreshes
 the tip for each witness, accounts for queued header notifications, and
 searches around its estimated height. Without notifications, it tries the
-estimate and one block on either side. A node further ahead of its index can
-make resolution fail; the enclave does not fall back to unchecked status.
+estimate and one block on either side. The safe height stays based on the
+session's starting tip. A node further ahead of its index can make resolution
+fail; the enclave does not fall back to unchecked status.
 The server requirements are in [configuration](configuration.md#launch-values).
 
 ## 3. Sequence

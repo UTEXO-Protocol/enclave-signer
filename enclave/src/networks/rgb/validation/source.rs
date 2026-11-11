@@ -358,7 +358,7 @@ mod indexer_only_source {
     fn refuses_unmined_shallow_and_wrong_network_indexer_answers() {
         for (depth, mined, network, reason) in [
             (6, false, true, "unmined"),
-            (5, true, true, "confirmation(s)"),
+            (5, true, true, "UnsafeHistory"),
             (6, true, false, "does not serve"),
         ] {
             let error = validate(depth, mined, network).unwrap_err().to_string();

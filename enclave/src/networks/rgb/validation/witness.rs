@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use bitcoin::{Transaction, Txid};
 use rgbstd::containers::Transfer;
@@ -12,9 +13,16 @@ use rgbstd::ChainNet;
 
 /// The on-chain status of witness txs.
 pub trait ConfirmedWitnesses {
-    /// The block position of `tx` if it is mined at the required depth.
+    /// The block position of a mined `tx`. The source either verifies depth
+    /// itself or supplies `safe_height` for rgb-lib to enforce it.
     /// `Err` says why not: unknown, unmined, too shallow or a failed lookup.
     fn confirmed(&self, tx: &Transaction) -> std::result::Result<WitnessPos, String>;
+
+    /// The latest height rgb-lib may accept without an `UnsafeHistory` warning.
+    /// `None` means this source has already checked confirmation depth.
+    fn safe_height(&self) -> std::result::Result<Option<NonZeroU32>, String> {
+        Ok(None)
+    }
 }
 
 /// Positions already proven, as the burn path's verified SPV proofs give them.

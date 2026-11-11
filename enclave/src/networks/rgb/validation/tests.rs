@@ -1528,8 +1528,8 @@ fn rgb_lib_report(bytes: &[u8]) -> rgb_lib::no_wallet::ConsignmentValidation {
     }
 }
 
-/// rgb-lib must have validated our transfer, and any warning refuses: none
-/// can arise with our resolver, so one means the setup changed.
+/// rgb-lib must have validated our transfer, and any warning refuses,
+/// including UnsafeHistory from the indexer's safe_height policy.
 #[test]
 fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     use super::consensus::check_validation;
@@ -2070,14 +2070,18 @@ mod electrum_indexer {
     }
 
     #[test]
-    fn refuses_a_witness_one_block_too_shallow() {
-        let err = confirmed(Server {
-            tip: BLOCK + 4,
-            confirmations: Some(5),
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("only 5 confirmation(s)"), "{err}");
+    fn passes_a_shallow_position_to_rgb_lib_with_a_lower_safe_height() {
+        let validator = validator_for(
+            Server {
+                tip: BLOCK + 4,
+                confirmations: Some(5),
+                ..server()
+            },
+            "regtest",
+        );
+        let source = validator.indexer_witnesses(6);
+        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
+        assert_eq!(source.confirmed(&witness()).unwrap().height().get(), BLOCK);
     }
 
     #[test]
@@ -2139,14 +2143,19 @@ mod electrum_indexer {
 
     #[test]
     fn a_newer_resolver_tip_does_not_increase_the_accepted_depth() {
-        let err = confirmed(Server {
-            tip: BLOCK + 4,
-            resolution_tip: Some(BLOCK + 8),
-            confirmations: Some(9),
-            ..server()
-        })
-        .unwrap_err();
-        assert!(err.contains("only 5 confirmation(s)"), "{err}");
+        let validator = validator_for(
+            Server {
+                tip: BLOCK + 4,
+                resolution_tip: Some(BLOCK + 8),
+                confirmations: Some(9),
+                ..server()
+            },
+            "regtest",
+        );
+        let source = validator.indexer_witnesses(6);
+        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
+        assert_eq!(source.confirmed(&witness()).unwrap().height().get(), BLOCK);
+        assert_eq!(source.safe_height().unwrap().unwrap().get(), BLOCK - 1);
     }
 
     #[test]
@@ -2240,6 +2249,7 @@ mod indexer_answer {
     use super::*;
     use rgbstd::validation::WitnessStatus;
     use rgbstd::vm::WitnessOrd;
+    use std::num::NonZeroU32;
 
     fn tx() -> bitcoin::Transaction {
         bitcoin::Transaction {
@@ -2255,46 +2265,113 @@ mod indexer_answer {
         WitnessPos::bitcoin(height, 1_700_000_000).unwrap()
     }
 
-    #[test]
-    fn accepts_a_tx_mined_exactly_min_confirmations_deep() {
-        let pos = mined_deep_enough(TxPlace::Mined(pos(95)), 100, 6).unwrap();
-        assert_eq!(pos.height().get(), 95);
+    struct ReportedHistory {
+        positions: BTreeMap<bitcoin::Txid, WitnessPos>,
+        tip: u32,
+        min_confirmations: u32,
+    }
+
+    impl ConfirmedWitnesses for ReportedHistory {
+        fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
+            self.positions.confirmed(tx)
+        }
+
+        fn safe_height(&self) -> std::result::Result<Option<NonZeroU32>, String> {
+            confirmation_height(self.tip, self.min_confirmations).map(Some)
+        }
+    }
+
+    fn validate_at(height: u32, tip: u32, min_confirmations: u32) -> Result<ValidatedConsignment> {
+        let bytes = burn_bytes();
+        let source = ReportedHistory {
+            positions: witness_ids(&bytes)
+                .into_iter()
+                .map(|id| (id, pos(height)))
+                .collect(),
+            tip,
+            min_confirmations,
+        };
+        validator().validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
     }
 
     #[test]
-    fn refuses_a_tx_one_block_short_of_min_confirmations() {
-        let err = mined_deep_enough(TxPlace::Mined(pos(96)), 100, 6).unwrap_err();
-        assert!(err.contains("only 5 confirmation(s)"), "{err}");
+    fn rgb_lib_accepts_exactly_min_confirmations() {
+        validate_at(100, 105, 6).unwrap();
     }
 
     #[test]
-    fn refuses_a_block_above_the_indexer_tip() {
-        let err = mined_deep_enough(TxPlace::Mined(pos(101)), 100, 1).unwrap_err();
-        assert!(err.contains("above the indexer tip"), "{err}");
+    fn rgb_lib_refuses_one_confirmation_short() {
+        let err = validate_at(101, 105, 6).unwrap_err().to_string();
+        assert!(err.contains("UnsafeHistory"), "{err}");
+    }
+
+    #[test]
+    fn rgb_lib_refuses_a_witness_above_the_indexer_tip() {
+        let err = validate_at(106, 105, 1).unwrap_err().to_string();
+        assert!(err.contains("UnsafeHistory"), "{err}");
+    }
+
+    #[test]
+    fn rgb_lib_checks_safe_height_for_every_history_witness() {
+        let bytes = burn_bytes();
+        let ids = witness_ids(&bytes);
+        assert!(ids.len() > 1);
+        for unsafe_id in &ids {
+            let source = ReportedHistory {
+                positions: ids
+                    .iter()
+                    .map(|id| (*id, pos(if id == unsafe_id { 101 } else { 100 })))
+                    .collect(),
+                tip: 105,
+                min_confirmations: 6,
+            };
+            let err = validator()
+                .validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("UnsafeHistory"), "{unsafe_id}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_short_chain_never_disables_the_confirmation_policy() {
+        for (tip, minimum) in [(0, 1), (5, 6), (4, 6), (100, 0)] {
+            assert!(
+                confirmation_height(tip, minimum).is_err(),
+                "{tip}, {minimum}"
+            );
+        }
+        let err = validate_at(1, 5, 6).unwrap_err().to_string();
+        assert!(err.contains("cannot provide a safe height"), "{err}");
+    }
+
+    #[test]
+    fn safe_height_arithmetic_handles_the_full_height_range() {
+        assert_eq!(confirmation_height(6, 6).unwrap().get(), 1);
+        assert_eq!(confirmation_height(u32::MAX, 1).unwrap().get(), u32::MAX);
+        assert_eq!(confirmation_height(u32::MAX, u32::MAX).unwrap().get(), 1);
     }
 
     #[test]
     fn indexer_answer_for_another_tx_is_refused() {
         let asked = gen::outpoint(0x55, 0).txid;
         let answer = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        let err = indexer_place(answer, asked).unwrap_err();
+        let err = indexer_position(answer, asked).unwrap_err();
         assert!(err.contains("answered with tx"), "{err}");
     }
 
     #[test]
-    fn indexer_answer_maps_to_mined_unmined_and_unknown() {
+    fn indexer_answer_requires_a_mined_witness() {
         let txid = tx().compute_txid();
         let mined = WitnessStatus::Resolved(tx(), WitnessOrd::Mined(pos(90)));
-        assert!(matches!(indexer_place(mined, txid), Ok(TxPlace::Mined(p)) if p == pos(90)));
+        assert_eq!(indexer_position(mined, txid).unwrap(), pos(90));
         let tentative = WitnessStatus::Resolved(tx(), WitnessOrd::Tentative);
-        assert!(matches!(
-            indexer_place(tentative, txid),
-            Ok(TxPlace::Unmined)
-        ));
-        assert!(matches!(
-            indexer_place(WitnessStatus::Unresolved, txid),
-            Ok(TxPlace::Unknown)
-        ));
+        assert!(indexer_position(tentative, txid)
+            .unwrap_err()
+            .contains("unmined"));
+        assert!(indexer_position(WitnessStatus::Unresolved, txid)
+            .unwrap_err()
+            .contains("does not know"));
     }
 }
 

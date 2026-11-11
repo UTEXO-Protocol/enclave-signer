@@ -8,10 +8,12 @@
 //! crosses the trust boundary and has a timeout. An Electrum server must
 //! serve verbose `blockchain.transaction.get`, as rgb-lib requires.
 //! Witness resolution is delegated to rgb-lib's upstream resolvers. This
-//! adapter checks the network, transaction identity and confirmation depth;
+//! adapter checks the network and transaction identity and supplies rgb-lib's
+//! confirmation boundary (`safe_height`);
 //! it trusts the indexer for inclusion, height and time.
 
 use std::cell::OnceCell;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use bitcoin::constants::ChainHash;
@@ -102,7 +104,7 @@ impl RgbValidator {
 
 impl RgbValidator {
     /// The witness source of a no-SPV burn, at `min_confirmations` depth. It
-    /// connects on the first witness it is asked about.
+    /// connects when rgb-lib's safe height or a witness is first requested.
     pub fn indexer_witnesses(&self, min_confirmations: u32) -> IndexerWitnesses<'_> {
         IndexerWitnesses {
             validator: self,
@@ -137,7 +139,7 @@ impl RgbValidator {
 }
 
 /// The witness source of a no-SPV burn. It trusts the configured indexer and
-/// enforces the enclave's confirmation policy.
+/// supplies rgb-lib with the enclave's confirmation policy.
 pub struct IndexerWitnesses<'a> {
     validator: &'a RgbValidator,
     min_confirmations: u32,
@@ -168,61 +170,43 @@ impl ConfirmedWitnesses for IndexerWitnesses<'_> {
             .resolver
             .resolve_witness(txid)
             .map_err(|e| format!("indexer lookup failed: {e}"))?;
-        let place = indexer_place(status, txid)?;
-        mined_deep_enough(place, session.tip, self.min_confirmations)
+        indexer_position(status, txid)
+    }
+
+    fn safe_height(&self) -> std::result::Result<Option<NonZeroU32>, String> {
+        confirmation_height(self.session()?.tip, self.min_confirmations).map(Some)
     }
 }
 
-/// Where the indexer places a tx.
-#[derive(Debug)]
-pub(super) enum TxPlace {
-    Unknown,
-    Unmined,
-    Mined(WitnessPos),
-}
-
-/// The position of `place` if it is `min_confirmations` deep below `tip`.
-/// Testnet min-difficulty blocks count too: no header chain tells them apart.
-pub(super) fn mined_deep_enough(
-    place: TxPlace,
+/// `tip - min_confirmations + 1`, without overflow or disabling the policy
+/// when the chain is too short to contain a safely confirmed witness.
+pub(super) fn confirmation_height(
     tip: u32,
     min_confirmations: u32,
-) -> std::result::Result<WitnessPos, String> {
-    let pos = match place {
-        TxPlace::Mined(pos) => pos,
-        TxPlace::Unmined => return Err("the indexer reports it unmined".into()),
-        TxPlace::Unknown => return Err("the indexer does not know it".into()),
-    };
-    let height = pos.height().get();
-    let depth = tip
-        .checked_sub(height)
-        .map(|d| d + 1)
-        .ok_or_else(|| format!("its block {height} is above the indexer tip {tip}"))?;
-    if depth < min_confirmations {
-        return Err(format!(
-            "only {depth} confirmation(s) at block {height}, need {min_confirmations}"
-        ));
-    }
-    Ok(pos)
+) -> std::result::Result<NonZeroU32, String> {
+    min_confirmations.checked_sub(1)
+        .and_then(|offset| tip.checked_sub(offset))
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| format!("indexer tip {tip} cannot provide a safe height for {min_confirmations} confirmation(s)"))
 }
 
-/// The place of an upstream resolver's answer for `txid`.
-pub(super) fn indexer_place(
+/// The mined position of an upstream resolver's answer for `txid`.
+pub(super) fn indexer_position(
     status: WitnessStatus,
     txid: bitcoin::Txid,
-) -> std::result::Result<TxPlace, String> {
+) -> std::result::Result<WitnessPos, String> {
     let (tx, ord) = match status {
         WitnessStatus::Resolved(tx, ord) => (tx, ord),
-        WitnessStatus::Unresolved => return Ok(TxPlace::Unknown),
+        WitnessStatus::Unresolved => return Err("the indexer does not know it".into()),
     };
     let got = tx.compute_txid();
     if got != txid {
         return Err(format!("the indexer answered with tx {got}"));
     }
-    Ok(match ord {
-        WitnessOrd::Mined(pos) => TxPlace::Mined(pos),
-        _ => TxPlace::Unmined,
-    })
+    match ord {
+        WitnessOrd::Mined(pos) => Ok(pos),
+        _ => Err("the indexer reports it unmined".into()),
+    }
 }
 
 fn esplora_session(
