@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -89,7 +90,11 @@ elif name == 'aws':
     shutil.copyfile(root / 'source' / pathlib.Path(args[2]).name, args[3])
 elif name == 'install':
     if '-d' in args:
-        for arg in args[1:]: pathlib.Path(arg).mkdir(parents=True, exist_ok=True)
+        dirs = args[1:]
+        if '-m' in dirs:
+            pos = dirs.index('-m')
+            dirs = dirs[:pos] + dirs[pos + 2:]
+        for arg in dirs: pathlib.Path(arg).mkdir(parents=True, exist_ok=True)
     else:
         shutil.copyfile(args[-2], args[-1])
         os.chmod(args[-1], int(args[args.index('-m') + 1], 8))
@@ -136,7 +141,7 @@ elif name == 'ss':
                      'systemd-tmpfiles', 'sleep'):
             (self.bin / name).symlink_to(stub)
 
-    def deploy(self, cid=18, role='burn', sha='a' * 40, **extra):
+    def deploy(self, cid=18, role='burn', sha='a' * 40, umask=None, **extra):
         files = {
             f'utexo-bridge-enclave-{role}.eif': f'image-{role}-{sha}',
             'utexo-bridge-parent': f'parent-{sha}',
@@ -162,8 +167,12 @@ elif name == 'ss':
                 KMS_EXPECTED_EVM_ADDRESS='0x' + '11' * 20,
             )
             extra = dict(defaults, **extra)
+        command = ['bash', str(self.script)]
+        if umask is not None:
+            command = ['bash', '-c', 'umask "$1"; exec bash "$2"', 'deploy-test',
+                       umask, str(self.script)]
         return subprocess.run(
-            ['bash', str(self.script)], text=True, capture_output=True, timeout=60,
+            command, text=True, capture_output=True, timeout=60,
             env=dict(self.env, ENCLAVE_CID=str(cid), SIGNER_ROLE=role, GIT_SHA=sha,
                      EVM_RPC_TLS_CA_DER_FILE=str(ca), EVM_RPC_PATH_FILE=str(path), **extra))
 
@@ -224,6 +233,26 @@ elif name == 'ss':
         self.assert_success(self.deploy(16, 'mint'))
         self.assert_success(self.deploy(18, ENCLAVE_DEBUG_MODE='1', TARGET_PCR='0' * 96))
         self.assertEqual(sorted(json.loads(self.state.read_text())['parents']), [16, 18])
+
+    def test_restrictive_umask_keeps_control_directories_traversable(self):
+        # Use the real install command so intermediate-directory permissions
+        # follow the host's filesystem behavior rather than the tool stub.
+        (self.bin / 'install').unlink()
+        # The developer machine need not have an ubuntu user or root access.
+        # Only omit ownership switches; preserve real mode/umask handling.
+        (self.bin / 'install').write_text(
+            '#!/usr/bin/env python3\nimport os, sys\n'
+            'args = iter(sys.argv[1:]); kept = []\n'
+            'for arg in args:\n'
+            '    if arg in ("-o", "-g"): next(args)\n'
+            '    else: kept.append(arg)\n'
+            f'os.execv({shutil.which("install")!r}, ["install"] + kept)\n')
+        (self.bin / 'install').chmod(0o755)
+        (self.local / 'lib').mkdir(mode=0o755)
+        self.assert_success(self.deploy(18, umask='077'))
+        for directory in (self.local / 'lib', self.local / 'lib/utexo',
+                          self.local / 'lib/utexo/18'):
+            self.assertEqual(directory.stat().st_mode & 0o005, 0o005, str(directory))
 
     def test_parent_timeout_is_written_for_only_the_selected_cid(self):
         self.assert_success(self.deploy(16, 'mint'))

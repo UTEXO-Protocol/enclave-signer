@@ -367,7 +367,9 @@ log "PCR0 (manifest) = $MAN_PCR"
 # --- 4. install host services (udev + tmpfiles + systemd units + env) ------
 log "installing systemd units + udev/tmpfiles"
 install -d /etc/utexo
-install -d "$CONTROL_DIR"
+# ubuntu executes the per-CID wrappers. Set the shared parent's mode too:
+# install -d otherwise creates intermediate directories using the caller's umask.
+install -d -m 0755 /usr/local/lib/utexo "$CONTROL_DIR"
 
 # udev: give the `ne` group the Nitro device on every boot.
 cat > /etc/udev/rules.d/99-nitro-enclaves.rules <<'EOF'
