@@ -374,7 +374,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertNotIn('ENDPOINTS_SHA256', args)
                 self.assertEqual(args['BITCOIN_NETWORK'], 'signet')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'none')
-                self.assertEqual(args['RUST_LOG'], 'debug')
+                self.assertEqual(args['RUST_LOG'], 'info' if role == 'mint' else 'debug')
                 self.assertEqual(args['SPV_MIN_CONFIRMATIONS'], '3')
                 self.assertEqual(args['EVM_FINALITY_TAG'], 'finalized')
                 self.assertEqual(args['FUNDS_IN_CONTRACT'],

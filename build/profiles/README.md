@@ -60,8 +60,9 @@ BUILD_PROFILE=stage-signet DOCKERFILE=Dockerfile.enclave.burn \
 ```
 
 The profile sets `BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none`,
-`EVM_CHAIN_ID=42161`, `RUST_LOG=debug`, the stage contract addresses and the
-role-specific feature list without `rgb`/`spv`. It does not enable Nitro debug
+`EVM_CHAIN_ID=42161`, `RUST_LOG=info` for Mint (`debug` for Burn), the stage
+contract addresses and the role-specific feature list without `rgb`/`spv`.
+It does not enable Nitro debug
 mode, mock attestation or seed import.
 
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the

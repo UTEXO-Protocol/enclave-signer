@@ -30,6 +30,7 @@ SPV_MIN_CONFIRMATIONS=3
 EVM_FINALITY_TAG=finalized
 
 if [ "$DOCKERFILE" = Dockerfile.enclave.mint ]; then
+    RUST_LOG=info
     # MINT_WITNESS_SAT is 1500 in the recipe; the connector must match it.
     RGB_MAX_UNOWNED_SATS=1500
 else
