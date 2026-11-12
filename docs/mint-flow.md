@@ -333,8 +333,7 @@ The txid of a native SegWit transaction does not change when it is signed.
     afterwards to detect a reorg. A receiving rgb-lib wallet confirms the
     mint only once the lock is `finalized`.
 - **S6.1** The amount must cover the minted units plus the commission. The
-  enclave takes the minted amount from the fascia, not from the request's
-  `psbt_output_amount`.
+  enclave takes the minted amount from the fascia.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal. A
   witness mint has no blinded seal, so a deposit with an invoice refuses it.

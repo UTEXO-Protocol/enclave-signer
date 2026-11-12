@@ -482,9 +482,6 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
-            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
-                "Concordium sources are not supported",
-            )),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -524,12 +521,8 @@ impl ParentAdapterService {
             sign_request::Data::RgbData(payload) => {
                 enclave_proto::sign_request::DestinationNetwork::RgbDestination(
                     enclave_proto::RgbDestination {
-                        operation_idx: payload.operation_idx,
                         psbt_bytes: payload.psbt_bytes,
-                        psbt_output_amount: payload.psbt_output_amount,
                         asset_id: payload.rgb_asset_id,
-                        consignment: payload.consignment,
-                        consignment_hash: payload.consignment_hash,
                         fascia: payload.fascia,
                         parent_fascia: payload.parent_fascia,
                     },
@@ -539,10 +532,6 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // `sign` refuses Concordium data before destination dispatch.
-            sign_request::Data::CcdData(_) => {
-                unreachable!("Concordium sign requests are refused before destination dispatch")
-            }
         }
     }
 
@@ -644,12 +633,6 @@ impl ParentService for ParentAdapterService {
         })?;
         let signer_network_id = common.dst_network_id;
 
-        if let Some(sign_request::Data::CcdData(_)) = inner.data.as_ref() {
-            return Err(Status::invalid_argument(
-                "Concordium signing is not supported",
-            ));
-        }
-
         match data_type {
             DataType::Transaction => {
                 let source = Self::source_proof(&mut inner)?;
@@ -673,7 +656,6 @@ impl ParentService for ParentAdapterService {
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
                             psbt_len = payload.psbt_bytes.len(),
-                            operation_idx = payload.operation_idx,
                             "gRPC Sign: RGB transaction"
                         );
 
@@ -684,9 +666,6 @@ impl ParentService for ParentAdapterService {
                             "TRANSACTION data_type must not carry BtcData; \
                              use data_type=BTC_UTXO for plain-BTC signing",
                         ))
-                    }
-                    Some(sign_request::Data::CcdData(_)) => {
-                        unreachable!("Concordium sign requests are refused at the top of sign")
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };

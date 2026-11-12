@@ -46,7 +46,7 @@ pub mod validation;
 
 #[cfg(evm_to_rgb)]
 pub use route::validate_destination;
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+#[cfg(evm_to_rgb)]
 pub use route::validate_destination_anchor;
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub use route::validate_rights_refill;

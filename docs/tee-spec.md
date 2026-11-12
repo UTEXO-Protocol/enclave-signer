@@ -152,8 +152,7 @@ signature depends on.
   a role ([parent-mtls.md](parent-mtls.md)).
 - `Sign` routes by `data_type`: `TRANSACTION` to `Sign`, `EVM_GAS_TX` to
   `SignRawDigest`, `BTC_UTXO` to `SignBtc`, `RGB_RIGHTS_REFILL` to
-  `SignRightsRefill`. It refuses a Concordium source or payload, which the
-  proto still defines.
+  `SignRightsRefill`.
 - It refuses `SubmitHeaders` from every client. Its own header sync reads
   headers from `HEADER_ELECTRUM_URL` and writes them to the enclave.
 - It waits longer for a reply than the request deadline of the enclave, so

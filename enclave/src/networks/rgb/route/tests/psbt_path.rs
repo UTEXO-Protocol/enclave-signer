@@ -120,7 +120,6 @@ fn destination(history: &History, mint: &Made, parent: &Made) -> RgbDestination 
         asset_id: history.contract_id.to_string(),
         fascia: mint.fascia_bytes(),
         parent_fascia: parent.fascia_bytes(),
-        ..Default::default()
     }
 }
 

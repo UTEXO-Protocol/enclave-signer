@@ -44,11 +44,8 @@ pub struct SignEvmRequest {
 #[derive(Debug, Clone)]
 pub struct SignPsbtRequest {
     pub evm_tx_hash: Vec<u8>,
-    /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required.
-    /// The replay key uses this full operation ID. The enclave does not read
-    /// `operation_idx`.
+    /// On-chain `BridgeFundsIn.operationId` (32 bytes). Required; the replay key uses it.
     pub evm_funds_in_operation_id: Vec<u8>,
-    pub operation_idx: u64,
     pub evm_event_valid: bool,
     pub evm_event_finalized: bool,
     pub evm_token: Vec<u8>,
@@ -56,10 +53,7 @@ pub struct SignPsbtRequest {
     pub evm_recipient: Vec<u8>,
     pub evm_commission: u64,
     pub psbt_bytes: Vec<u8>,
-    pub psbt_output_amount: u64,
     pub rgb_asset_id: String,
-    pub consignment: Vec<u8>,
-    pub consignment_hash: Vec<u8>,
     /// rgb-lib fascia of the PSBT's tx: rgb-lib keeps its RGB data there.
     pub fascia: Vec<u8>,
     /// rgb-lib fascia of the tx that made the right the mint spends.
@@ -424,12 +418,8 @@ impl EnclaveClient {
                     destination_network: Some(
                         crate::enclave_proto::sign_request::DestinationNetwork::RgbDestination(
                             crate::enclave_proto::RgbDestination {
-                                operation_idx: req.operation_idx,
                                 psbt_bytes: req.psbt_bytes,
-                                psbt_output_amount: req.psbt_output_amount,
                                 asset_id: req.rgb_asset_id,
-                                consignment: req.consignment,
-                                consignment_hash: req.consignment_hash,
                                 fascia: req.fascia,
                                 parent_fascia: req.parent_fascia,
                             },

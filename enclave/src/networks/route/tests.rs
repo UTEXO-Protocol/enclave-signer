@@ -13,14 +13,10 @@ fn evm_source(commission: u64) -> SourceNetwork {
     })
 }
 
-fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
+fn rgb_destination() -> DestinationNetwork {
     DestinationNetwork::RgbDestination(RgbDestination {
-        operation_idx: 1,
         psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
-        psbt_output_amount: destination_amount,
         asset_id: "rgb:test-asset".into(),
-        consignment: vec![],
-        consignment_hash: vec![],
         fascia: vec![],
         parent_fascia: vec![],
     })
@@ -57,24 +53,15 @@ fn proof(amount: u64) -> RouteProof {
 
 #[test]
 fn route_proofs_accept_exact_match_to_rgb_destination() {
-    assert!(validate_route_proofs(
-        &evm_source(20),
-        &rgb_destination(90),
-        &proof(90),
-        &proof(90),
-    )
-    .is_ok());
+    assert!(
+        validate_route_proofs(&evm_source(20), &rgb_destination(), &proof(90), &proof(90),).is_ok()
+    );
 }
 
 #[test]
 fn route_proofs_reject_underfunded_rgb_destination() {
-    let err = validate_route_proofs(
-        &evm_source(20),
-        &rgb_destination(90),
-        &proof(89),
-        &proof(90),
-    )
-    .unwrap_err();
+    let err = validate_route_proofs(&evm_source(20), &rgb_destination(), &proof(89), &proof(90))
+        .unwrap_err();
     assert!(err.to_string().contains("amount mismatch"));
 }
 
@@ -103,7 +90,7 @@ fn route_proofs_reject_underfunded_evm_destination() {
 
 #[test]
 fn route_proofs_reject_unsupported_pair() {
-    let err = validate_route_proofs(&rgb_source(), &rgb_destination(90), &proof(90), &proof(90))
+    let err = validate_route_proofs(&rgb_source(), &rgb_destination(), &proof(90), &proof(90))
         .unwrap_err();
     assert!(err.to_string().contains("unsupported"));
 }

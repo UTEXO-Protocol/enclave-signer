@@ -19,7 +19,7 @@ use super::validation;
 use super::{parent_proof, psbt_commit};
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::config::BridgeConfig;
-#[cfg(all(not(feature = "rgb-validation"), rgb_to_evm))]
+#[cfg(not(feature = "rgb-validation"))]
 use crate::error::EnclaveError;
 use crate::error::Result;
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -85,6 +85,19 @@ pub fn validate_destination(
     _ctx: &ValidationContext<'_>,
 ) -> Result<()> {
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
+}
+
+/// Without `rgb-validation` no fascia proves the minted units, so an RGB destination is refused.
+#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
+pub fn validate_destination_anchor(
+    _destination: &RgbDestination,
+    _source_amount: u64,
+    _source_commission: u64,
+    _ctx: &ValidationContext<'_>,
+) -> Result<(u64, Vec<String>)> {
+    Err(EnclaveError::CrossCheck(
+        "an RGB destination needs rgb-validation to prove its minted units".into(),
+    ))
 }
 
 /// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO

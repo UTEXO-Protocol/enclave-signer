@@ -240,7 +240,7 @@ pub struct EvmSource {
     pub commission: u64,
     /// On-chain BridgeFundsIn.operationId of the source deposit, exactly 32 bytes.
     /// Required: the enclave binds the FundsIn log to it and refuses to sign
-    /// without it. Not RgbDestination.operation_idx, which is a different id-space.
+    /// without it.
     #[prost(bytes="vec", tag="7")]
     pub funds_in_operation_id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -335,24 +335,12 @@ pub struct LzReleaseParams {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RgbDestination {
-    /// Destination operation index. The enclave does not read it.
-    #[prost(uint64, tag="1")]
-    pub operation_idx: u64,
     /// Serialized PSBT to sign.
     #[prost(bytes="vec", tag="2")]
     pub psbt_bytes: ::prost::alloc::vec::Vec<u8>,
-    /// Total non-change output amount. The enclave does not read it: the fascia gives the amount.
-    #[prost(uint64, tag="3")]
-    pub psbt_output_amount: u64,
     /// RGB asset identifier associated with the transfer.
     #[prost(string, tag="4")]
     pub asset_id: ::prost::alloc::string::String,
-    /// Raw destination RGB consignment bytes. The enclave does not read it.
-    #[prost(bytes="vec", tag="5")]
-    pub consignment: ::prost::alloc::vec::Vec<u8>,
-    /// keccak256(consignment). The enclave does not read it.
-    #[prost(bytes="vec", tag="6")]
-    pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
     /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
     #[prost(bytes="vec", tag="9")]
     pub fascia: ::prost::alloc::vec::Vec<u8>,

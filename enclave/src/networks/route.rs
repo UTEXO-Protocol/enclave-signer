@@ -145,16 +145,9 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is `mint.issued` from the fascia that the
-            // enclave proves, not the unchecked host `psbt_output_amount`. Only
-            // builds without that bind use the wire field. They run no
-            // destination cross-checks.
-            #[cfg(feature = "rgb-validation")]
+            // The destination amount is `mint.issued` from the fascia that the enclave proves.
             let (destination_amount, rgb_recipient_seals) =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
-            #[cfg(not(feature = "rgb-validation"))]
-            let (destination_amount, rgb_recipient_seals) =
-                (destination.psbt_output_amount, Vec::new());
 
             Ok(DestinationProof {
                 proof: RouteProof {

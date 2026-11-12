@@ -446,8 +446,7 @@ fn verify_funds_in_deposit(
                 .into(),
         )
     })?;
-    // Bind to the source BridgeFundsIn.operationId. `destination.operation_idx`
-    // is a different id space.
+    // Bind to the source BridgeFundsIn.operationId.
     let verified = crate::networks::evm::events::verify_funds_in_event(
         &**client,
         // The bridge entry contract emits FundsIn. It can differ from the
