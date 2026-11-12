@@ -37,9 +37,9 @@ on:
   workflow_dispatch:
     inputs:
       build_profile:
-        description: 'Measured image profile (stage-signet builds Mint and Burn only)'
+        description: 'Measured image profile (Stage Signet or Stage Bitcoin mainnet)'
         type: choice
-        options: [default, stage-signet]
+        options: [default, stage-signet, stage-mainnet]
         default: default
   push:
     tags: ["v*"]
@@ -62,6 +62,9 @@ jobs:
       STAGE_RGB_ASSET_ID: ${{ vars.STAGE_RGB_ASSET_ID }}
       STAGE_TOKEN_CONTRACT: ${{ vars.STAGE_TOKEN_CONTRACT }}
       STAGE_GAS_TX_ALLOWED_SELECTORS: ${{ vars.STAGE_GAS_TX_ALLOWED_SELECTORS }}
+      STAGE_MAINNET_RGB_ASSET_ID: ${{ vars.STAGE_MAINNET_RGB_ASSET_ID }}
+      STAGE_MAINNET_TOKEN_CONTRACT: ${{ vars.STAGE_MAINNET_TOKEN_CONTRACT }}
+      STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS: ${{ vars.STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS }}
     strategy:
       fail-fast: false
       matrix:
@@ -82,13 +85,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate Signet release inputs
-        if: env.BUILD_PROFILE == 'stage-signet'
+      - name: Validate Stage release inputs
+        if: env.BUILD_PROFILE != 'default'
         env:
           DOCKERFILE: ${{ matrix.dockerfile }}
         run: |
           set -euo pipefail
-          source build/profiles/stage-signet.sh
+          case "$BUILD_PROFILE" in
+            stage-signet|stage-mainnet) source "build/profiles/$BUILD_PROFILE.sh" ;;
+            *) echo 'Unknown build profile' >&2; exit 1 ;;
+          esac
 
       - name: Prepare private dependency keys
         env:
@@ -210,7 +216,7 @@ jobs:
       - name: Upload run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}${{ env.BUILD_PROFILE == 'stage-signet' && '-stage-signet' || '' }}
+          name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}${{ env.BUILD_PROFILE != 'default' && format('-{0}', env.BUILD_PROFILE) || '' }}
           path: |
             artifacts/${{ matrix.eif_name }}
             artifacts/PCR.json
@@ -237,7 +243,7 @@ jobs:
         run: |
           set -euxo pipefail
           [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }
-          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ env.BUILD_PROFILE == 'stage-signet' && 'stage-signet/' || '' }}${{ matrix.s3_subpath }}"
+          DEST="s3://${BUCKET}/eif/${{ github.sha }}/${{ env.BUILD_PROFILE != 'default' && format('{0}/', env.BUILD_PROFILE) || '' }}${{ matrix.s3_subpath }}"
           aws s3 cp artifacts/ "$DEST" --recursive
           echo "Published to $DEST"
 

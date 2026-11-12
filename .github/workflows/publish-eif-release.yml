@@ -3,6 +3,11 @@ name: Publish EIF Release
 on:
   workflow_dispatch:
     inputs:
+      build_profile:
+        description: Profile of the existing build to publish
+        type: choice
+        options: [stage-signet, stage-mainnet]
+        default: stage-signet
       source_branch:
         description: Branch containing the approved build commit
         type: choice
@@ -17,7 +22,7 @@ on:
         required: true
         type: string
       release_tag:
-        description: New tag, for example stage-signet-v0.1.0
+        description: New tag matching the profile, e.g. stage-mainnet-v0.1.0
         required: true
         type: string
 
@@ -47,6 +52,7 @@ jobs:
       RELEASE_SHA: ${{ inputs.git_sha }}
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       RELEASE_TAG: ${{ inputs.release_tag }}
+      BUILD_PROFILE: ${{ inputs.build_profile }}
       EIF_S3_BUCKET: ${{ vars.EIF_S3_BUCKET }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -94,6 +100,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_SHA: ${{ inputs.git_sha }}
       RELEASE_TAG: ${{ inputs.release_tag }}
+      BUILD_PROFILE: ${{ inputs.build_profile }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
@@ -103,5 +110,5 @@ jobs:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: release-output
           merge-multiple: true
-      - name: Publish a complete Stage Signet prerelease
+      - name: Publish a complete Stage prerelease
         run: python3 build/publish-eif-release.py publish

@@ -21,6 +21,9 @@ RUN = "12345"
 
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(os.environ, {"BUILD_PROFILE": "stage-signet"})
+        env.start()
+        self.addCleanup(env.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -80,6 +83,58 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("1" * 96, notes)
         self.assertIn("2" * 96, notes)
         self.assertIn("does not deploy", notes)
+
+    def use_mainnet(self):
+        for role in publisher.ROLES:
+            self.edit_both(role, "metadata.json", lambda data: dict(data, build_profile="stage-mainnet"))
+            self.edit_both(role, "IMAGE-ENV.json", lambda data: [
+                item.replace("BITCOIN_NETWORK=signet", "BITCOIN_NETWORK=bitcoin") for item in data
+            ] + ["BTC_RELAY_MODE=required", "SPV_MIN_CONFIRMATIONS=3", "EVM_FINALITY_TAG=finalized"])
+
+    def package_mainnet(self):
+        publisher.package(self.bundles, self.references, self.output, SHA, RUN,
+                          "stage-mainnet-v0.1.0", REPO, "dev", "stage-mainnet")
+
+    def test_mainnet_packages_are_labeled_and_keep_stage_prerelease(self):
+        self.use_mainnet()
+        self.package_mainnet()
+        manifest = json.loads((self.output / "assets/release-manifest.json").read_text())
+        self.assertEqual(manifest["bitcoin_network"], "bitcoin")
+        self.assertEqual(manifest["build_profile"], "stage-mainnet")
+        notes = (self.output / "notes.md").read_text()
+        self.assertIn("Stage / Bitcoin Mainnet", notes)
+        self.assertIn("Stage prerelease", notes)
+        self.assertNotIn("Public Signet", notes)
+
+    def test_mainnet_rejects_signet_bundle(self):
+        with self.assertRaisesRegex(ValueError, "Wrong burn metadata"):
+            self.package_mainnet()
+        self.assertFalse(self.output.exists())
+
+    def test_mainnet_rejects_wrong_network_and_disabled_checks(self):
+        self.use_mainnet()
+        for key, value in (("BITCOIN_NETWORK", "signet"), ("BTC_RELAY_MODE", "none"),
+                           ("SPV_MIN_CONFIRMATIONS", "0"), ("EVM_FINALITY_TAG", "latest")):
+            with self.subTest(key=key):
+                paths = [root / "mint/IMAGE-ENV.json" for root in (self.bundles, self.references)]
+                originals = [path.read_text() for path in paths]
+                self.edit_both("mint", "IMAGE-ENV.json", lambda data: [
+                    f"{key}={value}" if item.startswith(key + "=") else item for item in data])
+                with self.assertRaises(ValueError):
+                    self.package_mainnet()
+                self.assertFalse(self.output.exists())
+                for path, original in zip(paths, originals):
+                    path.write_text(original)
+
+    def test_release_tag_must_match_selected_profile(self):
+        env = {"GH_REPO": REPO, "RELEASE_SHA": SHA, "BUILD_PROFILE": "stage-mainnet"}
+        with patch.dict(os.environ, dict(env, RELEASE_TAG="stage-mainnet-v0.1.0")):
+            self.assertEqual(publisher.inputs()["BUILD_PROFILE"], "stage-mainnet")
+        for profile, tag in (("stage-mainnet", TAG), ("stage-signet", "stage-mainnet-v0.1.0"),
+                             ("../invalid", "stage-mainnet-v0.1.0")):
+            with patch.dict(os.environ, dict(env, BUILD_PROFILE=profile, RELEASE_TAG=tag)):
+                with self.assertRaises(ValueError):
+                    publisher.inputs()
 
     def test_missing_mint_prevents_any_package(self):
         (self.bundles / "mint/PCR.json").unlink()
@@ -165,8 +220,13 @@ class ReleaseTests(unittest.TestCase):
             with patch.dict(os.environ, dict(env, **{key: value})), self.assertRaises(ValueError):
                 publisher.inputs()
 
-    def publish_with_fake_upload(self, corrupt=False):
-        self.package()
+    def publish_with_fake_upload(self, corrupt=False, profile="stage-signet"):
+        tag = f"{profile}-v0.1.0"
+        if profile == "stage-mainnet":
+            self.use_mainnet()
+            self.package_mainnet()
+        else:
+            self.package()
         calls = []
 
         def fake_run(*args):
@@ -179,7 +239,7 @@ class ReleaseTests(unittest.TestCase):
                     (destination / "PCR-burn.json").write_text("corrupt")
             return ""
 
-        env = {"GH_REPO": REPO, "RELEASE_SHA": SHA, "RELEASE_TAG": TAG}
+        env = {"GH_REPO": REPO, "RELEASE_SHA": SHA, "RELEASE_TAG": tag, "BUILD_PROFILE": profile}
         with patch.dict(os.environ, env), patch.object(publisher, "OUTPUT", self.output), \
                 patch.object(publisher, "unused_tag"), patch.object(publisher, "run", side_effect=fake_run):
             if corrupt:
@@ -197,6 +257,46 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("--latest=false", create)
         self.assertEqual(calls[-1][:3], ("gh", "release", "edit"))
         self.assertIn("--draft=false", calls[-1])
+
+    def test_mainnet_publishes_as_stage_prerelease_without_changing_latest(self):
+        calls = self.publish_with_fake_upload(profile="stage-mainnet")
+        create = next(call for call in calls if call[:3] == ("gh", "release", "create"))
+        self.assertIn("Stage / Bitcoin Mainnet — stage-mainnet-v0.1.0", create)
+        self.assertIn("--prerelease", create)
+        self.assertIn("--latest=false", create)
+        self.assertIn("--prerelease", calls[-1])
+        self.assertIn("--latest=false", calls[-1])
+
+    def test_prepare_reads_only_selected_profile_paths_and_packages_them(self):
+        self.use_mainnet()
+        values = dict(GH_REPO=REPO, RELEASE_SHA=SHA, RELEASE_TAG="stage-mainnet-v0.1.0",
+                      BUILD_PROFILE="stage-mainnet")
+        calls = []
+
+        def fake_run(*args):
+            calls.append(args)
+            if args[:3] == ("gh", "run", "download"):
+                name = args[args.index("--name") + 1]
+                role = next(role for role in publisher.ROLES
+                            if name == f"eif-{SHA}-{role}-stage-mainnet")
+                shutil.copytree(self.references / role, args[args.index("--dir") + 1], dirs_exist_ok=True)
+            elif args[:3] == ("aws", "s3", "cp"):
+                prefix = f"s3://test-bucket/eif/{SHA}/stage-mainnet/rgb-"
+                self.assertTrue(args[3].startswith(prefix))
+                role, name = args[3][len(prefix):].split("/")
+                shutil.copyfile(self.bundles / role / name, args[4])
+            else:
+                self.fail(f"Unexpected command: {args}")
+            return ""
+
+        env = dict(BUILD_RUN_ID=RUN, SOURCE_BRANCH="dev", EIF_S3_BUCKET="test-bucket")
+        with patch.dict(os.environ, env), patch.object(publisher, "validate", return_value=values), \
+                patch.object(publisher, "run", side_effect=fake_run), \
+                patch.object(publisher, "OUTPUT", self.output):
+            publisher.prepare()
+        self.assertEqual(len(calls), 18)  # Two Actions archives and eight S3 files per role.
+        manifest = json.loads((self.output / "assets/release-manifest.json").read_text())
+        self.assertEqual(manifest["build_profile"], "stage-mainnet")
 
     def test_failed_upload_never_publishes(self):
         calls = self.publish_with_fake_upload(corrupt=True)

@@ -129,8 +129,11 @@ enclave refuses any other schema, so an asset issued on another schema does
 not validate. Use the id of a BFA contract issued on this schema, for the
 mint image and the burn image.
 
-**Stage profile.** `BUILD_PROFILE=stage-signet` builds both roles without
-`spv` for public Signet ([build/profiles/README.md](../build/profiles/README.md)).
+**Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles without
+`spv` for public Signet. `BUILD_PROFILE=stage-mainnet` builds both roles with
+`spv`, required relay checks and the new Stage mainnet contracts. Each profile
+uses dedicated release inputs and its own S3 subdirectory; see
+[build/profiles/README.md](../build/profiles/README.md).
 
 **CI.** `.github/workflows/build-eif.yml` builds the `rgb-mint` and
 `rgb-burn` variants and uploads each EIF with its PCRs, checksums,
@@ -183,7 +186,7 @@ and the other measured inputs, the tool versions, the checksums and the PCRs.
 An upload to S3 is not a public release, and it is not proof of a
 deployment.
 
-To publish a Stage Signet build and its measurements for cosigners, use
+To publish a Stage Signet or Stage mainnet build and its measurements for cosigners, use
 [Publish EIF Release](github-releases.md). It promotes existing build artifacts
 without rebuilding or deploying them.
 
