@@ -13,7 +13,8 @@
 # to the enclave at launch.
 #
 # Usage (root):
-#   EVM_RPC_HOST=<rpc host> [EVM_RPC_TLS_PORT=443] bash host-prep-evmrpc.sh
+#   EVM_RPC_HOST=<rpc host> [EVM_RPC_TLS_PORT=443] [EVM_RPC_PATH_FILE=<file with /v2/<key>>] \
+#     bash host-prep-evmrpc.sh
 set -euo pipefail
 
 HOST="${EVM_RPC_HOST:?EVM_RPC_HOST required (the host name the enclave gets at launch)}"
@@ -28,6 +29,22 @@ fi
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
   log "ERROR: EVM_RPC_TLS_PORT is not 1-65535"; exit 1
 fi
+
+# --- 0. self-test: eth_chainId direct to the pinned endpoint, before installing ---
+# A provider with a private path serves JSON-RPC only there; the path is a secret, so it is not logged.
+RPC_PATH=/
+if [ -n "${EVM_RPC_PATH_FILE:-}" ]; then
+  RPC_PATH=$(tr -d '\r\n' < "$EVM_RPC_PATH_FILE") || { log "ERROR: cannot read EVM_RPC_PATH_FILE"; exit 1; }
+  [[ "$RPC_PATH" =~ ^/[A-Za-z0-9._~%/-]*$ ]] || { log "ERROR: EVM_RPC_PATH_FILE must hold a URL path that starts with /"; exit 1; }
+fi
+log "self-test: eth_chainId via https://${HOST}:${PORT}"
+# curl reads the URL from stdin, so the path stays out of the process list.
+RESP=$(printf 'url = "https://%s:%s%s"\n' "$HOST" "$PORT" "$RPC_PATH" | curl -s --max-time 10 --config - \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}') || RESP=""
+CHAIN=$(printf '%s' "$RESP" | jq -r '.result // empty' 2>/dev/null) || CHAIN=""
+[ "$CHAIN" = "0xa4b1" ] || { log "ERROR: chainId != 0xa4b1 (Arbitrum One 42161), wrong EVM_RPC_HOST or EVM_RPC_PATH_FILE?"; exit 1; }
+log "OK: EVM_RPC_HOST reachable (chain 42161)"
 
 # --- 1. vsock-proxy environment + allowlist ---------------------------------
 install -d /etc/nitro_enclaves
@@ -66,14 +83,6 @@ systemctl enable --now vsock-proxy-evmrpc.service >/dev/null 2>&1 || true
 systemctl restart vsock-proxy-evmrpc.service
 sleep 1
 
-# --- 3. self-test: eth_chainId direct to the pinned endpoint ----------------
-log "self-test: eth_chainId via https://${HOST}:${PORT}/"
-CHAIN=$(curl -s --max-time 10 "https://${HOST}:${PORT}/" \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' | jq -r '.result // empty')
-[ "$CHAIN" = "0xa4b1" ] || { log "ERROR: chainId != 0xa4b1 (Arbitrum One 42161), wrong EVM_RPC_HOST, or it does not serve JSON-RPC at /?"; exit 1; }
-log "OK: EVM_RPC_HOST reachable (chain 42161)"
-
-# --- 4. status summary -------------------------------------------------------
+# --- 3. status summary -------------------------------------------------------
 systemctl --no-pager --lines=0 status vsock-proxy-evmrpc.service 2>/dev/null | grep -E 'Active:|Loaded:' || true
 log "host-prep-evmrpc DONE"

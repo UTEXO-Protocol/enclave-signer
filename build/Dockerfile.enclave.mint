@@ -66,7 +66,7 @@ RUN --mount=type=bind,source=build/apt-snapshot-install.sh,target=/usr/local/bin
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
     printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/98ca; \
     sh /usr/local/bin/apt-snapshot-install.sh \
-    bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
+    bash ca-certificates iproute2 libssl3t64 libstdc++6 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
         /var/cache/debconf /var/cache/ldconfig /var/log/* /tmp/*

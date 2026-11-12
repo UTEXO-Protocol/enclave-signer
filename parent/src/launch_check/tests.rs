@@ -218,8 +218,8 @@ fn attestation_mismatch_aborts() {
 #[test]
 fn evm_source_mismatch_aborts() {
     assert_mismatch(
-        set!(evm_source, EvmDataSource::RawRpc),
-        "evm_source mismatch: expected PinnedTlsRpc, attested RawRpc",
+        set!(evm_source, EvmDataSource::Disabled),
+        "evm_source mismatch: expected PinnedTlsRpc, attested Disabled",
     );
 }
 

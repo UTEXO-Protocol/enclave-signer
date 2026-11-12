@@ -75,30 +75,7 @@ fn route_proof_from_validated_consignment(
     // amount is.
     let amount = flow::funds_out_source_amount(last)?;
 
-    Ok(RouteProof {
-        amount,
-        operation_id: Some(normalize_rgb_operation_id(&last.op_id)?),
-    })
-}
-
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-fn normalize_rgb_operation_id(op_id: &str) -> Result<String> {
-    use crate::error::EnclaveError;
-
-    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
-    if normalized.len() != 64 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB operation_id must be 32-byte hex, got {} hex chars",
-            normalized.len()
-        )));
-    }
-    if !normalized.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err(EnclaveError::CrossCheck(
-            "RGB operation_id is not hex-decodable".into(),
-        ));
-    }
-
-    Ok(normalized.to_ascii_lowercase())
+    Ok(RouteProof { amount })
 }
 
 /// Validate fields owned by an RGB destination before route-level validation.

@@ -34,7 +34,7 @@ fn context() -> (BridgeConfig, SecurityPolicy) {
             signer_role: SignerRole::Combined,
         },
         &cfg,
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "electrum.test",
     );

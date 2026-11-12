@@ -54,10 +54,7 @@ pub enum EvmDataSource {
     /// No EVM verification in the build (`rgb-validation` off). The enclave rejects
     /// every EVM->RGB bridge request.
     Disabled = 0,
-    /// Plaintext JSON-RPC over the host relay. The host can forge the
-    /// responses. Dev and test builds only.
-    RawRpc = 1,
-    // 2 is reserved. Do not use it.
+    // 1 and 2 are reserved; the decoder refuses them.
     /// JSON-RPC over TLS that ends inside the enclave. The host relays only
     /// ciphertext. The pinned CA and host ([`EvmRpcTlsPin`]) authenticate the
     /// endpoint. The chain state is not verified.
@@ -389,7 +386,6 @@ impl AttestedPolicy {
                 };
                 let evm_source = match r.u8()? {
                     0 => EvmDataSource::Disabled,
-                    1 => EvmDataSource::RawRpc,
                     3 => EvmDataSource::PinnedTlsRpc,
                     _ => return Err(PolicyDecodeError("unknown EVM data source")),
                 };

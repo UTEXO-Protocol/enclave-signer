@@ -14,7 +14,7 @@
 //! - `spv_crosscheck.rs`: anchors consignment witness txs in that chain.
 //! - `signing/`: Taproot key-path signing with BIP-86 account keys.
 //! - `flow.rs`: the mint/burn flow rules.
-//! - `invoice.rs`: the send-RGB recipient bind.
+//! - `invoice.rs`: the mint recipient bind.
 
 // The PSBT checks (`SignBtc`, the mint PSBT bind, the recipient invoice)
 // apply to the EVM -> RGB direction only.

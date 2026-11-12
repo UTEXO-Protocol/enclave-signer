@@ -319,6 +319,7 @@ impl KeyManager {
 
     /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.
     /// Returns the PSBT bytes and the number of signed inputs.
+    #[cfg(test)]
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)
     }

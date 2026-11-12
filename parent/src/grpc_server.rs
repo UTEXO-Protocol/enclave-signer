@@ -627,7 +627,7 @@ impl ParentService for ParentAdapterService {
     /// Convert a `ParentService` sign request into an enclave request.
     ///
     /// Dispatch on `data_type`:
-    /// - TRANSACTION: cross-network Sign (bridge, RGB send, EVM).
+    /// - TRANSACTION: cross-network Sign (RGB mint, EVM release).
     /// - EVM_GAS_TX: unsigned gas-tx preimage to SignRawDigest.
     /// - BTC_UTXO: plain-BTC PSBT to SignBtc (vanilla BIP-86 path).
     /// - RGB_RIGHTS_REFILL: the mint wallet's rights send to SignRightsRefill
@@ -686,9 +686,7 @@ impl ParentService for ParentAdapterService {
                         ))
                     }
                     Some(sign_request::Data::CcdData(_)) => {
-                        return Err(Status::internal(
-                            "Concordium sign request should have been refused before destination dispatch",
-                        ));
+                        unreachable!("Concordium sign requests are refused at the top of sign")
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };

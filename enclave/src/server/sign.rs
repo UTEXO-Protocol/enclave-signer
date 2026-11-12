@@ -58,7 +58,7 @@ pub(super) fn handle_sign(
 
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
-        // Colored is the scope that `sign_psbt_scoped` uses on the send-RGB path.
+        // Colored is the scope that `sign_psbt_scoped` uses on the mint path.
         ctx.state.with_keys(|keys| {
             Ok(
                 crate::networks::rgb::psbt_validation::fee_key_path_inputs_scoped(

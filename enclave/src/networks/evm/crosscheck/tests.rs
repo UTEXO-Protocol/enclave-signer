@@ -5,7 +5,7 @@ use alloy_sol_types::SolCall;
 
 use crate::networks::evm::validation::{
     decode_funds_out_params, fundsOutCall, FundsOutParams, ReleaseIdentity,
-    FUNDS_OUT_SELECTOR_POOLS,
+    FUNDS_OUT_SELECTOR_DIRECT,
 };
 
 /// Decodes a fixture blob into the release that the cross-checks take.
@@ -109,7 +109,7 @@ fn validated_with_last(
 /// non-zero recipient fails the decode alone, so this tests the harder case.
 fn flat_calldata(recipient: [u8; 32]) -> Vec<u8> {
     let mut flat = Vec::with_capacity(4 + 9 * 32);
-    flat.extend_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+    flat.extend_from_slice(&FUNDS_OUT_SELECTOR_DIRECT);
     flat.extend_from_slice(&recipient);
     let mut amt = [0u8; 32];
     amt[24..].copy_from_slice(&1_000u64.to_be_bytes());

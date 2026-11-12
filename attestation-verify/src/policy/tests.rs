@@ -36,7 +36,7 @@ fn prod(
 }
 
 fn base() -> AttestedPolicy {
-    prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset")
+    prod(false, EvmDataSource::Disabled, 1, 0x11, "rgb:asset")
 }
 
 #[test]
@@ -182,14 +182,34 @@ fn production_and_development_never_collide() {
     assert_ne!(base().to_bytes(), AttestedPolicy::Development.to_bytes());
 }
 
+/// No build produces EVM source 1 or 2.
+#[test]
+fn reserved_evm_sources_are_refused() {
+    let disabled = base().to_bytes();
+    let pinned = prod(false, EvmDataSource::PinnedTlsRpc, 1, 0x11, "rgb:asset").to_bytes();
+    let source_at = disabled
+        .iter()
+        .zip(&pinned)
+        .position(|(a, b)| a != b)
+        .unwrap();
+    for reserved in [1u8, 2] {
+        let mut bytes = disabled.clone();
+        bytes[source_at] = reserved;
+        assert_eq!(
+            AttestedPolicy::from_bytes(&bytes),
+            Err(PolicyDecodeError("unknown EVM data source"))
+        );
+    }
+}
+
 #[test]
 fn every_posture_field_changes_the_bytes() {
     let cases = [
-        prod(true, EvmDataSource::RawRpc, 1, 0x11, "rgb:asset"),
+        prod(true, EvmDataSource::Disabled, 1, 0x11, "rgb:asset"),
         prod(false, EvmDataSource::PinnedTlsRpc, 1, 0x11, "rgb:asset"),
-        prod(false, EvmDataSource::RawRpc, 2, 0x11, "rgb:asset"),
-        prod(false, EvmDataSource::RawRpc, 1, 0x22, "rgb:asset"),
-        prod(false, EvmDataSource::RawRpc, 1, 0x11, "rgb:other"),
+        prod(false, EvmDataSource::Disabled, 2, 0x11, "rgb:asset"),
+        prod(false, EvmDataSource::Disabled, 1, 0x22, "rgb:asset"),
+        prod(false, EvmDataSource::Disabled, 1, 0x11, "rgb:other"),
     ];
     for c in cases {
         assert_ne!(
@@ -481,7 +501,7 @@ fn asset_length_prefix_matches_the_wire_contract() {
     // Fixed offset from the documented V1 layout: tags (7), chain (8),
     // network (1), bridge address (20). Do not discover it with to_bytes.
     const OFFSET: usize = 36;
-    let policy = prod(false, EvmDataSource::RawRpc, 1, 0x11, "ab");
+    let policy = prod(false, EvmDataSource::Disabled, 1, 0x11, "ab");
     let bytes = policy.to_bytes();
     assert_eq!(&bytes[OFFSET..OFFSET + 6], b"\x00\x00\x00\x02ab");
     assert_eq!(AttestedPolicy::from_bytes(&bytes), Ok(policy));

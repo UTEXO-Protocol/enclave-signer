@@ -1128,7 +1128,7 @@ fn refuses_a_witness_mint_against_a_blinded_invoice() {
     witness.deposit.invoice = blinded_invoice(witness.deposit.contract_id, secret);
     let refusal = refusal(&drive(&witness));
     assert!(
-        refusal.contains("pays 0 confidential recipient legs"),
+        refusal.contains("pays 0 blinded recipient legs"),
         "{refusal}"
     );
 }

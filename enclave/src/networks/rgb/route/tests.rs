@@ -35,11 +35,6 @@ fn validated_consignment(
 }
 
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-fn funds_out_consignment(amount: u64, op_id: &str) -> ValidatedConsignment {
-    validated_consignment(bfa_ids::TS_BURN, 0, Some(amount), op_id)
-}
-
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 #[test]
 fn route_proof_uses_burn_metadata_amount() {
     let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -52,7 +47,6 @@ fn route_proof_uses_burn_metadata_amount() {
     .unwrap();
 
     assert_eq!(proof.amount, 700);
-    assert_eq!(proof.operation_id.as_deref(), Some(op_id));
 }
 
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -67,18 +61,6 @@ fn route_proof_rejects_burn_without_burned_amount() {
     .unwrap_err();
 
     assert!(err.to_string().contains("no burnedAsset"), "{err}");
-}
-
-#[cfg(rgb_to_evm)]
-#[test]
-fn route_proof_rejects_non_hex_operation_id() {
-    let err = route_proof_from_validated_consignment(&funds_out_consignment(
-        100,
-        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-    ))
-    .unwrap_err();
-
-    assert!(err.to_string().contains("not hex-decodable"));
 }
 
 /// A plain transfer must not authorize a release.

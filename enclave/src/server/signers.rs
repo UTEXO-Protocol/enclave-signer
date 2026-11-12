@@ -112,7 +112,7 @@ pub(super) fn handle_sign_psbt(
     #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
     // Colored account only. An unscoped sign co-signs all inputs with a known
-    // key, including vanilla inputs that no send-RGB bind checks.
+    // key, including vanilla inputs that no mint bind checks.
     let sign_colored = || {
         ctx.state
             .sign_psbt_scoped(&req.psbt_bytes, Some(crate::keys::AccountType::Colored))
@@ -132,7 +132,7 @@ pub(super) fn handle_sign_psbt(
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub(super) fn sign_colored_psbt(ctx: &ServerContext, psbt_bytes: &[u8]) -> Result<EnclaveResponse> {
     // Colored account only. An unscoped sign co-signs all inputs with a known
-    // key, including vanilla inputs that no send-RGB bind checks.
+    // key, including vanilla inputs that no mint bind checks.
     signed_psbt_response(
         ctx.state
             .sign_psbt_scoped(psbt_bytes, Some(crate::keys::AccountType::Colored))?,

@@ -74,7 +74,7 @@ sequenceDiagram
     Evm->>Evm: lzFundsOut only: 1 ≤ minAmountLD ≤ amount,<br/>extraOptions empty or one lzReceive gas option,<br/>no value, gas ≤ MAX_LZ_RECEIVE_GAS
     Evm->>Evm: decoded amount == declared calldata_amount (fits u64)
     Evm->>Evm: config pinned? chain_id / proxy_contract == env pins<br/>(unconfigured ⇒ REFUSE on bridge builds)
-    Evm->>Evm: calldata destinationChainId:<br/>pools route == pinned chain, LZ route != pinned and > 0
+    Evm->>Evm: calldata destinationChainId:<br/>direct route == pinned chain, LZ route != pinned and > 0
     Evm->>Evm: deadline after now and ≤ now + MAX_TEE_DEADLINE_SECS
     Evm-->>Srv: Ok / CrossCheck err
 
@@ -99,7 +99,7 @@ sequenceDiagram
     alt lzFundsOut selector AND lz_release present
         Srv->>Sign: lz_funds_out_digest: request lz_release<br/>(dst_eid, min_amount_ld, recipient) must match decoded calldata
         Sign->>Sign: structHash TeeLzFundsOut(12 decoded fields + nonce, deadline)
-    else pools fundsOut
+    else direct fundsOut
         Srv->>Sign: funds_out_digest(decoded FundsOutParams, nonce, deadline)
         Sign->>Sign: structHash TeeFundsOut(9 decoded fields + nonce, deadline)
     end

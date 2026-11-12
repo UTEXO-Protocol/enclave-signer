@@ -62,7 +62,6 @@ sys.exit(int(os.environ.get('CLI_RC', '0')))
 
     def test_complete_map_passes_for_all_roles_and_debug(self):
         for mode in ({'SIGNER_ROLE': 'mint'}, {'SIGNER_ROLE': 'burn'},
-                     {'SIGNER_ROLE': 'combined'},
                      {'SIGNER_ROLE': 'burn', 'ENCLAVE_DEBUG_MODE': '1'}):
             with self.subTest(mode=mode):
                 result = self.run_gate(**mode)
@@ -82,6 +81,13 @@ sys.exit(int(os.environ.get('CLI_RC', '0')))
                     self.assert_denied(self.run_gate(SIGNER_ROLE=role, EXPECTED_EVM=expected), 2)
                     self.assertFalse(self.calls.exists())
                     self.assertFalse(list(self.base.glob('attestation-*.json')))
+
+    def test_identity_needs_a_launch_env_and_a_known_role(self):
+        del self.env['ENCLAVE_ENV']
+        self.assert_denied(self.run_gate(), 2)
+        self.assert_denied(self.run_gate(ENCLAVE_ENV=str(self.base / 'missing.env')), 2)
+        self.assert_denied(self.run_gate(ENCLAVE_ENV=str(self.launch), SIGNER_ROLE='combined'), 2)
+        self.assertFalse(self.calls.exists())
 
     def test_unset_cids_defaults_but_empty_does_not(self):
         del self.env['CIDS']

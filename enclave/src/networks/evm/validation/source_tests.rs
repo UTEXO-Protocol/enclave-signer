@@ -18,7 +18,6 @@ fn source() -> EvmSource {
 fn valid_source_passes() {
     let proof = validate_source(1_000, &source()).expect("valid source");
     assert_eq!(proof.amount, 1_000);
-    assert_eq!(proof.operation_id, None);
 }
 
 #[test]

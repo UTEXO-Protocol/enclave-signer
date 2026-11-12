@@ -152,7 +152,8 @@ signature depends on.
   a role ([parent-mtls.md](parent-mtls.md)).
 - `Sign` routes by `data_type`: `TRANSACTION` to `Sign`, `EVM_GAS_TX` to
   `SignRawDigest`, `BTC_UTXO` to `SignBtc`, `RGB_RIGHTS_REFILL` to
-  `SignRightsRefill`. It refuses a Concordium source or payload.
+  `SignRightsRefill`. It refuses a Concordium source or payload, which the
+  proto still defines.
 - It refuses `SubmitHeaders` from every client. Its own header sync reads
   headers from `HEADER_ELECTRUM_URL` and writes them to the enclave.
 - It waits longer for a reply than the request deadline of the enclave, so
@@ -223,7 +224,7 @@ SecurityPolicy = Production {
     allow_vanilla_psbt,                          -- plain-BTC signing on or off
     signer_role: Mint | Burn | Combined,
     attestation: Real,
-    evm_source:  Disabled | RawRpc | PinnedTlsRpc,
+    evm_source:  Disabled | PinnedTlsRpc,
     electrum_host, evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,
     kms,                                         -- mint signer only
@@ -246,8 +247,8 @@ the launch values and refuses the set on an error. The gate requires:
 - `BITCOIN_NETWORK=bitcoin` when `EVM_CHAIN_ID` is 1 or 42161;
 - an `EVM_FINALITY_TAG` of `safe` or `finalized`;
 - `SPV_MIN_CONFIRMATIONS` of at least 1;
-- at `SetEndpoints`: an indexer host, no plaintext EVM source, and a host and
-  CA pin for the pinned-TLS source;
+- at `SetEndpoints`: an indexer host, and a host and CA pin for the
+  pinned-TLS source;
 - at `SetEndpoints`, for a cloning role: a PCR3 that is not all zero.
 
 A build with a signer role and without `spv` needs real attestation,

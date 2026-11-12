@@ -117,7 +117,7 @@ The [sequence diagram in code order](diagrams/03-seq-sign-evm.md) and the
 | `GS_BURN_REASON` | 3009 | Burn global: 32 bytes that name the destination. Required. |
 | `GS_REJECT_LIST` | 3010 | Genesis global: where the reject list of the asset is. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `fundsOut` selector | `0x340276aa` | Direct (pools) route. |
+| `fundsOut` selector | `0x340276aa` | Direct route. |
 | `lzFundsOut` selector | from the enclave ABI | LayerZero route. |
 | `MAX_TEE_DEADLINE_SECS` | 1 day | The longest time a signature stays valid. The same value as `MultisigProxy.MAX_TEE_DEADLINE`. |
 | `MAX_LZ_RECEIVE_GAS` | 1,000,000 | The most gas a LayerZero `lzReceive` option may ask for. |

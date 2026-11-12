@@ -51,7 +51,7 @@ flowchart TD
         p2am -->|no| p2amr[REFUSE — amount mismatch]:::refuse
         p2am -->|yes| p2p{"config pinned AND chain_id /<br/>proxy_contract == env pins?"}
         p2p -->|no| p2pr[REFUSE — pinned-config mismatch]:::refuse
-        p2p -->|yes| p2dc{"calldata destinationChainId:<br/>pools == pin / LZ != pin and > 0?"}
+        p2p -->|yes| p2dc{"calldata destinationChainId:<br/>direct == pin / LZ != pin and > 0?"}
         p2dc -->|no| p2dcr[REFUSE — destination chain]:::refuse
         p2dc -->|yes| p2d{"deadline strictly in the future,<br/>at most MAX_TEE_DEADLINE_SECS ahead?"}
         p2d -->|no| p2dr[REFUSE — expired]:::refuse
@@ -75,7 +75,7 @@ flowchart TD
         p4t -->|no| p4tr[REFUSE — fundsOut amount bind]:::refuse
         p4t -->|yes| p4id{"sourceBurnTxId == settling transition OpId<br/>(non-zero)?"}
         p4id -->|no| p4idr[REFUSE — burn identity bind]:::refuse
-        p4id -->|yes| p4rc{"burnReason present. V0: no record, pools only,<br/>low 20 bytes == calldata recipient.<br/>V1: record hash == burnReason, record dstEid,<br/>destinationChainId and padded recipient == calldata?"}
+        p4id -->|yes| p4rc{"burnReason present. V0: no record, direct only,<br/>low 20 bytes == calldata recipient.<br/>V1: record hash == burnReason, record dstEid,<br/>destinationChainId and padded recipient == calldata?"}
         p4rc -->|no| p4rcr[REFUSE - burn destination]:::refuse
         p4rc -->|yes| p4st{"settlementData ids == the deposit ids derived<br/>from the mint anchors, non-empty,<br/>strictly ascending?"}
         p4st -->|no| p4str[REFUSE — settlement bind]:::refuse

@@ -3,7 +3,7 @@ set -e
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 
-# Loopback (required inside enclave for socat proxies)
+# Loopback (the in-binary vsock forwarders listen on it)
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null || true
 ip link set dev lo up 2>/dev/null || true
 

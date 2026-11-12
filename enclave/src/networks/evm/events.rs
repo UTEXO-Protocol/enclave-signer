@@ -1,7 +1,7 @@
 //! In-enclave verification of the EVM `FundsIn` deposit event for an
 //! EVM -> RGB `Sign`.
 //!
-//! An EVM -> RGB `Sign` releases RGB against an EVM deposit. The enclave does
+//! An EVM -> RGB `Sign` mints RGB against an EVM deposit. The enclave does
 //! not trust the listener `event_valid` / `event_finalized` flags. It
 //! gets the deposit receipt over an in-enclave EVM RPC. It checks that the
 //! pinned bridge contract emitted a `BridgeFundsIn` log with the claimed
@@ -173,7 +173,7 @@ static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
 #[cfg(evm_to_rgb)]
 pub struct VerifiedFundsIn {
     /// Verbatim from the log. For an RGB destination this is the user's
-    /// invoice, which the send-RGB recipient bind parses.
+    /// invoice, which the mint recipient bind parses.
     pub destination_address: String,
 }
 
@@ -264,7 +264,7 @@ pub fn verify_funds_in_event(
     if net > max_net {
         return Err(EnclaveError::CrossCheck(format!(
             "BridgeFundsIn netAmount ({net}) exceeds gross - commission ({max_net}) - refusing \
-             to sign a release for more than the deposit backs"
+             to sign a mint for more than the deposit backs"
         )));
     }
     if net < max_net {
@@ -290,9 +290,8 @@ pub fn verify_funds_in_event(
     })
 }
 
-/// The fields of one `BridgeFundsIn` log from the pinned emitter. The burn
-/// direction reads only the id and net amount. It decodes the full log, so
-/// both images refuse a malformed one.
+/// The fields of one `BridgeFundsIn` log from the pinned emitter. Only the
+/// mint direction decodes it.
 #[cfg_attr(not(evm_to_rgb), allow(dead_code))]
 struct BridgeFundsInRecord {
     operation_id: [u8; 32],
@@ -451,7 +450,7 @@ fn select_unique_log<'a>(
     if candidates.len() > 1 {
         return Err(EnclaveError::CrossCheck(format!(
             "ambiguous: multiple {event} logs with topic{id_topic} 0x{} from bridge contract \
-             0x{} in tx 0x{} - refusing to guess which authorises this release",
+             0x{} in tx 0x{} - refusing to guess which authorises this mint",
             hex::encode(id),
             hex::encode(emitter),
             hex::encode(evm_tx_hash)

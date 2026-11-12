@@ -13,15 +13,16 @@
 #   2. get-keys returns an INITIALIZED key (a "key not initialized" enclave that was
 #      restarted but never re-cloned is a FAIL, not "healthy");
 #   3. the live EVM address EQUALS the approved registered identity for that CID.
-#      For SIGNER_ROLE burn or combined, export-attestation attests the address
+#      For SIGNER_ROLE burn, export-attestation attests the address
 #      and writes $CLUSTER_DIR/attestation-<CID>.json; see docs/verify-a-signer.md.
 #
 # For SIGNER_ROLE=mint or ENCLAVE_DEBUG_MODE=1 (zero PCRs) step 3 reads get-keys:
 # a fast STRUCTURAL check, NOT an attestation.
 #
 # Launch values (PCR_FILE, IMAGE_ENV, SIGNER_ROLE, ELECTRUM_URL, ...) come from
-# ENCLAVE_ENV (default /etc/utexo/enclave.env) and
-# /etc/nitro_enclaves/vsock-proxy-evmrpc.env, as utexo-enclave-ctl.sh reads them.
+# ENCLAVE_ENV and /etc/nitro_enclaves/vsock-proxy-evmrpc.env, as
+# utexo-enclave-ctl.sh reads them. deploy-host.sh writes one env per CID
+# (/etc/utexo/enclave-<CID>.env), so check one CID per run.
 #
 # Runs ON a node (as root, e.g. via SSM — same model as deploy-host.sh).
 # Self-contained; no infra identifiers baked in — pass them via env.
@@ -29,7 +30,7 @@
 # Usage (run as root):
 #   CLUSTER_DIR=<dir-with-utexo-bridge-parent-cli> \
 #   EXPECTED_EVM="16=0x.. 18=0x.. 20=0x.." \
-#   [CIDS="16 18 20"] [ENCLAVE_ENV=/etc/utexo/enclave.env] bash verify-identity.sh
+#   CIDS=<cid> ENCLAVE_ENV=/etc/utexo/enclave-<cid>.env bash verify-identity.sh
 #
 # EXPECTED_EVM must contain exactly one approved CID=0x<40 hex digits> entry
 # per CIDS member. Obtain it from the approved deployment record, not live keys.
@@ -51,8 +52,11 @@ case "$#:$*" in
   *) fatal "usage: verify-identity.sh [--liveness]" ;;
 esac
 
-for f in "${ENCLAVE_ENV:-/etc/utexo/enclave.env}" /etc/nitro_enclaves/vsock-proxy-evmrpc.env; do
-  if [ -r "$f" ]; then set -a; . "$f"; set +a; fi
+if [ "$mode" = identity ] && ! [ -r "${ENCLAVE_ENV:-}" ]; then
+  fatal "ENCLAVE_ENV must name a readable launch env (/etc/utexo/enclave-<CID>.env)"
+fi
+for f in "${ENCLAVE_ENV:-}" /etc/nitro_enclaves/vsock-proxy-evmrpc.env; do
+  if [ -n "$f" ] && [ -r "$f" ]; then set -a; . "$f"; set +a; fi
 done
 
 # An explicitly empty list is an error; only an unset CIDS gets the default.
@@ -96,10 +100,10 @@ attested=0
 if [ "$mode" = identity ] && [ "${ENCLAVE_DEBUG_MODE:-0}" != 1 ]; then
   case "${SIGNER_ROLE:-}" in
     mint) ;;
-    burn|combined)
+    burn)
       [ -n "${PCR_FILE:-}" ] && [ -n "${IMAGE_ENV:-}" ] || fatal "PCR_FILE and IMAGE_ENV required (set in ENCLAVE_ENV)"
       attested=1 ;;
-    *) fatal "SIGNER_ROLE must be mint, burn or combined (set in ENCLAVE_ENV)" ;;
+    *) fatal "SIGNER_ROLE must be mint or burn (set in ENCLAVE_ENV)" ;;
   esac
 fi
 fail=0

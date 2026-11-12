@@ -492,6 +492,7 @@ impl EnclaveState {
 
     /// Sign the BIP-86 key-path inputs of either account. Returns
     /// (signed_psbt_bytes, inputs_signed).
+    #[cfg(test)]
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.with_active(|km| km.sign_psbt(psbt_bytes))
     }

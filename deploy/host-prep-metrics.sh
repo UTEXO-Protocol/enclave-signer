@@ -16,7 +16,7 @@
 # vsock straight to the enclave — does NOT touch the parent or the EIF). PCR0
 # unchanged, no rebuild. Reboot-safe (systemd timer enabled).
 #
-# ── IAM (attach ONCE to the hosts' instance role `ec2-ssm-role`) ──────────────
+# ── IAM (attach ONCE to the hosts' instance role) ──────────────
 # Least-privilege policy `utexo-stage-enclave-metrics-put` (PutMetricData cannot
 # be resource-scoped, so it is constrained by the metric namespace condition):
 #   {
@@ -59,11 +59,6 @@ IID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOK" \
         "http://169.254.169.254/latest/meta-data/instance-id" 2>/dev/null || true)
 IID="${IID:-unknown}"
 
-# cluster dir holds the cli binary (read from a parent env, fallback to default)
-CLUSTER_DIR=$(sed -n 's/^CLUSTER_DIR=//p' /etc/utexo/parent-16.env 2>/dev/null | head -1)
-CLUSTER_DIR="${CLUSTER_DIR:-/home/ubuntu/clone-stage}"
-CLI="$CLUSTER_DIR/utexo-bridge-parent-cli"
-
 DESC=$(nitro-cli describe-enclaves 2>/dev/null || echo '[]')
 SS=$(ss -ltnH 2>/dev/null || true)
 
@@ -76,8 +71,11 @@ for CID in "${CIDS[@]}"; do
   P=${PORT[$CID]}
   if printf '%s' "$SS" | grep -qE ":${P}([^0-9]|$)"; then LIS=1; else LIS=0; fi
 
+  # Each CID has its own parent env, and its CLUSTER_DIR holds that CID's cli binary.
+  CLUSTER_DIR=$(sed -n 's/^CLUSTER_DIR=//p' "/etc/utexo/parent-${CID}.env" 2>/dev/null | head -1)
+  CLI="${CLUSTER_DIR:+$CLUSTER_DIR/utexo-bridge-parent-cli}"
   RESP=0
-  if [ "$RUN" = "1" ] && [ -x "$CLI" ]; then
+  if [ "$RUN" = "1" ] && [ -n "$CLI" ] && [ -x "$CLI" ]; then
     # The CLI is ubuntu-owned, so never run it as root.
     if runuser -u ubuntu -- "$CLI" --addr "vsock://${CID}:5000" get-keys >/dev/null 2>&1; then RESP=1; fi
   fi

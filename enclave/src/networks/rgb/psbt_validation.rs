@@ -94,13 +94,13 @@ fn assert_native_segwit_inputs(psbt: &Psbt) -> Result<()> {
     for (i, input) in psbt.inputs.iter().enumerate() {
         let Some(utxo) = input.witness_utxo.as_ref() else {
             return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
+                "mint/refill PSBT input {i} carries no witness_utxo - cannot prove it finalizes \
                  without a scriptSig"
             )));
         };
         if !utxo.script_pubkey.is_witness_program() {
             return Err(EnclaveError::CrossCheck(format!(
-                "send-RGB PSBT input {i} spends a non-native-SegWit output; its finalized \
+                "mint/refill PSBT input {i} spends a non-native-SegWit output; its finalized \
                  scriptSig would change the txid ({}) - refusing to sign",
                 psbt.unsigned_tx.compute_txid()
             )));
@@ -118,7 +118,7 @@ fn assert_sighash_all(psbt: &Psbt) -> Result<()> {
             if raw != 0x00 && raw != 0x01 {
                 return Err(EnclaveError::CrossCheck(format!(
                     "PSBT input {i} requests non-ALL sighash 0x{raw:02x}; refusing to sign a \
-                     send-RGB PSBT under a spliceable sighash"
+                     mint/refill PSBT under a spliceable sighash"
                 )));
             }
         }
@@ -189,8 +189,8 @@ pub type FeeKeyPathResolver<'a> = &'a dyn Fn(&Psbt) -> Result<Vec<usize>>;
 
 /// Key-path inputs of `account` that this enclave controls, signed or not.
 /// Resolved from enclave keys, never from the request. `account` is the scope
-/// the signer co-signs: Colored for send-RGB, Vanilla for plain-BTC. The
-/// send-RGB resolver calls it. Plain-BTC uses [`fee_key_path_inputs_of`].
+/// the signer co-signs: Colored for mint and refill, Vanilla for plain-BTC.
+/// Plain-BTC uses [`fee_key_path_inputs_of`].
 #[cfg(feature = "rgb-validation")]
 pub(crate) fn fee_key_path_inputs_scoped(
     psbt: &Psbt,
@@ -218,7 +218,7 @@ pub(crate) fn fee_key_path_inputs_of(
 }
 
 /// Pinned fee policy for every PSBT the enclave signs. `path` names the
-/// signing path in errors (`"send-RGB"` / `"plain-BTC"`).
+/// signing path in errors (`"mint"`, `"rights-refill"` or `"plain-BTC"`).
 ///
 /// Three compile-time bounds:
 ///

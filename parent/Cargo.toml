@@ -93,7 +93,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # real verification path.
 attestation-verify = { path = "../attestation-verify", features = ["mock"] }
 sha2 = "0.11"
-# keccak256 for the CLI `consignment_hash` field (send-RGB PSBT path).
+# keccak256 for the CLI `consignment_hash` field (RgbDestination).
 sha3 = "0.12"
 rand = "0.10"
 
