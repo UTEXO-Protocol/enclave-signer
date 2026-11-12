@@ -80,8 +80,7 @@ struct Cli {
     expect_signer_role: Option<String>,
 
     /// Expected EVM `FundsIn` data source in the commitment: `tls` (RPC over
-    /// pinned TLS, used by the shipped image), `raw` (plaintext, dev only) or
-    /// `disabled`. Ignored with --mock.
+    /// pinned TLS, used by the shipped image) or `disabled`. Ignored with --mock.
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
@@ -250,10 +249,9 @@ fn parse_signer_role(s: Option<&str>) -> Result<SignerRole> {
 fn parse_evm_source(s: &str) -> Result<EvmDataSource> {
     match s.to_ascii_lowercase().as_str() {
         "tls" | "pinned-tls" => Ok(EvmDataSource::PinnedTlsRpc),
-        "raw" | "raw-rpc" | "rawrpc" => Ok(EvmDataSource::RawRpc),
         "disabled" | "none" | "off" => Ok(EvmDataSource::Disabled),
         other => {
-            anyhow::bail!("invalid --expect-evm-source '{other}' (expected: tls | raw | disabled)")
+            anyhow::bail!("invalid --expect-evm-source '{other}' (expected: tls | disabled)")
         }
     }
 }

@@ -482,9 +482,6 @@ impl ParentAdapterService {
                         .collect(),
                 }),
             ),
-            Some(source_proof::Chain::Ccd(_)) => Err(Status::invalid_argument(
-                "Concordium sources are not supported",
-            )),
             None => Err(Status::invalid_argument(
                 "source proof has no chain-specific evidence",
             )),
@@ -524,12 +521,8 @@ impl ParentAdapterService {
             sign_request::Data::RgbData(payload) => {
                 enclave_proto::sign_request::DestinationNetwork::RgbDestination(
                     enclave_proto::RgbDestination {
-                        operation_idx: payload.operation_idx,
                         psbt_bytes: payload.psbt_bytes,
-                        psbt_output_amount: payload.psbt_output_amount,
                         asset_id: payload.rgb_asset_id,
-                        consignment: payload.consignment,
-                        consignment_hash: payload.consignment_hash,
                         fascia: payload.fascia,
                         parent_fascia: payload.parent_fascia,
                     },
@@ -539,10 +532,6 @@ impl ParentAdapterService {
             sign_request::Data::BtcData(_) => unreachable!(
                 "BtcData is handled by the BTC_UTXO dispatch, not enclave_destination_network"
             ),
-            // `sign` refuses Concordium data before destination dispatch.
-            sign_request::Data::CcdData(_) => {
-                unreachable!("Concordium sign requests are refused before destination dispatch")
-            }
         }
     }
 
@@ -627,7 +616,7 @@ impl ParentService for ParentAdapterService {
     /// Convert a `ParentService` sign request into an enclave request.
     ///
     /// Dispatch on `data_type`:
-    /// - TRANSACTION: cross-network Sign (bridge, RGB send, EVM).
+    /// - TRANSACTION: cross-network Sign (RGB mint, EVM release).
     /// - EVM_GAS_TX: unsigned gas-tx preimage to SignRawDigest.
     /// - BTC_UTXO: plain-BTC PSBT to SignBtc (vanilla BIP-86 path).
     /// - RGB_RIGHTS_REFILL: the mint wallet's rights send to SignRightsRefill
@@ -643,12 +632,6 @@ impl ParentService for ParentAdapterService {
             Status::invalid_argument(format!("unknown data_type: {}", common.data_type))
         })?;
         let signer_network_id = common.dst_network_id;
-
-        if let Some(sign_request::Data::CcdData(_)) = inner.data.as_ref() {
-            return Err(Status::invalid_argument(
-                "Concordium signing is not supported",
-            ));
-        }
 
         match data_type {
             DataType::Transaction => {
@@ -673,7 +656,6 @@ impl ParentService for ParentAdapterService {
                             src_network_id = common.src_network_id,
                             dst_network_id = common.dst_network_id,
                             psbt_len = payload.psbt_bytes.len(),
-                            operation_idx = payload.operation_idx,
                             "gRPC Sign: RGB transaction"
                         );
 
@@ -684,11 +666,6 @@ impl ParentService for ParentAdapterService {
                             "TRANSACTION data_type must not carry BtcData; \
                              use data_type=BTC_UTXO for plain-BTC signing",
                         ))
-                    }
-                    Some(sign_request::Data::CcdData(_)) => {
-                        return Err(Status::internal(
-                            "Concordium sign request should have been refused before destination dispatch",
-                        ));
                     }
                     None => return Err(Status::invalid_argument("SignRequest.data is missing")),
                 };

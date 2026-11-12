@@ -176,7 +176,7 @@ async fn e2e_attest_verify_refuses_mock_with_production() {
         ExpectedPolicy::Production {
             allow_vanilla_psbt: false,
             signer_role: attestation_verify::SignerRole::Mint,
-            evm_source: EvmDataSource::RawRpc,
+            evm_source: EvmDataSource::Disabled,
             electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,

@@ -19,7 +19,7 @@ use super::validation;
 use super::{parent_proof, psbt_commit};
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::config::BridgeConfig;
-#[cfg(all(not(feature = "rgb-validation"), rgb_to_evm))]
+#[cfg(not(feature = "rgb-validation"))]
 use crate::error::EnclaveError;
 use crate::error::Result;
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -75,30 +75,7 @@ fn route_proof_from_validated_consignment(
     // amount is.
     let amount = flow::funds_out_source_amount(last)?;
 
-    Ok(RouteProof {
-        amount,
-        operation_id: Some(normalize_rgb_operation_id(&last.op_id)?),
-    })
-}
-
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-fn normalize_rgb_operation_id(op_id: &str) -> Result<String> {
-    use crate::error::EnclaveError;
-
-    let normalized = op_id.strip_prefix("0x").unwrap_or(op_id);
-    if normalized.len() != 64 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB operation_id must be 32-byte hex, got {} hex chars",
-            normalized.len()
-        )));
-    }
-    if !normalized.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err(EnclaveError::CrossCheck(
-            "RGB operation_id is not hex-decodable".into(),
-        ));
-    }
-
-    Ok(normalized.to_ascii_lowercase())
+    Ok(RouteProof { amount })
 }
 
 /// Validate fields owned by an RGB destination before route-level validation.
@@ -108,6 +85,19 @@ pub fn validate_destination(
     _ctx: &ValidationContext<'_>,
 ) -> Result<()> {
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
+}
+
+/// Without `rgb-validation` no fascia proves the minted units, so an RGB destination is refused.
+#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
+pub fn validate_destination_anchor(
+    _destination: &RgbDestination,
+    _source_amount: u64,
+    _source_commission: u64,
+    _ctx: &ValidationContext<'_>,
+) -> Result<(u64, Vec<String>)> {
+    Err(EnclaveError::CrossCheck(
+        "an RGB destination needs rgb-validation to prove its minted units".into(),
+    ))
 }
 
 /// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO

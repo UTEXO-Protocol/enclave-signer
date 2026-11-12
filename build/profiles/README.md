@@ -51,8 +51,8 @@ release. Supply the approved values through `cli set-endpoints` after launch,
 keeping each provider's API-key path in a restricted `EVM_RPC_PATH_FILE`.
 Rotating that file requires a new launch, not a new image.
 
-Provide the `RGB_LIB_BFA_DEPLOY_KEY`, `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` and
-`RGB_PRIVATE_DEPS_TOKEN` secrets. Keep credentials out of build arguments.
+Provide the `RGB_LIB_BFA_DEPLOY_KEY` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`
+secrets. Keep credentials out of build arguments.
 
 ## Mainnet release inputs
 
@@ -133,6 +133,12 @@ contract addresses and the role-specific feature list without `spv`.
 The log filter keeps debug logs but disables Alloy HTTP transport logs, which
 can include private RPC paths or response bodies. It does not enable Nitro
 debug mode, mock attestation or seed import.
+
+`EVM_CHAIN_ID=42161` is Arbitrum One mainnet, so the stage burn signers sign
+real mainnet releases. Without `spv` they trust the indexer, so a compromised
+stage host can report forged burns and release up to the stage Bridge's
+outflow limits. Keep the stage token without market value (see the "Builds
+without `spv`" limit in [tee-spec.md](../../docs/tee-spec.md#10-known-limits)).
 
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the
 connector. The recipe's other limits remain in effect, including

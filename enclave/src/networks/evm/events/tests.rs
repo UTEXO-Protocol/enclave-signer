@@ -824,8 +824,6 @@ fn receipt_mapping_rejects_missing_or_null_block_hash() {
     }
 }
 
-// ---- listener flags cannot authorize ----
-
 // ---- BFA: the `FundsIn` log whose id is the RGB lockId ----
 
 /// A lock keyed by the bare OpId, or by the OpId in another tx, is not the

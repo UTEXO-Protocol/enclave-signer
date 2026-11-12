@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Mint signer enclave image: EVM -> RGB only (vsock + spv + mint-signer).
-# rgb-lib comes from a private mirror and its RGB crates from public repos. BuildKit secrets lib_key and
-# rgb_deps_token (build/with-private-deps.sh requires both), never in a layer, the image or PCR0.
+# rgb-lib comes from a private mirror and its RGB crates from public repos. The BuildKit
+# secret lib_key reads the mirror; it is never in a layer, the image or PCR0.
 # Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
-#   --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
 #   --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
 FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
@@ -45,7 +44,6 @@ ENV CARGO_INCREMENTAL=0 \
 # Two roles, two PCR0s, two seeds, two running enclaves.
 ARG ENCLAVE_FEATURES=vsock,spv,mint-signer
 RUN --mount=type=secret,id=lib_key \
-    --mount=type=secret,id=rgb_deps_token \
     sh /build/build/with-private-deps.sh enclave cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
 
 
@@ -68,7 +66,7 @@ RUN --mount=type=bind,source=build/apt-snapshot-install.sh,target=/usr/local/bin
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' > /etc/apt/apt.conf.d/99snapshot; \
     printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/98ca; \
     sh /usr/local/bin/apt-snapshot-install.sh \
-    bash ca-certificates socat iproute2 libssl3t64 libstdc++6 \
+    bash ca-certificates iproute2 libssl3t64 libstdc++6 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
         /var/cache/debconf /var/cache/ldconfig /var/log/* /tmp/*

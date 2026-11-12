@@ -100,7 +100,14 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         }
     );
     alter!(attestation, AttestationMode::Mock);
-    alter!(evm_source, EvmDataSource::Disabled);
+    alter!(
+        evm_source,
+        if *evm_source == EvmDataSource::Disabled {
+            EvmDataSource::PinnedTlsRpc
+        } else {
+            EvmDataSource::Disabled
+        }
+    );
     // The Rust enum has only SpvVerified. A peer with another policy
     // vocabulary can still sign a byte encoding with a different source.
     // V1 layout: [version, production, vanilla, role, attestation, evm, btc].

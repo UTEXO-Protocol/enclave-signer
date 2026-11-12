@@ -145,7 +145,7 @@ message EvmSource {
   uint64 commission = 6; // Commission reported by the source event. It must equal the deposit's tokenCommission.
   // On-chain BridgeFundsIn.operationId of the source deposit, exactly 32 bytes.
   // Required: the enclave binds the FundsIn log to it and refuses to sign
-  // without it. Not RgbDestination.operation_idx, which is a different id-space.
+  // without it.
   bytes funds_in_operation_id = 7;
 }
 
@@ -207,12 +207,11 @@ message LzReleaseParams {
 }
 
 message RgbDestination {
-  uint64 operation_idx = 1; // Destination operation index. The enclave does not read it.
+  // 1, 3, 5 and 6 are reserved. Do not use them.
+  reserved 1, 3, 5, 6;
+  reserved "operation_idx", "psbt_output_amount", "consignment", "consignment_hash";
   bytes psbt_bytes = 2; // Serialized PSBT to sign.
-  uint64 psbt_output_amount = 3; // Total non-change output amount. The enclave does not read it: the fascia gives the amount.
   string asset_id = 4; // RGB asset identifier associated with the transfer.
-  bytes consignment = 5; // Raw destination RGB consignment bytes. The enclave does not read it.
-  bytes consignment_hash = 6; // keccak256(consignment). The enclave does not read it.
   // 7 is reserved. Do not use it.
   reserved 7;
   reserved "mint_ancestors";

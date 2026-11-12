@@ -16,7 +16,7 @@ fn expect_prod(
 ) -> ExpectedPolicy {
     ExpectedPolicy::Production {
         allow_vanilla_psbt: false,
-        evm_source: EvmDataSource::RawRpc,
+        evm_source: EvmDataSource::Disabled,
         signer_role: SignerRole::Combined,
         electrum_host: "electrum.test".into(),
         evm_rpc_tls: None,

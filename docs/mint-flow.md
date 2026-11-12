@@ -333,8 +333,7 @@ The txid of a native SegWit transaction does not change when it is signed.
     afterwards to detect a reorg. A receiving rgb-lib wallet confirms the
     mint only once the lock is `finalized`.
 - **S6.1** The amount must cover the minted units plus the commission. The
-  enclave takes the minted amount from the fascia, not from the request's
-  `psbt_output_amount`.
+  enclave takes the minted amount from the fascia.
 - **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
   invoice. Only a blinded seal is accepted, and it must equal the M7 seal. A
   witness mint has no blinded seal, so a deposit with an invoice refuses it.
@@ -423,9 +422,11 @@ scripts. An output is the enclave's own in two cases:
 An enclave key in one Taproot leaf proves nothing about the rest of the
 tree, so no rule accepts it.
 
-There is no rate limit. Each limit bounds one transaction: a compromised host
-can still spend up to the fee limit of every UTXO it submits. The bound on
-the sum belongs outside the enclave.
+There is no rate limit. Each limit bounds one request, and the change goes
+back to a vanilla output that the host can submit again. So a compromised
+host can turn the whole vanilla balance into fees, at most `MAX_FEE_SATS`
+per signature, and pay up to `BTC_MAX_UNOWNED_SATS` to its own address on
+each request. The bound on the sum belongs outside the enclave.
 
 ## 8. Rights refill (`SignRightsRefill`)
 
@@ -446,7 +447,7 @@ The cheap checks run first.
 
 **Gate** (PSBT and keys only):
 
-- **G1** The PSBT has 1 or 2 inputs: the seal of the right and at most one
+- **RR0** The PSBT has 1 or 2 inputs: the seal of the right and at most one
   fee input (`MAX_REFILL_FEE_INPUTS`). Each extra input could destroy the
   state it carries.
 - **RR10** Every input is a Colored key-path input of the enclave (the
@@ -471,7 +472,7 @@ The cheap checks run first.
   this transaction), never on a blinded seal or an output of another
   transaction, and no two share an output.
 - **RR11** PP1 - PP7 on the right it closes: exactly one input spends the
-  UTXO of the right. The other input, if any, is the fee input (G1).
+  UTXO of the right. The other input, if any, is the fee input (RR0).
 
 **Keys:**
 
@@ -502,10 +503,15 @@ What a refill does not check, and why that is safe:
   transaction that pays a Colored address of the enclave and commits a
   well-formed but invalid propagate. The parent proof passes on it. A refill
   then closes the "right" that this junk propagate made, and spends a real
-  right as its fee input, which destroys it: one right per refill. The host
-  cannot take a right: every new right is the enclave's (RR9) and every sat
-  stays (RR12). The host pays a Bitcoin transaction for each, and RR15 bounds
-  the rate. With a real parent the count of rights never drops.
+  right as its fee input, which destroys it: one right per refill. One junk
+  transaction is enough: the parent proof accepts any refill fascia, so each
+  junk refill is the parent of the next, and the fees come from the
+  enclave's Colored sats. The host cannot take a right: every new right is
+  the enclave's (RR9) and every sat stays (RR12). RR15 is an in-memory rate
+  per enclave process, not a total: at `MAX_REFILLS_PER_HOUR` the host can
+  destroy the rights of a full mint wallet in about a day, and faster after
+  a relaunch or with a second replica. Minting then stops until the issuer
+  sends new rights. With a real parent the count of rights never drops.
 - **Concealed assignments.** PP6 cannot see a concealed assignment of the
   parent. The parent is an enclave refill (RR7 and RR8: rights only, all
   revealed) or the issuer's send to witness invoices.

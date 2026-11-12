@@ -30,7 +30,7 @@
 # `utexo-parent@*` wildcard). Requires an agent version with journald support;
 # this script installs `latest`.
 #
-# ── IAM (attach ONCE to the hosts' instance role `ec2-ssm-role`) ──────────────
+# ── IAM (attach ONCE to the hosts' instance role) ──────────────
 # Least-privilege WRITE policy `utexo-stage-enclave-hosts-logs-write`:
 #   {
 #     "Version": "2012-10-17",
@@ -46,8 +46,8 @@
 #         "logs:DescribeLogGroups"
 #       ],
 #       "Resource": [
-#         "arn:aws:logs:eu-central-1:867958227014:log-group:/utexo/stage/enclave-hosts",
-#         "arn:aws:logs:eu-central-1:867958227014:log-group:/utexo/stage/enclave-hosts:*"
+#         "arn:aws:logs:<region>:<account-id>:log-group:/utexo/stage/enclave-hosts",
+#         "arn:aws:logs:<region>:<account-id>:log-group:/utexo/stage/enclave-hosts:*"
 #       ]
 #     }]
 #   }

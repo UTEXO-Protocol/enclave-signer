@@ -14,8 +14,6 @@
 //!
 //! The `server` module connects this crypto to the handlers and state machine.
 
-#![allow(dead_code)]
-
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305,

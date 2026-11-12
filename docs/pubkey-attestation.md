@@ -130,7 +130,7 @@ policy_commitment =
     u8(allow_vanilla_psbt)                          // plain-BTC path on?
     u8(signer_role)                                 // 0 combined | 1 mint | 2 burn
     u8(attestation_mode)                            // 1 = real NSM (0 = mock)
-    u8(evm_source)                                  // 0 disabled | 1 plaintext rpc (dev) | 2 reserved | 3 pinned TLS rpc
+    u8(evm_source)                                  // 0 disabled | 1, 2 reserved | 3 pinned TLS rpc
     u8(btc_source)                                  // 1 = SPV-verified
     chain_id_be8
     u8(bitcoin_network)                             // 0 mainnet | 1 testnet3 | 2 signet | 3 regtest | 4 testnet4 | 5 signetcustom
@@ -261,7 +261,7 @@ attest-verify \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
-    --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-gas-tx-to 0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
@@ -276,7 +276,7 @@ attest-verify \
 | `--expect-spv-min-confirmations`, `--expect-bitcoin-network` | The image values. Defaults: 3 and `bitcoin`. |
 | `--expect-electrum-host` | Required: the approved indexer host. |
 | `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | Required with the `tls` source: the approved RPC host and CA hash. |
-| `--expect-evm-source` | `tls` (the default, and what the images use), `raw` or `disabled`. |
+| `--expect-evm-source` | `tls` (the default, and what the images use) or `disabled`. |
 | `--expect-gas-tx-to`, `--expect-gas-max-gas-limit`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. |
 | `--expect-vanilla-psbt` | A mint signer with plain-BTC signing on. |
 | `--expect-kms-key-arn`, `--expect-kms-region`, `--expect-kms-seed-id`, `--expect-kms-evm-address` | The KMS values of a mint signer. The first three are required with the role `mint`; the address only when the operator set one. |

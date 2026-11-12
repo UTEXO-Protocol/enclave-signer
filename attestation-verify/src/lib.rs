@@ -17,6 +17,13 @@
 
 #![forbid(unsafe_code)]
 
+// The enclave crate guards its own feature; this catches `attestation-verify/allow-debug-pcrs`.
+#[cfg(all(feature = "allow-debug-pcrs", not(debug_assertions), not(test)))]
+compile_error!(
+    "`allow-debug-pcrs` must not be enabled in a release build (debug_assertions off): \
+     it removes the all-zero PCR rejection from the attestation verifier."
+);
+
 use std::collections::HashMap;
 
 use thiserror::Error;

@@ -73,8 +73,7 @@ pub struct ProductionPolicy {
     /// Attestation root of trust. Always [`AttestationMode::Real`] in
     /// production: mock is a release `compile_error!` in `lib.rs`.
     pub attestation: AttestationMode,
-    /// EVM `FundsIn` verification source (pinned TLS, plaintext RPC or
-    /// disabled). Attested.
+    /// EVM `FundsIn` verification source (pinned TLS or disabled). Attested.
     pub evm_source: EvmDataSource,
     /// Host of the Electrum server set at launch.
     pub electrum_host: String,
@@ -354,15 +353,6 @@ impl ProductionPolicy {
         self.check_build_invariants()?;
         if self.electrum_host.is_empty() {
             return Err("production policy has no Electrum host. Set it at launch.".into());
-        }
-        // Plaintext lets the host forge a receipt. `Disabled` fails closed per
-        // request.
-        if self.evm_source == EvmDataSource::RawRpc {
-            return Err(
-                "production policy reads the EVM RPC over plaintext; plaintext is for dev and \
-                 test builds only."
-                    .into(),
-            );
         }
         if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
             return Err(

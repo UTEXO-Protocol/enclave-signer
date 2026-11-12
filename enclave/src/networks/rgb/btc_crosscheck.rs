@@ -16,7 +16,7 @@
 //!     `BTC_MAX_UNOWNED_SATS` budget. Both BIP-86 accounts count, because
 //!     `create_utxo` funds Colored UTXOs from vanilla inputs.
 //!   * Fee policy ([`crate::networks::rgb::psbt_validation::check_psbt_fee`]):
-//!     the pinned maximum fee rate and absolute fee of the send-RGB path. All
+//!     the pinned maximum fee rate and absolute fee of the mint path. All
 //!     checks here bound one transaction only. Nothing here rate-limits
 //!     `SignBtc`, so the aggregate bound is outside the enclave. Every input
 //!     must be sizeable: a P2TR input with no Taproot spend metadata or a
@@ -118,7 +118,7 @@ pub fn validate_btc_request(
         }
     }
 
-    // 4. Pinned fee policy (same as send-RGB). It runs before the amount cap,
+    // 4. Pinned fee policy (same as the mint path). It runs before the amount cap,
     //    because the cap's dev fallback returns early. Key-path sizing uses the
     //    Vanilla account, which the signer co-signs on this path.
     let key_path_inputs = psbt_validation::fee_key_path_inputs_of(&jobs, AccountType::Vanilla);

@@ -27,7 +27,7 @@ sequenceDiagram
     participant Anchor as networks::rgb::psbt_validation
     participant Inv as networks::rgb::invoice
     participant State as EnclaveState<br/>op_replay_guard
-    participant Km as KeyManager::sign_psbt
+    participant Km as KeyManager::sign_psbt_scoped
 
     Orc->>Listener: FundsIn deposit observed on EVM
     Listener->>Parent: gRPC Sign(TRANSACTION, PSBT + fascia + parent_fascia)

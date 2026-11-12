@@ -18,7 +18,7 @@ fn image_env() -> String {
         "FUNDS_IN_CONTRACT=0x6711f1a319B37847fa0234181C34D883774c4951",
         "TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
         "SPV_MIN_CONFIRMATIONS=6",
-        "GAS_TX_ALLOWED_TO=0x6711f1a319B37847fa0234181C34D883774c4951",
+        "GAS_TX_ALLOWED_TO=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A",
         "GAS_TX_MAX_GAS_LIMIT=300000",
         "GAS_TX_MAX_FEE_PER_GAS=1000",
         "GAS_TX_MAX_VALUE_WEI=5",
@@ -218,8 +218,8 @@ fn attestation_mismatch_aborts() {
 #[test]
 fn evm_source_mismatch_aborts() {
     assert_mismatch(
-        set!(evm_source, EvmDataSource::RawRpc),
-        "evm_source mismatch: expected PinnedTlsRpc, attested RawRpc",
+        set!(evm_source, EvmDataSource::Disabled),
+        "evm_source mismatch: expected PinnedTlsRpc, attested Disabled",
     );
 }
 
@@ -365,7 +365,7 @@ fn gas_tx_allowed_to_mismatch_aborts() {
     assert_mismatch(
         set!(gas_tx_allowed_to, [0; 20]),
         &format!(
-            "gas_tx_allowed_to mismatch: expected 0x6711f1a319b37847fa0234181c34d883774c4951, \
+            "gas_tx_allowed_to mismatch: expected 0xc985c12bbcece96a13a72a62fd75d8ab9381ef5a, \
              attested 0x{}",
             "00".repeat(20)
         ),

@@ -381,7 +381,6 @@ fn sign_psbt_request(
     evm_amount: u64,
     evm_commission: u64,
     psbt_bytes: Vec<u8>,
-    psbt_output_amount: u64,
 ) -> SignRequest {
     SignRequest {
         amount: evm_amount,
@@ -396,12 +395,8 @@ fn sign_psbt_request(
             funds_in_operation_id: vec![0x33; 32],
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
-            operation_idx: 0,
             psbt_bytes,
-            psbt_output_amount,
             asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
             fascia: vec![],
             parent_fascia: vec![],
         })),
@@ -588,7 +583,6 @@ fn test_sign_psbt_before_init() {
             1000,
             0,
             minimal_valid_psbt_bytes(),
-            500,
         ))),
     };
     let resp = common::send_request(port, &sign_req);
@@ -625,7 +619,6 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
             1000,
             0,
             minimal_valid_psbt_bytes(),
-            500,
         ))),
     };
     let resp = common::send_request(port, &sign_req);
@@ -672,7 +665,6 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
             0,
             0,
             minimal_valid_psbt_bytes(),
-            0,
         ))),
     };
     let resp = common::send_request(port, &sign_req);
@@ -725,7 +717,6 @@ fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
             1000,
             0,
             minimal_valid_psbt_bytes(),
-            500,
         ))),
     };
     let resp = common::send_request(port, &sign_req);

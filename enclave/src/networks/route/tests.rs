@@ -13,14 +13,10 @@ fn evm_source(commission: u64) -> SourceNetwork {
     })
 }
 
-fn rgb_destination(destination_amount: u64) -> DestinationNetwork {
+fn rgb_destination() -> DestinationNetwork {
     DestinationNetwork::RgbDestination(RgbDestination {
-        operation_idx: 1,
         psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
-        psbt_output_amount: destination_amount,
         asset_id: "rgb:test-asset".into(),
-        consignment: vec![],
-        consignment_hash: vec![],
         fascia: vec![],
         parent_fascia: vec![],
     })
@@ -51,33 +47,21 @@ fn evm_destination(destination_amount: u64, commission: u64) -> DestinationNetwo
     })
 }
 
-fn proof(amount: u64, operation_id: Option<&str>) -> RouteProof {
-    RouteProof {
-        amount,
-        operation_id: operation_id.map(str::to_string),
-    }
+fn proof(amount: u64) -> RouteProof {
+    RouteProof { amount }
 }
 
 #[test]
 fn route_proofs_accept_exact_match_to_rgb_destination() {
-    assert!(validate_route_proofs(
-        &evm_source(20),
-        &rgb_destination(90),
-        &proof(90, None),
-        &proof(90, None),
-    )
-    .is_ok());
+    assert!(
+        validate_route_proofs(&evm_source(20), &rgb_destination(), &proof(90), &proof(90),).is_ok()
+    );
 }
 
 #[test]
 fn route_proofs_reject_underfunded_rgb_destination() {
-    let err = validate_route_proofs(
-        &evm_source(20),
-        &rgb_destination(90),
-        &proof(89, None),
-        &proof(90, None),
-    )
-    .unwrap_err();
+    let err = validate_route_proofs(&evm_source(20), &rgb_destination(), &proof(89), &proof(90))
+        .unwrap_err();
     assert!(err.to_string().contains("amount mismatch"));
 }
 
@@ -86,8 +70,8 @@ fn route_proofs_accept_rgb_to_evm_match() {
     assert!(validate_route_proofs(
         &rgb_source(),
         &evm_destination(90, 20),
-        &proof(90, Some("op")),
-        &proof(90, Some("op")),
+        &proof(90),
+        &proof(90),
     )
     .is_ok());
 }
@@ -97,8 +81,8 @@ fn route_proofs_reject_underfunded_evm_destination() {
     let err = validate_route_proofs(
         &rgb_source(),
         &evm_destination(90, 20),
-        &proof(89, Some("op")),
-        &proof(90, Some("op")),
+        &proof(89),
+        &proof(90),
     )
     .unwrap_err();
     assert!(err.to_string().contains("amount mismatch"));
@@ -106,12 +90,7 @@ fn route_proofs_reject_underfunded_evm_destination() {
 
 #[test]
 fn route_proofs_reject_unsupported_pair() {
-    let err = validate_route_proofs(
-        &rgb_source(),
-        &rgb_destination(90),
-        &proof(90, None),
-        &proof(90, None),
-    )
-    .unwrap_err();
+    let err = validate_route_proofs(&rgb_source(), &rgb_destination(), &proof(90), &proof(90))
+        .unwrap_err();
     assert!(err.to_string().contains("unsupported"));
 }

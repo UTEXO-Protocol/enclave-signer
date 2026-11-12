@@ -4,10 +4,9 @@ This crate contains the enclave wire protocol. Its local copy of the schema
 requires no credentials or private dependencies.
 
 Current caveat: the enclave takes rgb-lib from the private
-`UTEXO-Protocol/rgb-lib-bfa` mirror (deploy key `lib_key`). The RGB protocol
-crates are public. The build scripts require the token `rgb_deps_token` as
-well, so an enclave build needs both. That is a separate
-dependency; this crate stays credential-free.
+`UTEXO-Protocol/rgb-lib-bfa` mirror (deploy key `lib_key`), so an enclave
+build needs that key; the RGB protocol crates are public. rgb-lib is a
+separate dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —
@@ -39,8 +38,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `15e0d73f26d396691983faa8344bc14d9c173bae` (branch `docs/enclave-proto-match-enclave`, "docs(proto): state reserved numbers and reasons without history or ids") |
-| Commit date | 2026-11-10T13:18:45Z |
+| Commit | `65c3054c147a98f36e9899cdda7e2cee48de3c78` (branch `chore/reserve-unused-fields`, "Reserve fields the enclave does not read") |
+| Commit date | 2026-11-12T09:20:37Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -54,7 +53,7 @@ crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=15e0d73f26d396691983faa8344bc14d9c173bae
+REV=65c3054c147a98f36e9899cdda7e2cee48de3c78
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -69,8 +68,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `7c8c3efe3769bc2419a7ae1553f122f3c9069159` |
-| `proto/enclave/enclave.proto` | `87245c41b7496e66830b4dc0470c43a19814ff3a` |
+| `rust-gen/src/enclave/enclave.rs` | `3c0cf7dae816ebf3c04cc5cdc68cee84b952a188` |
+| `proto/enclave/enclave.proto` | `a6a2c767c3b37f88fca504d806b73ab604e17379` |
 
 ## Why only `prost`
 

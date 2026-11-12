@@ -74,7 +74,7 @@ pub fn assert_asset_binding(
             if cfg.rgb_asset_id.is_empty() {
                 return Err(EnclaveError::CrossCheck(
                     "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to \
-                     bind a send-RGB PSBT to an unpinned asset"
+                     bind a mint PSBT to an unpinned asset"
                         .into(),
                 ));
             }

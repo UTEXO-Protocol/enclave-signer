@@ -109,12 +109,8 @@ fn rgb_sign_request(psbt_bytes: Vec<u8>) -> SignRequest {
             })),
         }),
         data: Some(sign_request::Data::RgbData(enriched::EnrichedRgbPayload {
-            operation_idx: 5,
             psbt_bytes,
-            psbt_output_amount: 0,
             rgb_asset_id: String::new(),
-            consignment: vec![],
-            consignment_hash: vec![],
             fascia: vec![],
             parent_fascia: vec![],
         })),

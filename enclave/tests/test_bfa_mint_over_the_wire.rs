@@ -48,7 +48,6 @@ use rgbstd::validation::{
 use rgbstd::vm::WitnessOrd;
 use rgbstd::{BuilderSeal, ChainNet, ContractId, GraphSeal, Opout, SecretSeal};
 use schemata::BridgedFungibleAsset;
-use sha3::{Digest, Keccak256};
 use utexo_bridge_enclave::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
 use utexo_bridge_enclave::framing;
 use utexo_bridge_enclave::keys::{AccountType, KeyManager};
@@ -585,14 +584,8 @@ fn sign_request(built: &Built) -> SignRequest {
             funds_in_operation_id: operation_id(&built.deposit).to_vec(),
         })),
         destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
-            operation_idx: 0,
             psbt_bytes: built.psbt.serialize(),
-            psbt_output_amount: 0,
             asset_id: built.deposit.contract_id.to_string(),
-            // The request carries the consignment too; the mint signer reads
-            // only the PSBT, its fascia and its parent's.
-            consignment: built.deposit.consignment.clone(),
-            consignment_hash: Keccak256::digest(&built.deposit.consignment).to_vec(),
             fascia: built.deposit.mint.fascia_bytes(),
             parent_fascia: built.deposit.seed.fascia_bytes(),
         })),
@@ -807,21 +800,12 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
     .expect("consumer resolves the bound witness");
 }
 
-/// M5 compares the amount committed by the mint, not the listener's unchecked
-/// `psbt_output_amount`. The request and the receipt agree in every case.
+/// M5 compares the amount committed by the mint with the deposit.
 #[test]
 fn refuses_a_mint_whose_committed_amount_differs_from_the_deposit() {
     for issued in [MINTED - 1, MINTED + 1] {
         let minted = build_issuing(None, None, false, Payee::Blinded, issued);
-        let mut request = sign_request(&minted);
-        let Some(DestinationNetwork::RgbDestination(destination)) =
-            request.destination_network.as_mut()
-        else {
-            panic!("the fixture has an RGB destination");
-        };
-        // A host claiming the correct amount must not conceal different
-        // issuedSupply / asset units inside an otherwise valid mint.
-        destination.psbt_output_amount = MINTED;
+        let request = sign_request(&minted);
         let chain = deposit_chain(&minted, LOCK_BLOCK, LOCK_BLOCK, vec![]);
         let ctx = context(bridge_config(&minted.deposit.contract_id), chain);
         let response = sign_over_the_wire(&ctx, request);
@@ -1128,7 +1112,7 @@ fn refuses_a_witness_mint_against_a_blinded_invoice() {
     witness.deposit.invoice = blinded_invoice(witness.deposit.contract_id, secret);
     let refusal = refusal(&drive(&witness));
     assert!(
-        refusal.contains("pays 0 confidential recipient legs"),
+        refusal.contains("pays 0 blinded recipient legs"),
         "{refusal}"
     );
 }

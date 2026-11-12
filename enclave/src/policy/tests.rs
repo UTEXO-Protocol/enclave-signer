@@ -117,7 +117,7 @@ fn signer_role_is_attested() {
                 ..release_bridge_ctx()
             },
             &pinned_config(),
-            EvmDataSource::RawRpc,
+            EvmDataSource::Disabled,
             None,
             "e.test",
         )
@@ -148,7 +148,7 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
             ..release_bridge_ctx()
         },
         &config,
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "e.test",
     ) {
@@ -292,7 +292,7 @@ fn production_refuses_the_latest_finality_tag_at_boot() {
         evm_finality_tag: EvmFinalityTag::Latest,
         ..pinned_config()
     };
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
     assert!(err.contains("EVM_FINALITY_TAG=latest"), "got: {err}");
 }
@@ -305,7 +305,7 @@ fn production_boots_with_the_safe_and_finalized_tags() {
             evm_finality_tag: tag,
             ..pinned_config()
         };
-        let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+        let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
         assert!(policy.assert_valid_at_boot(&ctx).is_ok(), "{tag}");
     }
 }
@@ -315,7 +315,7 @@ fn production_rejects_a_zero_spv_confirmation_rule() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.spv_min_confirmations = 0;
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
     assert!(err.contains("SPV_MIN_CONFIRMATIONS"), "got: {err}");
 }
@@ -326,7 +326,7 @@ fn spv_min_confirmations_is_attested() {
     let commit = |depth: u32| {
         let mut cfg = pinned_config();
         cfg.spv_min_confirmations = depth;
-        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes()
     };
     assert_ne!(commit(6), commit(7));
@@ -338,7 +338,7 @@ fn production_rejects_an_unpinned_token_contract() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.token_contract = [0u8; 20];
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("TOKEN_CONTRACT"), "got: {err}");
 }
@@ -349,7 +349,7 @@ fn production_rejects_btc_relay_mode_none() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.btc_relay_mode = BtcRelayMode::None;
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("BTC_RELAY_MODE=none"), "got: {err}");
 }
@@ -379,9 +379,9 @@ fn token_contract_is_carried_into_the_commitment() {
     let mut other = base.clone();
     other.token_contract = [0x44; 20];
     assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &other, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &other, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
         "re-pinning TOKEN_CONTRACT must change the attested commitment"
     );
@@ -393,9 +393,14 @@ fn deposit_authorization_rule_is_carried_into_the_commitment() {
     let base = pinned_config();
     let mut other_emitter = base.clone();
     other_emitter.funds_in_contract = [0x33; 20];
-    let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, "e.test");
-    let changed_emitter =
-        SecurityPolicy::resolve(&ctx, &other_emitter, EvmDataSource::RawRpc, None, "e.test");
+    let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test");
+    let changed_emitter = SecurityPolicy::resolve(
+        &ctx,
+        &other_emitter,
+        EvmDataSource::Disabled,
+        None,
+        "e.test",
+    );
 
     assert_ne!(
         expected.commitment_bytes(),
@@ -409,7 +414,7 @@ fn release_bridge_unconfigured_is_rejected_at_boot() {
     let p = SecurityPolicy::resolve(
         &ctx,
         &BridgeConfig::default(),
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "e.test",
     );
@@ -431,7 +436,7 @@ fn release_bridge_partially_pinned_is_rejected_at_boot() {
         chain_id: 1,
         ..Default::default()
     };
-    let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::RawRpc, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::Disabled, None, "e.test");
     assert!(matches!(p, SecurityPolicy::Development { .. }));
     assert!(p.assert_valid_for_build(&ctx).is_err());
 }
@@ -478,7 +483,7 @@ fn debug_build_is_development_and_exempt_from_the_boot_gate() {
     let p = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "e.test",
     );
@@ -519,7 +524,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     // Unset BTC pins: vanilla is off.
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -529,7 +534,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     ));
     // With the cap set, vanilla is on and attested.
     cfg.btc_max_total_sats = 100_000;
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -546,7 +551,7 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     let unpinned = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "e.test",
     );
@@ -557,7 +562,7 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     cfg.gas_tx_max_fee_per_gas = 5_000;
     cfg.gas_tx_max_value_wei = Some(9_000);
     cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-    let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::RawRpc, None, "e.test");
+    let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
 
     assert_ne!(
         unpinned.commitment_bytes(),
@@ -590,9 +595,9 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
     raised.gas_tx_max_value_wei = Some(1);
 
     assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
         "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
     );
@@ -608,9 +613,9 @@ fn unset_gas_tx_value_ceiling_commits_as_zero() {
     zero.gas_tx_max_value_wei = Some(0);
 
     assert_eq!(
-        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::RawRpc, None, "e.test")
+        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::Disabled, None, "e.test")
             .commitment_bytes(),
     );
 }
@@ -618,11 +623,11 @@ fn unset_gas_tx_value_ceiling_commits_as_zero() {
 #[test]
 fn evm_source_is_carried_into_the_commitment() {
     let ctx = release_bridge_ctx();
-    let raw = SecurityPolicy::resolve(
+    let pinned = SecurityPolicy::resolve(
         &ctx,
         &pinned_config(),
-        EvmDataSource::RawRpc,
-        None,
+        EvmDataSource::PinnedTlsRpc,
+        a_tls_pin(),
         "e.test",
     );
     let disabled = SecurityPolicy::resolve(
@@ -632,7 +637,7 @@ fn evm_source_is_carried_into_the_commitment() {
         None,
         "e.test",
     );
-    assert_ne!(raw.commitment_bytes(), disabled.commitment_bytes());
+    assert_ne!(pinned.commitment_bytes(), disabled.commitment_bytes());
 }
 
 #[test]
@@ -650,7 +655,7 @@ fn development_commitment_is_stable_and_distinct() {
         SecurityPolicy::resolve(
             &release_bridge_ctx(),
             &pinned_config(),
-            EvmDataSource::RawRpc,
+            EvmDataSource::Disabled,
             None,
             "e.test",
         )
@@ -670,7 +675,7 @@ fn with_kms_is_committed_in_production_only() {
     let prod = SecurityPolicy::resolve(
         &release_bridge_ctx(),
         &pinned_config(),
-        EvmDataSource::RawRpc,
+        EvmDataSource::Disabled,
         None,
         "e.test",
     );

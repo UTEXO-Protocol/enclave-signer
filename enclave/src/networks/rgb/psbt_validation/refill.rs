@@ -1,7 +1,7 @@
 //! The PSBT rules of a rights refill (`SignRightsRefill`): one `mintRight` in,
 //! [`MIN_REFILL_RIGHTS`]..=[`MAX_REFILL_RIGHTS`] rights out to the enclave's
 //! own Colored outputs, no units moved. The rules read the committed
-//! transition from the fascia, with no consignment. The rule ids (G1, RR*) are
+//! transition from the fascia, with no consignment. The rule ids (RR*) are
 //! those of `docs/mint-flow.md` section 8.
 
 use std::collections::BTreeSet;
@@ -28,7 +28,7 @@ pub const MIN_REFILL_RIGHTS: usize = 2;
 /// Our own cap: rgb-lib sets no limit. RR9, RR12 and RR13 carry the security.
 pub const MAX_REFILL_RIGHTS: usize = 255;
 
-/// The gate (G1, RR10, RR12, RR13): PSBT and keys only, so it runs before the
+/// The gate (RR0, RR10, RR12, RR13): PSBT and keys only, so it runs before the
 /// rate limit and the RGB checks.
 pub fn refill_gate(psbt: &Psbt, keys: &KeyManager) -> Result<()> {
     assert_refill_input_count(psbt)?;
@@ -37,7 +37,7 @@ pub fn refill_gate(psbt: &Psbt, keys: &KeyManager) -> Result<()> {
     super::check_psbt_fee(psbt, &colored, "rights-refill")
 }
 
-/// G1: the right's seal and at most [`MAX_REFILL_FEE_INPUTS`] fee inputs.
+/// RR0: the right's seal and at most [`MAX_REFILL_FEE_INPUTS`] fee inputs.
 fn assert_refill_input_count(psbt: &Psbt) -> Result<()> {
     let inputs = psbt.unsigned_tx.input.len();
     if inputs > 1 + MAX_REFILL_FEE_INPUTS {

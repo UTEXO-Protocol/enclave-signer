@@ -58,7 +58,7 @@ pub(super) fn handle_sign(
 
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     let psbt_fee_key_paths = |psbt: &bitcoin::psbt::Psbt| {
-        // Colored is the scope that `sign_psbt_scoped` uses on the send-RGB path.
+        // Colored is the scope that `sign_psbt_scoped` uses on the mint path.
         ctx.state.with_keys(|keys| {
             Ok(
                 crate::networks::rgb::psbt_validation::fee_key_path_inputs_scoped(
@@ -446,8 +446,7 @@ fn verify_funds_in_deposit(
                 .into(),
         )
     })?;
-    // Bind to the source BridgeFundsIn.operationId. `destination.operation_idx`
-    // is a different id space.
+    // Bind to the source BridgeFundsIn.operationId.
     let verified = crate::networks::evm::events::verify_funds_in_event(
         &**client,
         // The bridge entry contract emits FundsIn. It can differ from the

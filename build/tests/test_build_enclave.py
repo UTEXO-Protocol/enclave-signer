@@ -70,7 +70,6 @@ class BuildArgumentsTests(unittest.TestCase):
             PATH=f'{self.bin}:{os.environ["PATH"]}',
             KMS_ALLOWED_ACCOUNT_IDS=ACCOUNTS,
             RGB_LIB_BFA_DEPLOY_KEY='fixture-deploy-key-not-a-real-credential',
-            RGB_PRIVATE_DEPS_TOKEN='fixture-mirror-token-not-a-real-credential',
             OUT_DIR=str(self.base / 'out'),
             SOURCE_DATE_EPOCH='1700000000',
             TEST_DOCKER_ARGV=str(self.argv),
@@ -96,7 +95,6 @@ class BuildArgumentsTests(unittest.TestCase):
         argv = json.loads(self.argv.read_text())
         self.assertEqual(argv[:2], ['buildx', 'build'])
         self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
-        self.assertNotIn(self.env['RGB_PRIVATE_DEPS_TOKEN'], ' '.join(argv))
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--build-arg']
 
     def test_rgb_recipes_reject_missing_asset_before_docker(self):
@@ -260,7 +258,7 @@ class BuildArgumentsTests(unittest.TestCase):
         self.assertEqual(docker_env['RGB_ASSET_ID'], 'rgb:test-bfa-asset')
         self.assertEqual(docker_env['KMS_ALLOWED_ACCOUNT_IDS'], ACCOUNTS)
         self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
-        self.assertIn('id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN', argv)
+        self.assertIn('id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY', argv)
 
     def test_make_mint_rejects_missing_asset_before_docker(self):
         result = self.invoke_make('build_enclave_mint')
@@ -294,38 +292,28 @@ class BuildArgumentsTests(unittest.TestCase):
         argv = json.loads(self.argv.read_text())
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
 
-    def test_every_recipe_takes_the_deploy_key_and_the_mirror_token_as_secrets(self):
+    def test_every_recipe_takes_the_deploy_key_as_a_secret(self):
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_secrets(), [
-                    'id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY',
-                    'id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN',
-                ])
+                self.assertEqual(self.captured_secrets(), ['id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY'])
 
-    def test_the_secret_files_of_private_deps_dir_win(self):
+    def test_the_secret_file_of_private_deps_dir_wins(self):
         deps = self.base / 'deps'
         deps.mkdir()
         (deps / 'lib_key').write_text('fixture-deploy-key-file')
-        (deps / 'rgb_deps_token').write_text('fixture-mirror-token-file')
         result = self.invoke('Dockerfile.enclave-dev.bfa', PRIVATE_DEPS_DIR=str(deps))
         self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_secrets(), [
-            f'id=lib_key,src={deps}/lib_key',
-            f'id=rgb_deps_token,src={deps}/rgb_deps_token',
-        ])
+        self.assertEqual(self.captured_secrets(), [f'id=lib_key,src={deps}/lib_key'])
         self.assertNotIn('fixture-deploy-key-file', self.argv.read_text())
-        self.assertNotIn('fixture-mirror-token-file', self.argv.read_text())
 
-    def test_a_missing_key_or_token_refuses_before_docker(self):
+    def test_a_missing_deploy_key_refuses_before_docker(self):
         deps = self.base / 'deps'
         deps.mkdir()
         cases = (
             ('RGB_LIB_BFA_DEPLOY_KEY', None, 'rgb-lib-bfa'),
-            ('RGB_PRIVATE_DEPS_TOKEN', None, 'RGB_PRIVATE_DEPS_TOKEN'),
             (None, 'lib_key', 'lib_key'),
-            (None, 'rgb_deps_token', 'rgb_deps_token'),
         )
         for unset, missing_file, named in cases:
             with self.subTest(unset=unset, missing_file=missing_file):
@@ -333,8 +321,7 @@ class BuildArgumentsTests(unittest.TestCase):
                 if unset:
                     env.pop(unset)
                 else:
-                    for name in ('lib_key', 'rgb_deps_token'):
-                        (deps / name).write_text('' if name == missing_file else 'fixture')
+                    (deps / missing_file).write_text('')
                     env['PRIVATE_DEPS_DIR'] = str(deps)
                 self.argv.unlink(missing_ok=True)
                 result = subprocess.run(['bash', str(ROOT / 'build/build-enclave.sh')],
@@ -480,6 +467,11 @@ class ImageInputsTests(unittest.TestCase):
                 self.assertRegex(text, r'(?m)^\s*EVM_FINALITY_TAG=finalized\b')
                 self.assertRegex(text, r'(?m)^\s*SPV_MIN_CONFIRMATIONS=3\b')
                 self.assertNotRegex(text, r'(?m)^ARG (EVM_FINALITY_TAG|SPV_MIN_CONFIRMATIONS)\b')
+
+    def test_the_burn_recipe_sends_gas_to_the_multisig_proxy(self):
+        # Every release calls the MultisigProxy, not the FundsIn contract.
+        text = (ROOT / 'build' / 'Dockerfile.enclave.burn').read_text()
+        self.assertRegex(text, r'(?m)^ARG GAS_TX_ALLOWED_TO=\$\{EVM_PROXY_CONTRACT_ADDRESS\}$')
 
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:

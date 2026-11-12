@@ -17,11 +17,10 @@ use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
 /// Route-neutral proof that the source and destination validators return.
 ///
 /// Each network module validates only its own payload. It maps the trusted
-/// amount and operation identity into this shape.
+/// amount into this shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteProof {
     pub amount: u64,
-    pub operation_id: Option<String>,
 }
 
 pub struct ValidationContext<'a> {
@@ -111,7 +110,7 @@ pub struct DestinationProof {
     /// handler binds the source fields to the request's source network and
     /// recomputes `burnId`. `None` for RGB destinations.
     pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
-    /// `utxob:...` seals of the send-RGB confidential recipient legs. They are
+    /// `utxob:...` seals of the mint's blinded recipient legs. They are
     /// bound to the deposit invoice after that receipt is verified. Empty for
     /// EVM destinations, witness mints and builds without the bind.
     pub rgb_recipient_seals: Vec<String>,
@@ -146,16 +145,9 @@ pub fn validate_destination(
         DestinationNetwork::RgbDestination(destination) => {
             rgb::validate_destination(destination, ctx)?;
 
-            // The destination amount is `mint.issued` from the fascia that the
-            // enclave proves, not the unchecked host `psbt_output_amount`. Only
-            // builds without that bind use the wire field. They run no
-            // destination cross-checks.
-            #[cfg(feature = "rgb-validation")]
+            // The destination amount is `mint.issued` from the fascia that the enclave proves.
             let (destination_amount, rgb_recipient_seals) =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
-            #[cfg(not(feature = "rgb-validation"))]
-            let (destination_amount, rgb_recipient_seals) =
-                (destination.psbt_output_amount, Vec::new());
 
             Ok(DestinationProof {
                 proof: RouteProof {
@@ -166,7 +158,6 @@ pub fn validate_destination(
                                 "destination amount + source_commission overflow".into(),
                             )
                         })?,
-                    operation_id: None,
                 },
                 evm_funds_out: None,
                 evm_release_identity: None,
@@ -212,24 +203,6 @@ fn validate_amount_covers_destination(source_amount: u64, destination_amount: u6
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(
             "amount mismatch: source amount ({source_amount}) < destination amount ({destination_amount})"
-        )));
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn validate_operation_ids_match(source: &RouteProof, destination: &RouteProof) -> Result<()> {
-    let source_id = source.operation_id.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck("source route proof is missing operation_id".into())
-    })?;
-    let destination_id = destination.operation_id.as_ref().ok_or_else(|| {
-        EnclaveError::CrossCheck("destination route proof is missing operation_id".into())
-    })?;
-
-    if source_id != destination_id {
-        return Err(EnclaveError::CrossCheck(format!(
-            "operation mismatch: source operation_id {source_id} != destination operation_id {destination_id}"
         )));
     }
 

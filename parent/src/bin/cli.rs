@@ -106,9 +106,6 @@ enum Command {
         /// On-chain BridgeFundsIn.operationId, 32-byte hex. Required.
         #[arg(long, default_value = "")]
         evm_funds_in_operation_id: String,
-        /// PSBT total non-change output amount
-        #[arg(long, default_value = "0")]
-        psbt_output_amount: u64,
         /// Mark EVM event as valid
         #[arg(long)]
         evm_event_valid: bool,
@@ -118,9 +115,6 @@ enum Command {
         /// RGB asset identifier associated with the transfer
         #[arg(long, default_value = "")]
         rgb_asset_id: String,
-        /// Hex-encoded RGB consignment bytes
-        #[arg(long, default_value = "")]
-        consignment: String,
         /// Hex-encoded rgb-lib fascia of the PSBT's tx
         #[arg(long, default_value = "")]
         fascia: String,
@@ -570,11 +564,9 @@ fn main() {
             evm_amount,
             evm_commission,
             evm_funds_in_operation_id,
-            psbt_output_amount,
             evm_event_valid,
             evm_event_finalized,
             rgb_asset_id,
-            consignment,
             fascia,
             parent_fascia,
         } => {
@@ -584,23 +576,6 @@ fn main() {
                     eprintln!("Invalid hex PSBT: {}", e);
                     process::exit(1);
                 }
-            };
-            let consignment_bytes = if consignment.is_empty() {
-                vec![]
-            } else {
-                match hex::decode(&consignment) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Invalid hex consignment: {}", e);
-                        process::exit(1);
-                    }
-                }
-            };
-            let consignment_hash = if consignment_bytes.is_empty() {
-                vec![]
-            } else {
-                use sha3::{Digest, Keccak256};
-                Keccak256::digest(&consignment_bytes).to_vec()
             };
             let fascia = match hex::decode(&fascia) {
                 Ok(d) => d,
@@ -648,7 +623,6 @@ fn main() {
             let req = SignPsbtRequest {
                 evm_tx_hash: tx_hash,
                 evm_funds_in_operation_id: funds_in_operation_id,
-                operation_idx: 0,
                 evm_event_valid,
                 evm_event_finalized,
                 evm_token: vec![],
@@ -656,10 +630,7 @@ fn main() {
                 evm_recipient: vec![],
                 evm_commission,
                 psbt_bytes,
-                psbt_output_amount,
                 rgb_asset_id,
-                consignment: consignment_bytes,
-                consignment_hash,
                 fascia,
                 parent_fascia,
             };

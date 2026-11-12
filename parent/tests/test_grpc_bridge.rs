@@ -544,12 +544,8 @@ async fn grpc_rgb_destination_forwards_both_fascias() {
         .unwrap();
 
     let payload = enriched::EnrichedRgbPayload {
-        operation_idx: 5,
         psbt_bytes: vec![0xFF; 32],
-        psbt_output_amount: 0,
         rgb_asset_id: "rgb:asset".into(),
-        consignment: vec![0x02; 4],
-        consignment_hash: vec![0x03; 32],
         fascia: vec![0x05; 6],
         parent_fascia: vec![0x04; 8],
     };
@@ -562,7 +558,6 @@ async fn grpc_rgb_destination_forwards_both_fascias() {
     assert_eq!(destination.psbt_bytes, vec![0xFF; 32]);
     assert_eq!(destination.fascia, vec![0x05; 6]);
     assert_eq!(destination.parent_fascia, vec![0x04; 8]);
-    assert_eq!(destination.consignment, vec![0x02; 4]);
     assert_eq!(destination.asset_id, "rgb:asset");
 }
 
@@ -575,7 +570,6 @@ fn client_sign_psbt_forwards_both_fascias() {
         .sign_psbt(SignPsbtRequest {
             evm_tx_hash: vec![],
             evm_funds_in_operation_id: vec![0x11; 32],
-            operation_idx: 0,
             evm_event_valid: false,
             evm_event_finalized: false,
             evm_token: vec![],
@@ -583,10 +577,7 @@ fn client_sign_psbt_forwards_both_fascias() {
             evm_recipient: vec![],
             evm_commission: 0,
             psbt_bytes: vec![0xFF; 32],
-            psbt_output_amount: 0,
             rgb_asset_id: "rgb:asset".into(),
-            consignment: vec![],
-            consignment_hash: vec![],
             fascia: vec![0x05; 6],
             parent_fascia: vec![0x04; 8],
         })
@@ -612,12 +603,8 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         burn_destination: None,
     };
     let rgb_payload = enriched::EnrichedRgbPayload {
-        operation_idx: 5,
         psbt_bytes: vec![0xFF; 32],
-        psbt_output_amount: 0,
         rgb_asset_id: String::new(),
-        consignment: vec![],
-        consignment_hash: vec![],
         fascia: vec![],
         parent_fascia: vec![],
     };
@@ -717,13 +704,9 @@ fn rights_refill_request() -> SignRequest {
         common: Some(common(0, 0, DataType::RgbRightsRefill)),
         source: None,
         data: Some(sign_request::Data::RgbData(enriched::EnrichedRgbPayload {
-            operation_idx: 0,
             psbt_bytes: vec![0x01; 3],
-            psbt_output_amount: 0,
             rgb_asset_id: "rgb:asset".into(),
             // The enclave reads no consignment for a refill.
-            consignment: vec![0x02; 4],
-            consignment_hash: vec![0x03; 32],
             fascia: vec![0x05; 6],
             parent_fascia: vec![0x04; 5],
         })),

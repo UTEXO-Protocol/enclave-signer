@@ -120,7 +120,6 @@ fn valid_destination_passes() {
     with_ctx(&config(), |ctx| {
         let proof = validate_dest(&destination(), ctx).expect("valid destination");
         assert_eq!(proof.amount, 1000);
-        assert_eq!(proof.operation_id, None);
     });
 }
 
@@ -491,7 +490,7 @@ fn rejects_uint256_amount_overflow() {
         },
     }
     .abi_encode();
-    call[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_POOLS);
+    call[..4].copy_from_slice(&FUNDS_OUT_SELECTOR_DIRECT);
     let mut destination = destination();
     destination.call_data = call;
     with_ctx(&config(), |ctx| {
@@ -506,7 +505,7 @@ fn rejects_uint256_amount_overflow() {
 /// whitelist uses the constant, and decode/encode use the `sol!` type.
 #[test]
 fn funds_out_selector_matches_abi_derived_selector() {
-    assert_eq!(FUNDS_OUT_SELECTOR_POOLS, fundsOutCall::SELECTOR);
+    assert_eq!(FUNDS_OUT_SELECTOR_DIRECT, fundsOutCall::SELECTOR);
 }
 
 /// Canonical calldata with non-empty dynamic tails. The two non-canonical

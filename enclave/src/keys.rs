@@ -58,7 +58,8 @@ pub enum AccountType {
     Colored,
 }
 
-/// HD wallet keys in memory. Secrets are in `SecretBox` (zeroize on drop).
+/// HD wallet keys in memory. Drop wipes the `SecretBox` fields and the account xprivs. Not wiped:
+/// the master xpriv and EVM keys that `from_seed` derives, and each `derive_btc_child` key.
 pub struct KeyManager {
     seed: SecretBox<[u8; 64]>,
     evm_secret: SecretBox<[u8; 32]>,
@@ -319,6 +320,7 @@ impl KeyManager {
 
     /// Sign Taproot key-path inputs (BIP-340) with BIP-86 keys from either account.
     /// Returns the PSBT bytes and the number of signed inputs.
+    #[cfg(test)]
     pub fn sign_psbt(&self, psbt_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
         self.sign_psbt_scoped(psbt_bytes, None)
     }

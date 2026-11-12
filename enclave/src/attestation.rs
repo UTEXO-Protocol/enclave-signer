@@ -9,8 +9,6 @@
 //! Mock mode (`mock-attestation`): raw CBOR documents with all-zero PCR0/1/2,
 //! [`attestation_verify::MOCK_PCR3`] and no COSE. Testing only.
 
-#![allow(dead_code)]
-
 use crate::error::{EnclaveError, Result};
 
 pub use attestation_verify::{ExpectedPcrs, VerifiedAttestation};

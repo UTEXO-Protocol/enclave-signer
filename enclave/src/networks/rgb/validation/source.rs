@@ -113,8 +113,7 @@ fn lock_chain<'a>(
 /// before the keccak hash and the RGB parse. Thus a request under each
 /// per-field cap cannot force too much work.
 ///
-/// `label` names the direction in the rejection, for example `"RGB source"`
-/// or `"send-RGB"`. Both directions share it, so the message is the same.
+/// `label` names the consignment in the rejection, for example `"RGB source"`.
 pub fn assert_consignment_size(consignment: &[u8], cfg: &BridgeConfig, label: &str) -> Result<()> {
     let max = crate::limits::in_force(cfg).max_consignment_bytes;
     if consignment.len() as u64 > max {

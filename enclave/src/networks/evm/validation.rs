@@ -28,7 +28,7 @@ use crate::proto::EvmSource;
 /// `sourceBurnTxId`) fail closed at the whitelist, so a backend that sends
 /// either shape gets no signature.
 #[cfg(rgb_to_evm)]
-pub const FUNDS_OUT_SELECTOR_POOLS: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
+pub const FUNDS_OUT_SELECTOR_DIRECT: [u8; 4] = [0x34, 0x02, 0x76, 0xaa];
 
 /// `keccak256("lzFundsOut(uint256,uint256,uint256,uint256,string,bytes,bytes,uint32,bytes32,uint256,bytes,bytes32)")[0..4]`.
 ///
@@ -53,7 +53,7 @@ pub const MAX_FUNDS_OUT_CALL_DATA_LEN: usize =
 pub const MAX_TEE_DEADLINE_SECS: u64 = 24 * 60 * 60;
 
 #[cfg(rgb_to_evm)]
-const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_POOLS, LZ_FUNDS_OUT_SELECTOR];
+const ALLOWED_SELECTORS: &[[u8; 4]] = &[FUNDS_OUT_SELECTOR_DIRECT, LZ_FUNDS_OUT_SELECTOR];
 
 sol! {
     /// Mirrors `IBridge.FundsOutParams` (in IBridge.sol). Field order fixes
@@ -117,10 +117,7 @@ pub fn validate_source(amount: u64, source: &EvmSource) -> Result<RouteProof> {
     // caller can set them. Validity and finality come from
     // `networks::evm::events::verify_funds_in_event` in `handle_sign`.
 
-    Ok(RouteProof {
-        amount,
-        operation_id: None,
-    })
+    Ok(RouteProof { amount })
 }
 
 /// The release calldata fields that identify the settled burn and its payout.
@@ -153,7 +150,7 @@ pub struct ReleaseIdentity {
 }
 
 impl ReleaseIdentity {
-    /// The identity of a pools-route `fundsOut`.
+    /// The identity of a direct-route `fundsOut`.
     pub fn from_funds_out(params: &FundsOutParams) -> Self {
         let mut recipient = [0u8; 32];
         recipient[12..].copy_from_slice(params.recipient.as_slice());
@@ -398,7 +395,7 @@ pub fn validate_destination(
     // Calldata `destinationChainId` is not the request `chain_id` above, which
     // sets only the EIP-712 domain.
     //
-    // A direct pools payout settles on the execution chain, so it must equal
+    // A direct payout settles on the execution chain, so it must equal
     // the pin. An entrypoint (LayerZero) payout settles on a remote chain, so
     // it must be non-zero and not the pin. The `destination.chain_id` and
     // `proxy_contract` checks pin the execution chain on both routes.
@@ -479,12 +476,9 @@ fn route_proof_from_params(params: &FundsOutParams) -> Result<RouteProof> {
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("fundsOut amount exceeds u64 range".into()))?;
 
-    Ok(RouteProof {
-        amount,
-        // `None`: the handler binds burn identity with `validate_burn_id` and
-        // the `sourceBurnTxId` OpId bind.
-        operation_id: None,
-    })
+    // The handler binds burn identity with `validate_burn_id` and the
+    // `sourceBurnTxId` OpId bind.
+    Ok(RouteProof { amount })
 }
 
 /// Decodes a `fundsOut` calldata blob and enforces canonical encoding. The
@@ -524,17 +518,14 @@ pub fn decode_lz_funds_out_params(call_data: &[u8]) -> Result<lzFundsOutCall> {
 }
 
 /// Maps a decoded LayerZero release into the route-neutral proof, as
-/// [`route_proof_from_params`] does on the pools route.
+/// [`route_proof_from_params`] does on the direct route.
 #[cfg(rgb_to_evm)]
 fn lz_route_proof_from_params(decoded: &lzFundsOutCall) -> Result<RouteProof> {
     let amount: u64 = decoded
         .amount
         .try_into()
         .map_err(|_| EnclaveError::CrossCheck("lzFundsOut amount exceeds u64 range".into()))?;
-    Ok(RouteProof {
-        amount,
-        operation_id: None,
-    })
+    Ok(RouteProof { amount })
 }
 
 #[cfg(all(test, evm_to_rgb))]

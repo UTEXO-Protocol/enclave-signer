@@ -152,7 +152,7 @@ signature depends on.
   a role ([parent-mtls.md](parent-mtls.md)).
 - `Sign` routes by `data_type`: `TRANSACTION` to `Sign`, `EVM_GAS_TX` to
   `SignRawDigest`, `BTC_UTXO` to `SignBtc`, `RGB_RIGHTS_REFILL` to
-  `SignRightsRefill`. It refuses a Concordium source or payload.
+  `SignRightsRefill`.
 - It refuses `SubmitHeaders` from every client. Its own header sync reads
   headers from `HEADER_ELECTRUM_URL` and writes them to the enclave.
 - It waits longer for a reply than the request deadline of the enclave, so
@@ -223,7 +223,7 @@ SecurityPolicy = Production {
     allow_vanilla_psbt,                          -- plain-BTC signing on or off
     signer_role: Mint | Burn | Combined,
     attestation: Real,
-    evm_source:  Disabled | RawRpc | PinnedTlsRpc,
+    evm_source:  Disabled | PinnedTlsRpc,
     electrum_host, evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,
     kms,                                         -- mint signer only
@@ -246,8 +246,8 @@ the launch values and refuses the set on an error. The gate requires:
 - `BITCOIN_NETWORK=bitcoin` when `EVM_CHAIN_ID` is 1 or 42161;
 - an `EVM_FINALITY_TAG` of `safe` or `finalized`;
 - `SPV_MIN_CONFIRMATIONS` of at least 1;
-- at `SetEndpoints`: an indexer host, no plaintext EVM source, and a host and
-  CA pin for the pinned-TLS source;
+- at `SetEndpoints`: an indexer host, and a host and CA pin for the
+  pinned-TLS source;
 - at `SetEndpoints`, for a cloning role: a PCR3 that is not all zero.
 
 A build with a signer role and without `spv` needs real attestation,
@@ -534,7 +534,13 @@ deployed.
   ([burn-destination.md](burn-destination.md)).
 - **Settlement ancestry.** `settlementData` must cite the deposit of every
   `TS_MINT` in the consignment, not only of the mints that fed the burned
-  units.
+  units. A consignment carries the whole lineage to genesis, so the mint
+  count only grows, and every later holder inherits it. A release can cite
+  only so many mints: `max_funds_out_call_data_bytes`, the frame and gRPC
+  limits, `GAS_TX_MAX_GAS_LIMIT` (each cited id costs gas in
+  `beforeFundsOut`) and the EVM transaction size. A burn above that is
+  refused after its units are burned, and it is never released. The backend
+  or wallet must count the lineage mints before a burn.
 - **Release route (contracts).** The Bridge release route for source chain
   827166 must use `RgbSettlementModule`. Only its `beforeFundsOut` checks that
   each cited deposit exists.
@@ -575,9 +581,18 @@ deployed.
   transaction that pays the user.
 - **Fee after the lock.** The mint transaction cannot change after the lock,
   and no fee bump is implemented. It must confirm at its original fee.
-- **Refill fee input.** A host that pays for a junk parent transaction can
-  make a refill destroy one right on its fee input. It cannot take a right.
-  The hourly refill limit bounds it ([mint-flow.md](mint-flow.md), section 8).
+- **Refill fee input.** A host that pays for one junk parent transaction can
+  chain refills on junk rights. Each destroys one real right on its fee
+  input, with fees from the enclave's Colored sats. It cannot take a right.
+  The hourly refill limit is in memory and per process, not a total: a full
+  mint wallet can lose its rights in about a day, faster after a relaunch or
+  with a second replica. Minting stops until the issuer sends new rights
+  ([mint-flow.md](mint-flow.md), section 8).
+- **SignBtc spending.** `SignBtc` has no total or rate limit. A compromised
+  host can submit the change again and again and turn the whole vanilla
+  balance into miner fees, at most `MAX_FEE_SATS` per signature. With a
+  non-zero `BTC_MAX_UNOWNED_SATS` it can also pay up to that budget to its own
+  address on each request ([mint-flow.md](mint-flow.md), section 7).
 - **Replay guard.** The EVM -> RGB guard is in memory and per enclave. A
   restart, its expiry or another replica lets a second request through. The
   parent proof is the bound: Bitcoin confirms at most one spend of the right.
@@ -596,7 +611,11 @@ deployed.
   rgb-lib checks the network, transaction IDs and confirmation depth against
   that trusted chain view ([burn flow](burn-flow.md#2-who-does-what)). These
   checks do not independently verify Bitcoin inclusion or headers.
-  `attest-verify` and `verify-launch` refuse this policy.
+  `attest-verify` and `verify-launch` refuse this policy. The stage profile
+  (`build/profiles/stage-signet.sh`) pins Arbitrum One mainnet
+  (`EVM_CHAIN_ID=42161`), so its burn signers sign real mainnet releases: a
+  compromised stage host can report forged burns and release up to the
+  stage Bridge's outflow limits. The stage token must have no market value.
 - **Test networks.** Testnet4 SPV is test-grade: a host can make
   min-difficulty blocks at almost no cost, and they count for depth and
   freshness. Run it with `BTC_RELAY_MODE=required` and a relay that applies

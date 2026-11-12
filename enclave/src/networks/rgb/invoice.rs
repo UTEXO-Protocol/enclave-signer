@@ -1,8 +1,8 @@
 //! The RGB recipient that an EVM deposit authorizes.
 //!
 //! `BridgeFundsIn.destinationAddress` holds the user invoice verbatim, in a
-//! log that the enclave verifies. The coordinator supplies the consignment,
-//! so only the invoice identifies the intended recipient.
+//! log that the enclave verifies. The coordinator supplies the mint, so only
+//! the invoice identifies the intended recipient.
 
 use std::str::FromStr;
 
@@ -14,7 +14,7 @@ use crate::networks::evm::events::BFI_MAX_DEST_ADDRESS_LEN as MAX_INVOICE_LEN;
 /// The `utxob:...` blinded seal that a verified deposit authorizes.
 ///
 /// A newtype, not a `String`. [`assert_recipient_authorized`] compares it with
-/// consignment seals, and a call site must not swap the two.
+/// the mint's recipient seals, and a call site must not swap the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedRecipient(String);
 
@@ -27,7 +27,7 @@ pub fn parse_authorized_recipient(destination_address: &str) -> Result<Authorize
     if trimmed.is_empty() {
         return Err(EnclaveError::CrossCheck(
             "BridgeFundsIn.destinationAddress is empty - the deposit names no RGB recipient to \
-             bind the consignment against"
+             bind the mint against"
                 .into(),
         ));
     }
@@ -47,14 +47,14 @@ pub fn parse_authorized_recipient(destination_address: &str) -> Result<Authorize
     match invoice.beneficiary.into_inner() {
         Beneficiary::BlindedSeal(seal) => Ok(AuthorizedRecipient(seal.to_string())),
         Beneficiary::WitnessVout(..) => Err(EnclaveError::CrossCheck(
-            "BridgeFundsIn.destinationAddress names a witness-vout beneficiary; the send-RGB \
+            "BridgeFundsIn.destinationAddress names a witness-vout beneficiary; the mint \
              recipient bind supports blinded seals only"
                 .into(),
         )),
     }
 }
 
-/// Requires exactly one confidential recipient leg, equal to the authorized seal.
+/// Requires exactly one blinded recipient leg, equal to the authorized seal.
 ///
 /// The amount bind pins the total, so a second leg would split the payment.
 pub fn assert_recipient_authorized(
@@ -65,14 +65,14 @@ pub fn assert_recipient_authorized(
 
     let [only] = seals else {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB consignment pays {} confidential recipient legs; exactly one is \
-             authorised by the deposit ({expected})",
+            "the mint pays {} blinded recipient legs; exactly one is authorised by the \
+             deposit ({expected})",
             seals.len()
         )));
     };
     if only != expected {
         return Err(EnclaveError::CrossCheck(format!(
-            "send-RGB recipient seal mismatch: the consignment pays {only}, but the on-chain \
+            "mint recipient seal mismatch: the mint pays {only}, but the on-chain \
              deposit authorised {expected} - refusing to sign a correct amount to the wrong \
              destination"
         )));
@@ -188,7 +188,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("2 confidential recipient legs"),
+            err.to_string().contains("2 blinded recipient legs"),
             "{err}"
         );
     }
@@ -197,8 +197,7 @@ mod tests {
     fn no_confidential_leg_at_all_is_refused() {
         let err = assert_recipient_authorized(&[], &blinded("utxob:real-recipient")).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("pays 0 confidential recipient legs"),
+            err.to_string().contains("pays 0 blinded recipient legs"),
             "{err}"
         );
     }
