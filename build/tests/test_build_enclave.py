@@ -60,7 +60,8 @@ class BuildArgumentsTests(unittest.TestCase):
         self.env = dict(os.environ)
         for key in ('RGB_ASSET_ID', 'PRIVATE_DEPS_DIR',
                     'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
-                    'STAGE_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
+                    'STAGE_GAS_TX_ALLOWED_SELECTORS', 'STAGE_MAINNET_RGB_ASSET_ID',
+                    'STAGE_MAINNET_TOKEN_CONTRACT', 'STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
                     'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_GAS_LIMIT', 'GAS_TX_MAX_FEE_PER_GAS',
                     'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
                     'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS, *MEMBER_INPUT_NAMES):
@@ -398,6 +399,74 @@ class BuildArgumentsTests(unittest.TestCase):
                     self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], inputs['STAGE_GAS_TX_ALLOWED_SELECTORS'])
                 else:
                     self.assertNotIn('GAS_TX_ALLOWED_TO', args)
+
+
+    def mainnet_inputs(self):
+        return dict(BUILD_PROFILE='stage-mainnet', STAGE_MAINNET_RGB_ASSET_ID='rgb:mainnet-asset',
+                    STAGE_MAINNET_TOKEN_CONTRACT='0x' + '44' * 20,
+                    STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS='0xd8220faf,0x8f6b3031')
+
+    def test_mainnet_requires_its_own_valid_inputs_before_docker(self):
+        cases = [(key, '') for key in self.mainnet_inputs() if key != 'BUILD_PROFILE'] + [
+            ('STAGE_MAINNET_RGB_ASSET_ID', 'rgb:asset\n'),
+            ('STAGE_MAINNET_TOKEN_CONTRACT', '0x' + '00' * 20),
+            ('STAGE_MAINNET_TOKEN_CONTRACT', '0x' + '44' * 20 + '\n'),
+            ('STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS', '0x1234'),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                inputs = dict(self.stage_inputs(), **self.mainnet_inputs())
+                inputs[key] = value
+                result = self.invoke('Dockerfile.enclave.burn', RGB_ASSET_ID='rgb:wrong', **inputs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(key, result.stderr)
+                self.assertFalse(self.argv.exists())
+
+    def test_mainnet_enforces_production_features_and_contracts_despite_caller_env(self):
+        for role in ('mint', 'burn'):
+            with self.subTest(role=role):
+                inputs = dict(self.stage_inputs(), **self.mainnet_inputs())
+                if role == 'mint':
+                    inputs.pop('STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS')
+                result = self.invoke(f'Dockerfile.enclave.{role}', **inputs,
+                                     ENCLAVE_FEATURES='vsock,allow-seed-import,mock-attestation',
+                                     **dict(MEASURED_PINS, EVM_CHAIN_ID='1'),
+                                     RGB_ASSET_ID='rgb:wrong', RUST_LOG='trace',
+                                     GAS_TX_ALLOWED_TO='0x' + '55' * 20,
+                                     GAS_TX_MAX_GAS_LIMIT='99999999',
+                                     GAS_TX_ALLOWED_SELECTORS='0x00000000',
+                                     SPV_MIN_CONFIRMATIONS='0', EVM_FINALITY_TAG='latest',
+                                     EVM_RPC_PATH='/v2/private', **KMS_PINS)
+                self.assertEqual(result.returncode, 42, result.stderr)
+                args = dict(arg.split('=', 1) for arg in self.captured_build_args())
+                self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,spv,{role}-signer')
+                self.assertEqual(args['BITCOIN_NETWORK'], 'bitcoin')
+                self.assertEqual(args['BTC_RELAY_MODE'], 'required')
+                self.assertEqual(args['EVM_CHAIN_ID'], '42161')
+                self.assertEqual(args['RGB_ASSET_ID'], inputs['STAGE_MAINNET_RGB_ASSET_ID'])
+                self.assertEqual(args['TOKEN_CONTRACT'], inputs['STAGE_MAINNET_TOKEN_CONTRACT'])
+                self.assertEqual(args['EVM_PROXY_CONTRACT_ADDRESS'],
+                                 '0x8ed92cd8c14b5ee2e006fcd7c24f000c87e72495')
+                self.assertEqual(args['FUNDS_IN_CONTRACT'],
+                                 '0xc16c969955343f0f7528bc0bccd09aaa7b5b4e34')
+                self.assertEqual(args['RUST_LOG'], 'debug,alloy_transport_http=off')
+                self.assertTrue(set(args).isdisjoint(MEMBER_INPUT_NAMES))
+                self.assertNotIn('SPV_MIN_CONFIRMATIONS', args)
+                self.assertNotIn('EVM_FINALITY_TAG', args)
+                if role == 'burn':
+                    self.assertEqual(args['GAS_TX_ALLOWED_TO'], args['EVM_PROXY_CONTRACT_ADDRESS'])
+                    self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], '0xd8220faf,0x8f6b3031')
+                    self.assertEqual(args['GAS_TX_MAX_GAS_LIMIT'], '3000000')
+                    self.assertEqual(args['GAS_TX_MAX_FEE_PER_GAS'], '1000000000')
+                    self.assertEqual(args['GAS_TX_MAX_VALUE_WEI'], '5000000000000000')
+                else:
+                    self.assertFalse(any(key.startswith('GAS_TX_') for key in args))
+
+    def test_mainnet_rejects_dev_recipe(self):
+        result = self.invoke('Dockerfile.enclave-dev.bfa', **self.mainnet_inputs())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('supports only mint and burn', result.stderr)
+        self.assertFalse(self.argv.exists())
 
 
 class ImageInputsTests(unittest.TestCase):
