@@ -118,7 +118,7 @@ jobs:
       # The check must fail, and fail on the guard, not on an unrelated error.
       - name: Assert release builds reject the dev features
         run: |
-          for feature in allow-seed-import mock-attestation allow-debug-pcrs; do
+          for feature in allow-seed-import mock-attestation allow-debug-pcrs attestation-verify/allow-debug-pcrs; do
             if cargo check -p utexo-bridge-enclave --release --features "$feature" 2>build.log; then
               echo "::error::release build unexpectedly SUCCEEDED with '$feature'"
               exit 1

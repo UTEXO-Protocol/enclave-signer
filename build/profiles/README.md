@@ -69,6 +69,12 @@ The log filter keeps debug logs but disables Alloy HTTP transport logs, which
 can include private RPC paths or response bodies. It does not enable Nitro
 debug mode, mock attestation or seed import.
 
+`EVM_CHAIN_ID=42161` is Arbitrum One mainnet, so the stage burn signers sign
+real mainnet releases. Without `spv` they trust the indexer, so a compromised
+stage host can report forged burns and release up to the stage Bridge's
+outflow limits. Keep the stage token without market value (see the "Builds
+without `spv`" limit in [tee-spec.md](../../docs/tee-spec.md#10-known-limits)).
+
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the
 connector. The recipe's other limits remain in effect, including `BTC_MAX_TOTAL_SATS=1000000`. Both stage roles require
 3 confirmations. Review these limits before publishing a release.

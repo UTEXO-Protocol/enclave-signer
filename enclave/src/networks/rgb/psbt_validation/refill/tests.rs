@@ -85,7 +85,7 @@ fn error_text<T: std::fmt::Debug>(result: Result<T>) -> String {
     result.expect_err("the refill must be refused").to_string()
 }
 
-// ===== the gate: G1, RR10, RR12, RR13 =====
+// ===== the gate: RR0, RR10, RR12, RR13 =====
 
 #[test]
 fn the_gate_accepts_a_refill_of_our_own_coins() {

@@ -58,7 +58,8 @@ pub enum AccountType {
     Colored,
 }
 
-/// HD wallet keys in memory. Secrets are in `SecretBox` (zeroize on drop).
+/// HD wallet keys in memory. Drop wipes the `SecretBox` fields and the account xprivs. Not wiped:
+/// the master xpriv and EVM keys that `from_seed` derives, and each `derive_btc_child` key.
 pub struct KeyManager {
     seed: SecretBox<[u8; 64]>,
     evm_secret: SecretBox<[u8; 32]>,

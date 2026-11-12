@@ -261,7 +261,7 @@ attest-verify \
     --expect-token-contract 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \
     --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
-    --expect-gas-tx-to 0x6711f1a319B37847fa0234181C34D883774c4951 \
+    --expect-gas-tx-to 0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
     --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>

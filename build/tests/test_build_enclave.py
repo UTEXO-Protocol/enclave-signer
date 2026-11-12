@@ -399,6 +399,11 @@ class ImageInputsTests(unittest.TestCase):
                 self.assertRegex(text, r'(?m)^\s*SPV_MIN_CONFIRMATIONS=3\b')
                 self.assertNotRegex(text, r'(?m)^ARG (EVM_FINALITY_TAG|SPV_MIN_CONFIRMATIONS)\b')
 
+    def test_the_burn_recipe_sends_gas_to_the_multisig_proxy(self):
+        # Every release calls the MultisigProxy, not the FundsIn contract.
+        text = (ROOT / 'build' / 'Dockerfile.enclave.burn').read_text()
+        self.assertRegex(text, r'(?m)^ARG GAS_TX_ALLOWED_TO=\$\{EVM_PROXY_CONTRACT_ADDRESS\}$')
+
     def test_eif_apt_uses_only_https_snapshots(self):
         for recipe in self.RECIPES:
             text = (ROOT / 'build' / recipe).read_text().replace('\\\n', ' ')

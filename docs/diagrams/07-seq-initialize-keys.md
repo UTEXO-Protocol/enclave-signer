@@ -47,7 +47,7 @@ sequenceDiagram
     Srv->>State: get_keys()
     State-->>Srv: KeyInfo
 
-    Note over Srv: tracing::info! evm_address, master_fingerprint,<br/>account_xpubs (public values only).<br/>The mnemonic is dropped here — its content lives<br/>only in the SecretBox(seed) from now on.
+    Note over Srv: tracing::info! evm_address, master_fingerprint,<br/>account_xpubs (public values only).<br/>The mnemonic is dropped here. The seed is kept<br/>in SecretBox(seed); the to_seed output, the master xpriv<br/>and the derived EVM keys are not wiped.
 
     Srv-->>PClient: InitializeKeyResponse{evm_address,<br/>master_fingerprint, account xpubs,<br/>evm_uncompressed_pub, evm_gas_tx pubkey + address,<br/>chain_id, bridge_contract, rgb_asset_id}
     PClient-->>Cli: print pubkeys
