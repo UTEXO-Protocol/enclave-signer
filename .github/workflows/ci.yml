@@ -50,7 +50,6 @@ jobs:
           components: rustfmt, clippy
           cache-name: light
           rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
-          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
           federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Test build and deployment scripts
@@ -142,7 +141,6 @@ jobs:
           components: clippy
           cache-name: parent
           rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
-          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
           federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Clippy (parent)
@@ -193,7 +191,6 @@ jobs:
           components: clippy
           cache-name: mint-signer
           rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
-          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
 
       # The features of the shipped image. `cargo test` below builds the code.
       - name: Clippy (mint image)
@@ -281,7 +278,6 @@ jobs:
           components: clippy
           cache-name: burn-signer
           rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
-          rgb-private-deps-token: ${{ secrets.RGB_PRIVATE_DEPS_TOKEN }}
 
       - name: Clippy (burn image)
         run: cargo clippy $ENCLAVE --features vsock,spv,burn-signer --all-targets -- -D warnings

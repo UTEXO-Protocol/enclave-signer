@@ -4,10 +4,9 @@ This crate contains the enclave wire protocol. Its local copy of the schema
 requires no credentials or private dependencies.
 
 Current caveat: the enclave takes rgb-lib from the private
-`UTEXO-Protocol/rgb-lib-bfa` mirror (deploy key `lib_key`). The RGB protocol
-crates are public. The build scripts require the token `rgb_deps_token` as
-well, so an enclave build needs both. That is a separate
-dependency; this crate stays credential-free.
+`UTEXO-Protocol/rgb-lib-bfa` mirror (deploy key `lib_key`), so an enclave
+build needs that key; the RGB protocol crates are public. rgb-lib is a
+separate dependency; this crate stays credential-free.
 
 This is a *slice*, not a copy: only the `enclave` protobuf package is here.
 The bridge / node / orchestrator / parent / signer packages are not vendored —

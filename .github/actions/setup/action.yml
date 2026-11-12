@@ -11,9 +11,6 @@ inputs:
   rgb-lib-bfa-deploy-key:
     description: Deploy key of the rgb-lib mirror.
     required: true
-  rgb-private-deps-token:
-    description: Token of the RGB protocol crate mirrors.
-    required: true
   federated-signer-proto-deploy-key:
     description: Deploy key of the private proto repo. Empty skips the SSH alias.
     default: ""
@@ -37,7 +34,6 @@ runs:
       shell: bash
       env:
         RGB_LIB_BFA_DEPLOY_KEY: ${{ inputs.rgb-lib-bfa-deploy-key }}
-        RGB_PRIVATE_DEPS_TOKEN: ${{ inputs.rgb-private-deps-token }}
       run: sh build/ci-rgb-lib-access.sh
 
     # The parent's private proto dep uses the SSH Host alias

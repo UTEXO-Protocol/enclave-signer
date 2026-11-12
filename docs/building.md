@@ -12,15 +12,14 @@ image measurements reproducible. Launching an image is in
   - rgb-lib comes from the private mirror `UTEXO-Protocol/rgb-lib-bfa`,
     through the `github-rgb-lib` SSH alias (deploy key `lib_key`).
   - The RGB protocol crates that rgb-lib pins are public. They come from the
-    `[patch.crates-io]` of `Cargo.toml` and `parent/Cargo.toml`. The build
-    scripts require the `rgb_deps_token` secret too
-    (`build/map-rgb-mirrors.sh`), although it maps no URL.
+    `[patch.crates-io]` of `Cargo.toml` and `parent/Cargo.toml` and need no
+    credential.
   - The parent also needs `federated-signer-proto`, through the
-    `github-federated-signer` SSH alias.
+    `github-federated-signer` SSH alias (deploy key `federated_key`).
   - CI wires these in `.github/workflows/ci.yml` (secrets
-    `RGB_LIB_BFA_DEPLOY_KEY`, `RGB_PRIVATE_DEPS_TOKEN` and
-    `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). `build/with-private-deps.sh` runs
-    cargo with that access and keeps the credentials out of the build layers.
+    `RGB_LIB_BFA_DEPLOY_KEY` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
+    `build/with-private-deps.sh` runs cargo with that access and keeps the
+    credentials out of the build layers.
 - **Docker with Buildx, `nitro-cli` and `jq`** for an EIF. Any x86_64 Linux
   host with Docker can build an EIF and read its PCRs. Nitro hardware is
   needed only to run it.
@@ -110,9 +109,9 @@ fails the build, not the launch.
 - `KMS_ALLOWED_ACCOUNT_IDS` (mint only): the 12-digit AWS account ids of the
   seed KMS key, comma-separated. The helper refuses a missing or malformed
   list.
-- The secrets `lib_key` and `rgb_deps_token`, from `RGB_LIB_BFA_DEPLOY_KEY`
-  and `RGB_PRIVATE_DEPS_TOKEN` or from files in `PRIVATE_DEPS_DIR`. They are
-  BuildKit secrets: never in a layer, the image or PCR0.
+- The secret `lib_key`, from `RGB_LIB_BFA_DEPLOY_KEY` or from the file
+  `lib_key` in `PRIVATE_DEPS_DIR`. It is a BuildKit secret: never in a layer,
+  the image or PCR0.
 - Optional measured overrides. When `ENCLAVE_FEATURES`, `BITCOIN_NETWORK`,
   `BTC_RELAY_MODE`, a bridge pin, a `GAS_TX_*` setting or `RUST_LOG` is set
   in the environment, the helper passes it to the recipe, and PCR0 changes.
@@ -190,16 +189,15 @@ without rebuilding or deploying them.
 ## Parent image
 
 ```bash
-# Both values must already be exported; neither is a build argument.
+# RGB_LIB_BFA_DEPLOY_KEY must already be exported; it is not a build argument.
 docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
-  --secret id=rgb_deps_token,env=RGB_PRIVATE_DEPS_TOKEN \
   --secret id=federated_key,src=<absolute-path> \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-`make build_parent*` and `make build_enclave*` pass `lib_key` and
-`rgb_deps_token` by default. A `DOCKER_AUTH_ARGS` value replaces that
-default, so to pass the parent's deploy key set all three secrets. The
+`make build_parent*` and `make build_enclave*` pass `lib_key` by default. A
+`DOCKER_AUTH_ARGS` value replaces that default, so to pass the parent's
+deploy key set both secrets. The
 `insecure-dev` parent feature (plaintext gRPC with no client check) is for
 dev images only (`make build_parent_dev`); a release build with it does not
 compile.

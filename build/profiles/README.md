@@ -43,8 +43,8 @@ release. Supply the approved values through `cli set-endpoints` after launch,
 keeping each provider's API-key path in a restricted `EVM_RPC_PATH_FILE`.
 Rotating that file requires a new launch, not a new image.
 
-Provide the `RGB_LIB_BFA_DEPLOY_KEY`, `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` and
-`RGB_PRIVATE_DEPS_TOKEN` secrets. Keep credentials out of build arguments.
+Provide the `RGB_LIB_BFA_DEPLOY_KEY` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`
+secrets. Keep credentials out of build arguments.
 
 ## Build
 

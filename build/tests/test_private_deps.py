@@ -14,8 +14,7 @@ ALIASES = {
     'github-federated-signer': 'federated_key',
 }
 DEPLOY_KEY = 'fixture-private-key-not-a-real-credential'
-MIRROR_TOKEN = 'fixture-mirror-token-not-a-real-credential'
-# The repos map-rgb-mirrors.sh maps to UTEXO-Protocol/<repo>-s-bfa. No lock entry uses them.
+# RGB protocol crate checkouts the cargo cache leaves out, as it does rgb-lib-bfa.
 PROTOCOL_REPOS = ('rgb-consensus', 'rgb-ops', 'rgb-api', 'rgb-schemas')
 
 
@@ -31,9 +30,8 @@ class PrivateDepsTests(unittest.TestCase):
         scanner = self.bin / 'ssh-keyscan'
         scanner.write_text('#!/bin/sh\nprintf "github.com ssh-ed25519 test-host-key\\n"\n')
         scanner.chmod(0o700)
-        # No system git helper may answer for the mirrors on a dev machine.
         self.env = dict(os.environ, PRIVATE_DEPS_DIR=str(self.secrets),
-                        PATH=f'{self.bin}:{os.environ["PATH"]}', GIT_CONFIG_NOSYSTEM='1')
+                        PATH=f'{self.bin}:{os.environ["PATH"]}')
 
     def run_auth(self, scope, code):
         probe = self.base / 'probe.py'
@@ -50,11 +48,9 @@ class PrivateDepsTests(unittest.TestCase):
     def keys(self):
         for key in ALIASES.values():
             self.secret(key, f'{DEPLOY_KEY}\n')
-        self.secret('rgb_deps_token', f'{MIRROR_TOKEN}\n')
 
     def lib_key(self):
         self.secret('lib_key', f'{DEPLOY_KEY}\n')
-        self.secret('rgb_deps_token', f'{MIRROR_TOKEN}\n')
 
     def test_each_ssh_alias_selects_only_its_repo_key(self):
         self.keys()
@@ -87,17 +83,13 @@ print(os.environ['GIT_CONFIG_GLOBAL'])
                     self.assertIn('rgb-lib-bfa', result.stderr)
                     self.assertEqual(result.stdout, '')
 
-    def test_the_mirror_token_goes_to_the_mirrors_only(self):
-        self.keys()
-        result = self.run_auth('enclave', '''
-for url in ('https://github.com/UTEXO-Protocol/rgb-lib-bfa.git',
-            'https://github.com/rgb-protocol/rgb-strict-types',
-            'https://example.com/UTEXO-Protocol/rgb-ops-s-bfa.git'):
-    filled = subprocess.run(['git', 'credential', 'fill'], input=f'url={url}\\n\\n',
-                            capture_output=True, text=True)
-    assert 'password=' not in filled.stdout, url
-''')
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_lib_key_alone_starts_either_scope(self):
+        self.lib_key()
+        for scope in ('enclave', 'parent'):
+            with self.subTest(scope=scope):
+                result = self.run_auth(scope, 'print("started")')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, 'started\n')
 
     def test_enclave_scope_has_only_rgb_lib_key(self):
         self.keys()
@@ -120,19 +112,17 @@ assert os.environ['PRIVATE_DEPS_DIR'] + '/federated_key' not in config2, config2
     def test_prepare_keys_preserves_multiline_values_and_restricts_permissions(self):
         value = "fixture first line\nfixture second line"
         env = dict(self.env, FEDERATED_SIGNER_PROTO_DEPLOY_KEY=value,
-                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY, RGB_PRIVATE_DEPS_TOKEN=MIRROR_TOKEN)
+                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY)
         script = ['sh', str(ROOT / 'build/prepare-private-deps.sh')]
         result = subprocess.run(script, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, '')
         self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o700)
-        for key, content in (('federated_key', value + '\n'), ('lib_key', DEPLOY_KEY + '\n'),
-                             ('rgb_deps_token', MIRROR_TOKEN + '\n')):
+        for key, content in (('federated_key', value + '\n'), ('lib_key', DEPLOY_KEY + '\n')):
             path = self.secrets / key
             self.assertEqual(path.read_text(), content)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        for name in ('FEDERATED_SIGNER_PROTO_DEPLOY_KEY', 'RGB_LIB_BFA_DEPLOY_KEY',
-                     'RGB_PRIVATE_DEPS_TOKEN'):
+        for name in ('FEDERATED_SIGNER_PROTO_DEPLOY_KEY', 'RGB_LIB_BFA_DEPLOY_KEY'):
             with self.subTest(missing=name):
                 result = subprocess.run(script, env=dict(env, **{name: ''}),
                                         capture_output=True, text=True)
@@ -140,14 +130,11 @@ assert os.environ['PRIVATE_DEPS_DIR'] + '/federated_key' not in config2, config2
                 self.assertIn(f'Missing {name}', result.stderr)
                 self.assertNotIn(value, result.stdout + result.stderr)
                 self.assertNotIn(DEPLOY_KEY, result.stdout + result.stderr)
-                self.assertNotIn(MIRROR_TOKEN, result.stdout + result.stderr)
 
     def test_ci_access_adds_deploy_key_to_ssh(self):
         home = self.base / 'home'
         home.mkdir()
-        env = dict(self.env, HOME=str(home),
-                   GIT_CONFIG_GLOBAL=str(home / '.gitconfig'), GIT_CONFIG_NOSYSTEM='1',
-                   RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY, RGB_PRIVATE_DEPS_TOKEN=MIRROR_TOKEN)
+        env = dict(self.env, HOME=str(home), RGB_LIB_BFA_DEPLOY_KEY=DEPLOY_KEY)
         script = ['sh', str(ROOT / 'build/ci-rgb-lib-access.sh')]
         result = subprocess.run(script, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -161,18 +148,16 @@ assert os.environ['PRIVATE_DEPS_DIR'] + '/federated_key' not in config2, config2
         self.assertIn('Host github-rgb-lib', ssh_config)
         self.assertIn('IdentityFile', ssh_config)
         self.assertIn('key_lib', ssh_config)
-        for name in ('RGB_LIB_BFA_DEPLOY_KEY', 'RGB_PRIVATE_DEPS_TOKEN'):
-            result = subprocess.run(script, env=dict(env, **{name: ''}),
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(f'Missing {name}', result.stderr)
+        result = subprocess.run(script, env=dict(env, RGB_LIB_BFA_DEPLOY_KEY=''),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing RGB_LIB_BFA_DEPLOY_KEY', result.stderr)
 
     def test_every_dockerfile_builds_through_its_secret_scope(self):
         for path in (ROOT / 'build').glob('Dockerfile*'):
             with self.subTest(dockerfile=path.name):
                 data = path.read_text()
                 self.assertIn('--mount=type=secret,id=lib_key', data)
-                self.assertIn('--mount=type=secret,id=rgb_deps_token', data)
                 self.assertNotIn('RUN cargo build', data)
                 self.assertIn('git ca-certificates', data.split('COPY . /build/')[0])
                 if path.name == 'Dockerfile.parent':
