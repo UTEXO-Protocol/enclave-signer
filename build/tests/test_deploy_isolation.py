@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -40,12 +41,16 @@ class DeployIsolationTests(unittest.TestCase):
         # Remap only filesystem roots. All deployment decisions and commands
         # run unchanged, including the installed units and verification code.
         self.script.write_text(HOST.read_text().replace('/etc/', f'{self.etc}/')
-                               .replace('/usr/local/', f'{self.local}/'))
-        for cid in (16, 18, 20):
+                               .replace('/usr/local/', f'{self.local}/')
+                               .replace('st.st_uid != 0', f'st.st_uid != {os.getuid()}'))
+        for cid in (16, 18, 20, 24):
             tls = self.etc / f'utexo/tls/{cid}'
             tls.mkdir(parents=True)
             for name in ('server.pem', 'server.key', 'client-ca.pem', 'clients.acl'):
                 (tls / name).write_text('fixture\n')
+        proxy_env = self.etc / 'nitro_enclaves/vsock-proxy-kms.env'
+        proxy_env.parent.mkdir(parents=True)
+        proxy_env.write_text('KMS_REGION=eu-central-1\n')
         self.env = dict(
             PATH=f'{self.bin}:{os.environ["PATH"]}', FAKE_ROOT=str(self.base),
             GIT_SHA='a' * 40, BUCKET='fixture', AWS_REGION='eu-central-1',
@@ -72,10 +77,24 @@ if name == 'runuser':
 elif name == 'su':
     os.execvp('sh', ['sh', '-c', args[args.index('-c') + 1]])
 elif name == 'aws':
+    if args[0] == 's3api':
+        if os.environ.get('S3_DENIED') == '1': sys.exit(1)
+        if args[1] == 'list-objects-v2':
+            exists = os.environ.get('SEED_EXISTS', '1') == '1'
+            key = args[args.index('--prefix') + 1]
+            print(json.dumps({'Contents': [{'Key': key}] if exists else []}))
+        else:
+            if os.environ.get('S3_HEAD_DENIED') == '1': sys.exit(1)
+            print(json.dumps({'ContentLength': int(os.environ.get('SEED_SIZE', '512'))}))
+        sys.exit(0)
     shutil.copyfile(root / 'source' / pathlib.Path(args[2]).name, args[3])
 elif name == 'install':
     if '-d' in args:
-        for arg in args[1:]: pathlib.Path(arg).mkdir(parents=True, exist_ok=True)
+        dirs = args[1:]
+        if '-m' in dirs:
+            pos = dirs.index('-m')
+            dirs = dirs[:pos] + dirs[pos + 2:]
+        for arg in dirs: pathlib.Path(arg).mkdir(parents=True, exist_ok=True)
     else:
         shutil.copyfile(args[-2], args[-1])
         os.chmod(args[-1], int(args[args.index('-m') + 1], 8))
@@ -86,6 +105,7 @@ elif name == 'nitro-cli':
     elif args[0] == 'describe-enclaves':
         print(json.dumps(state['enclaves']))
 elif name == 'systemctl':
+    if args[0] == 'is-active' and os.environ.get('PROXY_DOWN') == '1': sys.exit(1)
     for unit in args[1:]:
         if '@' not in unit: continue
         cid = int(unit.split('@')[1].removesuffix('.service'))
@@ -121,7 +141,7 @@ elif name == 'ss':
                      'systemd-tmpfiles', 'sleep'):
             (self.bin / name).symlink_to(stub)
 
-    def deploy(self, cid=18, role='burn', sha='a' * 40, **extra):
+    def deploy(self, cid=18, role='burn', sha='a' * 40, umask=None, **extra):
         files = {
             f'utexo-bridge-enclave-{role}.eif': f'image-{role}-{sha}',
             'utexo-bridge-parent': f'parent-{sha}',
@@ -139,8 +159,20 @@ elif name == 'ss':
         ca, path = self.base / f'ca-{cid}', self.base / f'path-{cid}'
         ca.write_text(f'CA for {cid}')
         path.write_text(f'/private/provider-{cid}')
+        if role == 'mint':
+            defaults = dict(
+                KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/12345678-1234-1234-1234-123456789012',
+                KMS_REGION='eu-central-1', KMS_SEED_ID='fixture-mint',
+                KMS_S3_BUCKET='fixture-seeds', KMS_S3_KEY='mint/seed.kms',
+                KMS_EXPECTED_EVM_ADDRESS='0x' + '11' * 20,
+            )
+            extra = dict(defaults, **extra)
+        command = ['bash', str(self.script)]
+        if umask is not None:
+            command = ['bash', '-c', 'umask "$1"; exec bash "$2"', 'deploy-test',
+                       umask, str(self.script)]
         return subprocess.run(
-            ['bash', str(self.script)], text=True, capture_output=True, timeout=60,
+            command, text=True, capture_output=True, timeout=60,
             env=dict(self.env, ENCLAVE_CID=str(cid), SIGNER_ROLE=role, GIT_SHA=sha,
                      EVM_RPC_TLS_CA_DER_FILE=str(ca), EVM_RPC_PATH_FILE=str(path), **extra))
 
@@ -202,6 +234,26 @@ elif name == 'ss':
         self.assert_success(self.deploy(18, ENCLAVE_DEBUG_MODE='1', TARGET_PCR='0' * 96))
         self.assertEqual(sorted(json.loads(self.state.read_text())['parents']), [16, 18])
 
+    def test_restrictive_umask_keeps_control_directories_traversable(self):
+        # Use the real install command so intermediate-directory permissions
+        # follow the host's filesystem behavior rather than the tool stub.
+        (self.bin / 'install').unlink()
+        # The developer machine need not have an ubuntu user or root access.
+        # Only omit ownership switches; preserve real mode/umask handling.
+        (self.bin / 'install').write_text(
+            '#!/usr/bin/env python3\nimport os, sys\n'
+            'args = iter(sys.argv[1:]); kept = []\n'
+            'for arg in args:\n'
+            '    if arg in ("-o", "-g"): next(args)\n'
+            '    else: kept.append(arg)\n'
+            f'os.execv({shutil.which("install")!r}, ["install"] + kept)\n')
+        (self.bin / 'install').chmod(0o755)
+        (self.local / 'lib').mkdir(mode=0o755)
+        self.assert_success(self.deploy(18, umask='077'))
+        for directory in (self.local / 'lib', self.local / 'lib/utexo',
+                          self.local / 'lib/utexo/18'):
+            self.assertEqual(directory.stat().st_mode & 0o005, 0o005, str(directory))
+
     def test_parent_timeout_is_written_for_only_the_selected_cid(self):
         self.assert_success(self.deploy(16, 'mint'))
         peer = self.etc / 'utexo/parent-16.env'
@@ -243,6 +295,122 @@ elif name == 'ss':
                 result = self.deploy(18, **mode)
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(json.loads(self.state.read_text())['parents'], [16])
+
+    def assert_mint_rejected_without_mutation(self, message, **extra):
+        before = self.snapshots()
+        state = self.state.read_bytes()
+        self.calls.write_text('')
+        result = self.deploy(24, 'mint', **extra)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(message, result.stdout + result.stderr)
+        self.assertEqual(self.snapshots(), before)
+        self.assertEqual(self.state.read_bytes(), state)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        for name, args in calls:
+            self.assertFalse(name == 'systemctl' and args[0] in ('stop', 'restart', 'start'), calls)
+            self.assertFalse(name == 'aws' and args[0] != 's3api', calls)
+            self.assertNotIn(name, ('install', 'usermod', 'groupadd'), calls)
+
+    def test_mint_requires_all_custody_fields_before_changing_a_live_host(self):
+        self.assert_success(self.deploy(18))
+        for name in ('KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_S3_BUCKET', 'KMS_S3_KEY'):
+            with self.subTest(name=name):
+                self.assert_mint_rejected_without_mutation(name, **{name: ''})
+
+    def test_mint_recovery_requires_approved_pin(self):
+        for pin in ('', '0x' + '00' * 20, '0x123', '0x' + '11' * 20 + '\n'):
+            self.assert_mint_rejected_without_mutation('recovery requires', KMS_EXPECTED_EVM_ADDRESS=pin)
+
+    def test_invalid_custody_values_are_rejected(self):
+        for name, value in (
+            ('KMS_REGION', 'eu-west-1'),
+            ('KMS_KEY_ARN', 'arn:aws:kms:eu-central-1:123456789012:alias/test'),
+            ('KMS_SEED_ID', 'bad\nSIGNER_ROLE=burn'),
+            ('KMS_S3_KEY', 'seed$(touch /tmp/unexpected)'),
+            ('KMS_S3_BUCKET', 'bad bucket'),
+            ('MINT_MODE', 'automatic'),
+        ):
+            self.assert_mint_rejected_without_mutation('', **{name: value})
+
+    def test_mint_checks_proxy_and_read_only_storage_prerequisites(self):
+        for settings, message in (
+            ({'PROXY_DOWN': '1'}, 'KMS proxy'),
+            ({'S3_DENIED': '1'}, 'cannot inspect seed'),
+            ({'SEED_EXISTS': '0'}, 'recovery seed object is absent'),
+            ({'S3_HEAD_DENIED': '1'}, 'not readable'),
+            ({'SEED_SIZE': '0'}, 'invalid ciphertext size'),
+            ({'SEED_SIZE': '6145'}, 'invalid ciphertext size'),
+            ({'MINT_MODE': 'bootstrap', 'KMS_EXPECTED_EVM_ADDRESS': ''}, 'seed object exists'),
+            ({'MINT_MODE': 'bootstrap'}, 'bootstrap requires an empty address'),
+        ):
+            with self.subTest(settings=settings):
+                self.assert_mint_rejected_without_mutation(message, **settings)
+
+    def test_mint_cid24_bootstrap_and_recovery_preserve_burn_and_write_custody_config(self):
+        self.assert_success(self.deploy(16, 'burn'))
+        burn = self.etc / 'utexo/parent-16.env'
+        before = burn.read_bytes()
+        self.assertNotIn(b'KMS_', before)
+        self.assert_success(self.deploy(24, 'mint', MINT_MODE='bootstrap',
+                                       KMS_EXPECTED_EVM_ADDRESS='', SEED_EXISTS='0'))
+        cfg = self.config(24)
+        self.assertEqual(cfg['KMS_EXPECTED_EVM_ADDRESS'], '')
+        parent = (self.etc / 'utexo/parent-24.env').read_text()
+        for line in ('GRPC_PORT=50055', 'HEALTH_PORT=50065', 'AWS_REGION=eu-central-1',
+                     'KMS_SEED_ID=fixture-mint', 'KMS_S3_BUCKET=fixture-seeds',
+                     'KMS_S3_KEY=mint/seed.kms', 'KMS_ALLOWED_CIDS=24'):
+            self.assertIn(line + '\n', parent)
+        self.assert_success(self.deploy(24, 'mint'))
+        self.assertEqual(self.config(24)['KMS_EXPECTED_EVM_ADDRESS'], '0x' + '11' * 20)
+        self.assertEqual(burn.read_bytes(), before)
+        self.assertEqual(sorted(json.loads(self.state.read_text())['parents']), [16, 24])
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        for name, args in calls:
+            if name == 'aws' and args[0] != 's3':
+                self.assertEqual(args[0], 's3api')
+                self.assertIn(args[1], ('list-objects-v2', 'head-object'))
+
+    def test_second_mint_broker_is_rejected_before_peer_is_changed(self):
+        self.assert_success(self.deploy(16, 'mint'))
+        self.assert_mint_rejected_without_mutation('one Mint per host')
+
+    def test_burn_rejects_custody_configuration(self):
+        result = self.deploy(KMS_S3_BUCKET='fixture-seeds')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('burn deployment must not', result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def write_mint_config(self):
+        cfg = self.base / 'mint.json'
+        data = dict(signer_role='mint', enclave_cid=24, settings=dict(
+            KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/12345678-1234-1234-1234-123456789012',
+            KMS_REGION='eu-central-1', KMS_SEED_ID='from-json',
+            KMS_EXPECTED_EVM_ADDRESS='0x' + '22' * 20,
+            KMS_S3_BUCKET='json-seeds', KMS_S3_KEY='mint/json.kms'))
+        cfg.write_text(json.dumps(data))
+        cfg.chmod(0o600)
+        return cfg, data
+
+    def test_json_config_reaches_both_enclave_and_parent(self):
+        cfg, _ = self.write_mint_config()
+        self.assert_success(self.deploy(24, 'mint', DEPLOY_CONFIG_FILE=str(cfg)))
+        self.assertEqual(self.config(24)['KMS_SEED_ID'], 'from-json')
+        parent = (self.etc / 'utexo/parent-24.env').read_text()
+        self.assertIn('KMS_SEED_ID=from-json\n', parent)
+        self.assertIn('KMS_S3_KEY=mint/json.kms\n', parent)
+
+    def test_json_cannot_retarget_deploy_or_execute_shell(self):
+        for mutation in ('role', 'cid', 'unknown', 'shell', 'writable', 'missing', 'duplicate'):
+            cfg, data = self.write_mint_config()
+            if mutation == 'role': data['signer_role'] = 'burn'
+            if mutation == 'cid': data['enclave_cid'] = 16
+            if mutation == 'unknown': data['settings']['GIT_SHA'] = 'b' * 40
+            if mutation == 'shell': data['settings']['KMS_SEED_ID'] = '$(id)'
+            if mutation == 'missing': del data['settings']['KMS_KEY_ARN']
+            cfg.write_text(json.dumps(data))
+            if mutation == 'writable': cfg.chmod(0o666)
+            if mutation == 'duplicate': cfg.write_text('{"signer_role":"mint","signer_role":"burn"}')
+            self.assert_mint_rejected_without_mutation('', DEPLOY_CONFIG_FILE=str(cfg))
 
     def test_installed_units_and_wrappers_match_the_standalone_files(self):
         for service in ('enclave', 'parent'):

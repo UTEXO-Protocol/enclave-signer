@@ -3,7 +3,7 @@
 # signer role (SIGNER_ROLE=mint or burn).
 # Verify checksums and PCRs before starting the services.
 # Start one enclave on CID 16 and Parent port 50051 by default.
-# Set ENCLAVE_CID=18 or 20 to deploy one of the other supported CIDs.
+# Set ENCLAVE_CID=18, 20 or 24 to deploy one of the other supported CIDs.
 #
 # Optional chain endpoints, set on each enclave at start:
 #   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
@@ -19,7 +19,11 @@
 # source leaves header sync unconfigured. The parent still starts.
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
-#   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
+#   KMS_EXPECTED_EVM_ADDRESS=<approved 0x address for recovery>
+#   KMS_S3_BUCKET=<seed bucket in KMS_REGION> KMS_S3_KEY=<exact object key>
+#   MINT_MODE=recovery (default) or explicit bootstrap for an absent object.
+# DEPLOY_CONFIG_FILE optionally loads approved per-CID JSON (see docs/mint-release.md).
+# Mint requires the matching KMS proxy provisioned before deployment.
 # ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
 # (docs/runtime-limits.md). The script writes it into enclave-<CID>.env. It stops
 # before it changes anything when that file exists and ubuntu cannot read it.
@@ -38,6 +42,61 @@
 #
 # Keep the embedded service files in sync with deploy/systemd/.
 set -euo pipefail
+
+# Optional operator-provisioned per-CID JSON. Never source a configuration file
+# as root: parse a fixed allowlist, reject shell syntax, and bind it to the target.
+DEPLOY_CONFIG_FILE="${DEPLOY_CONFIG_FILE:-}"
+if [ -n "$DEPLOY_CONFIG_FILE" ]; then
+  CONFIG_VALUES=$(python3 - "$DEPLOY_CONFIG_FILE" "${SIGNER_ROLE:-}" "${ENCLAVE_CID:-16}" <<'PYCONFIG'
+import json, os, re, stat, sys
+path, role, cid = sys.argv[1:]
+allowed = {
+    'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
+    'KMS_S3_BUCKET', 'KMS_S3_KEY', 'ELECTRUM_URL', 'HEADER_ELECTRUM_URL',
+    'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_PATH_FILE', 'ENCLAVE_LIMITS_FILE',
+    'ENCLAVE_CPU_COUNT', 'ENCLAVE_MEMORY', 'GRPC_REQUEST_TIMEOUT_SECS',
+    'GRPC_MAX_CONCURRENT_SIGN',
+}
+try:
+    if not os.path.isabs(path):
+        raise ValueError('path must be absolute')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+            raise ValueError('file must be regular, root-owned, not group/world writable')
+        def unique(pairs):
+            result = {}
+            for k, v in pairs:
+                if k in result:
+                    raise ValueError('duplicate key')
+                result[k] = v
+            return result
+        data = json.load(f, object_pairs_hook=unique)
+    if set(data) != {'signer_role', 'enclave_cid', 'settings'}:
+        raise ValueError('expected signer_role, enclave_cid and settings')
+    if data['signer_role'] != role or str(data['enclave_cid']) != cid:
+        raise ValueError('role/CID does not match deployment target')
+    settings = data['settings']
+    if not isinstance(settings, dict) or set(settings) - allowed:
+        raise ValueError('unknown setting')
+    for key, value in settings.items():
+        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_./:@%+=,~\[\]-]*', value):
+            raise ValueError('settings must be plain single-line strings without shell syntax')
+    for key, value in settings.items():
+        print(key + '\t' + value)
+except (OSError, ValueError, TypeError) as e:
+    sys.exit('invalid DEPLOY_CONFIG_FILE: ' + str(e))
+PYCONFIG
+  ) || exit 1
+  # A selected file is the complete custody configuration; never fill gaps
+  # with a stale KMS environment inherited by the caller.
+  unset KMS_KEY_ARN KMS_REGION KMS_SEED_ID KMS_EXPECTED_EVM_ADDRESS KMS_S3_BUCKET KMS_S3_KEY
+  while IFS=$'\t' read -r name value; do
+    [ -z "$name" ] || printf -v "$name" '%s' "$value"
+  done <<< "$CONFIG_VALUES"
+  unset CONFIG_VALUES
+fi
 
 GIT_SHA="${GIT_SHA:?GIT_SHA required (40-hex commit)}"
 [[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "GIT_SHA must be a 40-hex commit" >&2; exit 1; }
@@ -92,9 +151,33 @@ KMS_KEY_ARN="${KMS_KEY_ARN:-}"
 KMS_REGION="${KMS_REGION:-}"
 KMS_SEED_ID="${KMS_SEED_ID:-}"
 KMS_EXPECTED_EVM_ADDRESS="${KMS_EXPECTED_EVM_ADDRESS:-}"
-if [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID" ] \
-  && { [ -z "$KMS_KEY_ARN" ] || [ -z "$KMS_REGION" ] || [ -z "$KMS_SEED_ID" ]; }; then
-  echo "KMS_KEY_ARN, KMS_REGION and KMS_SEED_ID go together" >&2
+KMS_S3_BUCKET="${KMS_S3_BUCKET:-}"
+KMS_S3_KEY="${KMS_S3_KEY:-}"
+# Recovery is the safe default. Bootstrap must be explicitly requested and
+# still requires an absent S3 object; deployment never calls init itself.
+MINT_MODE="${MINT_MODE:-recovery}"
+if [ "$SIGNER_ROLE" = mint ]; then
+  for name in KMS_KEY_ARN KMS_REGION KMS_SEED_ID KMS_S3_BUCKET KMS_S3_KEY; do
+    [ -n "${!name}" ] || { echo "$name required for mint before deployment" >&2; exit 1; }
+  done
+  [[ "$KMS_REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ && "$KMS_REGION" != cn-* && "$KMS_REGION" != us-iso* ]] \
+    && [[ "$KMS_KEY_ARN" =~ ^arn:aws:kms:$KMS_REGION:[0-9]{12}:key/([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}|mrk-[a-fA-F0-9]{32})$ ]] \
+    || { echo "KMS key ARN must name a key in KMS_REGION (commercial AWS)" >&2; exit 1; }
+  [[ "$KMS_SEED_ID" =~ ^[A-Za-z0-9._-]{1,128}$ ]] \
+    && [[ "$KMS_S3_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] \
+    && [[ "$KMS_S3_KEY" =~ ^[A-Za-z0-9._/-]{1,1024}$ ]] \
+    || { echo "invalid KMS seed/storage setting" >&2; exit 1; }
+  case "$MINT_MODE" in
+    bootstrap)
+      [ -z "$KMS_EXPECTED_EVM_ADDRESS" ] || { echo "bootstrap requires an empty address pin" >&2; exit 1; } ;;
+    recovery)
+      [[ "$KMS_EXPECTED_EVM_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] \
+        && [[ ! "$KMS_EXPECTED_EVM_ADDRESS" =~ ^0x0{40}$ ]] \
+        || { echo "recovery requires approved nonzero KMS_EXPECTED_EVM_ADDRESS" >&2; exit 1; } ;;
+    *) echo "MINT_MODE must be bootstrap or recovery" >&2; exit 1 ;;
+  esac
+elif [ -n "$KMS_KEY_ARN$KMS_REGION$KMS_SEED_ID$KMS_EXPECTED_EVM_ADDRESS$KMS_S3_BUCKET$KMS_S3_KEY" ]; then
+  echo "burn deployment must not configure a KMS seed broker" >&2
   exit 1
 fi
 # The path goes into the enclave env file and a shell command below, so it has only
@@ -108,8 +191,8 @@ fi
 # ENCLAVE_CID when an operator wants another enclave.
 ENCLAVE_CID="${ENCLAVE_CID:-16}"
 case "$ENCLAVE_CID" in
-  16|18|20) ;;
-  *) echo "ENCLAVE_CID must be 16, 18 or 20, got '$ENCLAVE_CID'" >&2; exit 1 ;;
+  16|18|20|24) ;;
+  *) echo "ENCLAVE_CID must be 16, 18, 20 or 24, got '$ENCLAVE_CID'" >&2; exit 1 ;;
 esac
 CIDS=("$ENCLAVE_CID")
 # Artifacts and launch files belong to one CID. A peer's next restart must use
@@ -162,13 +245,13 @@ if [ "$HELD_MIB" -lt "$POOL_NEED" ]; then
   echo "the kernel holds $HELD_MIB MiB of hugepages in $NITRO_HUGEPAGES_DIR, and one enclave of $ENCLAVE_MEMORY MiB needs $POOL_NEED MiB. The allocator applies memory_mib when its service starts, and a restart of that service restarts every enclave of this host (docs/operations.md)." >&2
   exit 1
 fi
-declare -A PORT=([16]=50051 [18]=50052 [20]=50053)
+declare -A PORT=([16]=50051 [18]=50052 [20]=50053 [24]=50055)
 # Readiness probe (`GET /health`), one per parent. Loopback-only. This script is
 # a cold deploy that ends before identity bootstrap, so it only provisions the
 # port; the rolling restart in `devops` is what polls it to hold the 2-of-3
 # quorum. Named HPORT so it cannot collide with the env var it emits - the same
 # reason PORT above is not named GRPC_PORT.
-declare -A HPORT=([16]=50061 [18]=50062 [20]=50063)
+declare -A HPORT=([16]=50061 [18]=50062 [20]=50063 [24]=50065)
 
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # No login shell: ubuntu's dotfiles must not run in deploy steps.
@@ -212,6 +295,41 @@ for CID in "${CIDS[@]}"; do
   done
 done
 
+# Read-only Mint prerequisites, BEFORE downloads, config writes or service stops.
+# One broker owns host vsock port 8004. A second Mint parent would race for it.
+if [ "$SIGNER_ROLE" = mint ]; then
+  for peer_env in /etc/utexo/parent-*.env; do
+    [ "$peer_env" = "/etc/utexo/parent-$ENCLAVE_CID.env" ] && continue
+    if [ -f "$peer_env" ] && grep -Eq '^KMS_(SEED_ID|S3_BUCKET|S3_KEY|ALLOWED_CIDS)=' "$peer_env"; then
+      log "FATAL: another parent config owns the KMS broker: $peer_env (one Mint per host)"
+      exit 1
+    fi
+  done
+  grep -Fxq "KMS_REGION=$KMS_REGION" /etc/nitro_enclaves/vsock-proxy-kms.env \
+    && systemctl is-active --quiet vsock-proxy-kms.service \
+    || { log "FATAL: provision matching active KMS proxy with deploy/host-prep-kms.sh first"; exit 1; }
+  # Run as the Parent service user, using the same instance role, never deploy OIDC credentials.
+  OBJECTS=$(runuser -u ubuntu -- env HOME=/home/ubuntu aws s3api list-objects-v2 \
+    --bucket "$KMS_S3_BUCKET" --prefix "$KMS_S3_KEY" --max-keys 1 --no-paginate \
+    --region "$KMS_REGION" --output json) \
+    || { log "FATAL: cannot inspect seed object (ListBucket/network/region)"; exit 1; }
+  EXISTS=$(printf '%s' "$OBJECTS" | python3 -c \
+    'import json,sys; print(int(any(o["Key"] == sys.argv[1] for o in json.load(sys.stdin).get("Contents", []))))' "$KMS_S3_KEY")
+  if [ "$MINT_MODE" = bootstrap ]; then
+    [ "$EXISTS" = 0 ] || { log "FATAL: seed object exists; use recovery with its approved address"; exit 1; }
+  else
+    [ "$EXISTS" = 1 ] || { log "FATAL: recovery seed object is absent; refusing a new identity"; exit 1; }
+    OBJECT_INFO=$(runuser -u ubuntu -- env HOME=/home/ubuntu aws s3api head-object \
+      --bucket "$KMS_S3_BUCKET" --key "$KMS_S3_KEY" --region "$KMS_REGION" --output json) \
+      || { log "FATAL: recovery seed object is not readable"; exit 1; }
+    printf '%s' "$OBJECT_INFO" | python3 -c \
+      'import json,sys; sys.exit(0 if 0 < json.load(sys.stdin)["ContentLength"] <= 6144 else 1)' \
+      || { log "FATAL: recovery seed object has invalid ciphertext size"; exit 1; }
+  fi
+  # Recipient-attested KMS authorization and the derived address are checked
+  # by init, not by this host preflight. Never decrypt/create a seed here.
+fi
+
 # Ensure the `ne` group exists + ubuntu is a member (idempotent; the udev rule
 # below relies on the group). Group membership is persistent across reboots.
 getent group ne >/dev/null || groupadd -g 986 ne
@@ -249,7 +367,9 @@ log "PCR0 (manifest) = $MAN_PCR"
 # --- 4. install host services (udev + tmpfiles + systemd units + env) ------
 log "installing systemd units + udev/tmpfiles"
 install -d /etc/utexo
-install -d "$CONTROL_DIR"
+# ubuntu executes the per-CID wrappers. Set the shared parent's mode too:
+# install -d otherwise creates intermediate directories using the caller's umask.
+install -d -m 0755 /usr/local/lib/utexo "$CONTROL_DIR"
 
 # udev: give the `ne` group the Nitro device on every boot.
 cat > /etc/udev/rules.d/99-nitro-enclaves.rules <<'EOF'
@@ -676,6 +796,15 @@ ENCLAVE_VSOCK_CID=$CID
 ENCLAVE_VSOCK_PORT=5000
 HEADER_ELECTRUM_URL=$HEADER_ELECTRUM_URL
 EOF
+  if [ "$SIGNER_ROLE" = mint ]; then
+    cat >> "/etc/utexo/parent-$CID.env" <<EOF
+AWS_REGION=$KMS_REGION
+KMS_SEED_ID=$KMS_SEED_ID
+KMS_S3_BUCKET=$KMS_S3_BUCKET
+KMS_S3_KEY=$KMS_S3_KEY
+KMS_ALLOWED_CIDS=$CID
+EOF
+  fi
 done
 
 # apply udev + tmpfiles now (so this run doesn't depend on a reboot).

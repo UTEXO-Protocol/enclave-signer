@@ -130,7 +130,7 @@ os.execvp(args[0], args)
     def run_host(self, **extra):
         env = dict(
             PATH=self.env['PATH'], GIT_SHA='0' * 40, BUCKET='bucket',
-            AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base), SIGNER_ROLE='mint',
+            AWS_REGION='eu-central-1', CLUSTER_DIR=str(self.base), SIGNER_ROLE='burn',
             NITRO_ALLOCATOR_CONFIG=str(self.pool), NITRO_HUGEPAGES_DIR=str(self.pages),
             # Never read the limits file of the machine that runs the tests.
             ENCLAVE_LIMITS_FILE=str(self.base / 'absent' / 'enclave-limits.conf'),
