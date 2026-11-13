@@ -95,6 +95,16 @@ insecure-dev = []
 
 [dev-dependencies]
 tonic-prost = "0.14"
+# Build real BFA consignments with the same crates as the enclave test fixture.
+amplify = "=4.8.1"
+rgb-ops = { version = "=0.11.2-rc.2", default-features = false }
+rgb-schemas = { version = "=0.11.2-rc.2", default-features = false }
+rgb-psbt-utils = { version = "=0.11.2-rc.2", default-features = false }
+strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6" }
+# Encode the release ABI and recover its signer independently in the gRPC tests.
+alloy-primitives = "1"
+alloy-sol-types = "1"
+k256 = { version = "0.14", features = ["ecdsa"] }
 # Edits a mock attestation document in the launch check tests.
 ciborium = "0.2"
 # Real enclave (mock-attestation, seed-import) for end-to-end tests of the
