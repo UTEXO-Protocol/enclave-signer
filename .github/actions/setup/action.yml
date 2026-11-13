@@ -56,5 +56,6 @@ runs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git/*/*
+          !~/.cargo/git/*/federated-signer-proto-*
         key: ${{ runner.os }}-cargo-${{ inputs.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-${{ inputs.cache-name }}-

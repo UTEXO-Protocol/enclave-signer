@@ -138,6 +138,7 @@ class CacheTests(unittest.TestCase):
             with self.subTest(file=str(f.relative_to(ROOT)), cache=no):
                 # tar packs a listed directory whole, excludes below it included.
                 self.assertNotIn('~/.cargo/git', paths)
+                self.assertIn('!~/.cargo/git/*/federated-signer-proto-*', paths)
 
     def test_no_image_cache_exports_the_builder_stage(self):
         cd = (ROOT / '.github/workflows/cd-reusable.yml').read_text()
