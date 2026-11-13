@@ -10,10 +10,6 @@
 # published to S3 instead.
 /.artifacts/
 
-# The CI step for the RGB crate patches writes these files in the root.
-/metadata.json
-/metadata.log
-
 # Python build-wiring tests
 __pycache__/
 .DS_Store

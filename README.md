@@ -82,8 +82,9 @@ See the [component diagram](docs/diagrams/01-components.md) and the
 
 ### Build
 
-The build needs the Rust version of `rust-toolchain.toml` and read access to
-the private repositories ([`docs/building.md`](docs/building.md#requirements)).
+The build needs the Rust version of `rust-toolchain.toml`. The parent workspace
+also needs read access to a private repository
+([`docs/building.md`](docs/building.md#requirements)).
 
 ```bash
 git clone git@github.com:UTEXO-Protocol/enclave-signer

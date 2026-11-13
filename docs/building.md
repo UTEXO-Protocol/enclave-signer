@@ -8,18 +8,15 @@ image measurements reproducible. Launching an image is in
 
 - **Rust.** The exact version in `rust-toolchain.toml`. The patch version
   matters: another compiler gives another PCR0.
-- **Access to the private repositories.**
-  - rgb-lib comes from the private mirror `UTEXO-Protocol/rgb-lib-bfa`,
-    through the `github-rgb-lib` SSH alias (deploy key `lib_key`).
-  - The RGB protocol crates that rgb-lib pins are public. They come from the
-    `[patch.crates-io]` of `Cargo.toml` and `parent/Cargo.toml` and need no
-    credential.
-  - The parent also needs `federated-signer-proto`, through the
+- **Access to the private repository, for the parent only.**
+  - The enclave workspace needs no credential. rgb-lib comes from the public
+    `RGB-Tools/rgb-lib` repository, at the revision in `enclave/Cargo.toml`,
+    and the RGB protocol crates from crates.io.
+  - The parent needs `federated-signer-proto`, through the
     `github-federated-signer` SSH alias (deploy key `federated_key`).
-  - CI wires these in `.github/workflows/ci.yml` (secrets
-    `RGB_LIB_BFA_DEPLOY_KEY` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`).
-    `build/with-private-deps.sh` runs cargo with that access and keeps the
-    credentials out of the build layers.
+  - CI wires it in `.github/workflows/ci.yml` (secret
+    `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`). `build/with-private-deps.sh` runs
+    cargo with that access and keeps the credential out of the build layers.
 - **Docker with Buildx, `nitro-cli` and `jq`** for an EIF. Any x86_64 Linux
   host with Docker can build an EIF and read its PCRs. Nitro hardware is
   needed only to run it.
@@ -109,9 +106,6 @@ fails the build, not the launch.
 - `KMS_ALLOWED_ACCOUNT_IDS` (mint only): the 12-digit AWS account ids of the
   seed KMS key, comma-separated. The helper refuses a missing or malformed
   list.
-- The secret `lib_key`, from `RGB_LIB_BFA_DEPLOY_KEY` or from the file
-  `lib_key` in `PRIVATE_DEPS_DIR`. It is a BuildKit secret: never in a layer,
-  the image or PCR0.
 - Optional measured overrides. When `ENCLAVE_FEATURES`, `BITCOIN_NETWORK`,
   `BTC_RELAY_MODE`, a bridge pin, a `GAS_TX_*` setting or `RUST_LOG` is set
   in the environment, the helper passes it to the recipe, and PCR0 changes.
@@ -149,8 +143,9 @@ of the parent and of the dev enclave images only.
 ## Reproducibility
 
 The recipes pin the inputs below, so that a rebuild of the same commit with
-the same inputs gives the same PCR0, PCR1 and PCR2. No CI job compares two
-builds.
+the same inputs gives the same PCR0, PCR1 and PCR2. Every source of the
+enclave workspace is public, so a rebuild needs no credential. No CI job
+compares two builds.
 
 - the Rust toolchain, and the dependencies through `--locked`;
 - both base images, by digest, in both EIF recipes;
@@ -166,8 +161,8 @@ builds.
 
 Limits:
 
-- A reproducer needs read access to the private rgb-lib mirror. Repository
-  access alone does not prove that a build reproduces an approved PCR0.
+- The rgb-lib revision is not on a release tag yet, so a rebuild depends on
+  RGB-Tools keeping that commit reachable.
 - CI does not pin the Docker, Buildx and BuildKit versions.
 - The parent image and the dev images use live APT repositories. They are
   not measured.
@@ -192,15 +187,12 @@ without rebuilding or deploying them.
 ## Parent image
 
 ```bash
-# RGB_LIB_BFA_DEPLOY_KEY must already be exported; it is not a build argument.
-docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
-  --secret id=federated_key,src=<absolute-path> \
+docker build --secret id=federated_key,src=<absolute-path> \
   -f build/Dockerfile.parent -t utexo-bridge-parent .
 ```
 
-`make build_parent*` and `make build_enclave*` pass `lib_key` by default. A
-`DOCKER_AUTH_ARGS` value replaces that default, so to pass the parent's
-deploy key set both secrets. The
+`make build_parent*` passes `DOCKER_AUTH_ARGS` to `docker build`: set it to
+the `--secret` argument above. `make build_enclave*` takes no secret. The
 `insecure-dev` parent feature (plaintext gRPC with no client check) is for
 dev images only (`make build_parent_dev`); a release build with it does not
 compile.

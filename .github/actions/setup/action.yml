@@ -8,9 +8,6 @@ inputs:
   cache-name:
     description: Name part of the cargo cache key.
     default: ci
-  rgb-lib-bfa-deploy-key:
-    description: Deploy key of the rgb-lib mirror.
-    required: true
   federated-signer-proto-deploy-key:
     description: Deploy key of the private proto repo. Empty skips the SSH alias.
     default: ""
@@ -27,14 +24,6 @@ runs:
     - name: Install system dependencies
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
-    # rgb-lib comes from a private mirror and the RGB crates it pins from public
-    # repos. Cargo loads every git source of the lock, so every build fetches them.
-    - name: Set up access to the rgb-lib mirror
-      shell: bash
-      env:
-        RGB_LIB_BFA_DEPLOY_KEY: ${{ inputs.rgb-lib-bfa-deploy-key }}
-      run: sh build/ci-rgb-lib-access.sh
 
     # The parent's private proto dep uses the SSH Host alias
     # github-federated-signer. The alias maps to github.com with IdentityFile
@@ -59,18 +48,14 @@ runs:
         chmod 600 ~/.ssh/config
 
     # Fork PRs can restore this public repo's caches. Per-repo paths, since tar
-    # would pack an excluded subdirectory of a listed one. No target dirs: they
-    # hold the compiled private RGB crates.
+    # would pack an excluded subdirectory of a listed one. No target dirs: the
+    # parent's holds the compiled private proto crate.
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git/*/*
-          !~/.cargo/git/*/rgb-lib-bfa-*
-          !~/.cargo/git/*/rgb-consensus-*
-          !~/.cargo/git/*/rgb-ops-*
-          !~/.cargo/git/*/rgb-api-*
-          !~/.cargo/git/*/rgb-schemas-*
+          !~/.cargo/git/*/federated-signer-proto-*
         key: ${{ runner.os }}-cargo-${{ inputs.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-${{ inputs.cache-name }}-

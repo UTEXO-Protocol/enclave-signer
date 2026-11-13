@@ -51,8 +51,8 @@ release. Supply the approved values through `cli set-endpoints` after launch,
 keeping each provider's API-key path in a restricted `EVM_RPC_PATH_FILE`.
 Rotating that file requires a new launch, not a new image.
 
-Provide the `RGB_LIB_BFA_DEPLOY_KEY` and `FEDERATED_SIGNER_PROTO_DEPLOY_KEY`
-secrets. Keep credentials out of build arguments.
+Provide the `FEDERATED_SIGNER_PROTO_DEPLOY_KEY` secret: the workflow builds the
+host binaries with it. Keep credentials out of build arguments.
 
 ## Mainnet release inputs
 
@@ -110,7 +110,7 @@ Use a mainnet indexer at launch and configure Parent header synchronization
 ## Build
 
 For Actions, choose the intended `build_profile`: `stage-signet` or `stage-mainnet`.
-For local builds, configure Docker, Nitro CLI and private dependency access as
+For local builds, configure Docker and Nitro CLI as
 [docs/building.md](../../docs/building.md) describes, then run:
 
 ```sh

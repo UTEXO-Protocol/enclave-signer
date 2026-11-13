@@ -2,14 +2,12 @@
 # Enclave (dev mode, TCP, no vsock) with the BFA bridge, one signer role.
 # SIGNER_ROLE is required: `mint-signer` (EVM -> RGB) or `burn-signer`
 # (RGB -> EVM). The two roles are two enclaves with two seeds.
-# rgb-lib comes from a private mirror and its RGB crates from public repos. The BuildKit
-# secret lib_key reads the mirror; it is never in a layer, the image or PCR0.
-# Example: docker build --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY \
-#   --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
+# Every dependency of the enclave workspace is public: the build takes no secret.
+# Example: docker build --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
 # Builder glibc must stay compatible with the runtime stage below.
 FROM rust:1.96-slim AS builder
 
-# Builder-only tools: system Git fetches the private git dependency.
+# Builder-only tools: system Git fetches the git dependencies.
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev git ca-certificates openssh-client make cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -35,8 +33,7 @@ WORKDIR /build/enclave
 ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
-RUN --mount=type=secret,id=lib_key \
-    sh /build/build/with-private-deps.sh enclave cargo build --locked --no-default-features --features allow-seed-import,spv,mock-attestation,$SIGNER_ROLE
+RUN cargo build --locked --no-default-features --features allow-seed-import,spv,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

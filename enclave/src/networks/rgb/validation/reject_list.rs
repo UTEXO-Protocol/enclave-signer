@@ -1,4 +1,4 @@
-//! The BFA reject list, with rgb-lib-bfa 2f7b21d semantics (`api/evm.rs`
+//! The BFA reject list, with rgb-lib 567e5b8 semantics (`api/evm.rs`
 //! `RejectListLog::decisions`).
 //!
 //! The genesis may name an `IRgbRejectList` contract. Each entry rejects or

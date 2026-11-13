@@ -622,8 +622,7 @@ deployed.
   the same rule. The signets and regtest check no proof of work (section 7).
 - **Request deadline.** The socket deadline does not cancel a handler. A
   handler with slow indexer or RPC calls can run past it.
-- **Build reproducibility.** Reproducing PCR0 needs read access to a private
-  rgb-lib mirror, and CI does not pin the Docker and BuildKit versions
+- **Build reproducibility.** CI does not pin the Docker and BuildKit versions
   ([building.md](building.md#reproducibility)).
 - **Contract integration.** The Bridge must derive RGB deposit ids as the
   enclave does. Tests compare the EIP-712 domain and digests with stored
