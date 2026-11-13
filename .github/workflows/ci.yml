@@ -126,7 +126,16 @@ jobs:
 
       # Builds the library and both binaries too.
       - name: Test (parent)
-        run: cargo test --manifest-path parent/Cargo.toml
+        run: |
+          set -o pipefail
+          cargo test --locked --manifest-path parent/Cargo.toml 2>&1 | tee parent-tests.log
+          python3 - <<'PY'
+          import pathlib, re
+          log = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('parent-tests.log').read_text())
+          case = 'test grpc_direct_burn_returns_a_signature_for_the_forwarded_intent ... ok'
+          if log.count(case) != 1:
+              raise SystemExit('::error::expected the real Parent-to-Burn signing test to pass once')
+          PY
 
       # The local VSOCK transport needs no Nitro enclave. Fail if the runner
       # cannot provide it: a missing device must not become a passing test.

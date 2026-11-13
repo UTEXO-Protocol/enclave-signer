@@ -4940,6 +4940,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgb-psbt-utils"
+version = "0.11.2-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e7c47eb29264ed6a3bf47d1f535fee1510df6d74a9d2890d94793759d2ddd34"
+dependencies = [
+ "amplify",
+ "getrandom 0.3.4",
+ "rgb-ops",
+ "rgb-strict-encoding",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "rgb-schemas"
 version = "0.11.2-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6461,6 +6475,9 @@ dependencies = [
 name = "utexo-bridge-parent"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "amplify",
  "anyhow",
  "attestation-verify",
  "aws-config",
@@ -6477,9 +6494,14 @@ dependencies = [
  "hex",
  "http 1.5.0",
  "http-body-util",
+ "k256 0.14.0",
  "prost",
  "rand 0.10.3",
  "rcgen",
+ "rgb-ops",
+ "rgb-psbt-utils",
+ "rgb-schemas",
+ "rgb-strict-encoding",
  "rustls 0.23.46",
  "serde",
  "serde_json",
