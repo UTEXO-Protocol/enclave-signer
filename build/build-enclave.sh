@@ -16,12 +16,6 @@
 #   KMS_ALLOWED_ACCOUNT_IDS  mint only: AWS accounts of the seed KMS key; the
 #                    recipe fails the build without it
 #   SOURCE_DATE_EPOCH build timestamp (default: commit time)
-#   RGB_LIB_BFA_DEPLOY_KEY  deploy key with read access to UTEXO-Protocol/rgb-lib-bfa
-#   PRIVATE_DEPS_DIR        or a directory with that key in a lib_key file
-#
-# rgb-lib comes from a private mirror and the RGB protocol crates it pins from
-# public repos. The key goes in a BuildKit secret: never in a build arg, a
-# layer, the image or PCR0.
 #
 # Reproducible PCRs: PCR0/PCR1 depend on the nitro-cli version and its blobs
 # (kernel/init), not just our code. Pin nitro-cli to the same version the target
@@ -137,20 +131,6 @@ if declares_build_arg ENCLAVE_FEATURES; then
     done
 fi
 
-if [ -n "${PRIVATE_DEPS_DIR:-}" ]; then
-    [ -s "$PRIVATE_DEPS_DIR/lib_key" ] || {
-        echo "Error: $PRIVATE_DEPS_DIR/lib_key is missing or empty." >&2
-        exit 1
-    }
-    SECRET_ARGS=(--secret "id=lib_key,src=$PRIVATE_DEPS_DIR/lib_key")
-elif [ -n "${RGB_LIB_BFA_DEPLOY_KEY:-}" ]; then
-    SECRET_ARGS=(--secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY)
-else
-    echo "Error: the enclave build needs a deploy key with read access to UTEXO-Protocol/rgb-lib-bfa." >&2
-    echo "       Set RGB_LIB_BFA_DEPLOY_KEY, or PRIVATE_DEPS_DIR with a lib_key file." >&2
-    exit 1
-fi
-
 # --- 1. Build the docker image ---------------------------------------------
 # Deterministic timestamps: SOURCE_DATE_EPOCH (commit time, stable per git_sha)
 # + `rewrite-timestamp=true` make BuildKit normalise file mtimes in the exported
@@ -163,7 +143,6 @@ echo "Building Docker image (buildx, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)..."
 DOCKER_BUILDKIT=1 docker buildx build \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
-    "${SECRET_ARGS[@]}" \
     -f "$SCRIPT_DIR/$DOCKERFILE" \
     -t "$IMAGE_TAG" \
     --output "type=docker,rewrite-timestamp=true" \

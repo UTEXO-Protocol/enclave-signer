@@ -682,7 +682,7 @@ mod reject_list_rules {
 }
 
 /// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib 2f7b21d `SCHEMA_ID_BFA`.
+/// it must fail loudly here. rgb-lib 567e5b8 `SCHEMA_ID_BFA`.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(
@@ -1160,7 +1160,7 @@ fn refuses_a_lock_not_keyed_by_the_mint_lock_id() {
     }
 }
 
-/// The two upstream vectors (rgb-ops 00f8d62 `claim.rs`). The txid bytes are in
+/// The two upstream vectors (rgb-ops 0.11.2-rc.2 `claim.rs`). The txid bytes are in
 /// internal order, and the digest is the ABI word with no byte reversal.
 #[test]
 fn lock_id_matches_the_upstream_vectors() {

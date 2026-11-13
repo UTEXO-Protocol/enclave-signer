@@ -58,7 +58,7 @@ class BuildArgumentsTests(unittest.TestCase):
             stub.write_text('#!/bin/sh\nexit 99\n')
             stub.chmod(0o700)
         self.env = dict(os.environ)
-        for key in ('RGB_ASSET_ID', 'PRIVATE_DEPS_DIR',
+        for key in ('RGB_ASSET_ID',
                     'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
                     'STAGE_GAS_TX_ALLOWED_SELECTORS', 'STAGE_MAINNET_RGB_ASSET_ID',
                     'STAGE_MAINNET_TOKEN_CONTRACT', 'STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
@@ -69,7 +69,6 @@ class BuildArgumentsTests(unittest.TestCase):
         self.env.update(
             PATH=f'{self.bin}:{os.environ["PATH"]}',
             KMS_ALLOWED_ACCOUNT_IDS=ACCOUNTS,
-            RGB_LIB_BFA_DEPLOY_KEY='fixture-deploy-key-not-a-real-credential',
             OUT_DIR=str(self.base / 'out'),
             SOURCE_DATE_EPOCH='1700000000',
             TEST_DOCKER_ARGV=str(self.argv),
@@ -94,7 +93,6 @@ class BuildArgumentsTests(unittest.TestCase):
     def captured_build_args(self):
         argv = json.loads(self.argv.read_text())
         self.assertEqual(argv[:2], ['buildx', 'build'])
-        self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
         return [argv[i + 1] for i, value in enumerate(argv) if value == '--build-arg']
 
     def test_rgb_recipes_reject_missing_asset_before_docker(self):
@@ -257,8 +255,7 @@ class BuildArgumentsTests(unittest.TestCase):
         docker_env = json.loads(self.docker_env.read_text())
         self.assertEqual(docker_env['RGB_ASSET_ID'], 'rgb:test-bfa-asset')
         self.assertEqual(docker_env['KMS_ALLOWED_ACCOUNT_IDS'], ACCOUNTS)
-        self.assertNotIn(self.env['RGB_LIB_BFA_DEPLOY_KEY'], ' '.join(argv))
-        self.assertIn('id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY', argv)
+        self.assertNotIn('--secret', argv)
 
     def test_make_mint_rejects_missing_asset_before_docker(self):
         result = self.invoke_make('build_enclave_mint')
@@ -288,47 +285,12 @@ class BuildArgumentsTests(unittest.TestCase):
         env = json.loads((self.base / 'out/IMAGE-ENV.json').read_text())
         self.assertEqual(env, ['EVM_CHAIN_ID=42161'])
 
-    def captured_secrets(self):
-        argv = json.loads(self.argv.read_text())
-        return [argv[i + 1] for i, value in enumerate(argv) if value == '--secret']
-
-    def test_every_recipe_takes_the_deploy_key_as_a_secret(self):
+    def test_no_recipe_takes_a_secret(self):
         for recipe in (*RGB_RECIPES, 'Dockerfile.enclave-dev.bfa'):
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset')
                 self.assertEqual(result.returncode, 42, result.stderr)
-                self.assertEqual(self.captured_secrets(), ['id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY'])
-
-    def test_the_secret_file_of_private_deps_dir_wins(self):
-        deps = self.base / 'deps'
-        deps.mkdir()
-        (deps / 'lib_key').write_text('fixture-deploy-key-file')
-        result = self.invoke('Dockerfile.enclave-dev.bfa', PRIVATE_DEPS_DIR=str(deps))
-        self.assertEqual(result.returncode, 42, result.stderr)
-        self.assertEqual(self.captured_secrets(), [f'id=lib_key,src={deps}/lib_key'])
-        self.assertNotIn('fixture-deploy-key-file', self.argv.read_text())
-
-    def test_a_missing_deploy_key_refuses_before_docker(self):
-        deps = self.base / 'deps'
-        deps.mkdir()
-        cases = (
-            ('RGB_LIB_BFA_DEPLOY_KEY', None, 'rgb-lib-bfa'),
-            (None, 'lib_key', 'lib_key'),
-        )
-        for unset, missing_file, named in cases:
-            with self.subTest(unset=unset, missing_file=missing_file):
-                env = dict(self.env, DOCKERFILE='Dockerfile.enclave-dev.bfa')
-                if unset:
-                    env.pop(unset)
-                else:
-                    (deps / missing_file).write_text('')
-                    env['PRIVATE_DEPS_DIR'] = str(deps)
-                self.argv.unlink(missing_ok=True)
-                result = subprocess.run(['bash', str(ROOT / 'build/build-enclave.sh')],
-                                        env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn(named, result.stderr)
-                self.assertFalse(self.argv.exists())
+                self.assertNotIn('--secret', json.loads(self.argv.read_text()))
 
     def stage_inputs(self):
         return dict(BUILD_PROFILE='stage-signet', STAGE_RGB_ASSET_ID='rgb:stage-signet-asset',

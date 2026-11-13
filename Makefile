@@ -4,8 +4,9 @@ include config.mk
 # Docker's BuildKit feature.
 export DOCKER_BUILDKIT=1
 
-# Private dependency of both workspaces (the rgb-lib-bfa mirror), kept in a BuildKit secret.
-DOCKER_AUTH_ARGS ?= --secret id=lib_key,env=RGB_LIB_BFA_DEPLOY_KEY
+# The parent's private proto dependency: pass its deploy key as a BuildKit secret,
+# for example DOCKER_AUTH_ARGS='--secret id=federated_key,src=<absolute-path>'.
+DOCKER_AUTH_ARGS ?=
 
 # Pass public values through Docker's environment form, not shell interpolation.
 IMAGE_ENCLAVE_MINT_BACKUP ?= $(REGISTRY_HOST)/utexo-bridge-enclave-mint$(ENVIRONMENT):$(CURRENT_DATE_TIME)-$(LATEST_COMMIT)
@@ -37,8 +38,8 @@ check_mint_config:
 	@: "$${KMS_ALLOWED_ACCOUNT_IDS:?KMS_ALLOWED_ACCOUNT_IDS required for RGB mint builds}"
 
 build_enclave_mint: check_mint_config ## Build RGB mint signer image with KMS seed persistence.
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
-	docker build $(DOCKER_AUTH_ARGS) --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
+	docker build --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_BACKUP) . && \
+	docker build --build-arg RGB_ASSET_ID --build-arg KMS_ALLOWED_ACCOUNT_IDS -f ./build/Dockerfile.enclave.mint -t $(IMAGE_ENCLAVE_MINT_LATEST) .
 
 push_enclave_mint: ## Push RGB mint signer image.
 	docker push $(IMAGE_ENCLAVE_MINT_BACKUP) && \

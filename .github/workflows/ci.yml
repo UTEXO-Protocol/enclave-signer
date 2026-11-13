@@ -23,7 +23,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # parent/Cargo.toml uses an ssh:// URL for its private dep; force Cargo to use
-  # the system git so it honours the SSH setup step and the rgb-lib credential.
+  # the system git so it honours the SSH setup step.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
@@ -49,7 +49,6 @@ jobs:
         with:
           components: rustfmt, clippy
           cache-name: light
-          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
           federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Test build and deployment scripts
@@ -57,32 +56,12 @@ jobs:
           python3 -m unittest discover -s build/tests -v
           python3 -m unittest discover -s deploy/lambda/sns-to-slack -v
 
-      # A [patch.crates-io] entry that does not match its requirement is dropped
-      # with only a warning; one off rgb-lib's revs builds against other RGB crates.
-      - name: Every RGB crate patch is used and copies rgb-lib's
+      # The cargo commands below run without --locked and would rewrite a stale lock.
+      - name: Both lock files are current
         run: |
           for manifest in Cargo.toml parent/Cargo.toml; do
-            cargo metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null 2> metadata.log || { cat metadata.log; exit 1; }
-            if grep -q "was not used in the crate graph" metadata.log; then
-              echo "::error::$manifest has an unused [patch.crates-io] entry"
-              cat metadata.log
-              exit 1
-            fi
+            cargo metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null
           done
-          # The default set has no RGB, so ask for rgb-lib's crate explicitly.
-          cargo metadata --locked --format-version 1 --features utexo-bridge-enclave/rgb-validation > metadata.json
-          python3 - <<'EOF'
-          import json, tomllib
-          lib = next(p for p in json.load(open('metadata.json'))['packages'] if p['name'] == 'rgb-lib')
-          theirs = tomllib.load(open(lib['manifest_path'], 'rb'))['patch']['crates-io']
-          ours = tomllib.load(open('Cargo.toml', 'rb'))['patch']['crates-io']
-          stale = [name for name in sorted(ours.keys() | theirs.keys())
-                   if name not in ours or name not in theirs
-                   or ours[name]['git'] != theirs[name]['git']
-                   or not ours[name]['rev'].startswith(theirs[name]['rev'])]
-          if stale:
-              raise SystemExit(f"::error::Cargo.toml [patch.crates-io] differs from rgb-lib's: {stale}")
-          EOF
 
       # `parent/` is a separate cargo workspace (see the root Cargo.toml).
       - name: Check formatting
@@ -140,7 +119,6 @@ jobs:
         with:
           components: clippy
           cache-name: parent
-          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
           federated-signer-proto-deploy-key: ${{ secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY }}
 
       - name: Clippy (parent)
@@ -190,7 +168,6 @@ jobs:
         with:
           components: clippy
           cache-name: mint-signer
-          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
 
       # The features of the shipped image. `cargo test` below builds the code.
       - name: Clippy (mint image)
@@ -277,7 +254,6 @@ jobs:
         with:
           components: clippy
           cache-name: burn-signer
-          rgb-lib-bfa-deploy-key: ${{ secrets.RGB_LIB_BFA_DEPLOY_KEY }}
 
       - name: Clippy (burn image)
         run: cargo clippy $ENCLAVE --features vsock,spv,burn-signer --all-targets -- -D warnings
