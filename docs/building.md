@@ -124,7 +124,7 @@ mint image and the burn image.
 
 **Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles without
 `spv` for public Signet. `BUILD_PROFILE=stage-mainnet` builds both roles with
-`spv`, required relay checks and the new Stage mainnet contracts. Each profile
+`spv`, required relay checks and the Stage mainnet contracts. Each profile
 uses dedicated release inputs and its own S3 subdirectory; see
 [build/profiles/README.md](../build/profiles/README.md).
 
@@ -161,8 +161,8 @@ compares two builds.
 
 Limits:
 
-- The rgb-lib revision is not on a release tag yet, so a rebuild depends on
-  RGB-Tools keeping that commit reachable.
+- `enclave/Cargo.toml` pins rgb-lib to a commit, not to a release tag, so a
+  rebuild depends on RGB-Tools keeping that commit reachable.
 - CI does not pin the Docker, Buildx and BuildKit versions.
 - The parent image and the dev images use live APT repositories. They are
   not measured.

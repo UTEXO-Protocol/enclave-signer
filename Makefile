@@ -48,7 +48,7 @@ push_enclave_mint: ## Push RGB mint signer image.
 docker: ## Build and push the parent image.
 	$(MAKE) build_parent push_parent
 
-docker_dev: ## Build and push all dev docker images (parent-dev + enclave-dev).
+docker_dev: ## Build and push the parent dev image.
 	$(MAKE) build_parent_dev push_parent_dev
 
 help: ## Show this help.

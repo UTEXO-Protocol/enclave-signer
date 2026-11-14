@@ -1,5 +1,5 @@
-//! Compile-time checkpoints and network constants: the trust anchors for the
-//! in-enclave header chain.
+//! Compile-time checkpoints: the trust anchors for the in-enclave header
+//! chain.
 //!
 //! A checkpoint is `(height, block_hash, bits, time, chain_work)`. The enclave
 //! starts empty. The parent sends headers from `height + 1`, and the first
@@ -13,12 +13,8 @@
 //!   Local/dev builds can move it forward at boot with `SPV_CHECKPOINT` (see
 //!   [`resolve_checkpoint`]). Production-shaped builds do not start when it is
 //!   set.
-//! - Signet challenge, magic, block time: real UTEXO custom signet values
-//!   ([`UTEXO_SIGNET_CHALLENGE`], [`UTEXO_SIGNET_MAGIC`],
-//!   [`UTEXO_SIGNET_BLOCK_TIME_SECS`]). They are in PCR0, but BIP-325
-//!   signatures are not verified.
-//! - Testnet4: [`TESTNET4_CHECKPOINT`], a retarget boundary. Chainwork is not
-//!   set yet.
+//! - Testnet4: [`TESTNET4_CHECKPOINT`], a retarget boundary, without
+//!   chainwork.
 //! - Regtest: standard regtest constants.
 
 use crate::networks::rgb::spv::types::{BlockHash, BlockHeight, Network};
@@ -84,8 +80,8 @@ pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0x1e03_77ae,
     time: 1_780_464_472,
     is_real: true,
-    // Unknown: set it to the `getblockheader` chainwork from the UTEXO signet
-    // node. Until then, signet `fundsOut` fails.
+    // Unknown, so a signet `fundsOut` fails under `BTC_RELAY_MODE=required`
+    // with this compiled checkpoint.
     chain_work: None,
 };
 
@@ -114,8 +110,8 @@ pub const TESTNET4_CHECKPOINT: Checkpoint = Checkpoint {
     bits: 0x1903_7e43,
     time: 1_791_203_299,
     is_real: true,
-    // Unknown: set it to the `getblockheader` chainwork from a trusted
-    // testnet4 node. Until then, testnet4 `fundsOut` fails.
+    // Unknown, so a testnet4 `fundsOut` fails under `BTC_RELAY_MODE=required`
+    // with this compiled checkpoint.
     chain_work: None,
 };
 
@@ -143,8 +139,8 @@ impl Checkpoint {
     /// Fails on a placeholder checkpoint in production-shaped builds. Debug,
     /// test, and `allow-seed-import` builds are exempt.
     pub fn assert_real_in_release(&self) -> Result<(), &'static str> {
-        // Local dev/test images are release builds with `allow-seed-import` and
-        // can use placeholder checkpoints.
+        // Dev images are debug builds. `allow-seed-import` compiles only in
+        // debug and test builds. These builds may use placeholder checkpoints.
         if cfg!(debug_assertions) || cfg!(test) || cfg!(feature = "allow-seed-import") {
             return Ok(());
         }
@@ -337,41 +333,6 @@ pub fn parse_checkpoint_spec(spec: &str) -> std::result::Result<Checkpoint, Stri
         chain_work,
     })
 }
-
-// === UTEXO custom signet network parameters ===
-//
-// Compile-time consts, so they are in PCR0. BITCOIN_NETWORK selects the
-// network at boot. The parameters of each network are fixed per binary.
-//
-// BIP-325 signatures are not verified. The signature is in the coinbase
-// witness commitment, which SubmitHeadersRequest does not carry. That needs
-// `repeated bytes coinbase_txs` on the proto. The constants are ready for it.
-
-/// Signet challenge script for the UTEXO custom signet (BIP-325).
-///
-/// Layout:
-/// - `6a 4c 09 01 1e 00 00 00 00 00 00 00` - OP_RETURN-prefixed block-time
-///   spec (bitcoin#29365): 30s = `0x1e` little-endian u64.
-/// - `4c 69 53 21 <33-byte pubkey> 21 <33-byte pubkey> 21 <33-byte pubkey>
-///    53 ae` - `OP_PUSHDATA1 0x69 OP_3 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG`
-///   = 3-of-3 multisig over three federation signing keys.
-pub const UTEXO_SIGNET_CHALLENGE: &[u8] = &[
-    0x6a, 0x4c, 0x09, 0x01, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0x69, 0x53, 0x21,
-    0x02, 0x24, 0xa5, 0x28, 0xaa, 0x14, 0x1b, 0x7d, 0x2e, 0xd0, 0x93, 0x57, 0x5b, 0x5d, 0x2c, 0x2c,
-    0xee, 0x40, 0x65, 0xab, 0xc6, 0xf7, 0xf6, 0xb1, 0x9a, 0x97, 0x0a, 0x89, 0x75, 0xd3, 0x27, 0xf9,
-    0x35, 0x21, 0x02, 0x49, 0xc6, 0xbf, 0x83, 0x38, 0xec, 0xda, 0x27, 0x49, 0xc3, 0xff, 0xad, 0x4b,
-    0x8e, 0xc2, 0x2f, 0x71, 0x58, 0x19, 0x47, 0xc1, 0x0d, 0x17, 0x66, 0xd9, 0xce, 0x83, 0xd1, 0xbc,
-    0xaf, 0xb9, 0x94, 0x21, 0x02, 0x4f, 0x3a, 0x83, 0x1f, 0xcb, 0x4d, 0xb4, 0x46, 0xb0, 0x7f, 0xe8,
-    0x89, 0x7d, 0x19, 0x3b, 0x86, 0xf9, 0x13, 0x98, 0x4f, 0x6e, 0xb3, 0xab, 0x6e, 0x97, 0x45, 0xee,
-    0xb6, 0x10, 0x17, 0xa3, 0xb5, 0x53, 0xae,
-];
-
-/// Network magic bytes for the UTEXO custom signet.
-pub const UTEXO_SIGNET_MAGIC: [u8; 4] = [0x6f, 0x21, 0x61, 0x5a];
-
-/// Block time for the UTEXO custom signet, in seconds. The challenge script
-/// prefix encodes it (bitcoin#29365).
-pub const UTEXO_SIGNET_BLOCK_TIME_SECS: u32 = 30;
 
 #[cfg(test)]
 mod tests;

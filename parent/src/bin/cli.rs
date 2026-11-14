@@ -61,7 +61,7 @@ enum Command {
         /// Hex-encoded ABI call data
         #[arg(long)]
         call_data: String,
-        /// Per-selector sequential nonce
+        /// MultisigProxy nonce (`teeNonce`) of the source chain
         #[arg(long)]
         nonce: u64,
         /// Unix timestamp deadline

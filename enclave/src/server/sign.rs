@@ -80,8 +80,6 @@ pub(super) fn handle_sign(
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
     };
-    // Silences the unused warning on builds without a reject-list reader.
-    let _ = deadline;
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -199,7 +197,6 @@ pub(super) fn handle_sign(
                     source_validated.rgb_consignment.as_ref(),
                     &rgb_source.merkle_proofs,
                     &chain_pins,
-                    #[cfg(feature = "rgb-validation")]
                     destination
                         .burn_destination
                         .as_ref()
@@ -267,9 +264,7 @@ fn apply_funds_out_binding(
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
     merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
-    #[cfg(feature = "rgb-validation")] burn_destination: Option<
-        &crate::networks::evm::burn_destination::BurnDestinationRecord,
-    >,
+    burn_destination: Option<&crate::networks::evm::burn_destination::BurnDestinationRecord>,
 ) -> Result<()> {
     use crate::networks::evm::crosscheck;
 
@@ -342,12 +337,10 @@ fn apply_funds_out_binding(
     // destination chain to the 32 bytes that the burner committed to
     // (`burnReason`). `validate_funds_out_amount` already refused all
     // non-burns, so no runtime type test is necessary.
-    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     crosscheck::validate_funds_out_burn_recipient(release, validated, burn_destination)?;
 
     // Settlement bind (spec P6). The deposits in `settlementData` must be
     // exactly the locks consensus confirmed the burn's mint anchors against.
-    #[cfg(feature = "rgb-validation")]
     crosscheck::validate_funds_out_settlement(release, &validated.mint_locks)?;
 
     Ok(())
@@ -458,9 +451,9 @@ fn verify_funds_in_deposit(
     Ok(())
 }
 
-/// Refuse an EVM->RGB request on a build without `rgb-validation`.
-/// The consignment and PSBT checks prove the transfer shape only.
-/// They do not prove that an EVM deposit backs it.
+/// Refuse an EVM->RGB request on a build without `rgb-validation`. Such a
+/// build has no EVM RPC client, so it cannot prove that a `FundsIn` deposit
+/// backs the request.
 #[cfg(not(feature = "rgb-validation"))]
 fn refuse_unverifiable_funds_in(
     source: &SourceNetwork,
@@ -474,7 +467,7 @@ fn refuse_unverifiable_funds_in(
         )
     ) {
         return Err(EnclaveError::CrossCheck(
-            "enclave was not built with --features mint-signer: refusing to sign a bridge-mode PSBT \
+            "enclave was not built with --features mint-signer: refusing to sign a bridge PSBT \
              without independently verifying the FundsIn deposit (the listener-supplied \
              event_valid/event_finalized booleans are not trusted). \
              Rebuild with `--features mint-signer`."
@@ -629,7 +622,7 @@ mod early_bridge_checks {
                 ..Default::default()
             })),
             // Invalid RGB data on purpose. The early checks must refuse before
-            // consignment decoding, including BFA ancestry parsing.
+            // the PSBT and fascia parsing.
             destination_network: Some(DestinationNetwork::RgbDestination(RgbDestination {
                 asset_id: "rgb:test".into(),
                 ..Default::default()
@@ -930,7 +923,6 @@ mod funds_out_depth {
             Some(&validated),
             &proofs,
             &ChainPins::new(),
-            #[cfg(feature = "rgb-validation")]
             None,
         )
         .unwrap_err()

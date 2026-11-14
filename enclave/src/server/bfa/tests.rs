@@ -57,13 +57,12 @@ mod burn {
         address: BRIDGE,
     };
 
-    fn anchor(tag: u8, amount: u64, in_last_bundle: bool) -> MintAnchor {
+    fn anchor(tag: u8, amount: u64) -> MintAnchor {
         MintAnchor {
             opid: [tag; 32],
             lock_id: [tag | 0x40; 32],
             amount,
             before_block: 110,
-            in_last_bundle,
         }
     }
 
@@ -71,7 +70,7 @@ mod burn {
     #[test]
     fn derives_every_lock_from_its_anchor_without_rpc() {
         let ctx = context(config(), Box::new(NoRpc));
-        let anchors = [anchor(1, 100_000, false), anchor(2, 5, true)];
+        let anchors = [anchor(1, 100_000), anchor(2, 5)];
 
         let bound = derived_locks(&ctx, &PINNED, &anchors).unwrap();
         assert_eq!(bound.evm_chain_id, CHAIN_ID);
@@ -99,7 +98,7 @@ mod burn {
             ..config()
         };
         let ctx = context(cfg, Box::new(NoRpc));
-        let err = derived_locks(&ctx, &PINNED, &[anchor(1, 1, false)]).unwrap_err();
+        let err = derived_locks(&ctx, &PINNED, &[anchor(1, 1)]).unwrap_err();
         assert!(err.to_string().contains("TOKEN_CONTRACT"), "{err}");
     }
 
@@ -116,7 +115,7 @@ mod burn {
                 ..PINNED
             },
         ] {
-            let err = derived_locks(&ctx, &bridge, &[anchor(1, 1, false)]).unwrap_err();
+            let err = derived_locks(&ctx, &bridge, &[anchor(1, 1)]).unwrap_err();
             assert!(err.to_string().contains("is not the pinned"), "{err}");
         }
     }

@@ -744,7 +744,6 @@ fn validates_rgb_libs_split_burn_shape() {
         [schemata::TS_TRANSFER, schemata::TS_BURN].map(|t| t.to_inner())
     );
     let change = TransitionOutput {
-        assignment_type: schemata::OS_ASSET.to_inner(),
         amount: 40_000,
         seal: OutputSeal::Revealed {
             txid: None,
@@ -1013,7 +1012,6 @@ fn reads_a_mint_and_its_anchor() {
             lock_id: lock_id(mint.opid, mint.tx.compute_txid()),
             amount: MINTED,
             before_block: 90,
-            in_last_bundle: true,
         }]
     );
     assert!(validated.last_bundle_fully_disclosed);
@@ -1263,7 +1261,6 @@ fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
         lock_id: [n + 0x10; 32],
         amount: MINTED,
         before_block: 90,
-        in_last_bundle: false,
     };
     let anchors = [anchor(1), anchor(2)];
     let locks: Vec<VerifiedLock> = anchors.iter().map(lock_for).collect();
@@ -1404,10 +1401,7 @@ fn mint_transitions_are_the_only_mint_shape() {
     assert!(is_mint_transition(8013));
     assert!(!is_mint_transition(10000));
     assert!(!is_mint_transition(8010));
-    assert_eq!(
-        super::super::flow::is_signing_transition(8013),
-        cfg!(feature = "rgb-validation")
-    );
+    assert!(super::super::flow::is_signing_transition(8013));
 }
 
 // ===== the validator and its indexer =====
@@ -2217,10 +2211,6 @@ mod source_path {
             rgb_validator: Some(&validator),
             header_chain: chain,
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
-            #[cfg(evm_to_rgb)]
-            self_owned_psbt_outputs: None,
-            #[cfg(evm_to_rgb)]
-            psbt_fee_key_paths: None,
             anchor_binder: Some(&bind_all),
             reject_list_reader: reader,
         };
@@ -2730,7 +2720,7 @@ fn the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds() {
 /// history the default limits are sized for (`config.rs`). Ignored by default
 /// because it is slow in a debug build.
 #[test]
-#[ignore = "measures a history of 10_000 transfers; run it on request"]
+#[ignore = "measures a history of 10_000 transfers; the burn-signer CI job runs it"]
 fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
     use crate::memory::peak;
 
@@ -2751,7 +2741,7 @@ fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
 /// Ignored by default because it is slow in a debug build.
 #[cfg(rgb_to_evm)]
 #[test]
-#[ignore = "validates a history of 10_000 transfers; run it on request"]
+#[ignore = "validates a history of 10_000 transfers; the burn-signer CI job runs it"]
 fn a_history_of_10_000_transfers_fits_the_default_limits() {
     use crate::framing::{self, MAX_MESSAGE_SIZE};
     use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;

@@ -34,7 +34,7 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
     let end = offset + 32;
     if data.len() < end {
         return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
+            "log data too short: need {} bytes, got {}",
             end,
             data.len()
         )));
@@ -52,7 +52,7 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
 /// `IBridge.sol`. A stale signature matches zero logs, and each deposit then
-/// reports "no FundsIn log in tx".
+/// reports "no BridgeFundsIn log".
 ///
 /// The enclave does not decode `bytes settlementData`, but it is part of the
 /// signature and thus of `topic0`.
@@ -165,7 +165,6 @@ static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
 ///
 /// `expected_operation_id` is mandatory: exactly 32 bytes, or refuse. Empty is an
 /// error, not a skipped comparison.
-#[allow(clippy::too_many_arguments)]
 #[cfg(evm_to_rgb)]
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,

@@ -358,9 +358,6 @@ impl EnclaveClient {
                                 consignment_hash: req.consignment_hash,
                                 commission: req.calldata_commission,
                                 merkle_proofs: req.merkle_proofs,
-                                // The CLI cannot resolve the deposit behind
-                                // a mint, so the enclave rejects a BFA burn
-                                // signed through it.
                             },
                         ),
                     ),

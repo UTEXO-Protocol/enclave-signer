@@ -91,9 +91,9 @@ fn mock_funds_out_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
     .abi_encode()
 }
 
-/// Placeholder consignment bytes. `validate_source_payload` checks only the
-/// keccak hash. This harness has no RGB validator, so tests stop at the
-/// handler's "requires validated consignment" check.
+/// Placeholder consignment bytes with a matching keccak hash. This harness
+/// has no RGB validator, so a test with them stops at the RGB source
+/// validation.
 #[cfg(rgb_to_evm)]
 const PLACEHOLDER_CONSIGNMENT: &[u8] = b"placeholder-consignment-bytes-for-integration-tests";
 
@@ -513,10 +513,6 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-// Route proofs bind the amount. RGB source validation emits the consignment
-// amount. EVM destination validation decodes `fundsOut.amount` and checks it
-// against `calldata_amount`. `validate_route_proofs` compares the two.
-
 /// A build without `rgb-validation` must refuse an RGB source, even with no
 /// merkle_proofs. It has no consensus code to check a consignment with.
 ///
@@ -592,8 +588,8 @@ fn test_sign_psbt_before_init() {
 
 // PSBT enriched cross-check tests
 
-/// A build without the `FundsIn` verifier must refuse a bridge-mode PSBT. In
-/// the minimal build, that fail-closed guard is the first bridge-mode gate.
+/// A build without the `FundsIn` verifier must refuse a bridge PSBT. In the
+/// minimal build, that guard refuses before any route check.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn test_no_rgb_validation_build_refuses_bridge_psbt() {
@@ -608,9 +604,9 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
     };
     common::send_request(port, &init_req);
 
-    // Bridge mode (EVM source + RGB destination) with a shape-valid PSBT and
-    // consistent amounts. It passes the route cross-checks and reaches the
-    // `FundsIn` guard. The listener booleans are true but ignored.
+    // An EVM source and an RGB destination with a shape-valid PSBT and
+    // consistent amounts. The `FundsIn` guard refuses it before the route
+    // checks. The listener booleans are true but ignored.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0xAA; 32],
@@ -641,8 +637,8 @@ fn test_no_rgb_validation_build_refuses_bridge_psbt() {
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 const RGB_BIND_REFUSAL: &str = "witness_utxo";
 
-// An rgb-validation build rejects an EVM -> RGB `Sign` with no consignment.
-// An empty `evm_tx_hash` does not skip the bridge checks.
+// An rgb-validation build rejects an EVM -> RGB `Sign` with an empty
+// `evm_tx_hash`. An empty hash does not skip the bridge checks.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 fn test_sign_psbt_rejects_missing_evm_source_hash() {
@@ -683,14 +679,14 @@ fn test_sign_psbt_rejects_missing_evm_source_hash() {
 }
 
 // A length-valid, all-zero evm_tx_hash does not skip the bridge checks.
-// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed when no
-// consignment binds the PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
+// An EVM -> RGB `Sign` always runs the bridge cross-checks and fails closed on
+// a bare PSBT. `test_sign_psbt_rejects_missing_evm_source_hash`
 // covers the zero-length hash.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 #[test]
 fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     // The deposit stub lets the run pass the FundsIn gate and reach the
-    // consignment bind.
+    // PSBT checks.
     let port = common::start_test_server_with_evm_rpc(Box::new(common::deposit_stub::OneDeposit {
         operation_id: [0x33; 32],
         gross: 1000,
@@ -708,7 +704,7 @@ fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     common::send_request(port, &init_req);
 
     // An all-zero 32-byte hash passes the length check. The RgbDestination has
-    // no consignment and its PSBT no RGB data, so bridge mode must fail closed.
+    // no fascia and its PSBT no RGB data, so the mint path must fail closed.
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(sign_psbt_request(
             vec![0u8; 32],
@@ -724,15 +720,15 @@ fn test_sign_psbt_zero_evm_hash_runs_the_bridge_checks() {
     match &resp.response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3, "bridge cross-check failures use code 3");
-            // Bridge mode ran and its RGB bind refused.
+            // The mint path ran and its RGB bind refused.
             assert!(
                 e.message.contains(RGB_BIND_REFUSAL),
-                "expected an RGB-binding rejection (bridge mode), got: {}",
+                "expected an RGB-binding rejection (mint path), got: {}",
                 e.message
             );
         }
         other => panic!(
-            "zero-hash SignPsbt must fail closed in bridge mode, never sign: {:?}",
+            "zero-hash SignPsbt must fail closed, never sign: {:?}",
             other
         ),
     }

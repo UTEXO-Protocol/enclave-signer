@@ -8,8 +8,8 @@ Requires=utexo-enclave@%i.service
 Type=simple
 User=ubuntu
 # deploy-host.sh writes the per-CID env (CLUSTER_DIR, GRPC_*, HEALTH_*, USE_VSOCK,
-# ENCLAVE_VSOCK_*, HEADER_ELECTRUM_URL) on each run. It sets no GRPC_MAX_CONCURRENT*,
-# GRPC_REQUEST_TIMEOUT_SECS or SIGNED_RESPONSE_*, so the parent uses their defaults.
+# ENCLAVE_VSOCK_*, HEADER_ELECTRUM_URL) on each run. It sets no GRPC_MAX_CONCURRENT,
+# GRPC_MAX_CONCURRENT_PER_CONN or SIGNED_RESPONSE_*, so the parent uses their defaults.
 EnvironmentFile=/etc/utexo/parent-%i.env
 ExecStart=/usr/local/lib/utexo/%i/utexo-parent-ctl.sh
 Restart=on-failure

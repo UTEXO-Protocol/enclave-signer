@@ -19,12 +19,12 @@ use super::cloning_session::CloningSession;
 use super::replay_guard::NonceReplayGuard;
 
 /// Environment variable for the export warning threshold.
-/// An unset, zero, or invalid value disables the threshold.
+/// Unset or zero disables it. A set value that is not an unsigned integer stops the boot.
 /// This threshold does not block exports.
 const CLONE_EXPORT_SOFT_CAP_ENV: &str = "CLONE_EXPORT_SOFT_CAP";
 
 /// Environment variable for the export limit per enclave process.
-/// An unset, zero, or invalid value disables the limit.
+/// Unset or zero disables it. A set value that is not an unsigned integer stops the boot.
 /// The check occurs after authentication and before encryption.
 /// Each enclave has a separate count. A restart resets it.
 const CLONE_EXPORT_HARD_CAP_ENV: &str = "CLONE_EXPORT_HARD_CAP";
@@ -239,6 +239,7 @@ impl EnclaveState {
     }
 
     /// Current lifetime seed-export count for this instance.
+    #[cfg(test)]
     pub fn seed_export_count(&self) -> u64 {
         self.seed_export_count.load(Ordering::Relaxed)
     }
@@ -396,6 +397,7 @@ impl EnclaveState {
 
     /// Run `f` on the live `CloningSession` while the state lock is held.
     /// Returns `NotReady` if the phase is not `Cloning`.
+    #[cfg(test)]
     pub fn with_cloning_session<T>(
         &self,
         f: impl FnOnce(&CloningSession) -> Result<T>,

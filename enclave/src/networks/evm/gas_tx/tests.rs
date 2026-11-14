@@ -80,7 +80,6 @@ fn eip1559(chain_id: u64, to: &[u8], value: u64) -> Vec<u8> {
 
 /// Builds an unsigned EIP-1559 preimage with explicit fee/gas/data fields, for
 /// the cap and calldata-allowlist checks.
-#[allow(clippy::too_many_arguments)]
 fn eip1559_full(
     chain_id: u64,
     to: &[u8],

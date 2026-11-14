@@ -327,7 +327,13 @@ fn emits_a_key_path_job_for_a_bip86_input() {
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].merkle_root, None);
-    assert_eq!(jobs[0].xonly_pubkey, our_xonly(&km));
+    assert_eq!(
+        jobs[0].child_path,
+        [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 }
+        ]
+    );
     assert_eq!(jobs[0].account_type, AccountType::Vanilla);
 }
 

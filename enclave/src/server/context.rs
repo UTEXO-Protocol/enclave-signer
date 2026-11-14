@@ -28,7 +28,7 @@ pub struct Launch {
     pub rgb_validator: Option<crate::networks::rgb::validation::RgbValidator>,
     /// In-enclave EVM RPC client for independent `FundsIn` verification.
     /// `SetEndpoints` always sets it. Tests can leave it `None`.
-    /// Then `handle_sign` fails closed in bridge mode.
+    /// Then `handle_sign` refuses every request that reads the EVM chain.
     /// The host relays the RPC traffic through the loopback vsock forwarder.
     /// TLS ends inside the enclave. See [`crate::networks::evm::events`].
     #[cfg(feature = "rgb-validation")]

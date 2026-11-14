@@ -72,16 +72,6 @@ fn start_mock_enclave() -> u16 {
                                 },
                             )),
                         },
-                        Some(enclave_proto::sign_request::DestinationNetwork::RgbDestination(
-                            _,
-                        )) => EnclaveResponse {
-                            response: Some(enclave_response::Response::SignedPsbt(
-                                enclave_proto::SignedPsbtResponse {
-                                    signed_psbt: vec![0xDD; 100],
-                                    inputs_signed: 2,
-                                },
-                            )),
-                        },
                         _ => EnclaveResponse {
                             response: Some(enclave_response::Response::Error(
                                 enclave_proto::ErrorResponse {
@@ -115,36 +105,11 @@ fn start_mock_enclave() -> u16 {
                         },
                     )),
                 },
-                Some(enclave_request::Request::InitializeKey(_)) => EnclaveResponse {
-                    response: Some(enclave_response::Response::InitializeKey(
-                        enclave_proto::InitializeKeyResponse {
-                            evm_address: vec![0xAA; 20],
-                            master_fingerprint: vec![0xDD; 4],
-                            account_xpub_vanilla: "tpub-vanilla-test".into(),
-                            account_xpub_colored: "tpub-colored-test".into(),
-                            evm_uncompressed_pub: vec![0xEE; 64],
-                            chain_id: 0,
-                            bridge_contract: vec![0u8; 20],
-                            rgb_asset_id: String::new(),
-                            evm_gas_tx_uncompressed_pub: vec![0xFF; 64],
-                            evm_gas_tx_address: vec![0xFA; 20],
-                        },
-                    )),
-                },
                 Some(enclave_request::Request::GetLastSavedBlock(_)) => EnclaveResponse {
                     response: Some(enclave_response::Response::GetLastSavedBlock(
                         enclave_proto::GetLastSavedBlockResponse {
                             block_height: 215_000,
                             block_hash: vec![0x11; 32],
-                        },
-                    )),
-                },
-                Some(enclave_request::Request::SubmitHeaders(req)) => EnclaveResponse {
-                    response: Some(enclave_response::Response::SubmitHeaders(
-                        enclave_proto::SubmitHeadersResponse {
-                            last_block_height: req.start_height + req.headers.len() as u32 - 1,
-                            last_block_hash: vec![0x22; 32],
-                            headers_accepted: req.headers.len() as u32,
                         },
                     )),
                 },
@@ -367,7 +332,8 @@ async fn grpc_public_key_evm_gas_tx() {
 
 #[tokio::test]
 async fn grpc_public_key_refuses_transaction_type() {
-    // The BTC key is retired, so TRANSACTION has no public key.
+    // The parent answers PublicKey only for EVM_GAS_TX, so TRANSACTION gets
+    // InvalidArgument.
     let enclave_port = start_mock_enclave();
     let grpc_port = start_grpc_server(enclave_port).await;
 

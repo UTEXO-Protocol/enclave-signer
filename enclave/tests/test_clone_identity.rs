@@ -186,6 +186,5 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
             Resp::PublicKeys(keys.clone()),
             "{name}: replay changed Active identity"
         );
-        eprintln!("PASS {name}: mismatch -> no keys -> same-nonce retry -> full identity -> replay reject");
     }
 }

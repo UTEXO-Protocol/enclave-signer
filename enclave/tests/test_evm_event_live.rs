@@ -147,8 +147,5 @@ fn live_deposit_rejects_wrong_amount() {
     )
     .unwrap_err()
     .to_string();
-    assert!(
-        e.contains("amount mismatch") || e.contains("netAmount mismatch"),
-        "got: {e}"
-    );
+    assert!(e.contains("amount mismatch"), "got: {e}");
 }

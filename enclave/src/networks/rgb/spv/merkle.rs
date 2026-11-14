@@ -34,8 +34,6 @@ pub const MAX_MERKLE_PATH_DEPTH: usize = 32;
 /// variants, so callers can give clear errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MerkleError {
-    /// A sibling hash in the path was the wrong length.
-    BadSiblingLength { index: usize, len: usize },
     /// Reconstructed root did not match the header's committed root.
     RootMismatch {
         computed: Sha256d,
@@ -91,14 +89,6 @@ pub fn verify_merkle_proof(
     let mut idx = position;
 
     for (i, sibling) in path.iter().enumerate() {
-        if sibling.len() != 32 {
-            // Unreachable with [u8; 32]. Kept for a future Vec<Vec<u8>> input.
-            return Err(MerkleError::BadSiblingLength {
-                index: i,
-                len: sibling.len(),
-            });
-        }
-
         // Low bit of the position: 0 -> `current` is the left child,
         // 1 -> `current` is the right child.
         let mut buf = [0u8; 64];
