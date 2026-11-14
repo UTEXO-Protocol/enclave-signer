@@ -260,7 +260,6 @@ pub(super) fn transition_summary(
     Ok(TransitionSummary {
         op_id: t.opid.clone(),
         transition_type: transition_type_id(t.r#type),
-        total_output_amount: total,
         asset_output_amount: total,
         outputs,
         // Validation fills these from the rgbstd transition, for the settling
@@ -319,11 +318,7 @@ fn asset_output(
             vout,
         }
     };
-    Ok(TransitionOutput {
-        assignment_type: schemata::OS_ASSET.to_inner(),
-        amount,
-        seal,
-    })
+    Ok(TransitionOutput { amount, seal })
 }
 
 /// Parses a display-order (big-endian) txid hex string into a `bitcoin::Txid`.

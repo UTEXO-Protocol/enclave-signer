@@ -80,10 +80,7 @@ fn route_proof_from_validated_consignment(
 
 /// Validate fields owned by an RGB destination before route-level validation.
 #[cfg(evm_to_rgb)]
-pub fn validate_destination(
-    destination: &RgbDestination,
-    _ctx: &ValidationContext<'_>,
-) -> Result<()> {
+pub fn validate_destination(destination: &RgbDestination) -> Result<()> {
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
 }
 
@@ -94,21 +91,21 @@ pub fn validate_destination_anchor(
     _source_amount: u64,
     _source_commission: u64,
     _ctx: &ValidationContext<'_>,
-) -> Result<(u64, Vec<String>)> {
+) -> Result<u64> {
     Err(EnclaveError::CrossCheck(
         "an RGB destination needs rgb-validation to prove its minted units".into(),
     ))
 }
 
 /// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO
-/// (F1-F7, PP, M1-M8). Returns the units and the `utxob:` seal of a blinded mint.
+/// (F1-F7, PP, M1-M8). Returns the minted units.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
     source_amount: u64,
     source_commission: u64,
     ctx: &ValidationContext<'_>,
-) -> Result<(u64, Vec<String>)> {
+) -> Result<u64> {
     let psbt = psbt_validation::parse_psbt_shape(&destination.psbt_bytes)?;
     psbt_validation::assert_mint_shape(&psbt)?;
     psbt_validation::assert_txid_and_sighash_fixed(&psbt)?;
@@ -138,7 +135,7 @@ pub fn validate_destination_anchor(
         )
     })?;
     bind(&mint)?;
-    Ok((mint.issued, mint.recipient.blinded_seals()))
+    Ok(mint.issued)
 }
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which

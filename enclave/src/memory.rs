@@ -64,22 +64,21 @@
 //! - the frame (`MAX_MESSAGE_SIZE`) and its elements (`MAX_WIRE_ELEMENTS`),
 //! - consignments (`max_consignment_bytes`),
 //! - PSBTs and fascias (`MAX_PSBT_BYTES`),
-//! - gas transactions (`MAX_GAS_TX_BYTES`, `MAX_RLP_ITEMS`),
+//! - gas transactions (`max_gas_tx_bytes`, `max_rlp_items`),
 //! - attestation documents (`attestation_verify::MAX_DOCUMENT_BYTES`),
-//! - fundsOut calldata (`MAX_FUNDS_OUT_CALL_DATA_LEN`),
+//! - fundsOut calldata (`max_funds_out_call_data_bytes`),
 //! - the EVM RPC CA certificate (`MAX_EVM_RPC_CA_DER_BYTES`),
 //! - the `SetEndpoints` strings (`MAX_ENDPOINT_STRING_BYTES`),
 //! - an imported mnemonic, on `allow-seed-import` builds only,
-//! - headers (`MAX_HEADERS_PER_SUBMIT`) and Merkle paths
+//! - headers (`max_headers_per_submit`) and Merkle paths
 //!   (`MAX_MERKLE_PATH_DEPTH`).
 //!
 //! The other byte fields are fixed-size, refused before use, never read, or
 //! read once into a buffer of their own size (the encrypted clone seed). The
 //! asset ids and the cloning secret have no upper limit, and no parser reads
 //! them: they are only compared, hashed or stored. No build reads
-//! `EvmSource.token` or `EvmSource.recipient`, and the mint signer does not
-//! read the destination consignment or its hash. They take memory only in
-//! the decode, which the frame term covers. An error text can quote request
+//! `EvmSource.token` or `EvmSource.recipient`. They take memory only in the
+//! decode, which the frame term covers. An error text can quote request
 //! data, so dispatch cuts it at `MAX_ERROR_TEXT_BYTES` before it logs or
 //! returns it. The log formatter keeps a buffer as large as the longest line
 //! it wrote on each thread.

@@ -419,10 +419,9 @@ impl ParentAdapterService {
             .map_err(|e| Status::invalid_argument(format!("{field} must be hex bytes: {e}")))
     }
 
-    /// Decode a field that is hex for EVM but an opaque string elsewhere.
-    /// EVM->RGB FundsIn events put the RGB invoice (`utxob:`) in
-    /// `SourceProof.recipient`. Non-hex values pass through as raw UTF-8, so
-    /// the enclave sees what the listener saw.
+    /// Decode `SourceProof.recipient` of an EVM source. The listener sends the
+    /// BridgeFundsIn `destinationAddress`, which is empty for an RGB deposit.
+    /// A non-hex value passes through as raw UTF-8. The enclave does not read it.
     fn decode_hex_or_raw_field(value: String) -> Vec<u8> {
         let hex = value.strip_prefix("0x").unwrap_or(&value);
         match hex::decode(hex) {
@@ -995,8 +994,8 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Read the tip of the enclave SPV header chain. A build without that
-    /// chain returns NOT_READY.
+    /// Read the tip of the enclave SPV header chain. A build without `spv`
+    /// refuses the request with code 1, and the parent returns it as INTERNAL.
     async fn get_last_saved_block(
         &self,
         _request: Request<GetLastSavedBlockRequest>,

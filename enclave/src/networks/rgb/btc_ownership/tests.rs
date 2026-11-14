@@ -222,7 +222,7 @@ fn make_input_ours(psbt: &mut Psbt, keys: &KeyManager) -> ScriptBuf {
 }
 
 fn owned(psbt: &Psbt, keys: &KeyManager) -> bool {
-    let inputs = self_controlled_input_scripts(psbt, keys);
+    let inputs = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla));
     output_is_self_owned(psbt, 0, &inputs) || output_is_self_derived(psbt, 0, keys, None)
 }
 
@@ -468,7 +468,7 @@ fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
         .tap_key_origins
         .insert(our, (vec![], (*keys.master_fingerprint(), path)));
 
-    let inputs = self_controlled_input_scripts(&psbt, &keys);
+    let inputs = self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla));
     assert_eq!(unowned_output_sats(&psbt, &inputs, &keys), Some(0));
 }
 

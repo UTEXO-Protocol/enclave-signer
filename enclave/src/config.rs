@@ -132,9 +132,9 @@ pub struct BridgeConfig {
     /// There is no output script allowlist: the scripts come from a seed that
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
-    /// Budget in sats for plain-BTC outputs that do not pay back into the same
-    /// custody (`BTC_MAX_UNOWNED_SATS`). Covers the dust outputs of
-    /// `create_utxo`. `0` = unset: production refuses plain-BTC signing.
+    /// Budget in sats for plain-BTC outputs that the enclave cannot prove pay
+    /// back into the same custody (`BTC_MAX_UNOWNED_SATS`). `0` = unset: a
+    /// production build refuses a PSBT that pays any such output.
     pub btc_max_unowned_sats: u64,
     /// Emitter of `FundsIn`/`BridgeFundsIn` (`FUNDS_IN_CONTRACT`), default
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in

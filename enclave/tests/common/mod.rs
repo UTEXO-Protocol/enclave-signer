@@ -60,7 +60,7 @@ pub fn start_test_server_with_policy(
     )
 }
 
-/// Same, with an EVM receipt provider. The enclave refuses a bridge-mode PSBT
+/// Same, with an EVM receipt provider. The enclave refuses a bridge PSBT
 /// unless it can verify the FundsIn deposit. A test that must reach the RGB
 /// checks supplies a provider.
 #[cfg(feature = "rgb-validation")]
@@ -181,7 +181,7 @@ pub fn submit_headers(port: u16, start_height: u32, headers: Vec<Vec<u8>>) -> En
 
 /// A stub EVM RPC that reports one confirmed `BridgeFundsIn` deposit.
 ///
-/// The enclave refuses a bridge-mode PSBT before RGB work unless it can verify
+/// The enclave refuses a bridge PSBT before RGB work unless it can verify
 /// the deposit. The log carries the gross and commission that the request
 /// declares. The deposit gate passes, so only the later checks can reject.
 #[cfg(feature = "rgb-validation")]
@@ -202,12 +202,6 @@ pub mod deposit_stub {
             string destinationAddress, bytes settlementData
         );
     }
-
-    /// An invoice that `parse_authorized_recipient` accepts, so the deposit
-    /// gate passes the recipient parse.
-    const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                           XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                           UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
     /// Block 100 is both canonical and safe.
     const BLOCK: u64 = 100;
@@ -235,8 +229,8 @@ pub mod deposit_stub {
                 tokenCommission: U256::from(self.commission),
                 nativeCommission: U256::ZERO,
                 sourceChainId: U256::ZERO,
-                destinationChainId: U256::ZERO,
-                destinationAddress: INVOICE.into(),
+                destinationChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
+                destinationAddress: String::new(),
                 settlementData: Default::default(),
             };
             Ok(Some(ReceiptData {

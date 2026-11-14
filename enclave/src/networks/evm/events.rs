@@ -34,7 +34,7 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
     let end = offset + 32;
     if data.len() < end {
         return Err(EnclaveError::CrossCheck(format!(
-            "call_data too short: need {} bytes, got {}",
+            "log data too short: need {} bytes, got {}",
             end,
             data.len()
         )));
@@ -52,7 +52,7 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 
 /// Canonical `BridgeFundsIn` signature, verbatim from `bridge-smart-contracts`
 /// `IBridge.sol`. A stale signature matches zero logs, and each deposit then
-/// reports "no FundsIn log in tx".
+/// reports "no BridgeFundsIn log".
 ///
 /// The enclave does not decode `bytes settlementData`, but it is part of the
 /// signature and thus of `topic0`.
@@ -78,9 +78,8 @@ const BFI_DEST_CHAIN_ID_OFF: usize = 192;
 /// string itself.
 const BFI_DEST_ADDRESS_HEAD_OFF: usize = 224;
 /// Maximum decoded `destinationAddress` length. `Bridge.sol` caps it at 512
-/// on chain. This cap bounds the parse of a relayed receipt. The invoice parser
-/// uses the same cap, so the two cannot drift.
-pub(crate) const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
+/// on chain. This cap bounds the parse of a relayed receipt.
+const BFI_MAX_DEST_ADDRESS_LEN: usize = 2048;
 /// 7 static words + 2 dynamic-tail offset words (`destinationAddress`,
 /// `settlementData`) must be present. The `settlementData` tail is not read.
 const BFI_MIN_DATA_LEN: usize = 9 * 32;
@@ -88,23 +87,6 @@ const BFI_MIN_DATA_LEN: usize = 9 * 32;
 /// Bridge `FundsIn` signature. The sender and the RGB lockId are indexed; the
 /// uint64 amount is the one data word.
 pub const FUNDS_IN_SIG: &str = "FundsIn(address,uint256,uint64)";
-
-/// An RGB invoice in the shape the pinned `rgb-invoicing` accepts:
-/// `rgb:<contract>/<schema>/<state>/bc:utxob:<seal>`.
-///
-/// It is outside the test module, so the [`crate::networks::rgb::invoice`]
-/// tests parse the same string that this module's tests ABI-encode. Thus the
-/// two cannot drift.
-#[cfg(test)]
-pub(crate) const SAMPLE_INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                                         XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                                         UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
-
-/// The beneficiary [`SAMPLE_INVOICE`] names, in the form a confidential
-/// recipient leg carries.
-#[cfg(all(test, evm_to_rgb))]
-pub(crate) const SAMPLE_INVOICE_SEAL: &str =
-    "utxob:UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
 /// One decoded EVM log. It is enclave-local, so no RPC-client types leave this
 /// module, and unit tests need no live RPC.
@@ -167,16 +149,6 @@ static BRIDGE_FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
 static FUNDS_IN_TOPIC0: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(|| event_topic0(FUNDS_IN_SIG));
 
-/// What a verified `BridgeFundsIn` deposit authorises. Only the fields that
-/// later stages bind. [`verify_funds_in_event`] checks the rest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(evm_to_rgb)]
-pub struct VerifiedFundsIn {
-    /// Verbatim from the log. For an RGB destination this is the user's
-    /// invoice, which the mint recipient bind parses.
-    pub destination_address: String,
-}
-
 /// Verifies the `FundsIn` deposit for an EVM -> RGB `Sign`.
 ///
 /// Selects the `BridgeFundsIn` with the request's operationId. Other deposits in
@@ -193,7 +165,6 @@ pub struct VerifiedFundsIn {
 ///
 /// `expected_operation_id` is mandatory: exactly 32 bytes, or refuse. Empty is an
 /// error, not a skipped comparison.
-#[allow(clippy::too_many_arguments)]
 #[cfg(evm_to_rgb)]
 pub fn verify_funds_in_event(
     provider: &dyn EvmReceiptProvider,
@@ -203,7 +174,7 @@ pub fn verify_funds_in_event(
     expected_operation_id: &[u8],
     expected_gross_amount: u64,
     expected_commission: u64,
-) -> Result<VerifiedFundsIn> {
+) -> Result<()> {
     let expected_id = <&[u8; 32]>::try_from(expected_operation_id).map_err(|_| {
         EnclaveError::CrossCheck(format!(
             "FundsIn expected operationId must be exactly 32 bytes (the contract-derived \
@@ -231,14 +202,13 @@ pub fn verify_funds_in_event(
         evm_tx_hash,
     )?;
 
-    // 5/6/7. Bind operationId and amounts. The log comes from the pinned
-    //        bridge contract, so later stages bind authenticated evidence.
+    // 5/6/7. Bind operationId and amounts from the log of the pinned bridge
+    //        contract.
     let BridgeFundsInRecord {
         operation_id,
         gross,
         net,
         commission,
-        destination_address,
         ..
     } = decode_bridge_funds_in(log)?;
 
@@ -285,9 +255,7 @@ pub fn verify_funds_in_event(
         operation_id = %hex::encode(operation_id),
         "FundsIn event independently verified in-enclave"
     );
-    Ok(VerifiedFundsIn {
-        destination_address,
-    })
+    Ok(())
 }
 
 /// The fields of one `BridgeFundsIn` log from the pinned emitter. Only the
@@ -675,8 +643,10 @@ pub fn derived_lock(
 /// The receipt must also have exactly one `BridgeFundsIn` from the pinned
 /// contract with `operation_id` (from [`rgb_mint_deposit_id`]), and exactly one
 /// `FundsIn` with `lock_id` and `minted` as amount. Other deposits in the tx
-/// are ignored. A later `fundsOut` must cite its `operationId` in
-/// `settlementData` (see `crosscheck::validate_funds_out_settlement`).
+/// are ignored. That `BridgeFundsIn` must name the RGB network as its
+/// destination chain, and no destination address. A later `fundsOut` must
+/// cite its `operationId` in `settlementData` (see
+/// `crosscheck::validate_funds_out_settlement`).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_rgb_funds_in(
     provider: &dyn EvmReceiptProvider,
@@ -720,6 +690,7 @@ pub fn verify_rgb_funds_in(
         operation_id,
         net: net_amount,
         dest_chain_id,
+        destination_address,
         ..
     } = decode_bridge_funds_in(bridge_log)?;
     // FundsIn has no chain field, so the deposit's chain comes from BridgeFundsIn.
@@ -727,6 +698,15 @@ pub fn verify_rgb_funds_in(
         return Err(EnclaveError::CrossCheck(format!(
             "BridgeFundsIn destinationChainId {dest_chain_id} != RGB network id {}",
             crate::networks::evm::RGB_CHAIN_ID
+        )));
+    }
+    // The Bridge refuses an RGB deposit that names an address. The lockId
+    // binds the recipient, and no check binds a mint to an address.
+    if !destination_address.is_empty() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "BridgeFundsIn destinationAddress has {} bytes - an RGB deposit names no address, \
+             refusing to sign",
+            destination_address.len()
         )));
     }
 

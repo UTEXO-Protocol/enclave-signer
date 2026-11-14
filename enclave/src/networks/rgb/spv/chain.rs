@@ -65,14 +65,15 @@ pub const MAX_REORG_DEPTH: BlockHeight = 100;
 /// compile-time checkpoint forward.
 ///
 /// The worst case is this many headers at about 112 B each. The UTEXO signet
-/// reaches it sooner than mainnet: it makes a block each
-/// [`super::UTEXO_SIGNET_BLOCK_TIME_SECS`] seconds. Tune it to the enclave
-/// memory reservation.
+/// makes blocks faster than mainnet, so it reaches the cap sooner. Tune it to
+/// the enclave memory reservation.
 pub const MAX_STORED_HEADERS: usize = 1_000_000;
 
-/// The image value of `max_headers_per_submit`: the most headers in one
-/// `submit_headers` call. It bounds per-call work. The frame size limit
-/// (`max_message_bytes`) alone allows about one header for each 80 bytes.
+/// The image value of `max_headers_per_submit`, for the tests: the most
+/// headers in one `submit_headers` call. It bounds per-call work. The frame
+/// size limit (`max_message_bytes`) alone allows about one header for each 80
+/// bytes.
+#[cfg(test)]
 pub const MAX_HEADERS_PER_SUBMIT: usize =
     crate::limits::Limits::DEFAULTS.max_headers_per_submit as usize;
 

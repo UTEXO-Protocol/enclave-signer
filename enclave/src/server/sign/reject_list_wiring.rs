@@ -115,8 +115,6 @@ fn a_burn_of_a_rejected_lineage_is_refused_through_the_pinned_client() {
 }
 
 /// Control: the list is read, and the burn goes on to the destination.
-/// Only a build with `rgb-validation` lets a burn reach the destination.
-#[cfg(feature = "rgb-validation")]
 #[test]
 fn a_burn_with_only_unrelated_entries_passes_the_list() {
     let unrelated = OpoutKey {

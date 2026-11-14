@@ -145,7 +145,6 @@ mod source_burn {
         TransitionSummary {
             op_id: op_id.into(),
             transition_type: bfa_ids::TS_TRANSFER,
-            total_output_amount: 1000,
             asset_output_amount: 1000,
             outputs: Vec::new(),
             burned_asset_amount: None,
@@ -235,7 +234,6 @@ mod source_burn {
 // Redemption fundsOut tests: `validate_funds_out_burn_recipient`. The shape
 // and amount checks are tested with `validate_funds_out_amount` and the
 // mint-burn flow.
-#[cfg(feature = "rgb-validation")]
 mod burn {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;
@@ -365,14 +363,12 @@ mod transfer {
     use crate::networks::rgb::validation::TransitionSummary;
     use crate::test_support::bfa_ids;
 
-    #[cfg(feature = "rgb-validation")]
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
             // The destroyed amount is the burnedAsset global, never the
             // outputs.
             transition_type: bfa_ids::TS_BURN,
-            total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(amount),
@@ -405,7 +401,6 @@ mod transfer {
     /// A burn has no change leg and `fundsOut.amount` is gross, so the
     /// release must equal the burned amount. A lower release strands the
     /// difference.
-    #[cfg(feature = "rgb-validation")]
     #[test]
     fn rejects_when_source_amount_exceeds_calldata_amount() {
         let cd = mock_funds_out_calldata(1000);
@@ -664,7 +659,6 @@ mod lz_route {
         validated_with_last(TransitionSummary {
             op_id: OP_ID_HEX.into(),
             transition_type: bfa_ids::TS_BURN,
-            total_output_amount: 0,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(BURNED),

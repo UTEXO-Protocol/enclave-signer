@@ -28,14 +28,6 @@
 # container/containerd builder). SOURCE_DATE_EPOCH defaults to the commit time.
 # EIF recipes pin OS packages to a signed Debian snapshot.
 #
-# Usage:
-#   ./build/build-enclave.sh
-# Tunables (env):
-#   OUT_DIR                output directory for artifacts (default: build/)
-#   IMAGE_TAG              docker tag for the builder image (default: utexo-bridge-enclave:latest)
-#   RGB_ASSET_ID           required approved asset pin for every Dockerfile that
-#                          declares ARG RGB_ASSET_ID (mint, burn)
-#   NITRO_CLI_BLOBS        override blobs dir for `nitro-cli build-enclave`
 # NOTE: the donor cloning secret is NOT baked into the EIF. It is delivered at
 # runtime via the InitializeKey message (CLI: `init --cloning-secret <secret>`),
 # keeping it out of the image and the PCRs reproducible.
@@ -75,7 +67,6 @@ mkdir -p "$OUT_DIR"
 
 # Require an asset when the selected Dockerfile declares RGB_ASSET_ID.
 # Reject a missing asset before the build starts.
-# A fixed ENV asset does not need a build argument.
 BUILD_ARGS=()
 declares_build_arg() {
     grep -qE "^[[:space:]]*ARG[[:space:]]+$1([=[:space:]]|$)" "$SCRIPT_DIR/$DOCKERFILE"

@@ -47,7 +47,6 @@ fn reference_transition(t: &rgbstd::Transition, opid: rgbstd::OpId) -> Transitio
     TransitionSummary {
         op_id: opid.to_string(),
         transition_type: t.transition_type.to_inner(),
-        total_output_amount: total,
         asset_output_amount: total,
         outputs,
         burned_asset_amount: None,
@@ -57,7 +56,6 @@ fn reference_transition(t: &rgbstd::Transition, opid: rgbstd::OpId) -> Transitio
 
 fn reference_output(a: &rgbstd::Assign<RevealedValue, GraphSeal>) -> TransitionOutput {
     TransitionOutput {
-        assignment_type: schemata::OS_ASSET.to_inner(),
         amount: a.state.as_u64(),
         seal: output_seal(&a.seal),
     }
@@ -378,7 +376,6 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                         .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner())
                         .flat_map(|a| a.entries.iter())
                         .map(|e| TransitionOutput {
-                            assignment_type: schemata::OS_ASSET.to_inner(),
                             amount: e.amount,
                             seal: match &e.seal {
                                 SealInfo::Revealed { txid, vout } => OutputSeal::Revealed {
@@ -397,7 +394,6 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                     TransitionSummary {
                         op_id: t.op_id.clone(),
                         transition_type: t.transition_type,
-                        total_output_amount: total,
                         asset_output_amount: total,
                         outputs,
                         burned_asset_amount: None,

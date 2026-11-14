@@ -7,8 +7,6 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-#[cfg(test)]
-use super::types::ValidatedConsignment;
 use crate::error::EnclaveError;
 use crate::error::Result;
 use crate::networks::rgb::spv::Network;
@@ -28,9 +26,6 @@ pub struct RgbValidator {
     pub(super) chain_net: ChainNet,
     /// Test override for the read timeout in [`crate::limits`].
     pub(super) timeout_secs: Option<u64>,
-    /// Test result that bypasses consignment validation.
-    #[cfg(test)]
-    pub(super) canned: Option<ValidatedConsignment>,
 }
 
 impl RgbValidator {
@@ -60,18 +55,7 @@ impl RgbValidator {
             indexer_url,
             chain_net,
             timeout_secs: None,
-            #[cfg(test)]
-            canned: None,
         })
-    }
-
-    /// A validator that returns `validated` and does not call the indexer.
-    #[cfg(test)]
-    pub fn canned(validated: ValidatedConsignment) -> Self {
-        let mut v =
-            Self::new("tcp://indexer.invalid:1".into(), "bitcoin").expect("canned validator");
-        v.canned = Some(validated);
-        v
     }
 
     /// Sets a short indexer timeout for tests.

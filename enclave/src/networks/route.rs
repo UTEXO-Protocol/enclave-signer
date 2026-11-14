@@ -110,10 +110,6 @@ pub struct DestinationProof {
     /// handler binds the source fields to the request's source network and
     /// recomputes `burnId`. `None` for RGB destinations.
     pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
-    /// `utxob:...` seals of the mint's blinded recipient legs. They are
-    /// bound to the deposit invoice after that receipt is verified. Empty for
-    /// EVM destinations, witness mints and builds without the bind.
-    pub rgb_recipient_seals: Vec<String>,
 }
 
 /// Dispatch destination-network validation to the owning network module.
@@ -126,8 +122,6 @@ pub fn validate_destination(
     // An EVM destination drops these. It checks only `calldata_amount`, against the calldata.
     #[cfg(not(evm_to_rgb))]
     let _ = (amount, source_commission);
-    #[cfg(all(evm_to_rgb, not(feature = "rgb-validation")))]
-    let _ = amount;
 
     match destination {
         #[cfg(rgb_to_evm)]
@@ -138,15 +132,14 @@ pub fn validate_destination(
                 proof,
                 evm_funds_out,
                 evm_release_identity: Some(release),
-                rgb_recipient_seals: Vec::new(),
             })
         }
         #[cfg(evm_to_rgb)]
         DestinationNetwork::RgbDestination(destination) => {
-            rgb::validate_destination(destination, ctx)?;
+            rgb::validate_destination(destination)?;
 
             // The destination amount is `mint.issued` from the fascia that the enclave proves.
-            let (destination_amount, rgb_recipient_seals) =
+            let destination_amount =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
 
             Ok(DestinationProof {
@@ -161,7 +154,6 @@ pub fn validate_destination(
                 },
                 evm_funds_out: None,
                 evm_release_identity: None,
-                rgb_recipient_seals,
             })
         }
         #[allow(unreachable_patterns)]
@@ -194,11 +186,12 @@ pub fn validate_route_proofs(
 }
 
 /// Both sides are bridge asset units, not sats. For EVM -> RGB,
-/// `source_amount` is the `FundsIn` amount from
-/// `evm::events::verify_funds_in_event`. For RGB -> EVM, it is the consignment
-/// amount. An RGB `destination_amount` is the fascia's `mint.issued` in RGB
-/// units, issued 1:1 against the EVM token. The PSBT checks in sats are in
-/// [`crate::networks::rgb::btc_crosscheck`].
+/// `source_amount` is the request amount, which
+/// `evm::events::verify_funds_in_event` binds to the `BridgeFundsIn` gross
+/// `amount`. For RGB -> EVM, it is the consignment amount. An RGB
+/// `destination_amount` is the fascia's `mint.issued` plus the source
+/// commission, in RGB units issued 1:1 against the EVM token. The PSBT checks
+/// in sats are in [`crate::networks::rgb::btc_crosscheck`].
 fn validate_amount_covers_destination(source_amount: u64, destination_amount: u64) -> Result<()> {
     if source_amount < destination_amount {
         return Err(EnclaveError::CrossCheck(format!(

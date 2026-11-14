@@ -14,7 +14,7 @@
 //!    64-byte transaction (see `spv::merkle`).
 //! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
 //!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
-//!    Bridge spec section 11 forbids trust in only the most recent anchoring
+//!    Spec P8 requires this depth of each anchoring
 //!    transaction. On the testnets, min-difficulty blocks count too: testnets
 //!    carry no production value. [`ChainPins`] holds the hash and the depth of
 //!    every block a check used. The signer checks both again under the chain
@@ -405,9 +405,6 @@ fn verify_one_proof(
                 proof.block_height,
             ))
         }
-        MerkleError::BadSiblingLength { index: j, len } => EnclaveError::Spv(format!(
-            "merkle_proofs[{index}].merkle_path[{j}] has wrong length {len}"
-        )),
         MerkleError::PositionOutOfRange { position, depth } => EnclaveError::Spv(format!(
             "merkle_proofs[{index}]: tx_position {position} is out of reach of a \
              {depth}-sibling merkle_path"

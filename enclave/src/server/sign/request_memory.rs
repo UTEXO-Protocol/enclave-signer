@@ -141,7 +141,7 @@ fn a_burn_request_through_dispatch_stays_within_the_request_bound() {
 /// The same at the history the request limits are sized for (`config.rs`).
 /// Slow in a debug build.
 #[test]
-#[ignore = "a history of 10_000 transfers; run it on request"]
+#[ignore = "a history of 10_000 transfers; the burn-signer CI job runs it"]
 fn a_burn_request_of_10_000_transfers_through_dispatch_stays_within_the_request_bound() {
     measure_dispatch(
         &burn_after(10_000),

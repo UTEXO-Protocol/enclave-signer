@@ -30,7 +30,7 @@
 //! Fail-closed: the fee policy and the witness_utxo rule need no config and run
 //! in every build. The amount cap and the unowned budget are operator values.
 //! Non-test builds with `rgb-validation`, and every release build, require a
-//! non-zero total-input cap and a non-zero unowned-output budget.
+//! non-zero total-input cap.
 //! A zero unowned-output budget rejects unproven outputs but permits self-pay.
 //! Unit tests and debug builds without `rgb-validation` skip these checks.
 

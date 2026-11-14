@@ -92,8 +92,8 @@ fn test_tee_lz_funds_out_typehash_matches_contract() {
 ///
 /// The alloy EIP-712 encoder over `TeeFundsOut` (an independent
 /// implementation) made the pinned digest. [`test_digest_matches_alloy_eip712`]
-/// derives it again at test time. TODO: pin a Foundry vector with
-/// `sourceBurnTxId` when the contracts repo publishes one.
+/// derives it again at test time. No vector from the contracts repository
+/// pins this digest.
 #[test]
 fn test_digest_matches_reference_vector() {
     let digest =
