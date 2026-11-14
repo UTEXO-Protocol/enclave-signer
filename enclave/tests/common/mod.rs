@@ -203,12 +203,6 @@ pub mod deposit_stub {
         );
     }
 
-    /// An invoice that `parse_authorized_recipient` accepts, so the deposit
-    /// gate passes the recipient parse.
-    const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                           XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                           UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
-
     /// Block 100 is both canonical and safe.
     const BLOCK: u64 = 100;
 
@@ -236,7 +230,7 @@ pub mod deposit_stub {
                 nativeCommission: U256::ZERO,
                 sourceChainId: U256::ZERO,
                 destinationChainId: U256::ZERO,
-                destinationAddress: INVOICE.into(),
+                destinationAddress: String::new(),
                 settlementData: Default::default(),
             };
             Ok(Some(ReceiptData {

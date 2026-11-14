@@ -49,10 +49,8 @@ pub(super) fn handle_sign(
     precheck_operation(ctx, source_ref, destination_ref)?;
 
     // Refuse an invalid deposit before RGB validation and fee/indexer I/O.
-    // Keep the authorized recipient to compare with the proven RGB seals.
     #[cfg(evm_to_rgb)]
-    let authorized_recipient =
-        verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
+    verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
     #[cfg(evm_to_rgb)]
     ensure_time_left(deadline, "the deposit check")?;
 
@@ -147,10 +145,6 @@ pub(super) fn handle_sign(
         &source_validated.proof,
         &destination_proof.proof,
     )?;
-
-    // Must run after RGB validation, which proves the seals.
-    #[cfg(evm_to_rgb)]
-    bind_funds_in_recipient(authorized_recipient, &destination_proof)?;
 
     // A reply after the deadline is never read, so do not sign for it.
     #[cfg(evm_to_rgb)]
@@ -406,35 +400,29 @@ fn evm_tx_hash(source: &EvmSource) -> Result<[u8; 32]> {
     })
 }
 
-/// The recipient that a verified deposit authorizes. Uninhabited on builds
-/// without a deposit verifier, so their `Option` is always `None`.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-use crate::networks::rgb::invoice::AuthorizedRecipient;
-#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
-type AuthorizedRecipient = std::convert::Infallible;
-
 /// Prove the EVM `FundsIn` deposit of an EVM->RGB request. Fails closed.
 ///
 /// One name for two builds, so `handle_sign` needs no `#[cfg]` here:
 ///
-///   * `rgb-validation`: fetch the receipt with the enclave RPC client. Return the
-///     recipient that the deposit invoice authorizes.
+///   * `rgb-validation`: fetch the receipt with the enclave RPC client.
 ///   * no `rgb-validation`: no-op. [`refuse_unverifiable_funds_in`] already refused
 ///     all EVM->RGB requests.
 ///
-/// [`bind_funds_in_recipient`] uses the result after RGB validation proves the
-/// recipient seals.
+/// This proves the amount, not the recipient. M6 (`verify_rgb_funds_in`)
+/// binds the recipient: the deposit's lockId must name the signed mint
+/// transition in the signed tx. The transition commits to its recipient
+/// seal, and the tx to the output script of a witness seal.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn verify_funds_in_deposit(
     ctx: &ServerContext,
     amount: u64,
     source: &SourceNetwork,
     destination: &DestinationNetwork,
-) -> Result<Option<AuthorizedRecipient>> {
+) -> Result<()> {
     let (SourceNetwork::EvmSource(source), DestinationNetwork::RgbDestination(_)) =
         (source, destination)
     else {
-        return Ok(None);
+        return Ok(());
     };
     let tx_hash = evm_tx_hash(source)?;
     // `funds_in_operation_id` is the full 32-byte on-chain BridgeFundsIn
@@ -447,7 +435,7 @@ fn verify_funds_in_deposit(
         )
     })?;
     // Bind to the source BridgeFundsIn.operationId.
-    let verified = crate::networks::evm::events::verify_funds_in_event(
+    crate::networks::evm::events::verify_funds_in_event(
         &**client,
         // The bridge entry contract emits FundsIn. It can differ from the
         // MultisigProxy in EVM_PROXY_CONTRACT_ADDRESS (see config.rs).
@@ -457,22 +445,7 @@ fn verify_funds_in_deposit(
         &source.funds_in_operation_id,
         amount,
         source.commission,
-    )?;
-
-    // Recipient bind. The checks above prove the amount, not the recipient.
-    // The v2 Bridge `fundsIn` refuses a non-empty RGB destinationAddress, so
-    // the deposit has no invoice. Then the lockId binds the recipient:
-    // M6 (`verify_rgb_funds_in`) requires the deposit lockId to name the
-    // signed mint transition in the signed tx. The transition commits to its recipient
-    // seals and the tx to a witness mint's output script.
-    // A deposit with an invoice (a non-empty destinationAddress) also gets
-    // the seal bind.
-    if verified.destination_address.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(
-        crate::networks::rgb::invoice::parse_authorized_recipient(&verified.destination_address)?,
-    ))
+    )
 }
 
 #[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
@@ -481,8 +454,8 @@ fn verify_funds_in_deposit(
     _amount: u64,
     _source: &SourceNetwork,
     _destination: &DestinationNetwork,
-) -> Result<Option<AuthorizedRecipient>> {
-    Ok(None)
+) -> Result<()> {
+    Ok(())
 }
 
 /// Refuse an EVM->RGB request on a build without `rgb-validation`.
@@ -509,31 +482,6 @@ fn refuse_unverifiable_funds_in(
         ));
     }
 
-    Ok(())
-}
-
-/// Compare the seals that RGB validation proved with the recipient that the
-/// verified deposit authorized. No-op when [`verify_funds_in_deposit`]
-/// returns no recipient.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-fn bind_funds_in_recipient(
-    authorized: Option<AuthorizedRecipient>,
-    destination_proof: &crate::networks::DestinationProof,
-) -> Result<()> {
-    match authorized {
-        Some(authorized) => crate::networks::rgb::invoice::assert_recipient_authorized(
-            &destination_proof.rgb_recipient_seals,
-            &authorized,
-        ),
-        None => Ok(()),
-    }
-}
-
-#[cfg(all(not(feature = "rgb-validation"), evm_to_rgb))]
-fn bind_funds_in_recipient(
-    _authorized: Option<AuthorizedRecipient>,
-    _destination_proof: &crate::networks::DestinationProof,
-) -> Result<()> {
     Ok(())
 }
 

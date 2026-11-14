@@ -73,18 +73,6 @@ pub enum MintRecipient {
     Witness { vout: u32 },
 }
 
-impl MintRecipient {
-    /// The seals S6.2 compares with the invoice in a deposit's
-    /// `destinationAddress`. A witness mint has none, so S6.2 refuses it when
-    /// the deposit names an invoice.
-    pub fn blinded_seals(&self) -> Vec<String> {
-        match self {
-            Self::Blinded(seal) => vec![seal.clone()],
-            Self::Witness { .. } => Vec::new(),
-        }
-    }
-}
-
 /// M6: binds the mint to the request's verified EVM deposit, or refuses.
 pub type MintBinder<'a> = &'a dyn Fn(&MintFacts) -> Result<()>;
 

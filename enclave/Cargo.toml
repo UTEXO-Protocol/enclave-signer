@@ -43,12 +43,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # change the BFA schema id. Exact pins keep a newer prerelease out.
 rgb-ops = { version = "=0.11.2-rc.2", default-features = false, features = ["esplora_blocking", "electrum_blocking"], optional = true }
 rgb-schemas = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-# Invoice parsing for the recipient bind of a deposit that names an RGB invoice.
-rgb-invoicing = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-# Not used directly: pins the consensus and VM crates that rgb-ops pulls with a
-# caret requirement.
+# Not used directly: pins the consensus, VM and invoicing crates that rgb-ops
+# pulls with a caret requirement.
 rgb-consensus = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 rgb-aluvm = { version = "=0.11.2-rc.2", default-features = false, optional = true }
+rgb-invoicing = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
 # Decodes the fascia rgb-lib writes for a mint or refill tx, which carries its

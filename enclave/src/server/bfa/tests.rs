@@ -198,8 +198,10 @@ mod mint {
     fn binds_the_mint_among_other_deposits_in_one_tx() {
         // (a) A second RGB deposit: its FundsIn and its BridgeFundsIn.
         let other_rgb = paid(lock_of([3; 32], 0x33), 50).receipt.unwrap().logs;
-        // (b) A deposit on another route: one BridgeFundsIn to chain 42161.
-        let mut data = bridge_funds_in_data(50, 50, 0, "");
+        // (b) A deposit on another route: one BridgeFundsIn to chain 42161,
+        // which names its destination address.
+        let mut data =
+            bridge_funds_in_data(50, 50, 0, "0x00000000000000000000000000000000000000d3");
         let dest_chain = 192..224;
         assert_eq!(
             data[dest_chain.clone()],

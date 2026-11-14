@@ -575,10 +575,12 @@ deployed.
   locked. It cannot mint units that no deposit backs, and it cannot spend
   other state of the wallet. The mint wallet must hold no right whose parent
   is a mint or the genesis ([mint-flow.md](mint-flow.md), section 11).
-- **Witness mint recipient.** The deposit's lockId commits the mint
-  transaction, and so the script that the user's output pays. The user locks
-  the lockId that the bridge hands out, so the bridge must name the
-  transaction that pays the user.
+- **Mint recipient.** The enclave checks that the signed mint is the one that
+  the deposit's lockId names. It does not check that this mint pays the user.
+  The lockId commits the mint transition with its seal, and the mint
+  transaction, and so the script that the output of a witness seal pays. The
+  user locks the lockId that the bridge hands out, so the bridge must name
+  the mint that pays the user.
 - **Fee after the lock.** The mint transaction cannot change after the lock,
   and no fee bump is implemented. It must confirm at its original fee.
 - **Refill fee input.** A host that pays for one junk parent transaction can
