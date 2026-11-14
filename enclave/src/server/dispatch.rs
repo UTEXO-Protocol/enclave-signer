@@ -24,10 +24,10 @@ use crate::proto::enclave_response::Response;
 use crate::proto::*;
 use crate::state::ReplayReservation;
 
-/// Error for a request whose network is not compiled into this build.
-/// Single-network EIFs (RGB-only) return it, so callers see the
-/// refusal. It is not a silent no-op. `features` names the build features
-/// that add the network.
+/// Error for a request whose network is not compiled into this build. A
+/// build without `rgb-validation` returns it for `SubmitHeaders` and
+/// `GetLastSavedBlock`, so callers see a refusal, not a silent no-op.
+/// `features` names the build features that add the network.
 #[allow(dead_code)]
 pub(super) fn unsupported_build(network: &str, features: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!(
@@ -38,7 +38,6 @@ pub(super) fn unsupported_build(network: &str, features: &str) -> EnclaveError {
 
 /// Error for a request of the other signer role. A mint signer does not
 /// release, and a burn signer does not mint.
-#[allow(dead_code)]
 pub(super) fn wrong_signer_role(what: &str) -> EnclaveError {
     let role = if cfg!(feature = "mint-signer") {
         "the mint signer (EVM -> RGB)"

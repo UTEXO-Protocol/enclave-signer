@@ -38,19 +38,11 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::signing::taproot::{find_controlled_taproot_inputs, TaprootSignJob};
 
-/// The `script_pubkey`s of the PSBT inputs this enclave provably controls on
-/// the plain-BTC (Vanilla) account. Only tests call this wrapper.
+/// The `script_pubkey`s of the PSBT inputs this enclave provably controls.
 ///
 /// Each entry comes from the custody resolver, so a real BIP-86 derivation
-/// gives its output key.
-pub fn self_controlled_input_scripts(psbt: &Psbt, keys: &KeyManager) -> HashSet<Vec<u8>> {
-    self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla))
-}
-
-/// [`self_controlled_input_scripts`] with the account filter made explicit.
-///
-/// `allowed_account` is `Some(_)` for one BIP-86 account, `None` for either.
-/// The mint sats check (M8) uses `None`, and only tests pass `Colored`.
+/// gives its output key. `allowed_account` is `Some(_)` for one BIP-86
+/// account, `None` for either. The mint sats check (M8) passes `None`.
 /// A wider filter changes only which scripts count as ours, never what is
 /// signed. `sign_psbt_scoped` controls signing.
 pub fn self_controlled_input_scripts_scoped(

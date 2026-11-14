@@ -45,10 +45,6 @@ impl RgbValidator {
         witnesses: &WitnessCheck<'_>,
         lists: &ListAccess<'_>,
     ) -> Result<ValidatedConsignment> {
-        #[cfg(test)]
-        if let Some(validated) = &self.canned {
-            return Ok(validated.clone());
-        }
         let start = std::time::Instant::now();
         tracing::info!(
             bytes_len = consignment_bytes.len(),

@@ -6165,7 +6165,6 @@ dependencies = [
  "alloy-sol-types",
  "amplify",
  "attestation-verify",
- "aws-credential-types",
  "aws-nitro-enclaves-nsm-api",
  "aws-sdk-kms",
  "aws-smithy-async",

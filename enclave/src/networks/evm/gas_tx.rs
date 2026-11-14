@@ -49,11 +49,13 @@ const MAX_RLP_DEPTH: usize = 8;
 #[cfg(test)]
 const MAX_RLP_ITEMS: usize = crate::limits::Limits::DEFAULTS.max_rlp_items as usize;
 
-/// Maximum size of the unsigned transaction in the image. The operator can
-/// change it ([`crate::limits`]). A release call with thousands of
-/// deposit ids is well under 100 KiB. The wire frame has the size of a burn
-/// consignment, not of a gas transaction. This limit keeps the decoder's
-/// input, and so its heap, far below the request memory model (`memory.rs`).
+/// The image value of the runtime limit `max_gas_tx_bytes`, for the tests.
+/// The operator can change the limit ([`crate::limits`]). A release call with
+/// thousands of deposit ids is well under 100 KiB. The wire frame has the size
+/// of a burn consignment, not of a gas transaction. This limit keeps the
+/// decoder's input, and so its heap, far below the request memory model
+/// (`memory.rs`).
+#[cfg(test)]
 pub const MAX_GAS_TX_BYTES: usize = crate::limits::Limits::DEFAULTS.max_gas_tx_bytes as usize;
 
 fn reject(msg: impl Into<String>) -> EnclaveError {

@@ -16,9 +16,10 @@ pub type BlockHash = [u8; 32];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
     Mainnet,
-    /// Default global signet or a custom signet. Only the compile-time
-    /// challenge script makes them different. Header validation is the same:
-    /// the BIP-325 coinbase signature is not verified (see `validation.rs`).
+    /// Default global signet or a custom signet. Their challenge scripts
+    /// differ, and the enclave holds neither. Header validation is the same
+    /// for both: the BIP-325 coinbase signature is not verified (see
+    /// `validation.rs`).
     Signet,
     /// The UTEXO custom signet as RGB names it (`sbc`). Same headers and
     /// checkpoint as [`Self::Signet`]; only the RGB chain-network differs.
@@ -200,9 +201,6 @@ pub enum SpvError {
 
     #[error("no header at height {0}")]
     HeaderNotFound(BlockHeight),
-
-    #[error("checkpoint placeholder - refusing to operate")]
-    CheckpointPlaceholder,
 }
 
 pub type Result<T> = std::result::Result<T, SpvError>;

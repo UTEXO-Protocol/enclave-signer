@@ -71,14 +71,14 @@ pub struct ValidatedConsignment {
     ///
     /// One Bitcoin tx commits a bundle, which can hold many transitions. The
     /// burn path reads [`Self::last_transition`], and the mint signer reads
-    /// the fascia. Only tests read this field, through
-    /// [`Self::transitions_committed_by`].
+    /// the fascia. Only tests read this field.
     pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
     pub mint_locks: Vec<VerifiedLock>,
 }
 
+#[cfg(test)]
 impl ValidatedConsignment {
     /// Each transition that the witness tx `txid` commits.
     ///
@@ -104,13 +104,11 @@ pub struct TransitionSummary {
     /// BFA transition-type id. Compare with `schemata::TS_TRANSFER`,
     /// `TS_BURN` or `TS_MINT` to classify the EVM action.
     pub transition_type: u16,
-    /// Sum of all fungible amounts in the output assignments. For a Transfer,
-    /// this is recipient plus change. For a Burn, it is 0: the schema gives it
-    /// no outputs, and the destroyed amount is in [`Self::burned_asset_amount`].
-    pub total_output_amount: u64,
-    /// Sum of the fungible amounts on `OS_ASSET` output assignments only.
-    /// BFA has no other fungible type, so this equals
-    /// [`Self::total_output_amount`]. For a mint, it is the minted value.
+    /// Sum of the fungible amounts on `OS_ASSET` output assignments, the one
+    /// fungible type of BFA. For a Transfer, this is recipient plus change.
+    /// For a mint, it is the minted value. For a Burn, it is 0: the schema
+    /// gives it no outputs, and the destroyed amount is in
+    /// [`Self::burned_asset_amount`].
     pub asset_output_amount: u64,
     /// Fungible output assignments, each with a destination seal and an
     /// amount. The declarative mint right is not here.
@@ -129,8 +127,6 @@ pub struct TransitionSummary {
 /// One fungible output assignment on a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
-    /// BFA assignment type. Only `OS_ASSET` entries carry asset units.
-    pub assignment_type: u16,
     /// Amount in the smallest unit of the asset.
     pub amount: u64,
     /// Destination seal: a revealed `txid:vout` or a hidden commitment.

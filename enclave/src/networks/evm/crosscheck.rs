@@ -5,7 +5,6 @@
 
 use crate::config::BtcRelayMode;
 use crate::error::{EnclaveError, Result};
-#[cfg(feature = "rgb-validation")]
 use crate::networks::evm::burn_destination::{self, BurnDestinationRecord};
 use crate::networks::evm::validation::ReleaseIdentity;
 use crate::networks::rgb::spv::HeaderChain;
@@ -79,7 +78,6 @@ pub fn validate_funds_out_amount(
 /// The schema does not require `burnReason`, so this is its only guard. The
 /// caller must run [`validate_funds_out_amount`] first. It rejects anything
 /// that is not a burn of exactly the released amount.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub fn validate_funds_out_burn_recipient(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
@@ -260,7 +258,7 @@ struct ProofBlock {
     commitment: [u8; 32],
 }
 
-/// BtcRelay agreement and consignment source-block bind (spec section 13).
+/// BtcRelay agreement and consignment source-block bind (spec P8).
 /// Before a `fundsOut` is signed:
 ///
 /// 1. Find the block of the last witness tx from its SPV Merkle proof, not

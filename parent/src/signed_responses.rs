@@ -214,6 +214,7 @@ impl SignedResponses {
     }
 
     /// Finished replies currently stored.
+    #[cfg(test)]
     pub fn stored(&self) -> usize {
         let c = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         c.order.len()

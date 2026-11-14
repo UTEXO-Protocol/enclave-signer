@@ -89,7 +89,7 @@ const LIST: [u8; 20] = [0x4e; 20];
 sol! {
     event FundsIn(address indexed sender, uint256 indexed lockId, uint64 amount);
     event BridgeFundsIn(
-        bytes32 indexed operationId, bytes32 indexed sourceTx, address indexed sender,
+        bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
         uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
@@ -296,7 +296,7 @@ fn deposit_receipt(
     };
     let bridge_funds_in = BridgeFundsIn {
         operationId: operation_id.into(),
-        sourceTx: [0x5c; 32].into(),
+        sourceSender: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
         senderNonce: alloy_primitives::U256::ZERO,
         amount: alloy_primitives::U256::from(MINTED),

@@ -4,7 +4,6 @@ import re
 import unittest
 
 HOST = Path(__file__).resolve().parents[2] / 'deploy/deploy-host.sh'
-CONFIG = Path(__file__).resolve().parents[2] / 'parent/src/config.rs'
 
 
 def parent_unit():

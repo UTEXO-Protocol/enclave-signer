@@ -398,9 +398,7 @@ fn esplora_url_takes_a_default_port() {
     // The EVM RPC forwarder takes another loopback port than Esplora's 443.
     let e = parse_with(|r| {
         r.electrum_url = "https://esplora.test".into();
-        if cfg!(feature = "rgb-validation") {
-            r.evm_rpc_tls_port = 8443;
-        }
+        r.evm_rpc_tls_port = 8443;
     })
     .unwrap();
     assert_eq!(

@@ -14,8 +14,6 @@ use crate::keys::{AccountType, KeyManager};
 /// One Taproot key-path input with a key from an enclave BIP-86 account.
 pub struct TaprootSignJob {
     pub input_index: usize,
-    /// The untweaked internal key, derived from our seed.
-    pub xonly_pubkey: XOnlyPublicKey,
     /// Tapret / script-tree root the output key was tweaked with, if any.
     pub merkle_root: Option<TapNodeHash>,
     pub account_type: AccountType,
@@ -97,7 +95,6 @@ fn key_path_job(
     }
     Some(TaprootSignJob {
         input_index: input_idx,
-        xonly_pubkey: internal_key,
         merkle_root: input.tap_merkle_root,
         account_type,
         child_path,

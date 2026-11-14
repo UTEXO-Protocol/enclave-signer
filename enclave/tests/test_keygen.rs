@@ -22,13 +22,6 @@ fn initialize_and_get_keys() {
         other => panic!("expected InitializeKeyResponse, got {:?}", other),
     };
 
-    eprintln!("--- initialize_and_get_keys (random entropy) ---");
-    eprintln!(
-        "  EVM address:    0x{}",
-        hex::encode(&init_resp.evm_address)
-    );
-    eprintln!("  vanilla xpub:   {}", init_resp.account_xpub_vanilla);
-
     assert_eq!(init_resp.evm_address.len(), 20);
     assert!(!init_resp.account_xpub_vanilla.is_empty());
     assert!(init_resp.account_xpub_vanilla.starts_with("xpub"));
@@ -164,8 +157,6 @@ fn production_build_rejects_caller_supplied_seed_and_mnemonic() {
     let seed_resp = common::send_request(port, &seed_req);
     match &seed_resp.response {
         Some(Response::Error(e)) => {
-            eprintln!("--- production rejects seed import ---");
-            eprintln!("  error: code={} message=\"{}\"", e.code, e.message);
             assert!(
                 e.message.contains("not allowed"),
                 "expected a 'not allowed' rejection, got: {}",

@@ -1,5 +1,5 @@
-//! Independent v1 wire encoder and single-field negative cases. Shared by the
-//! mock handler regression test and the separately built Nitro test peer.
+//! Independent v1 wire encoder and single-field negative cases for the mock
+//! handler regression test in `test_clone_identity.rs`.
 use sha2::{Digest, Sha256};
 use utexo_bridge_enclave::policy::{AttestationMode, AttestedPolicy, EvmDataSource, SignerRole};
 use utexo_bridge_enclave::proto::PublicKeysResponse;

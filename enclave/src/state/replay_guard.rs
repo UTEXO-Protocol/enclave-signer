@@ -105,11 +105,7 @@ impl NonceReplayGuard {
         Ok(())
     }
 
-    pub fn check_and_record(&self, nonce: [u8; 32]) -> Result<()> {
-        self.check_and_record_at(nonce, Instant::now()).map(|_| ())
-    }
-
-    /// Core of [`Self::check_and_record`] with an explicit `now` for TTL eviction.
+    /// Core of [`Self::reserve`] with an explicit `now` for TTL eviction.
     /// Tests use it to check eviction without a sleep.
     pub(super) fn check_and_record_at(&self, nonce: [u8; 32], now: Instant) -> Result<u64> {
         let (max, ttl) = self.bounds.get();
@@ -153,9 +149,8 @@ impl NonceReplayGuard {
         Ok(generation)
     }
 
-    /// Record `nonce` with [`check_and_record`](Self::check_and_record) and
-    /// return a [`ReplayReservation`]. The reservation removes the record on
-    /// drop, unless [`ReplayReservation::commit`] is called first.
+    /// Record `nonce` and return a [`ReplayReservation`]. The reservation removes
+    /// the record on drop, unless [`ReplayReservation::commit`] is called first.
     ///
     /// Reserve before the fallible work. Commit after it succeeds.
     /// A failure between them releases the key, so a legitimate retry can run.

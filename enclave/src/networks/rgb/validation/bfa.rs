@@ -48,8 +48,6 @@ pub struct MintAnchor {
     pub amount: u64,
     /// The mint's `beforeBlock`: its lock must be in an EVM (L2) block < before_block.
     pub before_block: u64,
-    /// The mint is in the last bundle. Only tests read this field.
-    pub in_last_bundle: bool,
 }
 
 /// The bridge contract that a BFA genesis commits to.
@@ -90,9 +88,8 @@ pub fn lock_id(opid: OpId, witness_id: bitcoin::Txid) -> [u8; 32] {
     LockId::with(opid, witness_id).to_byte_array()
 }
 
-/// One claim consensus left open. `last_bundle` holds the OpIds of the
-/// consignment's last bundle.
-fn mint_anchor(claim: &Claim, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
+/// One claim consensus left open.
+fn mint_anchor(claim: &Claim) -> MintAnchor {
     let Claim::Lock {
         opid,
         witness_id,
@@ -104,7 +101,6 @@ fn mint_anchor(claim: &Claim, last_bundle: &BTreeSet<OpId>) -> MintAnchor {
         lock_id: lock_id(*opid, *witness_id),
         amount: *amount,
         before_block: *before_block,
-        in_last_bundle: last_bundle.contains(opid),
     }
 }
 
@@ -129,23 +125,15 @@ pub(super) fn check_bijection(anchors: &[MintAnchor], locks: &[VerifiedLock]) ->
 pub(super) struct BindingResolver<'a> {
     genesis: &'a Genesis,
     bind: AnchorBinder<'a>,
-    last_bundle: BTreeSet<OpId>,
     bound: RefCell<Vec<(MintAnchor, VerifiedLock)>>,
     failure: RefCell<Option<EnclaveError>>,
 }
 
 impl<'a> BindingResolver<'a> {
     pub(super) fn new(transfer: &'a Transfer, bind: AnchorBinder<'a>) -> Self {
-        let last_bundle = transfer
-            .bundles
-            .iter()
-            .last()
-            .map(|wb| wb.bundle.known_transitions.iter().map(|k| k.opid).collect())
-            .unwrap_or_default();
         Self {
             genesis: &transfer.genesis,
             bind,
-            last_bundle,
             bound: RefCell::new(Vec::new()),
             failure: RefCell::new(None),
         }
@@ -191,7 +179,7 @@ impl ResolveClaim for BindingResolver<'_> {
         _location: &BridgeLocation,
         claim: &Claim,
     ) -> std::result::Result<bool, ClaimResolverError> {
-        let anchor = mint_anchor(claim, &self.last_bundle);
+        let anchor = mint_anchor(claim);
         match self.bind(&[anchor])?.locks.as_slice() {
             [lock] if lock.lock_id == anchor.lock_id && lock.minted == anchor.amount => {
                 self.bound.borrow_mut().push((anchor, lock.clone()));

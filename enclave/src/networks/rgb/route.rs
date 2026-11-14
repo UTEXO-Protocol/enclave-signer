@@ -80,10 +80,7 @@ fn route_proof_from_validated_consignment(
 
 /// Validate fields owned by an RGB destination before route-level validation.
 #[cfg(evm_to_rgb)]
-pub fn validate_destination(
-    destination: &RgbDestination,
-    _ctx: &ValidationContext<'_>,
-) -> Result<()> {
+pub fn validate_destination(destination: &RgbDestination) -> Result<()> {
     psbt_validation::validate_psbt_bytes(&destination.psbt_bytes)
 }
 
