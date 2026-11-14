@@ -129,8 +129,7 @@ pub struct TransitionSummary {
 /// One fungible output assignment on a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOutput {
-    /// BFA assignment type. Only `OS_ASSET` entries carry asset units. The
-    /// per-output recipient bind filters on it, as `asset_output_amount` does.
+    /// BFA assignment type. Only `OS_ASSET` entries carry asset units.
     pub assignment_type: u16,
     /// Amount in the smallest unit of the asset.
     pub amount: u64,

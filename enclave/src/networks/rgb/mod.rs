@@ -14,19 +14,15 @@
 //! - `spv_crosscheck.rs`: anchors consignment witness txs in that chain.
 //! - `signing/`: Taproot key-path signing with BIP-86 account keys.
 //! - `flow.rs`: the mint/burn flow rules.
-//! - `invoice.rs`: the mint recipient bind.
 
-// The PSBT checks (`SignBtc`, the mint PSBT bind, the recipient invoice)
-// apply to the EVM -> RGB direction only.
+// The PSBT checks (`SignBtc`, the mint PSBT bind) apply to the EVM -> RGB
+// direction only.
 #[cfg(evm_to_rgb)]
 pub mod btc_crosscheck;
 #[cfg(evm_to_rgb)]
 pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
-// The invoice bind reads a verified BridgeFundsIn log.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-pub mod invoice;
 // The mint signer reads mints and refills from their fascias, with no consignment.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub mod parent_proof;

@@ -109,7 +109,7 @@ sequenceDiagram
     E->>R: Stage 2: this deposit's receipt
     E->>E: Stages 3-5: core on the fascia, mint rule, parent proof, fee, M8 sats
     E->>R: Stage 6: chain id, FundsIn of this mint, finality
-    E->>E: Stage 6: recipient bind, replay reserve
+    E->>E: Stage 6: route amount, replay reserve
     E->>E: Stage 7: sign
     E-->>P: signed PSBT
     P-->>L: signed PSBT
@@ -159,9 +159,8 @@ error.
 
 The stages group the checks by topic. The code order differs in places: F7
 and the fee check run after M1 - M5 and M7, and the fee check runs after the
-parent proof. Stage 2 parses the invoice of S6.2; only the seal compare
-runs in Stage 6. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md)
-show the code order.
+parent proof. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md) show
+the code order.
 
 ### Stage 0 - Can this enclave do this request?
 
@@ -327,6 +326,8 @@ The txid of a native SegWit transaction does not change when it is signed.
     `funds_in_operation_id`, which S2.3 bound. Its `netAmount` must equal
     `issuedSupply`. Other deposits in the transaction are ignored.
   - `destinationChainId` must be `RGB_CHAIN_ID`.
+  - `destinationAddress` must be empty. The Bridge refuses an RGB deposit
+    that names an address, and no check binds a mint to one.
   - The receipt block must be before `beforeBlock`, at or below the head
     that `EVM_FINALITY_TAG` selects, and its `blockHash` must match the
     canonical block at its height. The enclave reads the head again
@@ -334,14 +335,13 @@ The txid of a native SegWit transaction does not change when it is signed.
     mint only once the lock is `finalized`.
 - **S6.1** The amount must cover the minted units plus the commission. The
   enclave takes the minted amount from the fascia.
-- **S6.2** If the deposit event has a `destinationAddress`, it is an RGB
-  invoice. Only a blinded seal is accepted, and it must equal the M7 seal. A
-  witness mint has no blinded seal, so a deposit with an invoice refuses it.
-- **S6.3** If the `destinationAddress` is empty (the v2 Bridge), the deposit
-  binds the user through the mint's lockId (M6). The mint transition commits
-  to its seal, and the transaction to the script on the output of a witness
-  seal (section 11).
+- **S6.3** The deposit binds the user through the mint's lockId (M6). The
+  mint transition commits to its seal, and the transaction to the script on
+  the output of a witness seal (section 11).
 - **S6.4** The mint signer reserves the replay key.
+
+The rule number S6.2 is not used: a deposit carries no invoice, so no invoice
+check runs on it.
 
 ### Stage 7 - Sign
 
@@ -563,8 +563,8 @@ transition is a commitment:
 2. The deposit: its `FundsIn` names this mint's lockId, and the deposit id
    that the mint derives carries `issuedSupply` (M6). The units equal
    `amount - commission` (M5).
-3. The recipient: the one leg (M7) is the depositor's blinded seal when the
-   deposit carries an invoice (S6.2). Otherwise the lockId binds it (S6.3).
+3. The recipient: the deposit's lockId binds the one leg (M7) and its
+   transaction (S6.3).
 
 **History decides whether a mint takes effect, never what it does.** A
 receiver validates the full history when it accepts the mint, so a bad
@@ -580,11 +580,11 @@ missing check is a liveness limit only:
 - No witness depth. The mint signer checks no witness transaction of the
   history.
 - No reject list. The connector's rgb-lib checks it before `mint_begin`.
-- No invoice expiry. S6.2 does not check the expiry of an invoice, and a v2
-  deposit carries no invoice. So the enclave can sign a mint after the
-  invoice expired. A wallet fails a receive that it has not checked when the
-  invoice expires. The connector checks the time left when it prepares the
-  mint (`MINT_INVOICE_MIN_TTL`), but slow blocks can still pass the expiry.
+- No invoice expiry. The deposit carries no invoice, so the enclave reads
+  no expiry. It can sign a mint after the user's invoice expired. A wallet
+  fails a receive that it has not checked when the invoice expires. The
+  connector checks the time left when it prepares the mint
+  (`MINT_INVOICE_MIN_TTL`), but slow blocks can still pass the expiry.
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,

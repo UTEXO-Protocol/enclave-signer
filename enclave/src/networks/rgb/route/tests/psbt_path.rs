@@ -76,7 +76,12 @@ fn claim_change(psbt: &mut Psbt, keys: &KeyManager, vout: usize) {
 
 /// A mint of `MINTED` on seed right 0 to the depositor, change to `[0, 99]`.
 fn mint_on(history: &mut History, right: Utxo, keys: &KeyManager) -> Made {
-    let to = BuilderSeal::Concealed(recipient());
+    mint_to(history, right, keys, recipient())
+}
+
+/// A mint of `MINTED` on seed right 0 to the blinded `seal`, change to `[0, 99]`.
+fn mint_to(history: &mut History, right: Utxo, keys: &KeyManager, seal: SecretSeal) -> Made {
+    let to = BuilderSeal::Concealed(seal);
     let change = ours(keys, 99, CHANGE_SATS);
     let mut mint = history.mint(right, MINTED, BEFORE_BLOCK, to, vec![], vec![change]);
     our_input(&mut mint.psbt, keys, 1);
@@ -130,7 +135,7 @@ fn pinned(history: &History) -> BridgeConfig {
     }
 }
 
-type Minted = Result<(u64, Vec<String>)>;
+type Minted = Result<u64>;
 
 /// Runs the mint route with the fixture keys, M8 on `cfg`'s witness amount
 /// and a binder that records the mint. `edit` can unwire either.
@@ -259,7 +264,7 @@ fn blob(bytes: &[u8]) -> SmallBlob {
 fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     let (history, seed, mint) = valid_mint();
     let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    assert_eq!(minted.unwrap(), (MINTED, vec![recipient().to_string()]));
+    assert_eq!(minted.unwrap(), MINTED);
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
     // M6 reads the lock of this mint in this exact tx.
@@ -311,7 +316,7 @@ fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
     mint.psbt.push_rgb_transition(other).unwrap();
     assert!(!mint.psbt.rgb_bundles().unwrap().is_empty());
     let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    assert_eq!(minted.unwrap().0, MINTED);
+    assert_eq!(minted.unwrap(), MINTED);
     assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
@@ -596,7 +601,7 @@ fn refuses_a_blinded_mint_paying_sats_out() {
 fn binds_a_valid_witness_mint() {
     let (history, seed, mint) = valid_witness_mint();
     let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    assert_eq!(minted.unwrap(), (MINTED, vec![]));
+    assert_eq!(minted.unwrap(), MINTED);
     let bound = bound.expect("the binder ran");
     assert_eq!(bound.opid, gen::opid_bytes(mint.opid));
     assert_eq!(bound.lock_id, mint.lock_id());
@@ -612,8 +617,12 @@ fn binds_a_witness_mint_without_change() {
     let outputs = vec![depositor(WITNESS_SATS)];
     let mut mint = history.mint(rights[0], MINTED, BEFORE_BLOCK, to, vec![], outputs);
     our_input(&mut mint.psbt, &keys, 1);
-    let (minted, _) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
-    assert_eq!(minted.unwrap(), (MINTED, vec![]));
+    let (minted, bound) = run_mint(&destination(&history, &mint, &seed), &pinned(&history));
+    assert_eq!(minted.unwrap(), MINTED);
+    assert_eq!(
+        bound.expect("the binder ran").recipient,
+        MintRecipient::Witness { vout: 1 }
+    );
 }
 
 /// Vout 2 is our change; vout 3 is past the tx's three outputs.
@@ -687,24 +696,55 @@ fn witness_mint_lock_id_binds_the_recipient_script() {
     assert_ne!(to_user.lock_id(), to_host.lock_id());
 
     // The depositor locked the user's tx; M6 checks that lock's FundsIn.
-    let bridge = [0xB1; 20];
-    let deposit = crate::test_support::mint_deposit(bridge, to_user.lock_id(), MINTED, [0xd0; 32]);
-    let m6 = |made: &Made| {
-        let (minted, bound) = run_mint(&destination(&history, made, &seed), &pinned(&history));
-        assert_eq!(minted.unwrap(), (MINTED, vec![]));
-        let bound = bound.expect("the binder ran");
-        crate::networks::evm::events::verify_rgb_funds_in(
-            &deposit,
-            &bridge,
-            attestation_verify::EvmFinalityTag::Safe,
-            &[0xee; 32],
-            &bound.lock_id,
-            &[0xd0; 32],
-            MINTED,
-            bound.before_block,
-        )
-    };
+    let m6 = |made: &Made| m6_against(to_user.lock_id(), &history, made, &seed);
     m6(&to_user).expect("the user's tx is the one locked");
+    let err = m6(&to_host).unwrap_err().to_string();
+    assert!(err.contains("no FundsIn log"), "{err}");
+}
+
+/// The route on `made`, then M6 against a deposit that locks `locked`.
+fn m6_against(locked: [u8; 32], history: &History, made: &Made, seed: &Made) -> Result<()> {
+    let bridge = [0xB1; 20];
+    let deposit = crate::test_support::mint_deposit(bridge, locked, MINTED, [0xd0; 32]);
+    let (minted, bound) = run_mint(&destination(history, made, seed), &pinned(history));
+    assert_eq!(minted.unwrap(), MINTED);
+    let bound = bound.expect("the binder ran");
+    crate::networks::evm::events::verify_rgb_funds_in(
+        &deposit,
+        &bridge,
+        attestation_verify::EvmFinalityTag::Safe,
+        &[0xee; 32],
+        &bound.lock_id,
+        &[0xd0; 32],
+        MINTED,
+        bound.before_block,
+    )
+    .map(|_| ())
+}
+
+/// The OpId commits a blinded seal. So the same mint to another seal names
+/// another lock, and M6 binds the user's lock to the mint that pays the user.
+#[test]
+fn blinded_mint_lock_id_binds_the_recipient_seal() {
+    let keys = fx::km();
+    let mint_paying = |seal: SecretSeal| {
+        let (mut history, seed, rights) = seeded(&keys);
+        let mint = mint_to(&mut history, rights[0], &keys, seal);
+        (history, seed, mint)
+    };
+    let (history, seed, to_user) = mint_paying(recipient());
+    let host = GraphSeal::with_blinding(gen::outpoint(0xC1, 0).txid, 0u32, 7).to_secret_seal();
+    let (host_history, _, to_host) = mint_paying(host);
+
+    // The two mints differ in their seal only.
+    assert_eq!(history.contract_id, host_history.contract_id);
+    assert_eq!(to_user.tx.input, to_host.tx.input);
+    assert_ne!(to_user.opid, to_host.opid);
+    assert_ne!(to_user.lock_id(), to_host.lock_id());
+
+    // The depositor locked the mint to the user's seal.
+    let m6 = |made: &Made| m6_against(to_user.lock_id(), &history, made, &seed);
+    m6(&to_user).expect("the user's mint is the one locked");
     let err = m6(&to_host).unwrap_err().to_string();
     assert!(err.contains("no FundsIn log"), "{err}");
 }

@@ -65,9 +65,6 @@ const EXPIRED_RPC_TEST: (&str, &str) = (
     include_str!("fixtures/evm_rpc_tls/expired_rpc_test.pem"),
     include_str!("fixtures/evm_rpc_tls/expired_rpc_test.key.pem"),
 );
-const INVOICE: &str = "rgb:fuhLYX9G-eC8gDvf-V0XpYFH-ceSafoc-lGutAYq-~SExGU4/\
-                       XvmU3d4_nQQ8S7oagbXi07x5vjMm7P~ERukQNX6SC4M/BF/bc:utxob:\
-                       UzR~73lD-JyzirTn-engdWia-qjd5NyV-mndAmmo-EbxdVEG-L6OiP";
 
 /// One receipt log from `BRIDGE` at block 100.
 fn log_json(topics: &[alloy_primitives::B256], data: &[u8], index: u8) -> String {
@@ -85,7 +82,7 @@ fn log_json(topics: &[alloy_primitives::B256], data: &[u8], index: u8) -> String
 }
 
 /// A successful receipt at block 100 with one `BridgeFundsIn` from `BRIDGE`
-/// (gross 1000, commission 50, recipient `INVOICE`) and one `FundsIn` that
+/// (gross 1000, commission 50, no destination address) and one `FundsIn` that
 /// locks 950 under the mint lockId `MINT_LOCK_ID`.
 fn forged_receipt() -> String {
     let event = BridgeFundsIn {
@@ -99,7 +96,7 @@ fn forged_receipt() -> String {
         nativeCommission: U256::ZERO,
         sourceChainId: U256::ZERO,
         destinationChainId: U256::from(utexo_bridge_enclave::networks::evm::RGB_CHAIN_ID),
-        destinationAddress: INVOICE.into(),
+        destinationAddress: String::new(),
         settlementData: Default::default(),
     };
     let lock = FundsIn {

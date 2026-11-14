@@ -12,9 +12,12 @@ fn op_id(tag: u8) -> [u8; 32] {
     id
 }
 
-/// BridgeFundsIn `data` paying [`SAMPLE_INVOICE`].
+/// A destination address that is longer than one ABI word.
+const DESTINATION: &str = "a destination address that is longer than one ABI word";
+
+/// BridgeFundsIn `data` of an RGB deposit: it names no destination address.
 fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
-    bridge_funds_in_data(gross, net, commission, SAMPLE_INVOICE)
+    bridge_funds_in_data(gross, net, commission, "")
 }
 
 // --- destinationAddress tail decoding ---
@@ -23,9 +26,9 @@ fn bridge_data(gross: u64, net: u64, commission: u64) -> Vec<u8> {
 
 #[test]
 fn decodes_the_destination_address_tail() {
-    let d = bridge_funds_in_data(1000, 950, 50, SAMPLE_INVOICE);
+    let d = bridge_funds_in_data(1000, 950, 50, DESTINATION);
     let got = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap();
-    assert_eq!(got, SAMPLE_INVOICE);
+    assert_eq!(got, DESTINATION);
 }
 
 #[test]
@@ -37,7 +40,7 @@ fn decodes_an_empty_destination_address() {
 
 #[test]
 fn rejects_a_tail_offset_past_the_data() {
-    let mut d = bridge_funds_in_data(1000, 950, 50, SAMPLE_INVOICE);
+    let mut d = bridge_funds_in_data(1000, 950, 50, DESTINATION);
     d[BFI_DEST_ADDRESS_HEAD_OFF..BFI_DEST_ADDRESS_HEAD_OFF + 32].copy_from_slice(&word(1_000_000));
     let err = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
     assert!(err.to_string().contains("past the"), "{err}");
@@ -45,7 +48,7 @@ fn rejects_a_tail_offset_past_the_data() {
 
 #[test]
 fn rejects_a_tail_length_past_the_data() {
-    let mut d = bridge_funds_in_data(1000, 950, 50, SAMPLE_INVOICE);
+    let mut d = bridge_funds_in_data(1000, 950, 50, DESTINATION);
     let len_at = 9 * 32;
     // Under the size cap, so the bounds check must catch it.
     d[len_at..len_at + 32].copy_from_slice(&word(1_000));
@@ -68,16 +71,6 @@ fn rejects_a_non_utf8_tail() {
     d[at] = 0xFF;
     let err = decode_abi_string(&d, BFI_DEST_ADDRESS_HEAD_OFF, "destinationAddress").unwrap_err();
     assert!(err.to_string().contains("not valid UTF-8"), "{err}");
-}
-
-/// Without this, the recipient bind has no value to compare.
-#[cfg(evm_to_rgb)]
-#[test]
-fn verified_funds_in_carries_the_destination_address() {
-    let p = happy_provider();
-    let v =
-        verify_funds_in_event(&p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 1000, 50).unwrap();
-    assert_eq!(v.destination_address, SAMPLE_INVOICE);
 }
 
 /// topics: [topic0, operationId, sourceSender, sender].
@@ -125,7 +118,7 @@ fn happy_provider() -> FakeEvm {
 /// Verifies with the operationId bound, the only supported call shape.
 #[cfg(evm_to_rgb)]
 fn verify(p: &FakeEvm) -> Result<()> {
-    verify_funds_in_event(p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 1000, 50).map(|_| ())
+    verify_funds_in_event(p, &BRIDGE, EvmFinalityTag::Safe, &TX, &op_id(7), 1000, 50)
 }
 
 #[test]
@@ -513,9 +506,7 @@ mod finality {
     fn verifiers() -> Vec<Verifier> {
         vec![
             #[cfg(evm_to_rgb)]
-            |provider, tag| {
-                verify_funds_in_event(provider, &BRIDGE, tag, &TX, &op_id(7), 1000, 50).map(|_| ())
-            },
+            |provider, tag| verify_funds_in_event(provider, &BRIDGE, tag, &TX, &op_id(7), 1000, 50),
             |provider, tag| {
                 verify_rgb_funds_in(
                     provider,
@@ -995,6 +986,38 @@ fn verify_rgb_funds_in_rejects_a_foreign_destination_chain() {
     .unwrap_err()
     .to_string();
     assert!(e.contains("destinationChainId 42161"), "got: {e}");
+}
+
+/// The Bridge refuses an RGB deposit that names an address, and no check
+/// binds a mint to one. One byte is an address, and so is white space.
+#[test]
+fn verify_rgb_funds_in_refuses_a_deposit_that_names_a_destination_address() {
+    let longest = "x".repeat(BFI_MAX_DEST_ADDRESS_LEN);
+    for address in [" ", "\n", "a", DESTINATION, &longest] {
+        let mut bridge = bridge_log(op_id(7), 1000, 950, 50);
+        bridge.data = bridge_funds_in_data(1000, 950, 50, address);
+        let p = FakeEvm {
+            receipt: Some(receipt_with(
+                vec![rgb_companion_log(0xab, 100), bridge],
+                100,
+            )),
+            ..FakeEvm::default()
+        };
+        let e = verify_rgb_funds_in(
+            &p,
+            &BRIDGE,
+            EvmFinalityTag::Safe,
+            &TX,
+            &word(0xab),
+            &op_id(7),
+            100,
+            BEFORE_BLOCK,
+        )
+        .unwrap_err()
+        .to_string();
+        let refusal = format!("destinationAddress has {} bytes", address.len());
+        assert!(e.contains(&refusal), "{address:?}: {e}");
+    }
 }
 
 /// Without the record, a `fundsOut` has nothing to cite, so the lock is not

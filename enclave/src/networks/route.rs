@@ -110,10 +110,6 @@ pub struct DestinationProof {
     /// handler binds the source fields to the request's source network and
     /// recomputes `burnId`. `None` for RGB destinations.
     pub evm_release_identity: Option<crate::networks::evm::validation::ReleaseIdentity>,
-    /// `utxob:...` seals of the mint's blinded recipient legs. They are
-    /// bound to the deposit invoice after that receipt is verified. Empty for
-    /// EVM destinations, witness mints and builds without the bind.
-    pub rgb_recipient_seals: Vec<String>,
 }
 
 /// Dispatch destination-network validation to the owning network module.
@@ -138,7 +134,6 @@ pub fn validate_destination(
                 proof,
                 evm_funds_out,
                 evm_release_identity: Some(release),
-                rgb_recipient_seals: Vec::new(),
             })
         }
         #[cfg(evm_to_rgb)]
@@ -146,7 +141,7 @@ pub fn validate_destination(
             rgb::validate_destination(destination, ctx)?;
 
             // The destination amount is `mint.issued` from the fascia that the enclave proves.
-            let (destination_amount, rgb_recipient_seals) =
+            let destination_amount =
                 rgb::validate_destination_anchor(destination, amount, source_commission, ctx)?;
 
             Ok(DestinationProof {
@@ -161,7 +156,6 @@ pub fn validate_destination(
                 },
                 evm_funds_out: None,
                 evm_release_identity: None,
-                rgb_recipient_seals,
             })
         }
         #[allow(unreachable_patterns)]

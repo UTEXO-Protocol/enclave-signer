@@ -25,7 +25,6 @@ sequenceDiagram
     participant Rpc as EVM RPC<br/>(TLS to pinned host, ends in enclave)
     participant Core as networks::rgb::psbt_commit<br/>+ parent_proof (fascia)
     participant Anchor as networks::rgb::psbt_validation
-    participant Inv as networks::rgb::invoice
     participant State as EnclaveState<br/>op_replay_guard
     participant Km as KeyManager::sign_psbt_scoped
 
@@ -50,7 +49,7 @@ sequenceDiagram
     Evt->>Evt: the ONE BridgeFundsIn from FUNDS_IN_CONTRACT with topic1 == funds_in_operation_id<br/>(none or two ⇒ REFUSE, other deposits ignored, no plain FundsIn fallback)
     Evt->>Evt: topic1 operationId == funds_in_operation_id<br/>gross == amount, tokenCommission == commission<br/>netAmount ≤ gross − commission, u64 only
     Evt->>Evt: receipt height ≤ selected head, canonical blockHash matches,<br/>revalidate head snapshot,<br/>missing head or receipt above head ⇒ REFUSE
-    Evt-->>Srv: destinationAddress (may be empty)
+    Evt-->>Srv: this deposit backs the request's amount
 
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
     Srv->>Core: F1 parse, F2 witness_utxo native SegWit, sighash ALL / DEFAULT
@@ -63,16 +62,11 @@ sequenceDiagram
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
     Srv->>Srv: TOKEN_CONTRACT, EVM_CHAIN_ID pinned (before any RPC)
     Srv->>Rpc: eth_chainId, receipt of evm_tx_hash,<br/>EVM_FINALITY_TAG head, canonical block
-    Srv->>Srv: eth_chainId == EVM_CHAIN_ID, the FundsIn with lockId == LockId(mint OpId, PSBT txid) and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored), block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated,<br/>deposit == the mint's derived lock
+    Srv->>Srv: eth_chainId == EVM_CHAIN_ID, the FundsIn with lockId == LockId(mint OpId, PSBT txid) and amount == issuedSupply<br/>+ the BridgeFundsIn with operationId == derived id (other deposits ignored),<br/>destinationChainId == RGB_CHAIN_ID, destinationAddress empty, block < beforeBlock, height ≤ selected head,<br/>canonical blockHash matches, head snapshot revalidated,<br/>deposit == the mint's derived lock
 
-    Note over Srv,Inv: 5 — route and recipient
+    Note over Srv: 5 - route
     Srv->>Srv: amount ≥ minted units + commission
-    alt destinationAddress not empty (deposit with an RGB invoice)
-        Srv->>Inv: RGB invoice, blinded seal only
-        Srv->>Inv: the M7 blinded seal == invoice seal (a witness mint has none ⇒ REFUSE)
-    else empty (v2 Bridge)
-        Note right of Srv: recipient bound by the mint lockId (step 4, M6)
-    end
+    Note right of Srv: recipient bound by the mint lockId (step 4, M6)
 
     Note over Srv,State: 6 — reserve replay key
     Srv->>State: reserve (rolled back on error)
