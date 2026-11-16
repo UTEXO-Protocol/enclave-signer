@@ -14,9 +14,9 @@ contain an error.
 
 1. The backend makes an RGB mint (a BFA `mint` transition) with rgb-lib's
    `mint_begin`, and a Bitcoin PSBT that anchors it. It gets the mint's lockId
-   and `settlementData = abi.encode(uint256 lockId, uint64 beforeBlock)`. The
-   mint commits to `beforeBlock`: its EVM lock must be in an earlier (L2)
-   block.
+   and `settlementData`: `abi.encode(uint256 lockId, uint64 beforeBlock)` and
+   then one fee-type byte (0 = BASE, 1 = WITNESS), 65 bytes. The mint commits
+   to `beforeBlock`: its EVM lock must be in an earlier (L2) block.
 2. The user locks ERC-20 tokens in the Bridge contract on EVM. The `fundsIn`
    call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
