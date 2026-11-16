@@ -44,7 +44,7 @@ fn proof(child: &Made, parent: &Made, right: Utxo, history: &History) -> Result<
         &child.psbt,
         &parent.fascia_bytes(),
         right.opout,
-        history.contract_id,
+        Pin::for_test(history.contract_id),
     )
 }
 
@@ -92,7 +92,13 @@ fn finds_the_right_after_a_fee_input() {
 fn refuses_missing_parent_fascia() {
     let (mut history, _, rights) = seeded();
     let child = refill(&mut history, rights[0]);
-    let err = right_input(&child.psbt, &[], rights[0].opout, history.contract_id).unwrap_err();
+    let err = right_input(
+        &child.psbt,
+        &[],
+        rights[0].opout,
+        Pin::for_test(history.contract_id),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("parent_fascia required"), "{err}");
 }
 
@@ -102,8 +108,13 @@ fn refuses_a_parent_that_is_not_a_fascia() {
     let (mut history, seed, rights) = seeded();
     let child = refill(&mut history, rights[0]);
     for parent in [b"junk".to_vec(), seed.psbt.serialize()] {
-        let err =
-            right_input(&child.psbt, &parent, rights[0].opout, history.contract_id).unwrap_err();
+        let err = right_input(
+            &child.psbt,
+            &parent,
+            rights[0].opout,
+            Pin::for_test(history.contract_id),
+        )
+        .unwrap_err();
         let err = err.to_string();
         assert!(
             err.contains("parent_fascia is not an rgb-lib fascia"),
@@ -124,7 +135,26 @@ fn refuses_a_parent_fascia_whose_tx_does_not_commit_it() {
         ..seed
     };
     let err = refusal(&child, &parent, rights[0], &history);
-    assert!(err.contains("does not commit exactly"), "{err}");
+    assert!(err.contains("doesn't commit to"), "{err}");
+}
+
+/// rgb-lib writes a fascia while its transaction is still unsigned, and the
+/// inspection reads that transaction as a PSBT. A witness on it is refused.
+#[test]
+fn refuses_a_parent_fascia_whose_tx_carries_a_signature() {
+    let (mut history, seed, rights) = seeded();
+    let child = refill(&mut history, rights[0]);
+    let mut witness = seed.fascia.seal_witness().clone();
+    witness.tx.input[0].witness.push([0x51; 64]);
+    let parent = Made {
+        fascia: Fascia::new(witness, seed.fascia.bundles().clone()),
+        ..seed
+    };
+    let err = refusal(&child, &parent, rights[0], &history);
+    assert!(
+        err.contains("parent_fascia carries a transaction that is not unsigned"),
+        "{err}"
+    );
 }
 
 /// A sibling of the seed tx commits the same bundle; only PP7 tells them apart.

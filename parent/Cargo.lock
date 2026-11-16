@@ -1671,6 +1671,12 @@ dependencies = [
 
 [[package]]
 name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
+name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -1740,6 +1746,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb0ce8bd5baaa0d303a19915a6d93afed161f528654e42da2a7a97d05c59499a"
 dependencies = [
  "base58ck",
+ "base64 0.21.7",
  "bech32",
  "bitcoin-io",
  "bitcoin-units",
@@ -4564,7 +4571,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4903,9 +4910,10 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.8"
-source = "git+https://github.com/RGB-Tools/rgb-lib?rev=567e5b8308f70a6242137475394be5a82fc15c95#567e5b8308f70a6242137475394be5a82fc15c95"
+source = "git+https://github.com/RGB-Tools/rgb-lib?rev=ea2b745b66b20fbaf3001e2121e1329c4695f647#ea2b745b66b20fbaf3001e2121e1329c4695f647"
 dependencies = [
  "amplify",
+ "bitcoin",
  "hex",
  "rgb-invoicing",
  "rgb-ops",
@@ -5185,7 +5193,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6742,7 +6750,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

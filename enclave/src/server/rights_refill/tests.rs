@@ -354,7 +354,10 @@ fn refuses_a_refill_whose_fascia_is_of_another_tx() {
         ..request(&history, &refill, &seed)
     };
     let err = sign(&ctx, req).unwrap_err();
-    assert!(err.to_string().contains("fascia is of tx"), "{err}");
+    assert!(
+        err.to_string().contains("does not match PSBT TXID"),
+        "{err}"
+    );
 }
 
 #[test]

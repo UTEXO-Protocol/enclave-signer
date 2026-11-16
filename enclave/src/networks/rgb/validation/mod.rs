@@ -7,7 +7,6 @@
 //! - `witness.rs`: witness sources and the SPV resolver.
 //! - `consensus.rs`: run rgb-lib validation over the consignment bytes.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
-//! - `scratch.rs`: the file rgb-lib reads the bytes from.
 //! - `consignment.rs`: decode the validated `Transfer` into plain shapes.
 //! - `transition.rs`: read one transition's globals and seals, for both paths.
 //! - `types.rs`: those shapes.
@@ -26,7 +25,6 @@ mod cost;
 mod indexer;
 mod reject_list;
 mod schema;
-mod scratch;
 mod source;
 mod transition;
 mod types;

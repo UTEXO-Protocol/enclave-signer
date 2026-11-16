@@ -53,10 +53,10 @@ sequenceDiagram
 
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
     Srv->>Core: F1 parse, F2 witness_utxo native SegWit, sighash ALL / DEFAULT
-    Srv->>Core: fascia decodes, its witness txid == the PSBT txid<br/>F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 one fascia bundle, of RGB_ASSET_ID (== asset_id)<br/>F5 MPC tree of every fascia bundle + its entropy == opret commitment<br/>F6 one transition, its own id, input map == its inputs
+    Srv->>Core: F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 fascia decodes, one bundle, of RGB_ASSET_ID (== asset_id)<br/>F5/F6 rgb-lib inspect_fascia on the fascia bytes in a scratch file:<br/>its witness txid == the PSBT txid, opret close method,<br/>MPC tree of every fascia bundle under the entropy it carries == opret commitment,<br/>one transition under its own id, input map == its inputs,<br/>and the same tx, asset and transition the enclave read
     Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one leg, blinded or a witness seal of this tx
     Srv->>Anchor: F7 one input, Colored key path of this enclave
-    Srv->>Core: PP1-PP7 parent fascia: core again on its own tx, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
+    Srv->>Core: PP1-PP7 parent fascia: core again on its own unsigned tx, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
     Srv->>Anchor: fee ≤ MAX_FEE_SATS, ≤ MAX_FEE_RATE_SAT_VB (unsigned size),<br/>≥ MIN_FEE_RATE_SAT_VB (estimated signed size)
     Srv->>Anchor: M8 blinded: no sat out<br/>witness: exactly MINT_WITNESS_SAT to the seal's output, not ours, nothing else
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)

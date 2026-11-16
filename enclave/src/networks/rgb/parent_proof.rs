@@ -7,28 +7,40 @@
 
 use bitcoin::psbt::Psbt;
 use bitcoin::OutPoint;
+use rgbstd::containers::Fascia;
 use rgbstd::txout::TxoSeal;
-use rgbstd::{BuilderSeal, ContractId, GraphSeal, Opout};
+use rgbstd::{BuilderSeal, GraphSeal, Opout};
 
 use super::psbt_commit::{
-    committed_transition, parse_fascia, single_right_input, witness_vout, Committed,
+    committed_transition, parse_fascia, single_right_input, witness_vout, Committed, Pin,
 };
 use super::validation::output_seal;
 use crate::error::{EnclaveError, Result};
 
+/// The request field the parent fascia arrives in.
+const FIELD: &str = "parent_fascia";
+
 /// PP1-PP7: the index of the one input of `psbt` that spends the UTXO of the
 /// right `input` names, as `parent_fascia` proves that UTXO.
-pub fn right_input(
-    psbt: &Psbt,
-    parent_fascia: &[u8],
-    input: Opout,
-    pin: ContractId,
-) -> Result<usize> {
+pub fn right_input(psbt: &Psbt, parent_fascia: &[u8], input: Opout, pin: Pin) -> Result<usize> {
     // PP1, then PP2: the fascia carries the parent's unsigned tx, which the core binds.
-    let parent = parse_fascia(parent_fascia, "parent_fascia")?;
-    let made = committed_transition(&parent.seal_witness().tx, &parent, pin)?;
+    let parent = parse_fascia(parent_fascia, FIELD)?;
+    let parent_psbt = unsigned_psbt(&parent)?;
+    let made = committed_transition(&parent_psbt, parent, parent_fascia, FIELD, pin)?;
     let vout = right_vout(&made, input)?;
     spending_input(psbt, OutPoint::new(made.txid, vout))
+}
+
+/// PP2: the parent's own transaction, as the PSBT the fascia inspection reads
+/// it from. rgb-lib writes a fascia while its transaction is still unsigned,
+/// so a parent fascia that carries a signature or a scriptSig is refused.
+fn unsigned_psbt(parent: &Fascia) -> Result<Psbt> {
+    Psbt::from_unsigned_tx(parent.seal_witness().tx.clone()).map_err(|e| {
+        EnclaveError::CrossCheck(format!(
+            "{FIELD} carries a transaction that is not unsigned: {e} - rgb-lib writes a fascia \
+             before its transaction is signed"
+        ))
+    })
 }
 
 /// PP3-PP6: the parent is a propagate that made `input` alone on an output of
@@ -36,7 +48,7 @@ pub fn right_input(
 fn right_vout(made: &Committed, input: Opout) -> Result<u32> {
     if input.op != made.opid || input.ty != schemata::OS_MINT {
         return Err(EnclaveError::CrossCheck(format!(
-            "parent_fascia commits transition {}, which did not make the mintRight {input} the \
+            "{FIELD} commits transition {}, which did not make the mintRight {input} the \
              request spends",
             made.opid
         )));

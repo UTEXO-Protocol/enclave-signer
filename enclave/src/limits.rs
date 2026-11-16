@@ -304,11 +304,14 @@ impl Limits {
         crate::memory::REQUEST_MEMORY_FACTOR as u64 * self.max_message_bytes + self.elements_bytes()
     }
 
-    /// The most RAM the consignment scratch file of one request can take
-    /// (`memory.rs`). The file holds the consignment bytes, and a frame
-    /// cannot carry more than itself.
+    /// The most RAM the scratch file of one request can take (`memory.rs`).
+    /// A request holds one file at a time: the consignment of a burn, or one
+    /// fascia of a mint or refill. So the larger limit sets the bound, and a
+    /// frame cannot carry more than itself.
     pub fn scratch_file_bytes(&self) -> u64 {
-        self.max_consignment_bytes.min(self.max_message_bytes)
+        self.max_consignment_bytes
+            .max(self.max_psbt_bytes)
+            .min(self.max_message_bytes)
     }
 
     /// The socket deadline of one request.

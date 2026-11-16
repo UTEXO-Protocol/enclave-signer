@@ -1,22 +1,24 @@
 //! The core of the mint signer's PSBT rules: the one transition of the pinned
 //! contract that a tx commits, read from the fascia rgb-lib writes for that tx
 //! (rgb-lib strips the RGB keys from the PSBT). No consignment: each step below
-//! is a commitment, so the txid fixes the transition. The rule ids (F3-F6) are
-//! those of `docs/mint-flow.md` section 5, Stage 3.
+//! is a commitment, so the txid fixes the transition.
+//!
+//! rgb-lib's wallet-less `inspect_fascia` proves the commitments: the fascia is
+//! of the PSBT's tx, that tx commits exactly the bundles the fascia discloses
+//! under the entropy the fascia carries, and each bundle commits the
+//! transitions it holds. The rules around it are the enclave's: one bundle of
+//! the pinned asset, one transition, and an opret host the enclave can read.
+//! The rule ids (F3-F6) are those of `docs/mint-flow.md` section 5, Stage 3.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use amplify::confinement::{Confined, U24};
+use bitcoin::psbt::Psbt;
 use bitcoin::Transaction;
+use rgb_lib::no_wallet::{inspect_fascia, RgbInspection};
+use rgb_lib::{BitcoinNetwork, CloseMethod};
 use rgbstd::containers::Fascia;
-use rgbstd::opret::OpretProof;
-use rgbstd::rgbcore::commit_verify::mpc::{
-    MerkleTree, Message, MultiSource, ProtocolId, MPC_MINIMAL_DEPTH,
-};
-use rgbstd::rgbcore::commit_verify::{CommitId, TryCommitVerify};
-use rgbstd::rgbcore::dbc::Proof;
-use rgbstd::validation::DbcProof;
 use rgbstd::{ContractId, OpId, Operation, Opout, Transition, TransitionBundle};
 use strict_encoding::StrictDeserialize;
 
@@ -32,21 +34,65 @@ pub struct Committed {
     pub transition: Transition,
 }
 
-/// `RGB_ASSET_ID`, parsed. Bundles are compared as ids, never as strings.
-pub fn pinned_contract(cfg: &BridgeConfig) -> Result<ContractId> {
-    if cfg.rgb_asset_id.is_empty() {
-        return Err(EnclaveError::CrossCheck(
-            "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to sign for \
-             an unpinned asset"
-                .into(),
-        ));
+/// What the core reads a fascia under: the pinned asset and the image's
+/// Bitcoin network.
+#[derive(Debug, Clone, Copy)]
+pub struct Pin {
+    /// `RGB_ASSET_ID`, parsed. Bundles are compared as ids, never as strings.
+    pub contract: ContractId,
+    /// Only rgb-lib's recipient ids carry it. The mint rules read the
+    /// recipient seal from the transition, so no check depends on it.
+    network: BitcoinNetwork,
+}
+
+impl Pin {
+    /// The pins of this image, or a refusal when `RGB_ASSET_ID` is unset or
+    /// not a contract id.
+    pub fn of(cfg: &BridgeConfig) -> Result<Self> {
+        if cfg.rgb_asset_id.is_empty() {
+            return Err(EnclaveError::CrossCheck(
+                "asset-identity pin missing: RGB_ASSET_ID is not configured - refusing to sign \
+                 for an unpinned asset"
+                    .into(),
+            ));
+        }
+        let contract = ContractId::from_str(&cfg.rgb_asset_id).map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "RGB_ASSET_ID {} is not a contract id: {e}",
+                cfg.rgb_asset_id
+            ))
+        })?;
+        Ok(Self {
+            contract,
+            network: rgb_lib_network(cfg),
+        })
     }
-    ContractId::from_str(&cfg.rgb_asset_id).map_err(|e| {
-        EnclaveError::CrossCheck(format!(
-            "RGB_ASSET_ID {} is not a contract id: {e}",
-            cfg.rgb_asset_id
-        ))
-    })
+}
+
+#[cfg(test)]
+impl Pin {
+    /// A regtest image pinned to `contract`, for the tests of the mint paths.
+    /// The fixtures build regtest seals.
+    pub fn for_test(contract: ContractId) -> Self {
+        Self {
+            contract,
+            network: BitcoinNetwork::Regtest,
+        }
+    }
+}
+
+/// The network rgb-lib renders a concealed seal's recipient id with. The match
+/// is exhaustive, so a new network must be mapped here.
+fn rgb_lib_network(cfg: &BridgeConfig) -> BitcoinNetwork {
+    use attestation_verify::BitcoinNetwork as Image;
+    match cfg.bitcoin_network {
+        Image::Mainnet => BitcoinNetwork::Mainnet,
+        Image::Testnet3 => BitcoinNetwork::Testnet,
+        Image::Testnet4 => BitcoinNetwork::Testnet4,
+        Image::Signet => BitcoinNetwork::Signet,
+        Image::SignetCustom => BitcoinNetwork::SignetCustom,
+        Image::Regtest => BitcoinNetwork::Regtest,
+    }
 }
 
 /// The strict-encoded fascia in the request field `field`, decoded as rgb-lib
@@ -66,26 +112,27 @@ pub fn parse_fascia(bytes: &[u8], field: &str) -> Result<Fascia> {
         .map_err(|e| EnclaveError::CrossCheck(format!("{field} is not an rgb-lib fascia: {e}")))
 }
 
-/// F3-F6: `fascia` is of `tx`, whose first OP_RETURN commits exactly its
-/// bundles, and the pinned contract's bundle is one known transition.
+/// F3-F6: `fascia`, which `bytes` encodes, is of the PSBT's tx, whose first
+/// OP_RETURN commits exactly its bundles, and the pinned contract's bundle is
+/// one known transition.
+///
+/// The fascia is dropped before rgb-lib decodes its own copy, so only one
+/// decoded fascia is live at a time (`memory.rs`).
 pub fn committed_transition(
-    tx: &Transaction,
-    fascia: &Fascia,
-    pin: ContractId,
+    psbt: &Psbt,
+    fascia: Fascia,
+    bytes: &[u8],
+    field: &str,
+    pin: Pin,
 ) -> Result<Committed> {
-    let txid = tx.compute_txid();
-    if fascia.witness_id() != txid {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the fascia is of tx {}, not of the PSBT's tx {txid} - refusing to sign a tx whose \
-             RGB data the enclave cannot see",
-            fascia.witness_id()
-        )));
-    }
-    assert_opret_host(tx)?;
-    let bundles = fascia.bundles();
-    let bundle = pinned_bundle(bundles, pin)?;
-    assert_commits_exactly(tx, fascia, bundles)?;
-    let (opid, transition) = disclosed_transition(bundle, pin)?;
+    let txid = psbt.unsigned_tx.compute_txid();
+    assert_opret_host(&psbt.unsigned_tx)?;
+    let bundle = pinned_bundle(fascia.bundles(), pin.contract)?;
+    let transition = disclosed_transition(bundle, pin.contract)?;
+    let opid = transition.id();
+    drop(fascia);
+    let inspection = inspect(psbt, bytes, field, pin)?;
+    assert_inspects_as(&inspection, field, pin, opid, &transition, txid)?;
     Ok(Committed {
         txid,
         opid,
@@ -131,46 +178,10 @@ fn pinned_bundle(
     }
 }
 
-/// F5: the MPC tree of every fascia bundle under its entropy gives the opret
-/// commitment. Unlike rgb-lib, the fascia's DBC proof is not read: F3 rules out a tapret.
-fn assert_commits_exactly(
-    tx: &Transaction,
-    fascia: &Fascia,
-    bundles: &BTreeMap<ContractId, TransitionBundle>,
-) -> Result<()> {
-    let entropy = fascia
-        .seal_witness()
-        .mpc_merkle_block
-        .entropy()
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(
-                "the fascia's MPC block carries no MPC entropy to rebuild the commitment".into(),
-            )
-        })?;
-    let messages = bundles
-        .iter()
-        .map(|(cid, bundle)| (ProtocolId::from(*cid), Message::from(bundle.bundle_id())));
-    let source = MultiSource {
-        min_depth: MPC_MINIMAL_DEPTH,
-        messages: Confined::try_from_iter(messages)
-            .map_err(|e| EnclaveError::CrossCheck(format!("fascia MPC messages: {e}")))?,
-        static_entropy: Some(entropy),
-    };
-    let tree = MerkleTree::try_commit(&source)
-        .map_err(|e| EnclaveError::CrossCheck(format!("fascia MPC tree: {e}")))?;
-    DbcProof::Opret(OpretProof::default())
-        .verify(&tree.commit_id(), tx)
-        .map_err(|e| {
-            EnclaveError::CrossCheck(format!(
-                "the OP_RETURN does not commit exactly the bundles the fascia discloses: {e} - \
-                 refusing to sign state moves the enclave cannot see"
-            ))
-        })
-}
-
-/// F6: the bundle holds one transition, stored under its own id, of the
-/// pinned contract, and its input map is exactly that transition's inputs.
-fn disclosed_transition(bundle: &TransitionBundle, pin: ContractId) -> Result<(OpId, Transition)> {
+/// F6: the bundle holds one transition, of the pinned contract. That it is
+/// stored under its own id, and that the input map closes its inputs for it,
+/// is what [`assert_inspects_as`] takes from rgb-lib.
+fn disclosed_transition(bundle: &TransitionBundle, pin: ContractId) -> Result<Transition> {
     let [known] = bundle.known_transitions.as_slice() else {
         return Err(EnclaveError::CrossCheck(format!(
             "the fascia discloses {} transitions in its bundle - the mint signer signs exactly \
@@ -179,41 +190,108 @@ fn disclosed_transition(bundle: &TransitionBundle, pin: ContractId) -> Result<(O
         )));
     };
     let transition = &known.transition;
-    let id = transition.id();
-    if id != known.opid {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the fascia stores a transition under opid {} but its id is {id}",
-            known.opid
-        )));
-    }
     if transition.contract_id != pin {
         return Err(EnclaveError::CrossCheck(format!(
-            "the fascia's transition {id} belongs to contract {}, not the pinned {pin}",
+            "the fascia's transition {} belongs to contract {}, not the pinned {pin}",
+            transition.id(),
             transition.contract_id
         )));
     }
-    assert_input_map_is(bundle, transition, id)?;
-    Ok((id, transition.clone()))
+    Ok(transition.clone())
 }
 
-/// The bundle id commits only the input map, so each entry must close an
-/// input of the disclosed transition, for that transition.
-fn assert_input_map_is(bundle: &TransitionBundle, transition: &Transition, id: OpId) -> Result<()> {
-    let inputs: BTreeSet<Opout> = transition.inputs.iter().copied().collect();
-    let keys: BTreeSet<Opout> = bundle.input_map.keys().copied().collect();
-    if keys != inputs {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the fascia's input map closes {} seal(s), but transition {id} spends {} - refusing \
-             to sign a bundle that closes seals the enclave cannot see",
-            keys.len(),
-            inputs.len()
-        )));
+/// rgb-lib's wallet-less fascia inspection, over the request bytes in a
+/// scratch file: rgb-lib reads a fascia only from a path.
+///
+/// F5: no entropy is passed, so rgb-lib takes the one the fascia's MPC
+/// commitment carries, and refuses a concealed commitment that carries none.
+///
+/// rgb-lib builds its MPC source from the bundles of the file it reads, in a
+/// map of at most 65535 entries. That holds because [`pinned_bundle`] has
+/// already refused every fascia but one that discloses a single bundle, and
+/// the file carries the same bytes.
+fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
+    // rgb-lib parses the PSBT from its base64 form.
+    let psbt = psbt.to_string();
+    super::scratch::with_scratch_file(field, bytes, |path| {
+        let path = path.to_str().ok_or_else(|| {
+            EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
+        })?;
+        inspect_fascia(psbt, path.to_string(), None, pin.network).map_err(|e| {
+            EnclaveError::CrossCheck(format!(
+                "rgb-lib refused the {field} of this tx: {e} - refusing to sign state moves the \
+                 enclave cannot see"
+            ))
+        })
+    })
+}
+
+/// The inspection names the transition the enclave read, under an opret proof.
+///
+/// F3: rgb-lib verifies the commitment with the DBC proof of the fascia, so a
+/// tapret proof is refused here; F3 then makes the OP_RETURN the host that
+/// consensus reads. F5 and F6: the counts bind the whole input map, which
+/// rgb-lib checks only for the transitions it inspects.
+fn assert_inspects_as(
+    inspection: &RgbInspection,
+    field: &str,
+    pin: Pin,
+    opid: OpId,
+    transition: &Transition,
+    txid: bitcoin::Txid,
+) -> Result<()> {
+    let refuse = |what: String| Err(EnclaveError::CrossCheck(format!("the {field} {what}")));
+    if inspection.close_method != CloseMethod::OpretFirst {
+        return refuse(format!(
+            "commits with the close method {:?} - the mint signer signs an opret commitment only",
+            inspection.close_method
+        ));
     }
-    if let Some(other) = bundle.input_map.values().find(|opid| **opid != id) {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the fascia's input map assigns a seal to transition {other}, not to the disclosed \
-             {id}"
-        )));
+    if inspection.txid != txid.to_string() {
+        return refuse(format!(
+            "commits tx {}, not the PSBT's tx {txid}",
+            inspection.txid
+        ));
+    }
+    let [operation] = inspection.operations.as_slice() else {
+        return refuse(format!(
+            "commits {} operations - exactly one, of the pinned asset",
+            inspection.operations.len()
+        ));
+    };
+    if operation.asset_id != pin.contract.to_string() {
+        return refuse(format!(
+            "commits an operation of asset {}, not of the pinned RGB_ASSET_ID {}",
+            operation.asset_id, pin.contract
+        ));
+    }
+    if operation.committed_transition_count != 1 {
+        return refuse(format!(
+            "has an input map that names {} transitions - refusing to sign a bundle that closes \
+             seals for a transition the enclave cannot see",
+            operation.committed_transition_count
+        ));
+    }
+    let inputs = transition.inputs.len();
+    if operation.committed_input_count as usize != inputs {
+        return refuse(format!(
+            "has an input map that closes {} seal(s), but transition {opid} spends {inputs} - \
+             refusing to sign a bundle that closes seals the enclave cannot see",
+            operation.committed_input_count
+        ));
+    }
+    let [inspected] = operation.transitions.as_slice() else {
+        return refuse(format!(
+            "discloses {} transitions in its bundle - the mint signer signs exactly one",
+            operation.transitions.len()
+        ));
+    };
+    if inspected.opid != opid.to_string() {
+        return refuse(format!(
+            "commits transition {}, not transition {opid}, which the enclave read from the same \
+             bytes",
+            inspected.opid
+        ));
     }
     Ok(())
 }

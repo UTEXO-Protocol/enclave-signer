@@ -190,68 +190,6 @@ fn rejects_a_non_bfa_schema() {
     assert!(err.contains("validates only the bridged fungible"), "{err}");
 }
 
-/// A scratch path of its own for each test.
-fn scratch(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "utexo-enclave-test-{name}-{}.rgb",
-        std::process::id()
-    ))
-}
-
-/// The file rgb-lib read is gone after a pass, and after a refusal.
-#[test]
-fn the_scratch_file_is_removed_after_rgb_lib_reads_it() {
-    use super::scratch::with_file_at;
-    for (name, pass) in [("removed-ok", true), ("removed-err", false)] {
-        let path = scratch(name);
-        let result = with_file_at(&path, b"bytes", |at| {
-            assert_eq!(std::fs::read(at).unwrap(), b"bytes");
-            if pass {
-                Ok(())
-            } else {
-                Err(crate::error::EnclaveError::CrossCheck("refused".into()))
-            }
-        });
-        assert_eq!(result.is_ok(), pass, "{name}");
-        assert!(!path.exists(), "{name}");
-    }
-}
-
-/// A file already at the scratch path is refused and left in place.
-#[test]
-fn the_scratch_file_never_reuses_an_existing_file() {
-    use super::scratch::with_file_at;
-    let path = scratch("existing");
-    std::fs::write(&path, b"someone else's").unwrap();
-    let err = with_file_at(&path, &burn_bytes(), |_| Ok(())).unwrap_err();
-    let kept = std::fs::read(&path);
-    std::fs::remove_file(&path).unwrap();
-    assert!(
-        matches!(err, crate::error::EnclaveError::Internal(_)),
-        "an enclave fault: {err}"
-    );
-    assert!(
-        err.to_string()
-            .contains("could not create the consignment scratch file"),
-        "{err}"
-    );
-    assert_eq!(kept.unwrap(), b"someone else's");
-}
-
-/// A debug build unwinds a panic in the reader: the file is removed then too.
-#[test]
-fn the_scratch_file_is_removed_when_the_reader_panics() {
-    use super::scratch::with_file_at;
-    let path = scratch("panicked");
-    let panicked = std::panic::catch_unwind(|| {
-        with_file_at(&path, b"bytes", |_| -> Result<()> {
-            panic!("rgb-lib panicked")
-        })
-    });
-    assert!(panicked.is_err());
-    assert!(!path.exists());
-}
-
 // ===== reject list =====
 
 const LIST: [u8; 20] = [0x4e; 20];
