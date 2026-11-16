@@ -1,7 +1,7 @@
 //! Real BFA/SPV validation through the generated Parent gRPC entry point.
 //! Test keys, regtest headers and the issuer-list transport are controlled.
 
-// The shared generator has enclave-only cfgs for unused mint helpers.
+// The shared generator gates a mint-only helper with an enclave cfg.
 #[allow(dead_code, unexpected_cfgs)]
 #[path = "../../enclave/tests/support/bfa_burn.rs"]
 mod burn_fixture;
