@@ -19,12 +19,12 @@ use sha3::{Digest, Keccak256};
 use super::asset_bind::*;
 use super::bfa::*;
 use super::consignment::*;
-use super::indexer::*;
 use super::reject_list::*;
 use super::schema::*;
 #[cfg(rgb_to_evm)]
 use super::source::*;
 use super::types::*;
+use super::validator::*;
 use super::witness::*;
 use crate::config::BridgeConfig;
 use crate::error::Result;
@@ -111,12 +111,7 @@ fn validate(bytes: &[u8]) -> Result<ValidatedConsignment> {
 /// Validates on the burn path's terms, with every witness of `bytes` mined.
 fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<ValidatedConsignment> {
     let chain = mined(&witness_ids(bytes));
-    validator().validate_consignment(bytes, bind, &on_chain(&chain), &open_lists())
-}
-
-/// The burn path's check: no witness may be unmined.
-fn on_chain(chain: &dyn ConfirmedWitnesses) -> WitnessCheck<'_> {
-    WitnessCheck::Proven(chain)
+    validator().validate_consignment(bytes, bind, &chain, &open_lists())
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
@@ -340,8 +335,7 @@ fn validate_listed(
         read: Some(&read),
     };
     let chain = mined(&witness_ids(bytes));
-    let result =
-        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &lists);
+    let result = validator().validate_consignment(bytes, Some(&bind_all), &chain, &lists);
     (result, reads.into_inner())
 }
 
@@ -531,7 +525,7 @@ fn the_list_is_read_only_for_a_listed_asset_after_the_bind() {
             read: Some(&read),
         };
         let chain = mined(&witness_ids(bytes));
-        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &lists)
+        validator().validate_consignment(bytes, Some(&bind_all), &chain, &lists)
     };
     let listed = listed_burn().0.consignment();
     for bytes in [&listed, &burn_bytes()] {
@@ -557,7 +551,7 @@ fn a_listed_asset_is_refused_when_its_list_cannot_be_read() {
             read,
         };
         validator()
-            .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &lists)
+            .validate_consignment(&bytes, Some(&bind_all), &chain, &lists)
             .expect_err("a listed asset needs its list")
     };
     let err = run(None).to_string();
@@ -1404,7 +1398,7 @@ fn mint_transitions_are_the_only_mint_shape() {
     assert!(super::super::flow::is_signing_transition(8013));
 }
 
-// ===== the validator and its indexer =====
+// ===== the validator =====
 
 #[test]
 fn rejects_unknown_network() {
@@ -1454,67 +1448,15 @@ fn stalled_host() -> std::net::SocketAddr {
     addr
 }
 
-/// A stalled indexer at `url` fails the connection within its read timeout.
-fn assert_stalled_indexer_times_out(url: String) {
-    let validator = RgbValidator::new(url, "bitcoin").unwrap().with_timeout(2);
-    let start = std::time::Instant::now();
-    let err = validator
-        .indexer_resolver(1)
-        .err()
-        .expect("a stalled indexer gives no resolver");
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(60),
-        "a stalled indexer must be bounded by the read timeout: {err}"
-    );
-    assert!(
-        err.to_string()
-            .contains("indexer cannot resolve the witnesses"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_stalled_electrum_indexer_times_out_instead_of_hanging() {
-    assert_stalled_indexer_times_out(format!("tcp://{}", stalled_host()));
-}
-
-#[test]
-fn a_stalled_esplora_indexer_times_out_instead_of_hanging() {
-    assert_stalled_indexer_times_out(format!("http://{}", stalled_host()));
-}
-
-/// A block at height `h` has `tip - h + 1` confirmations. A chain with no
-/// block `minimum` deep has no safe height, and a zero minimum is no policy.
-#[test]
-fn a_short_chain_never_disables_the_confirmation_policy() {
-    for (tip, minimum) in [(0, 1), (5, 6), (4, 6), (100, 0)] {
-        assert!(
-            confirmation_height(tip, minimum).is_err(),
-            "{tip}, {minimum}"
-        );
-    }
-}
-
-#[test]
-fn safe_height_arithmetic_handles_the_full_height_range() {
-    assert_eq!(confirmation_height(100, 6).unwrap().get(), 95);
-    assert_eq!(confirmation_height(100, 1).unwrap().get(), 100);
-    assert_eq!(confirmation_height(6, 6).unwrap().get(), 1);
-    assert_eq!(confirmation_height(u32::MAX, 1).unwrap().get(), u32::MAX);
-    assert_eq!(confirmation_height(u32::MAX, u32::MAX).unwrap().get(), 1);
-}
-
 /// The burn path reads witness status from its SPV proofs, never the indexer.
 #[test]
 fn burn_path_validation_makes_no_indexer_call() {
-    let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "regtest")
-        .unwrap()
-        .with_timeout(30);
+    let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "regtest").unwrap();
     let bytes = burn_bytes();
     let chain = mined(&witness_ids(&bytes));
     let start = std::time::Instant::now();
     validator
-        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &open_lists())
+        .validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists())
         .unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
@@ -1558,6 +1500,9 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
         ValidationWarning::Other {
             details: "d".into(),
         },
+        ValidationWarning::UnsafeHistory {
+            txids: vec!["t".into()],
+        },
     ] {
         let warned = rgb_lib::no_wallet::ConsignmentValidation {
             warnings: vec![warning],
@@ -1567,47 +1512,6 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
             .unwrap_err()
             .to_string();
         assert!(err.contains("with the warning"), "{err}");
-    }
-}
-
-/// Unsafe-history errors stay bounded while identifying one failing witness.
-#[test]
-fn an_unsafe_history_warning_names_its_first_witness() {
-    use super::consensus::check_validation;
-    use rgb_lib::no_wallet::{ValidatedWitness, ValidationWarning, WitnessValidationStatus};
-    let bytes = burn_bytes();
-    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes[..])).unwrap();
-    let witness = |txid: &str, status| ValidatedWitness {
-        txid: txid.into(),
-        status,
-        from_consignment: false,
-    };
-    let shallow = WitnessValidationStatus::Mined {
-        height: 101,
-        timestamp: 1_700_000_000,
-    };
-    for (status, first) in [
-        (shallow, "the first: 1111 in block 101"),
-        (
-            WitnessValidationStatus::Tentative,
-            "the first: 1111 unmined",
-        ),
-    ] {
-        let warned = rgb_lib::no_wallet::ConsignmentValidation {
-            safe_height: Some(100),
-            witnesses: vec![witness("1111", status), witness("2222", status)],
-            warnings: vec![ValidationWarning::UnsafeHistory {
-                txids: vec!["1111".into(), "2222".into()],
-            }],
-            ..rgb_lib_report(&bytes)
-        };
-        let err = check_validation(&warned, &transfer)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("2 witness tx(s)"), "{err}");
-        assert!(err.contains("(safe height 100)"), "{err}");
-        assert!(err.contains(first), "{err}");
-        assert!(!err.contains("2222"), "{err}");
     }
 }
 
@@ -1768,7 +1672,7 @@ fn mint_after_a_rights_send() -> Vec<u8> {
 fn validate_without(bytes: &[u8], unmined: bitcoin::Txid) -> Result<ValidatedConsignment> {
     let mut chain = mined(&witness_ids(bytes));
     chain.remove(&unmined);
-    validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&chain), &open_lists())
+    validator().validate_consignment(bytes, Some(&bind_all), &chain, &open_lists())
 }
 
 #[cfg(rgb_to_evm)]
@@ -1867,14 +1771,11 @@ fn a_failing_resolver_refuses_with_its_own_error() {
     let bytes = listed_burn().0.consignment();
     let chain = mined(&witness_ids(&bytes));
     let v = validator();
-    let err =
-        error_of(v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&Down), &open_lists()));
+    let err = error_of(v.validate_consignment(&bytes, Some(&bind_all), &Down, &open_lists()));
     assert!(err.contains("witness source down"), "{err}");
-    let binder_down =
-        v.validate_consignment(&bytes, Some(&binder), &on_chain(&chain), &open_lists());
+    let binder_down = v.validate_consignment(&bytes, Some(&binder), &chain, &open_lists());
     assert_own_error(binder_down.expect_err("the binder is down"), "binder");
-    let reader_down =
-        v.validate_consignment(&bytes, Some(&bind_all), &on_chain(&chain), &read_failing);
+    let reader_down = v.validate_consignment(&bytes, Some(&bind_all), &chain, &read_failing);
     assert_own_error(reader_down.expect_err("the reader is down"), "reader");
 }
 
@@ -1913,7 +1814,7 @@ fn burn_path_asks_about_every_witness() {
         asked: RefCell::new(Vec::new()),
     };
     validator()
-        .validate_consignment(&bytes, Some(&bind_all), &on_chain(&source), &open_lists())
+        .validate_consignment(&bytes, Some(&bind_all), &source, &open_lists())
         .unwrap();
     let mut asked = source.asked.into_inner();
     asked.sort();

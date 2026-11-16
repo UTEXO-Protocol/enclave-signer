@@ -19,13 +19,13 @@ flowchart TD
         p1l -->|no| p1lr[REFUSE - not an EVM reject list]:::refuse
         p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
         p1k -->|no| p1kr[REFUSE - work cap]:::refuse
-        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof,<br/>or the indexer on a no-SPV build<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
+        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{valid?}
         p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
     end
     start --> p1w
 
-    subgraph P3 ["2 — SPV / Bitcoin anchoring (feature spv)"]
+    subgraph P3 ["2 — SPV / Bitcoin anchoring"]
         p3stale{"chain tip fresh?<br/>≤ 2 h old, ≤ 2 h future"}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
         p3stale -->|yes| p3net{consignment chain_net == enclave network?}
@@ -104,14 +104,12 @@ flowchart TD
   ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
-- An `spv` burn signer reads no Bitcoin indexer. A burn signer built without
-  `spv` (public Signet, `Development` policy) trusts the indexer for witness
-  status, and the SPV and BtcRelay gates do not run. It reads the EVM RPC only for
+- A burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside
   rgb-lib's validation (step 1), and never confirms an anchor or calls plain
   `validate()` without a bound lock.
 - `allow-seed-import` and `mock-attestation` are a `compile_error!` in
-  release builds. A release `spv` build refuses to boot, and `SetEndpoints`
-  refuses, without a valid `Production` policy. A release no-SPV build needs
-  `Development { IndexerTrusted }` instead.
+  release builds. A release bridge build refuses to boot, and `SetEndpoints`
+  refuses, without a valid `Production` policy. A public-Signet image needs
+  `Development { PublicSignet }` instead.

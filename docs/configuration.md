@@ -27,7 +27,7 @@ All of the first three are required for a `Production` policy.
 | `RGB_ASSET_ID` | empty | Pinned RGB contract id. There is no default asset. |
 | `FUNDS_IN_CONTRACT` | the proxy address | The emitter of `FundsIn` and `BridgeFundsIn`. Unset uses the proxy address; a set value that is not an address stops the boot. Attested. It must be non-zero in production. |
 | `TOKEN_CONTRACT` | zero | The ERC-20 that the Bridge releases. An input of `burnId` and of the deposit id. Attested. It must be non-zero in production. |
-| `BTC_RELAY_MODE` | `required` | `required` checks both BtcRelay words of a release against the enclave's own records. `none` requires both words to be zero. A production policy refuses to boot on `none`, and a build without `spv` boots only on `none`. Any other value acts as `required`, with a warning at boot. |
+| `BTC_RELAY_MODE` | `required` | `required` checks both BtcRelay words of a release against the enclave's own records. `none` requires both words to be zero. A production policy refuses to boot on `none`. A public-Signet image runs with `none`. Any other value acts as `required`, with a warning at boot. |
 | `BITCOIN_NETWORK` | `bitcoin` | `bitcoin` (or `mainnet`), `testnet3` (or `testnet`), `testnet4`, `signet`, `signetcustom` or `regtest`. It selects the SPV rules and checkpoint, the RGB chain network, the coin types and the xpub prefix. An unknown value stops the boot. Attested. A production policy on EVM chain 1 or 42161 requires `bitcoin`. |
 
 ### Acceptance rules
@@ -91,7 +91,7 @@ values from its environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 
 | CLI flag / variable | Build | Description |
 |---------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | mint, burn | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora), serving the configured Bitcoin network. Electrum must support verbose transaction lookup. TLS ends inside the enclave. Plaintext `tcp://` and `http://` URLs are allowed only in test, debug or dev-feature builds. |
+| `--electrum-url` / `ELECTRUM_URL` | mint, burn | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). A `Production` policy commits the host. Plaintext `tcp://` and `http://` URLs are allowed only in test, debug or dev-feature builds. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | mint, burn | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
 | `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | mint, burn | TLS port, 1 to 65535, not the indexer port. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | mint, burn | DER of the only CA that the EVM RPC connection trusts. |

@@ -44,8 +44,8 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ./utexo-bridge-parent
 ```
 
-- A burn signer built with `spv` gets its Bitcoin headers from the header
-  sync of the parent. Without `HEADER_ELECTRUM_URL` it never becomes ready.
+- A burn signer gets its Bitcoin headers from the header sync of the
+  parent. Without `HEADER_ELECTRUM_URL` it never becomes ready.
 - A mint signer also needs the KMS proxy and the parent's storage settings
   ([kms-persistence.md](kms-persistence.md)).
 - The CLI of a Nitro host is built with the parent feature `vsock`
@@ -173,11 +173,11 @@ and the `set-endpoints` values. On a mismatch it names the field, the
 expected value and the attested value. The enclave is then terminated, its
 unit stops, and the deploy exits before a parent starts.
 
-- `verify-launch` accepts a `Production` policy only. It refuses an image
-  built without `spv`.
+- `verify-launch` accepts a `Production` policy only. It refuses a
+  public-Signet image.
 - `export-attestation --allow-development-policy` exports a bundle of an
   enclave that attests `Development` with a real NSM document, such as a
-  build without `spv`. It needs approved PCRs that are not zero. It verifies
+  public-Signet image. It needs approved PCRs that are not zero. It verifies
   those PCRs, not the role and not the endpoint settings. Approve the launch
   values separately.
 - `ENCLAVE_DEBUG_MODE=1` skips the check, because the PCRs are zero.
@@ -192,7 +192,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5001/health
 ```
 
 - `200`: the launch values are set and the signing key is loaded. A burn
-  signer built with `spv` also needs a fresh header chain with at least
+  signer also needs a fresh header chain with at least
   `SPV_MIN_CONFIRMATIONS` headers above the checkpoint. A mint signer does
   not.
 - `503`: the enclave is not ready, cannot be reached, or did not answer
@@ -221,21 +221,6 @@ other hosts. The deploy script gives the three parents the health ports
 ```bash
 utexo-bridge-parent-cli --addr vsock://16:5000 health
 ```
-
-## Indexer errors
-
-For a burn signer without `spv`:
-
-- **Wrong network:** check that the server serves the configured Bitcoin
-  network. If it does, check connectivity and historical transaction access.
-  rgb-lib can report a failed lookup during its server check as a network
-  mismatch, including on timeout.
-- **Transaction cannot be located:** check that the Electrum server is synced
-  with its Bitcoin node, then retry. Also confirm that the transaction exists
-  on the configured network.
-
-Electrum requires verbose transaction lookup. See
-[configuration](configuration.md#launch-values) for supported URL formats.
 
 ## Lost `SetEndpoints` reply
 

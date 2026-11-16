@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lifecycle/readiness smoke test for either signer role, with or without SPV.
+# Lifecycle/readiness smoke test for either signer role.
 # Run on the parent instance against a running enclave. A fresh enclave gets
 # its endpoints and keys initialized; an initialized enclave keeps its identity.
 # Mint KMS configuration and burn header sync must be available as applicable.

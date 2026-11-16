@@ -158,18 +158,18 @@ class BuildArgumentsTests(unittest.TestCase):
                 )
 
     def test_member_settings_do_not_change_role_build_arguments(self):
-        # Capture the real wrapper's full Docker command for both feature profiles.
+        # Capture the real wrapper's full Docker command for both network profiles.
         # No Docker/Nitro build runs here; ImageInputsTests separately checks that
         # the recipes cannot bake these member settings into ARG or ENV.
         for role in ('mint', 'burn'):
-            for spv in (True, False):
-                with self.subTest(role=role, spv=spv):
+            for signet in (False, True):
+                with self.subTest(role=role, signet=signet):
                     recipe = f'Dockerfile.enclave.{role}'
                     pins = dict(
                         RGB_ASSET_ID='rgb:test-bfa-asset',
-                        ENCLAVE_FEATURES=f'vsock,{"spv," if spv else ""}{role}-signer',
-                        BITCOIN_NETWORK='bitcoin' if spv else 'signet',
-                        BTC_RELAY_MODE='required' if spv else 'none',
+                        ENCLAVE_FEATURES=f'vsock,{role}-signer',
+                        BITCOIN_NETWORK='signet' if signet else 'bitcoin',
+                        BTC_RELAY_MODE='none' if signet else 'required',
                     )
                     baseline = self.invoke(recipe, **pins)
                     self.assertEqual(baseline.returncode, 42, baseline.stderr)
@@ -211,29 +211,6 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertEqual(self.captured_build_args(),
                                  self.base_args(f'Dockerfile.enclave.{role}'))
                 self.assertNotIn('build override:', result.stdout)
-
-    def test_non_signet_roles_require_spv_before_docker(self):
-        for role in ('mint', 'burn'):
-            for network in (None, '', 'bitcoin', 'testnet', 'testnet4', 'regtest'):
-                with self.subTest(role=role, network=network):
-                    overrides = {} if network is None else {'BITCOIN_NETWORK': network}
-                    result = self.invoke(f'Dockerfile.enclave.{role}',
-                                         RGB_ASSET_ID='rgb:test-bfa-asset',
-                                         ENCLAVE_FEATURES=f'vsock,{role}-signer', **overrides)
-                    self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn('requires the spv feature', result.stderr)
-                    self.assertFalse(self.argv.exists())
-
-    def test_non_signet_roles_accept_explicit_spv(self):
-        for role in ('mint', 'burn'):
-            for features in (f'spv,vsock,{role}-signer', f'vsock,spv,{role}-signer',
-                             f'vsock,{role}-signer,spv', f'vsock spv {role}-signer'):
-                with self.subTest(role=role, features=features):
-                    result = self.invoke(f'Dockerfile.enclave.{role}',
-                                         RGB_ASSET_ID='rgb:test-bfa-asset',
-                                         BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES=features)
-                    self.assertEqual(result.returncode, 42, result.stderr)
-                    self.assertIn(f'ENCLAVE_FEATURES={features}', self.captured_build_args())
 
     def invoke_make(self, target, **extra):
         self.argv.unlink(missing_ok=True)
@@ -320,14 +297,14 @@ class BuildArgumentsTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.argv.exists())
 
-    def test_stage_profile_pins_both_roles_without_spv_and_uses_multisig_for_gas(self):
+    def test_stage_profile_pins_both_roles_and_uses_multisig_for_gas(self):
         for role in ('mint', 'burn'):
             with self.subTest(role=role):
                 inputs = self.stage_inputs()
                 if role == 'mint':
                     inputs.pop('STAGE_GAS_TX_ALLOWED_SELECTORS')
                 result = self.invoke(f'Dockerfile.enclave.{role}',
-                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock,spv',
+                                     BITCOIN_NETWORK='bitcoin', ENCLAVE_FEATURES='vsock',
                                      RGB_ASSET_ID='rgb:other-asset', RUST_LOG='trace', **inputs)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
@@ -388,7 +365,7 @@ class BuildArgumentsTests(unittest.TestCase):
                                      EVM_RPC_PATH='/v2/private', **KMS_PINS)
                 self.assertEqual(result.returncode, 42, result.stderr)
                 args = dict(arg.split('=', 1) for arg in self.captured_build_args())
-                self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,spv,{role}-signer')
+                self.assertEqual(args['ENCLAVE_FEATURES'], f'vsock,{role}-signer')
                 self.assertEqual(args['BITCOIN_NETWORK'], 'bitcoin')
                 self.assertEqual(args['BTC_RELAY_MODE'], 'required')
                 self.assertEqual(args['EVM_CHAIN_ID'], '42161')

@@ -994,8 +994,9 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Read the tip of the enclave SPV header chain. A build without `spv`
-    /// refuses the request with code 1, and the parent returns it as INTERNAL.
+    /// Read the tip of the enclave SPV header chain. A build without a signer
+    /// role refuses the request with code 1, and the parent returns it as
+    /// INTERNAL.
     async fn get_last_saved_block(
         &self,
         _request: Request<GetLastSavedBlockRequest>,

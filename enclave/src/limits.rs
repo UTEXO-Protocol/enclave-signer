@@ -105,11 +105,11 @@ limits! {
     io_idle_timeout_secs: IO_IDLE_TIMEOUT.as_secs(), 2, 3_600;
     /// Time for the first bytes of an egress client connection.
     first_bytes_timeout_secs: crate::egress::FIRST_BYTES_TIMEOUT.as_secs(), 1, 3_600;
-    /// Time for each socket operation of the Electrum client. Without a
-    /// timeout, a stalled read blocks the worker thread for ever. The ingress
-    /// deadline does not cancel indexer work.
+    /// Time for each socket operation of an Electrum client. No client in the
+    /// enclave uses it. `Limits::check` keeps it within the request deadline.
     electrum_timeout_secs: 15, 1, 3_600;
-    /// Time for one Esplora HTTP call, connect and read.
+    /// Time for one Esplora HTTP call. No client in the enclave uses it.
+    /// `Limits::check` keeps it within the request deadline.
     esplora_timeout_secs: 30, 1, 3_600;
     /// Time for one EVM JSON-RPC call. Without a timeout, a hung RPC blocks the
     /// worker thread for ever: `block_on` has no deadline, and alloy and reqwest

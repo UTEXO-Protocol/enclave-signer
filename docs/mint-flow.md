@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 - **Signer image:** `mint-signer`
-  (`--no-default-features --features vsock,spv,mint-signer`).
+  (`--no-default-features --features vsock,mint-signer`).
 - **Checked against repository code:** 2026-11-10, rgb-lib-bfa 5010eefa
   (RGB-Tools bfa 66bae096). Deployment was not checked.
 

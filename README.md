@@ -132,8 +132,8 @@ cli --help
 ```bash
 cargo test                                                              # enclave workspace, default features
 cargo test -p attestation-verify --features mock                          # dependency tests need their own invocation
-cargo test -p utexo-bridge-enclave --no-default-features --features spv,mint-signer,mock-attestation,allow-seed-import
-cargo test -p utexo-bridge-enclave --no-default-features --features spv,burn-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features mint-signer,mock-attestation,allow-seed-import
+cargo test -p utexo-bridge-enclave --no-default-features --features burn-signer,mock-attestation,allow-seed-import
 cargo test --manifest-path parent/Cargo.toml                            # gRPC bridge + attest-verify e2e
 python3 -m unittest discover -s build/tests -v
 python3 -m unittest discover -s deploy/lambda/sns-to-slack -v

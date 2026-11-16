@@ -47,8 +47,8 @@
 //! itself, so `run-enclave --memory` must give at least
 //! [`RUN_ENCLAVE_MEMORY_MIB`].
 //!
-//! Responses from the pinned EVM RPC and the Bitcoin indexer are outside the
-//! model. TLS pins their senders, and the host cannot change them. The reject
+//! Responses from the pinned EVM RPC are outside the model. TLS pins their
+//! sender, and the host cannot change them. The reject
 //! list is the one exception, because the operator sets its length limit: each
 //! request can hold `max_reject_list_entries` entries, and `Limits::check`
 //! counts them in the heap of a burn.

@@ -345,7 +345,7 @@ fn production_rejects_an_unpinned_token_contract() {
 
 #[test]
 fn production_rejects_btc_relay_mode_none() {
-    // `none` is only for a local stand with no BtcRelay.
+    // `none` is only for a local stand or a public-Signet image.
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.btc_relay_mode = BtcRelayMode::None;

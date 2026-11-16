@@ -1,6 +1,6 @@
 //! The caps on the work rgb-lib does, checked before it runs, and
 //! release-mode timings: `cargo test --release -p utexo-bridge-enclave
-//! --no-default-features --features spv,burn-signer --lib caps -- --ignored
+//! --no-default-features --features burn-signer --lib caps -- --ignored
 //! --nocapture --test-threads=1`. `docs/validation-cost-model.md` has the
 //! measurements behind the cap values.
 
@@ -317,8 +317,7 @@ fn validate_unmined(bytes: &[u8]) -> (String, usize) {
         chain: &chain,
         asked: RefCell::new(Vec::new()),
     };
-    let result =
-        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&source), &open_lists());
+    let result = validator().validate_consignment(bytes, Some(&bind_all), &source, &open_lists());
     (error_of(result), source.asked.into_inner().len())
 }
 

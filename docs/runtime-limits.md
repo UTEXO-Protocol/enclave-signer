@@ -74,8 +74,8 @@ checks them at launch.
 | `total_request_timeout_secs` | 90 | 10 | 86400 | Socket deadline of a request, from accept. |
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
-| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. |
-| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. |
+| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
+| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
 | `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |

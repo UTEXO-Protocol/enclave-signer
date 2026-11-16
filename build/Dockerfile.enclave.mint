@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Mint signer enclave image: EVM -> RGB only (vsock + spv + mint-signer).
+# Mint signer enclave image: EVM -> RGB only (vsock + mint-signer).
 # Every dependency of the enclave workspace is public: the build takes no secret.
 # Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
@@ -30,9 +30,9 @@ WORKDIR /build/enclave
 #   -C debuginfo=0 / strip=symbols  drop debug info + symbol tables
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
-# `spv` implies `rgb-validation`. `--no-default-features` keeps the feature list explicit
-# (so this binary is RGB-only). The signer role implies `rgb-validation`,
-# which includes in-enclave FundsIn verification (alloy + tokio). It needs a
+# `--no-default-features` keeps the feature list explicit (so this binary is
+# RGB-only). The signer role implies `rgb-validation`, which includes the SPV
+# header chain and in-enclave FundsIn verification (alloy + tokio). It needs a
 # second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).
 #
 # `mint-signer` (implies `rgb-validation`: the mint/burn flow + BFA validation)
@@ -40,7 +40,7 @@ ENV CARGO_INCREMENTAL=0 \
 # verifying the EVM lock, and signs create_utxo (`SignBtc`). It carries no
 # `fundsOut` release rule at all - the burn signer is Dockerfile.enclave.burn.
 # Two roles, two PCR0s, two seeds, two running enclaves.
-ARG ENCLAVE_FEATURES=vsock,spv,mint-signer
+ARG ENCLAVE_FEATURES=vsock,mint-signer
 RUN cargo build --release --locked --no-default-features --features "$ENCLAVE_FEATURES"
 
 
@@ -79,11 +79,11 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # The mint signer restores its KMS-protected seed instead of peer cloning.
 
 # Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
-# (chain_id 42161), SPV and Production policy. Without SPV, Development policy
-# requires BITCOIN_NETWORK=signet and BTC_RELAY_MODE=none.
-# Electrum is set at launch. The enclave pins its host to 127.0.0.1 and reaches
-# it over the vsock forwarder (host runs
-# `vsock-proxy 8001 <electrum host> <port>`); TLS terminates in-enclave.
+# (chain_id 42161) and Production policy. A public-Signet image
+# (BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none) attests Development policy.
+# Electrum is set at launch. The enclave pins its host to 127.0.0.1 behind the
+# vsock forwarder (host runs `vsock-proxy 8001 <electrum host> <port>`). No
+# client in the enclave calls it.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
@@ -125,11 +125,11 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
 # The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
-# They remain outside the image with or without SPV. Production policy commits
+# They remain outside the image. Production policy commits
 # the Electrum/EVM hosts and EVM CA; Development policy does not commit them.
 # A Production policy attests SPV_MIN_CONFIRMATIONS (at least 1), but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
-# In an `spv` build it only decides when the health check reports the SPV header chain
+# It only decides when the health check reports the SPV header chain
 # synced, that many blocks past the checkpoint. Both role images set 3, the depth
 # the burn signer checks every burn witness at.
 # MINT_WITNESS_SAT: the exact sats a witness mint pays to the user's output

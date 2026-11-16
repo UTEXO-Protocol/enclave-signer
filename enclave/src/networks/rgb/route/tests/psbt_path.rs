@@ -883,7 +883,6 @@ fn consensus(
             )
         })
         .collect();
-    let witnesses = validation::WitnessCheck::Proven(&chain);
     let anchors = RefCell::new(Vec::new());
     let bind = |bridge: &validation::BfaBridge, seen: &[validation::MintAnchor]| {
         anchors.borrow_mut().extend_from_slice(seen);
@@ -905,7 +904,7 @@ fn consensus(
         read: None,
     };
     let validated = validator
-        .validate_consignment(bytes, Some(&bind), &witnesses, &lists)
+        .validate_consignment(bytes, Some(&bind), &chain, &lists)
         .unwrap();
     (validated, anchors.into_inner())
 }

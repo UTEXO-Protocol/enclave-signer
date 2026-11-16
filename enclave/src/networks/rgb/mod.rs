@@ -4,7 +4,7 @@
 //!
 //! - `route.rs`: the entry points that `networks::route` calls.
 //! - `validation/`: consignment parsing, rgb-lib validation, asset binding,
-//!   and the `RgbValidator` indexer client.
+//!   and the `RgbValidator` of one Bitcoin network.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
 //! - `psbt_commit.rs`: the mint signer's core: the transition a PSBT commits.
 //! - `parent_proof.rs`: pins the UTXO of the right a mint or refill spends.

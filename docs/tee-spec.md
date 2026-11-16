@@ -54,9 +54,9 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 |-------|-------------|-----------------|
 | Nitro hardware and NSM | Isolation, measurement (PCRs), attestation signing, entropy | - |
 | Enclave code (this repository) | Validation, key custody, signing | - (the attestation measures it) |
-| Parent, listener, backend | Liveness and delivery of data | Every claim in a request. The enclave checks each one. |
+| Parent, listener, backend | Liveness and delivery of data. On a public-Signet image, also the Bitcoin headers that the parent sends ([known limits](#10-known-limits)). | Every claim in a request. The enclave checks each one. |
 | EVM RPC (pinned host and CA) | Mint signer: receipts, canonical blocks and the selected finality head. Burn signer: only the content of an asset's reject list. | TLS authenticates the endpoint. It does not prove EVM history or the answer of an `eth_call`. |
-| Bitcoin indexer (pinned URL) | Nothing on an `spv` signing path. A burn signer built without `spv` trusts it for witness status and depth. | TLS authenticates the indexer. It proves no Bitcoin consensus. |
+| Bitcoin indexer (pinned URL) | Nothing. The enclave makes no indexer call. | - |
 | Bridge contracts and their governance | Honest deposit events. The on-chain release rules and the signature quorum. | - |
 | Operator | Deployment, launch values, the cloning secret | Export of the plaintext seed |
 | AWS KMS (mint only) | Seed generation, encryption and decryption, under the configured key policy | - |
@@ -66,7 +66,8 @@ code and its validation libraries, the compiled-in Bitcoin checkpoint, the
 pinned EVM RPC, and the Bridge contract with its governance. The enclave pins
 the Bridge address, not its code: an upgraded Bridge could emit false
 `FundsIn` events and so back mints that have no deposit. Mint seed recovery
-also trusts AWS KMS and its key policy.
+also trusts AWS KMS and its key policy. A public-Signet image also trusts the
+parent for its Bitcoin headers.
 
 **EVM RPC (accepted by design).** TLS ends inside the enclave and
 authenticates the configured host against the pinned CA. The host relay can
@@ -132,16 +133,15 @@ version field. Each connection carries one request.
 
 ### Outbound connections
 
-The enclave has no network stack of its own. It reaches the EVM RPC, the
-Bitcoin indexer and KMS through loopback forwarders that bridge to
-`vsock-proxy` processes on the host. TLS ends inside the enclave, so a proxy
-relays bytes only. A forwarder of a TLS endpoint passes only a connection
-that starts with a TLS handshake, so no client in the enclave can send
-plaintext to the host for that endpoint. The EVM RPC client follows no
-redirect. The indexer client can follow one, but a redirect to another host
-or port has no route out of the enclave. A mint signer also connects to the
-seed broker of the parent over vsock, for the AWS credentials and the stored
-ciphertext of the seed.
+The enclave has no network stack of its own. It reaches the EVM RPC and KMS
+through loopback forwarders that bridge to `vsock-proxy` processes on the
+host. TLS ends inside the enclave, so a proxy relays bytes only. A forwarder
+of a TLS endpoint passes only a connection that starts with a TLS handshake,
+so no client in the enclave can send plaintext to the host for that endpoint.
+The EVM RPC client follows no redirect. The launch also starts a forwarder for
+the indexer URL, which no client in the enclave uses. A mint signer also
+connects to the seed broker of the parent over vsock, for the AWS credentials
+and the stored ciphertext of the seed.
 
 ### The parent
 
@@ -200,8 +200,8 @@ The enclave has a fixed amount of memory and no swap. So the heap that one
 request can use has a bound that does not depend on the content of the
 request: `REQUEST_MEMORY_FACTOR` times the frame, plus a term for the decoded
 protobuf elements. A parser that can take more has its own size limit. The
-answers of the EVM RPC and the indexer are outside the model, except a reject
-list, whose entry limit the model counts. A release build refuses to start
+answers of the EVM RPC are outside the model, except a reject list, whose
+entry limit the model counts. A release build refuses to start
 with less usable memory than the model needs for all its workers.
 `enclave/src/memory.rs` holds the model and its measured factors; the tests
 are next to the parsers that they measure.
@@ -231,14 +231,16 @@ SecurityPolicy = Production {
 } | Development { reason }
 ```
 
-**Resolution** (`enclave/src/policy.rs`). Only a release `spv` build with
+**Resolution** (`enclave/src/policy.rs`). Only a release bridge build with
 `EVM_CHAIN_ID`, `EVM_PROXY_CONTRACT_ADDRESS` and `RGB_ASSET_ID` set resolves
-to `Production`. A debug or test build, a build with a dev feature, a build
-without `spv` and a build with a missing pin resolve to `Development`.
+to `Production`. A debug or test build, a build with a dev feature, a
+public-Signet image (`BITCOIN_NETWORK=signet` with `BTC_RELAY_MODE=none`) and
+a build with a missing pin resolve to `Development`.
 
-**Boot gate.** A release `spv` build that does not resolve to a valid
-`Production` policy refuses to boot. `SetEndpoints` runs the gate again with
-the launch values and refuses the set on an error. The gate requires:
+**Boot gate.** A release bridge build that does not resolve to a valid
+`Production` policy, or to `Development { PublicSignet }`, refuses to boot.
+`SetEndpoints` runs the gate again with the launch values and refuses the set
+on an error. The `Production` gate requires:
 
 - a non-zero FundsIn contract (`FUNDS_IN_CONTRACT`, or its default, the
   proxy address) and a non-zero `TOKEN_CONTRACT`;
@@ -250,12 +252,12 @@ the launch values and refuses the set on an error. The gate requires:
   pinned-TLS source;
 - at `SetEndpoints`, for a cloning role: a PCR3 that is not all zero.
 
-A build with a signer role and without `spv` needs real attestation,
-`BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none` and the bridge pins, in a
-debug and in a release profile. It boots and signs on
-`Development { IndexerTrusted }` and on no other policy. Each dev feature
-(`mock-attestation`, `allow-seed-import`, `allow-debug-pcrs`) fails to
-compile in a release build. A build with both signer roles, or with
+A release public-Signet image needs at least one confirmation in
+`SPV_MIN_CONFIRMATIONS`, the bridge pins, a non-zero FundsIn contract
+(`FUNDS_IN_CONTRACT`, or its default, the proxy address) and a non-zero
+`TOKEN_CONTRACT`. It boots and signs on `Development { PublicSignet }`.
+Each dev feature (`mock-attestation`, `allow-seed-import`, `allow-debug-pcrs`)
+fails to compile in a release build. A build with both signer roles, or with
 `rgb-validation` and no role, fails to compile.
 
 **Commitment.** The attestation carries
@@ -283,7 +285,7 @@ endpoint is configured; it does not show that the provider is honest.
 - The runtime limits in force, which nothing attests. PCR0 measures only
   their image values.
 
-On a build without `spv` the `Development` policy commits no field. Its gas
+On a public-Signet image the `Development` policy commits no field. Its gas
 rule and `SPV_MIN_CONFIRMATIONS` are measured, not attested.
 
 ## 5. Keys and lifecycle
@@ -343,8 +345,8 @@ Replicas of one seed are not independent quorum members.
 | `SignRightsRefill` | `Active` | mint | A send of one mint right to new rights of the mint wallet. |
 | `SignRawDigest` | `Active` | burn | A gas transaction under the attested allowlist. |
 | `SignRawMessage` | - | none | Refused in every build. |
-| `SubmitHeaders` | any | mint, burn, built with `spv` | Bitcoin headers for the header chain. |
-| `GetLastSavedBlock` | any | mint, burn, built with `spv` | The tip of the header chain, or the checkpoint when the chain is empty. |
+| `SubmitHeaders` | any | mint, burn | Bitcoin headers for the header chain. |
+| `GetLastSavedBlock` | any | mint, burn | The tip of the header chain, or the checkpoint when the chain is empty. |
 | `InitiateCloning`, `GetClone`, `SetClone` | see [cloning.md](cloning.md) | burn | The seed cloning handshake. |
 | `Health` | any | all | Readiness: launch values set, keys loaded and, where a release needs it, a ready header chain. |
 
@@ -411,7 +413,7 @@ so a gRPC caller identifies the finality wait by its fixed prefix.
 
 ## 7. Bitcoin header chain (SPV)
 
-An `spv` build keeps its own Bitcoin header chain. The parent feeds it with
+A signer build keeps its own Bitcoin header chain. The parent feeds it with
 `SubmitHeaders`, and the enclave validates every header
 ([sequence](diagrams/08-seq-spv-submit-headers.md)). An RGB -> EVM release
 needs a proof in this chain for every witness transaction of its consignment.
@@ -471,7 +473,8 @@ on a dev build; a production-shaped build refuses to start when it is set.
 | `bitcoin` | Block 951,552 | Full: linkage, proof of work, `nBits`, time. |
 | `testnet4` | Block 155,232, without chainwork | Full, with the testnet rules. Test-grade: min-difficulty blocks count for depth and freshness. |
 | `testnet3` | Placeholder. A release build refuses to boot. | Full, with the 20-minute rule. |
-| `signet`, `signetcustom` | Block 334,000 of the UTEXO signet, without chainwork | No proof of work, `nBits` or signet challenge signature. Linkage, time, reorganization, rate and freshness rules only. |
+| `signet` | Block 320,544 of public Signet, without chainwork | No proof of work, `nBits` or signet challenge signature. Linkage, time, reorganization, rate and freshness rules only. |
+| `signetcustom` | Block 334,000 of the UTEXO signet, without chainwork | As `signet`. |
 | `regtest` | Genesis | No proof of work or `nBits`. |
 
 An RGB -> EVM release under `BTC_RELAY_MODE=required` needs the chainwork of
@@ -493,8 +496,8 @@ decisions.
 | P4 | Valid calldata | An allowed selector, a size limit, canonical ABI encoding, the destination-chain rule of the route, and a bounded deadline. |
 | P5 | Correct destination | The pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`). |
 | P6 | Release identity | Source chain 827166, an empty source address, the recomputed `burnId`, `sourceBurnTxId` equal to the burn OpId, and settlement ids equal to the derived deposits. |
-| P7 | Accepted Bitcoin history | With `spv`: every witness is in the enclave's header chain. Without `spv`: the indexer gives the chain view. |
-| P8 | Inclusion and relay agreement | With `spv`: Merkle inclusion, depth, tip freshness and the BtcRelay proof. Without `spv`: the indexer gives the depth. |
+| P7 | Accepted Bitcoin history | Every witness is in the enclave's header chain. |
+| P8 | Inclusion and relay agreement | Merkle inclusion, depth, tip freshness and the BtcRelay proof. |
 | P9 | Backed mints | The enclave derives the deposit id of every mint in the consignment. It reads nothing from the chain. |
 | P10 | Signed payload matches the checks | The typed digest commits to the decoded fields that the checks read. |
 | P11 | No signature on failure | A failed check returns an error. |
@@ -604,17 +607,12 @@ deployed.
 - **Policy coverage.** The commitment does not hold every enforced setting
   (section 4). A verifier must compare the attested chain, contract and asset
   pins with the intended deployment.
-- **Builds without `spv`.** A build with a signer role and without `spv` runs
-  on public Signet only and attests `Development`, which commits no endpoint
-  and no KMS value. A compromised host can launch it with its own TLS
-  endpoints: its own indexer for a burn signer, its own EVM RPC for a mint
-  signer. A burn signer built this way trusts the indexer for witness status
-  and depth, and checks no request-supplied Merkle proof or BtcRelay proof.
-  rgb-lib checks the network, transaction IDs and confirmation depth against
-  that trusted chain view ([burn flow](burn-flow.md#2-who-does-what)). These
-  checks do not independently verify Bitcoin inclusion or headers.
-  `attest-verify` and `verify-launch` refuse this policy. The stage profile
-  (`build/profiles/stage-signet.sh`) pins Arbitrum One mainnet
+- **Public Signet.** A public-Signet image attests `Development`, which
+  commits no endpoint and no KMS value, so a compromised host can launch it
+  with its own endpoints. Its header checks skip proof of work, `nBits` and
+  the signet challenge (section 7), so the host can also feed headers of its
+  own. `attest-verify` and `verify-launch` refuse this policy. The stage
+  profile (`build/profiles/stage-signet.sh`) pins Arbitrum One mainnet
   (`EVM_CHAIN_ID=42161`), so its burn signers sign real mainnet releases: a
   compromised stage host can report forged burns and release up to the
   stage Bridge's outflow limits. The stage token must have no market value.
@@ -623,7 +621,7 @@ deployed.
   freshness. Run it with `BTC_RELAY_MODE=required` and a relay that applies
   the same rule. The signets and regtest check no proof of work (section 7).
 - **Request deadline.** The socket deadline does not cancel a handler. A
-  handler with slow indexer or RPC calls can run past it.
+  handler with slow RPC calls can run past it.
 - **Build reproducibility.** CI does not pin the Docker and BuildKit versions
   ([building.md](building.md#reproducibility)).
 - **Contract integration.** The Bridge must derive RGB deposit ids as the

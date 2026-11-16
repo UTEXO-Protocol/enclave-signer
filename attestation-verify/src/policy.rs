@@ -157,8 +157,8 @@ pub struct KmsPin {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
-    /// Witness txids are checked against the enclave PoW-verified header
-    /// chain (`spv`), not the host-controlled indexer.
+    /// Witness txids are checked against the enclave's SPV header chain, not
+    /// the host-controlled indexer.
     SpvVerified = 1,
 }
 
@@ -176,7 +176,7 @@ pub enum AttestationMode {
 ///
 /// [`Production`](AttestedPolicy::Production) is the fail-closed bridge
 /// posture: fully pinned, real attestation, SPV anchors and a known EVM data
-/// source. A debug, dev-feature, no-SPV, unpinned or non-bridge build is
+/// source. A debug, dev-feature, public-Signet, unpinned or non-bridge build is
 /// [`Development`](AttestedPolicy::Development). A production verifier must
 /// reject it.
 // Built once at boot, so the variant size difference does not matter.

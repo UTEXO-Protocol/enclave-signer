@@ -143,14 +143,14 @@ A behavior change is incomplete until its affected descriptions agree with it.
   claims one role but enables another's path.
 - Keep dev-only seed import, mock attestation, all-zero peer PCR allowances
   and insecure transport out of release enclave binaries. Preserve
-  compile-time rejection tests, including role-specific and no-SPV combinations.
-- A stage or no-SPV profile changes specified validation assumptions. It does
+  compile-time rejection tests, including role-specific combinations.
+- A stage profile changes specified validation assumptions. It does
   not automatically authorize weaker seed custody, raw signing or mock
   attestation.
-- An RGB build without `spv` has no SPV proof. Its burn signer trusts the
-  indexer for Bitcoin witness status. Limit such a build to public Signet and a
-  Development policy. It must not resolve to a Production policy or claim
-  SPV-verified data.
+- Every signer build has the in-enclave header chain, and a burn proves every
+  witness in it. Do not add a path that trusts an indexer for witness status. A
+  public-Signet image checks no proof of work, so it must resolve to a
+  Development policy, never to Production.
 
 ## Common EIFs and independent federation RPCs
 
@@ -184,7 +184,7 @@ measurements (PCR0/PCR1/PCR2), while using different EVM RPC connections.
   does not approve those fields, prove a connection occurred, or prove the
   provider's data is honest. EVM RPC data received over TLS remains an explicit
   trust assumption.
-- Apply the same image/runtime separation to SPV and no-SPV / IndexerTrusted
+- Apply the same image/runtime separation to the mainnet and public-Signet
   profiles. Endpoint approval belongs to the independently approved deployment
   configuration; do not introduce an operator signing-key system as part of
   endpoint configuration. Preserve runtime TLS and launch validation.
@@ -316,7 +316,7 @@ report that conflict and keep it visible until the implementation is fixed.
   caps, sighash rules or output-key checks.
   Keep market-fee selection separate from deterministic signing limits. Do
   not use live fee estimates: they can strand an already funded request.
-- For SPV builds, verify Merkle inclusion and position, enforce path-depth
+- Verify Merkle inclusion and position of every witness, enforce path-depth
   limits and refuse a path node that is a 64-byte transaction. Check header
   ancestry, network rules, difficulty, chainwork, timestamps, confirmations and
   freshness as required by that network. Test reorgs and boundary cases.
@@ -327,8 +327,8 @@ report that conflict and keep it visible until the implementation is fixed.
   the proof the signature relies on.
 - Do not discard historical headers that supported consignments still need.
   Bound retention explicitly and describe what happens at the cap.
-- Keep mainnet, testnet, Signet, regtest and indexer-trusted assumptions
-  explicit. Network labels and attested values must match enforced behavior.
+- Keep mainnet, testnet, Signet and regtest assumptions explicit. Network
+  labels and attested values must match enforced behavior.
   Never describe TLS or test-network checks as a proof of Bitcoin consensus.
 
 ## Limits, deadlines, concurrency and retries

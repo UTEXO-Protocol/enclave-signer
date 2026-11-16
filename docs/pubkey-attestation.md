@@ -155,14 +155,14 @@ policy_commitment =
       || u8(address_present) [|| expected_evm_address(20)]
     u8(clone_peer_pcr3_present)                     // 1 for a cloning role (burn, combined), 0 for mint
       [|| clone_peer_pcr3(48)]                      //   own PCR3 (parent IAM role), never all zero
-    // Development (debug, test, dev-feature, no-SPV, or unpinned build):
+    // Development (debug, test, dev-feature, public-Signet, or unpinned build):
     u8(0x00)                                        // development discriminant
 ```
 
 Notes on the fields:
 
-- **Development.** A dev or mock enclave, and a real-attestation build
-  without `spv`, commit only `[version, 0x00]`: no endpoint, no pin, no rule.
+- **Development.** A dev or mock enclave, and a public-Signet image, commit
+  only `[version, 0x00]`: no endpoint, no pin, no rule.
 - **`evm_finality_tag`.** Production verification requires
   `--expect-evm-finality-tag` with the approved `safe` or `finalized`. A
   production enclave refuses `latest`, and so does the verifier.
