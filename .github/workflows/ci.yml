@@ -132,9 +132,20 @@ jobs:
           python3 - <<'PY'
           import pathlib, re
           log = re.sub(r'\x1b\[[0-9;]*m', '', pathlib.Path('parent-tests.log').read_text())
-          case = 'test grpc_direct_burn_returns_a_signature_for_the_forwarded_intent ... ok'
-          if log.count(case) != 1:
-              raise SystemExit('::error::expected the real Parent-to-Burn signing test to pass once')
+          cases = """
+          grpc_direct_burn_returns_a_signature_for_the_forwarded_intent
+          grpc_legacy_direct_burn_signs_without_a_destination_record
+          grpc_layerzero_burn_preserves_the_original_recipient_bytes
+          grpc_legacy_burn_rejects_a_destination_record
+          grpc_legacy_burn_rejects_the_layerzero_route
+          grpc_versioned_burn_requires_a_destination_record
+          grpc_burn_rejects_an_unknown_destination_record_version
+          grpc_burn_rejects_changed_destination_record_bytes
+          """.split()
+          for case in cases:
+              count = len(re.findall(rf'^test {re.escape(case)} \.\.\. ok$', log, re.MULTILINE))
+              if count != 1:
+                  raise SystemExit(f'::error::expected {case} to pass once; found {count} successful results')
           PY
 
       # The local VSOCK transport needs no Nitro enclave. Fail if the runner

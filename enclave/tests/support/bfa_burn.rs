@@ -17,7 +17,7 @@ use attestation_verify::EvmFinalityTag;
 use bfa_consignment::{History, Issue};
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{BlockHash, CompactTarget, Network, TxMerkleNode};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use utexo_bridge_enclave::config::BridgeConfig;
@@ -147,6 +147,13 @@ fn relay_commit(headers: &[Header], height: u32) -> B256 {
     keccak256(record)
 }
 
+fn merkle_parent(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut pair = [0u8; 64];
+    pair[..32].copy_from_slice(&left);
+    pair[32..].copy_from_slice(&right);
+    sha256d::Hash::hash(&pair).to_byte_array()
+}
+
 fn chain(history: &History) -> (HeaderChain, Vec<MerkleProofEntry>, Bytes) {
     assert_eq!(
         history.bundles.len(),
@@ -177,13 +184,25 @@ fn chain(history: &History) -> (HeaderChain, Vec<MerkleProofEntry>, Bytes) {
     for height in 1..=TIP {
         let merkle_root = if (11..=BURN_HEIGHT).contains(&height) {
             let txid = history.bundles[(height - 11) as usize].witness_id();
+            // A nonzero position and both path levels must survive transport.
+            // Build the root independently of the enclave's Merkle verifier.
+            let left = [0xa1; 32];
+            let right = merkle_parent([0xa2; 32], [0xa3; 32]);
+            let root = merkle_parent(merkle_parent(left, txid.to_byte_array()), right);
+            let merkle_path = [left, right]
+                .into_iter()
+                .map(|mut sibling| {
+                    sibling.reverse();
+                    sibling.to_vec()
+                })
+                .collect();
             proofs.push(MerkleProofEntry {
                 txid: hex::decode(txid.to_string()).unwrap(),
                 block_height: height,
-                tx_position: 0,
-                merkle_path: vec![],
+                tx_position: 1,
+                merkle_path,
             });
-            TxMerkleNode::from_byte_array(txid.to_byte_array())
+            TxMerkleNode::from_byte_array(root)
         } else {
             TxMerkleNode::from_byte_array([0xab; 32])
         };
@@ -269,6 +288,7 @@ pub(super) struct Fixture {
     pub(super) mint: bfa_consignment::Mint,
     pub(super) params: FundsOutParams,
     pub(super) route: Route,
+    pub(super) burn_destination: Option<BurnDestination>,
     pub(super) list_reads: Arc<AtomicUsize>,
 }
 
@@ -278,18 +298,53 @@ impl Fixture {
     }
 
     pub(super) fn with_claimed_burn(route: Route, claimed_burned: u64) -> Self {
+        Self::with_destination(route, claimed_burned, Some(PAYEE.to_vec()))
+    }
+
+    // The Parent matrix uses version cases outside the shared handler suite.
+    #[allow(dead_code)]
+    pub(super) fn v0(route: Route) -> Self {
+        Self::with_destination(route, BURNED, None)
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn v1_with_recipient(route: Route, recipient: Vec<u8>) -> Self {
+        match route {
+            Route::Direct => assert_eq!(recipient.len(), 20),
+            Route::LayerZero => assert!((1..=32).contains(&recipient.len())),
+        }
+        Self::with_destination(route, BURNED, Some(recipient))
+    }
+
+    fn with_destination(route: Route, claimed_burned: u64, recipient: Option<Vec<u8>>) -> Self {
+        let burn_destination = recipient.map(|recipient| BurnDestination {
+            version: 1,
+            destination_chain_id: route.chain(),
+            dst_eid: route.eid(),
+            recipient,
+        });
         let right = bfa_consignment::outpoint(0xa0, 0);
         let mut issue = Issue::new(CHAIN_ID, BRIDGE, vec![right]);
         issue.reject_list = Some(bfa_consignment::evm_reject_list(CHAIN_ID, LIST));
         let mut history = History::issue(issue);
         let units = history.mint_owned(history.genesis_right(0, right), MINTED, 90);
-        let reason = UtexoBurnDestinationV1 {
-            destinationChainId: route.chain(),
-            dstEid: route.eid(),
-            recipient: PAYEE.to_vec().into(),
-        }
-        .eip712_hash_struct()
-        .0;
+        let reason = match &burn_destination {
+            Some(record) => {
+                UtexoBurnDestinationV1 {
+                    destinationChainId: record.destination_chain_id,
+                    dstEid: record.dst_eid,
+                    recipient: record.recipient.clone().into(),
+                }
+                .eip712_hash_struct()
+                .0
+            }
+            None => bfa_consignment::burn_reason_for(PAYEE),
+        };
+        let recipient = burn_destination
+            .as_ref()
+            .map_or(PAYEE.as_slice(), |record| record.recipient.as_slice());
+        let mut padded_recipient = [0u8; 32];
+        padded_recipient[32 - recipient.len()..].copy_from_slice(recipient);
         let mut transitions = history.burn_transitions(units, MINTED, Some(BURNED), Some(reason));
         // The allocation consumed by the burn always holds BURNED units. A
         // mismatched global below makes a well-formed, fully anchored file
@@ -320,7 +375,7 @@ impl Fixture {
             commission: 0,
         };
         let mut params = FundsOutParams {
-            recipient: Address::from(PAYEE),
+            recipient: Address::from_slice(&padded_recipient[12..]),
             amount: U256::from(BURNED),
             burnId: U256::ZERO,
             sourceChainId: U256::from(RGB_CHAIN_ID),
@@ -358,12 +413,18 @@ impl Fixture {
             mint: history.mints[0],
             params,
             route,
+            burn_destination,
             list_reads,
         }
     }
 
     pub(super) fn request(&self, p: FundsOutParams) -> SignRequest {
         let mut recipient = [0u8; 32];
+        if let Some(record) = &self.burn_destination {
+            recipient[32 - record.recipient.len()..].copy_from_slice(&record.recipient);
+        }
+        // The common release mutations use its address field; retain any
+        // longer LayerZero recipient prefix while applying that mutation.
         recipient[12..].copy_from_slice(p.recipient.as_slice());
         let amount: u64 = p.amount.try_into().unwrap();
         let (call_data, lz_release) = match self.route {
@@ -405,12 +466,7 @@ impl Fixture {
                 calldata_amount: amount,
                 calldata_commission: 0,
                 lz_release,
-                burn_destination: Some(BurnDestination {
-                    version: 1,
-                    destination_chain_id: self.route.chain(),
-                    dst_eid: self.route.eid(),
-                    recipient: PAYEE.to_vec(),
-                }),
+                burn_destination: self.burn_destination.clone(),
             })),
         }
     }
