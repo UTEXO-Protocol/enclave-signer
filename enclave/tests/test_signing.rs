@@ -398,7 +398,6 @@ fn sign_psbt_request(
             psbt_bytes,
             asset_id: String::new(),
             fascia: vec![],
-            parent_fascia: vec![],
         })),
     }
 }

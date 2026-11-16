@@ -163,11 +163,11 @@ The mint signer refuses a second request for a deposit for `mint_replay_ttl_secs
 The PSBT is not part of the key. So the guard also refuses a mint that the listener
 builds again with other inputs or a higher fee.
 
-This guard is not the safety control of a mint. Each signature for one mint spends
-the same UTXO, so at most one can reach the chain
-([mint-flow.md](mint-flow.md), section 6). A restart clears the guard. So a change
-gives the host nothing that it does not have already. The guard reads the two limits
-at each call, so a change applies to the entries that it holds.
+This guard is not the safety control of a mint. Each signature for one deposit is
+for the one transaction that its lockId names (M6), so at most one can reach the
+chain ([mint-flow.md](mint-flow.md), section 6). A restart clears the guard. So a
+change gives the host nothing that it does not have already. The guard reads the two
+limits at each call, so a change applies to the entries that it holds.
 
 Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If the
 parent drops a reply first, the enclave refuses the retry until the window ends.

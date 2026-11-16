@@ -229,6 +229,48 @@ fn a_message_field_with_another_wire_type_is_refused_by_the_decode() {
     assert!(matches!(err, EnclaveError::Framing(_)), "{err}");
 }
 
+/// A request with a value at the reserved `parent_fascia` number: the walk and the decode skip it.
+#[test]
+fn a_reserved_rgb_field_is_skipped() {
+    use crate::proto::sign_request::DestinationNetwork;
+    use crate::proto::{RgbDestination, SignRequest, SignRightsRefillRequest};
+    use prost::Message;
+
+    let destination = RgbDestination {
+        psbt_bytes: vec![0xFF; 32],
+        asset_id: "rgb:asset".into(),
+        fascia: vec![0x05; 6],
+    };
+    let refill = SignRightsRefillRequest {
+        psbt_bytes: vec![0xFF; 32],
+        asset_id: "rgb:asset".into(),
+        fascia: vec![0x05; 6],
+    };
+    let mut rgb = destination.encode_to_vec();
+    len_field(10, &[0x04; 8], &mut rgb);
+    let mut sign = Vec::new();
+    len_field(5, &rgb, &mut sign); // SignRequest.rgb_destination
+    let mut mint = Vec::new();
+    len_field(3, &sign, &mut mint); // EnclaveRequest.sign
+    let mut rights = refill.encode_to_vec();
+    len_field(7, &[0x04; 8], &mut rights);
+    let mut refill_request = Vec::new();
+    len_field(18, &rights, &mut refill_request); // EnclaveRequest.sign_rights_refill
+    let expected = [
+        enclave_request::Request::Sign(SignRequest {
+            destination_network: Some(DestinationNetwork::RgbDestination(destination)),
+            ..Default::default()
+        }),
+        enclave_request::Request::SignRightsRefill(refill),
+    ];
+    for (body, request) in [mint, refill_request].into_iter().zip(expected) {
+        let mut wire = (body.len() as u32).to_le_bytes().to_vec();
+        wire.extend_from_slice(&body);
+        let decoded = read_request(&mut Cursor::new(&wire)).unwrap();
+        assert_eq!(decoded.request, Some(request));
+    }
+}
+
 /// The proto the enclave decodes, verbatim from upstream
 /// (`enclave-proto/README.md`).
 const ENCLAVE_PROTO: &str = include_str!("../../../enclave-proto/proto/enclave.proto");

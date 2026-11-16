@@ -523,7 +523,6 @@ impl ParentAdapterService {
                         psbt_bytes: payload.psbt_bytes,
                         asset_id: payload.rgb_asset_id,
                         fascia: payload.fascia,
-                        parent_fascia: payload.parent_fascia,
                     },
                 )
             }
@@ -544,8 +543,7 @@ impl ParentAdapterService {
         }
         let Some(sign_request::Data::RgbData(payload)) = req.data else {
             return Err(Status::invalid_argument(
-                "RGB_RIGHTS_REFILL sign requires RgbData with the PSBT, its fascia and its parent \
-                 fascia",
+                "RGB_RIGHTS_REFILL sign requires RgbData with the PSBT and its fascia",
             ));
         };
         Ok(EnclaveRequest {
@@ -554,7 +552,6 @@ impl ParentAdapterService {
                     psbt_bytes: payload.psbt_bytes,
                     asset_id: payload.rgb_asset_id,
                     fascia: payload.fascia,
-                    parent_fascia: payload.parent_fascia,
                 },
             )),
         })

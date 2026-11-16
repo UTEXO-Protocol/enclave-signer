@@ -267,7 +267,8 @@ async fn checked_body(method: &str, body: Body) -> Result<Bytes, Status> {
 mod tests {
     use super::*;
     use crate::grpc_proto::{
-        source_proof, MerkleProofEntry, RgbSource, SignRequest, SourceProof, SubmitHeadersRequest,
+        sign_request, source_proof, EnrichedRgbPayload, MerkleProofEntry, RgbSource, SignRequest,
+        SourceProof, SubmitHeadersRequest,
     };
     use prost::Message;
 
@@ -348,6 +349,23 @@ mod tests {
             panic!("no RGB source");
         };
         assert_eq!(rgb.merkle_proofs.len(), 20);
+    }
+
+    /// A request with a value at the reserved `parent_fascia` number: the walk and the decode skip it.
+    #[test]
+    fn a_reserved_rgb_field_is_skipped() {
+        let payload = EnrichedRgbPayload {
+            psbt_bytes: vec![0xFF; 32],
+            rgb_asset_id: "rgb:asset".into(),
+            fascia: vec![0x05; 6],
+        };
+        let mut rgb = payload.encode_to_vec();
+        prost::encoding::bytes::encode(10, &vec![0x04; 8], &mut rgb);
+        let mut bytes = Vec::new();
+        prost::encoding::bytes::encode(4, &rgb, &mut bytes);
+        count_request_elements("Sign", &bytes).unwrap();
+        let decoded = SignRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.data, Some(sign_request::Data::RgbData(payload)));
     }
 
     /// Each header of `SubmitHeaders` counts at the top level.

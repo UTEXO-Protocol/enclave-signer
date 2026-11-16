@@ -4,7 +4,7 @@ use bitcoin::blockdata::script::Builder;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf};
 use rgbstd::contract::AllocatedState;
-use rgbstd::{GlobalValues, GraphSeal, OpId, Operation, RevealedData, RevealedValue};
+use rgbstd::{GlobalValues, GraphSeal, OpId, Operation, Opout, RevealedData, RevealedValue};
 
 use super::super::MAX_FEE_SATS;
 use super::*;
@@ -265,9 +265,9 @@ fn issued(tags: &[u8]) -> (History, Vec<Utxo>) {
 }
 
 /// A rights send of one genesis right to `vouts`.
-fn rights_send(vouts: &[u32]) -> (Utxo, Transition) {
+fn rights_send(vouts: &[u32]) -> Transition {
     let (mut history, rights) = issued(&[0xA0]);
-    (rights[0], history.rights_transition(rights[0], vouts))
+    history.rights_transition(rights[0], vouts)
 }
 
 fn refusal_of(transition: Transition) -> String {
@@ -282,10 +282,8 @@ fn on_witness(vout: u32) -> OutputSeal {
 fn reads_one_right_sent_to_two_and_to_three() {
     for k in [2u32, 3] {
         let vouts: Vec<u32> = (1..=k).collect();
-        let (right, send) = rights_send(&vouts);
-        let (spent, made) = refill_rights(&committed(send)).unwrap();
-        assert_eq!(spent, right.opout);
-        assert_eq!(made, vouts);
+        let send = rights_send(&vouts);
+        assert_eq!(refill_rights(&committed(send)).unwrap(), vouts);
     }
 }
 
@@ -339,7 +337,7 @@ fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
 #[test]
 fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
     for transition_type in [schemata::TS_TRANSFER, schemata::TS_MINT, schemata::TS_BURN] {
-        let (_, mut send) = rights_send(&[1, 2]);
+        let mut send = rights_send(&[1, 2]);
         send.transition_type = transition_type;
         let err = refusal_of(send);
         assert!(err.contains("requires a propagate transition"), "{err}");
@@ -426,7 +424,7 @@ fn refuses_rights_that_carry_an_amount() {
 
 #[test]
 fn refuses_a_global_on_the_propagate() {
-    let (_, mut send) = rights_send(&[1, 2]);
+    let mut send = rights_send(&[1, 2]);
     let value = GlobalValues::with(RevealedData::new(
         amplify::confinement::SmallBlob::try_from(vec![0u8; 8]).unwrap(),
     ));

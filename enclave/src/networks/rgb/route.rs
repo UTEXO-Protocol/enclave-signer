@@ -3,20 +3,20 @@
 //! This layer only selects the check for this build. The checks are in the
 //! sibling modules: consignment parsing and rgb-lib validation in
 //! [`super::validation`], PSBT anchoring in [`super::psbt_validation`], the
-//! mint signer's PSBT core in [`super::psbt_commit`] and
-//! [`super::parent_proof`], and per-flow rules in [`super::flow`].
+//! mint signer's PSBT core in [`super::psbt_commit`], and per-flow rules in
+//! [`super::flow`].
 //!
-//! The mint signer validates from the PSBT, its fascia and its parent's fascia
-//! alone. Every other RGB build validates a consignment.
+//! The mint signer validates from the PSBT and its fascia alone. Every other
+//! RGB build validates a consignment.
 
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 use super::flow;
+#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+use super::psbt_commit;
 #[cfg(evm_to_rgb)]
 use super::psbt_validation;
 #[cfg(feature = "rgb-validation")]
 use super::validation;
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-use super::{parent_proof, psbt_commit};
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 use crate::config::BridgeConfig;
 #[cfg(not(feature = "rgb-validation"))]
@@ -97,8 +97,8 @@ pub fn validate_destination_anchor(
     ))
 }
 
-/// The mint its PSBT and fascia commit, bound to the deposit and the right's UTXO
-/// (F1-F7, PP, M1-M8). Returns the minted units.
+/// The mint its PSBT and fascia commit, bound to the deposit (F1-F7, M1-M8).
+/// Returns the minted units.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
     destination: &RgbDestination,
@@ -109,7 +109,7 @@ pub fn validate_destination_anchor(
     let psbt = psbt_validation::parse_psbt_shape(&destination.psbt_bytes)?;
     psbt_validation::assert_mint_shape(&psbt)?;
     psbt_validation::assert_txid_and_sighash_fixed(&psbt)?;
-    let (pin, committed) = pinned_commitment(
+    let committed = pinned_commitment(
         &psbt,
         &destination.fascia,
         &destination.asset_id,
@@ -118,7 +118,6 @@ pub fn validate_destination_anchor(
     let mint = psbt_validation::mint_facts(&committed)?;
     psbt_validation::assert_mints_net_deposit(&mint, source_amount, source_commission)?;
     let colored = mint_inputs(&psbt, ctx)?;
-    parent_proof::right_input(&psbt, &destination.parent_fascia, mint.right, pin)?;
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched: the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &colored, "mint")?;
@@ -139,14 +138,14 @@ pub fn validate_destination_anchor(
 }
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which
-/// `asset_id` must name too. Returns the pin and the committed transition.
+/// `asset_id` must name too. Returns the committed transition.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn pinned_commitment(
     psbt: &bitcoin::psbt::Psbt,
     fascia: &[u8],
     asset_id: &str,
     cfg: &BridgeConfig,
-) -> Result<(rgbstd::ContractId, psbt_commit::Committed)> {
+) -> Result<psbt_commit::Committed> {
     let pin = psbt_commit::pinned_contract(cfg)?;
     let fascia = psbt_commit::parse_fascia(fascia, "fascia")?;
     let committed = psbt_commit::committed_transition(&psbt.unsigned_tx, &fascia, pin)?;
@@ -156,11 +155,11 @@ fn pinned_commitment(
         cfg,
         validation::AssetBindMode::Destination,
     )?;
-    Ok((pin, committed))
+    Ok(committed)
 }
 
-/// F7: the mint spends its right alone ([`psbt_validation::MINT_INPUTS`]), a
-/// Colored key-path input of this enclave. Returns it, for the fee bound.
+/// F7: the mint spends [`psbt_validation::MINT_INPUTS`] inputs, all Colored
+/// key-path inputs of this enclave. Returns them, for the fee bound.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Result<Vec<usize>> {
     use crate::error::EnclaveError;
@@ -168,8 +167,8 @@ fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Resul
     let inputs = psbt.unsigned_tx.input.len();
     if inputs != psbt_validation::MINT_INPUTS {
         return Err(EnclaveError::CrossCheck(format!(
-            "mint PSBT spends {inputs} inputs - a mint spends its right alone, and that UTXO's \
-             sats pay the fee"
+            "mint PSBT spends {inputs} inputs - F7 allows {} input, and its sats pay the fee",
+            psbt_validation::MINT_INPUTS
         )));
     }
     let resolve_colored = ctx.psbt_fee_key_paths.ok_or_else(|| {
@@ -184,8 +183,8 @@ fn mint_inputs(psbt: &bitcoin::psbt::Psbt, ctx: &ValidationContext<'_>) -> Resul
     Ok(colored)
 }
 
-/// A refill from its PSBT and the two fascias alone (F2-F6, RR6-RR8, RR11), no
-/// network. Returns the new rights' vouts, which the caller proves ours (RR9).
+/// A refill from its PSBT and its fascia alone (F2-F6, RR6-RR8), no network.
+/// Returns the new rights' vouts, which the caller proves ours (RR9).
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_rights_refill(
     req: &SignRightsRefillRequest,
@@ -193,10 +192,8 @@ pub fn validate_rights_refill(
     cfg: &BridgeConfig,
 ) -> Result<Vec<u32>> {
     psbt_validation::assert_txid_and_sighash_fixed(psbt)?;
-    let (pin, committed) = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg)?;
-    let (right, vouts) = psbt_validation::refill_rights(&committed)?;
-    parent_proof::right_input(psbt, &req.parent_fascia, right, pin)?;
-    Ok(vouts)
+    let committed = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg)?;
+    psbt_validation::refill_rights(&committed)
 }
 
 #[cfg(all(test, feature = "rgb-validation"))]

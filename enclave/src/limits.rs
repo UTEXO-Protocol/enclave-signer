@@ -7,9 +7,10 @@
 //! image: the SPV depth, the fee limits, the clone replay guard and the pins.
 //!
 //! The mint replay guard is here because it is not a safety rule. A shorter
-//! window lets a rebuilt mint for one deposit reach the signer sooner. Each
-//! signature for that mint spends the same UTXO, so Bitcoin confirms at most
-//! one (`docs/mint-flow.md`, section 6). A restart clears the guard anyway.
+//! window lets a retry for one deposit reach the signer sooner. Each signature
+//! for that deposit is for the one transaction that its lockId names (M6), so
+//! Bitcoin confirms at most one (`docs/mint-flow.md`, section 6). A restart
+//! clears the guard anyway.
 //!
 //! The image sets the start values. [`Limits::DEFAULTS`] holds the constants of
 //! the image, and [`Limits::image`] adds the request limits of `BridgeConfig`.

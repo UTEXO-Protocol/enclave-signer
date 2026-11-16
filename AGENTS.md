@@ -99,7 +99,7 @@ A behavior change is incomplete until its affected descriptions agree with it.
   CVE and RUSTSEC ids, RFC, BIP and EIP numbers, upstream bug links, tool error
   codes such as the nitro-cli `E<nn>` codes, and the rule ids that
   `docs/mint-flow.md` and `docs/tee-spec.md` define and the code cites (for
-  example `M6`, `RR10`, `PP1`).
+  example `M6`, `RR10`, `F4`).
 - Preserve the provenance of generated and vendored files. Correct stale
   upstream comments upstream and re-sync the files; do not hand-edit a
   verbatim copy. Until the re-sync lands, list each comment difference in
@@ -286,8 +286,8 @@ report that conflict and keep it visible until the implementation is fixed.
 ## RGB, Bitcoin and PSBT rules
 
 - Follow the selected flow's validation model. Burn checks RGB consensus and
-  its required history; mint uses its fascia, parent-right and EVM-deposit
-  bindings. Do not claim mint validates history it does not read.
+  its required history; mint uses its fascia and EVM-deposit bindings. Do
+  not claim mint validates history it does not read.
 - Use the pinned canonical RGB schema and type definitions. Do not trust a
   consignment to supply the rules against which it will be validated.
 - Validate a consignment only with rgb-lib's
@@ -303,10 +303,10 @@ report that conflict and keep it visible until the implementation is fixed.
 - Prove key and output ownership from scripts, derivation and allowed accounts.
   Being able to sign one leaf of a Taproot tree is not proof of exclusive
   custody. Keep colored, vanilla and foreign-input handling distinct.
-- Keep the exact mint amount, recipient seal, right propagation, parent
-  transaction and PSBT commitment rules together. For refill, preserve custody
-  of the rights and its separate limits. Do not generalize away documented
-  witness-recipient or fee-input limitations.
+- Keep the exact mint amount, recipient seal, right propagation and PSBT
+  commitment rules together. For refill, preserve custody of the rights and
+  its separate limits. Do not generalize away documented witness-recipient or
+  spent-state limitations.
 - A mint's lock names one Bitcoin transaction: `LockId` commits the mint OpId
   and the txid. After the lock, no path may change that transaction by RBF, a
   rebuild or batching. A retry uses the same PSBT. Only a CPFP child can raise

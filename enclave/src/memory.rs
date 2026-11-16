@@ -22,8 +22,8 @@
 //!
 //! - PSBTs, at most `max_psbt_bytes`: about 102 times for one input and
 //!   outputs that each carry two empty records. A request holds one parsed
-//!   PSBT at a time. A mint also parses its two fascias, under the same
-//!   limit, and each parse stays within the factor.
+//!   PSBT at a time. A mint or a refill also parses its fascia, under the
+//!   same limit, and the parse stays within the factor.
 //! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`:
 //!   about 48 times for a document of CBOR nulls.
 //! - Consignments, at most `max_consignment_bytes`: about 53 times for

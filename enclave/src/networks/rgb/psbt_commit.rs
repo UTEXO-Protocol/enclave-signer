@@ -218,10 +218,10 @@ fn assert_input_map_is(bundle: &TransitionBundle, transition: &Transition, id: O
     Ok(())
 }
 
-/// The one input `transition` closes, which must be a `mintRight` (M2, RR7).
-pub fn single_right_input(transition: &Transition, what: &str) -> Result<Opout> {
+/// M2, RR7: `transition` closes exactly one input, a `mintRight`.
+pub fn assert_single_right_input(transition: &Transition, what: &str) -> Result<()> {
     match transition.inputs.iter().collect::<Vec<_>>().as_slice() {
-        [input] if input.ty == schemata::OS_MINT => Ok(**input),
+        [input] if input.ty == schemata::OS_MINT => Ok(()),
         inputs => Err(EnclaveError::CrossCheck(format!(
             "{what} must close exactly one mintRight - it closes {inputs:?}"
         ))),

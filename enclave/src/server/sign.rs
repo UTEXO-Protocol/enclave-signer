@@ -498,7 +498,7 @@ fn precheck_operation(
         if matches!(e, EnclaveError::NonceReplay) {
             EnclaveError::CrossCheck(
                 "duplicate bridge operation: refusing to sign a replay (soft in-memory guard; \
-                 Bitcoin lets only one tx spend the right)"
+                 M6 binds the deposit to one transaction)"
                     .into(),
             )
         } else {
@@ -534,7 +534,8 @@ fn reserve_operation<'ctx>(
                 Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
                      funds_in_operation_id, rgb_asset_id) was already signed recently - refusing \
-                     to sign a replay (soft in-memory guard; Bitcoin lets only one tx spend the right)"
+                     to sign a replay (soft in-memory guard; M6 binds the deposit to one \
+                     transaction)"
                         .into(),
                 ))
             }

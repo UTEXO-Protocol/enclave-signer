@@ -367,9 +367,9 @@ the checks in order.
 **EVM -> RGB (mint signer).** The enclave reads the mint from the fascia that
 rgb-lib wrote for the PSBT's transaction, and it validates no consignment. It
 proves that the transaction commits exactly one mint of the pinned asset, that
-the mint issues exactly the deposited amount less the commission, that the
-deposit names this mint and this transaction, and that the PSBT spends the
-one output that holds the mint right. It then signs with the colored account.
+the mint issues exactly the deposited amount less the commission, and that
+the deposit names this mint and this transaction. It does not see which RGB
+state the spent output holds. It then signs with the colored account.
 [mint-flow.md](mint-flow.md) gives the checks in order.
 
 ### 6.2 Other signing requests
@@ -515,10 +515,10 @@ not prove that a release will succeed on chain.
 - **Release replay.** The burn signer keeps no release state. The
   `MultisigProxy` nonce is in the signed digest, and the Bridge refuses a
   used `burnId`. A signature expires at its deadline.
-- **Mint replay.** Every signature for one mint spends the same output, so
-  Bitcoin confirms at most one. An in-memory guard also refuses a second
-  request for a deposit for a time. It is not the safety control
-  ([mint-flow.md](mint-flow.md), section 6).
+- **Mint replay.** M6 binds every signature for one deposit to the one
+  transaction that its lockId names, so Bitcoin confirms it at most once. An
+  in-memory guard also refuses a second request for a deposit for a time. It
+  is not the safety control ([mint-flow.md](mint-flow.md), section 6).
 - **Clone replay.** Each donor records the attestation nonces that it
   accepted ([cloning.md](cloning.md)).
 
@@ -575,9 +575,8 @@ deployed.
 - **No history check.** The mint signer validates no RGB history: no
   consensus, genesis, ancestor, witness depth or reject list. A host that
   controls the bridge can make a mint that no wallet accepts, after the user
-  locked. It cannot mint units that no deposit backs, and it cannot spend
-  other state of the wallet. The mint wallet must hold no right whose parent
-  is a mint or the genesis ([mint-flow.md](mint-flow.md), section 11).
+  locked. It cannot mint units that no deposit backs, and it cannot move
+  other state of the wallet ([mint-flow.md](mint-flow.md), section 11).
 - **Mint recipient.** The enclave checks that the signed mint is the one that
   the deposit's lockId names. It does not check that this mint pays the user.
   The lockId commits the mint transition with its seal, and the mint
@@ -586,12 +585,15 @@ deployed.
   the mint that pays the user.
 - **Fee after the lock.** The mint transaction cannot change after the lock,
   and no fee bump is implemented. It must confirm at its original fee.
-- **Refill fee input.** A host that pays for one junk parent transaction can
-  chain refills on junk rights. Each destroys one real right on its fee
-  input, with fees from the enclave's Colored sats. It cannot take a right.
-  The hourly refill limit is in memory and per process, not a total: a full
-  mint wallet can lose its rights in about a day, faster after a relaunch or
-  with a second replica. Minting stops until the issuer sends new rights
+- **Spent state.** The mint signer does not see which RGB state an input
+  holds. A compromised host can make it sign a mint or a refill that spends a
+  Colored UTXO of the enclave with other state, such as a right, and that
+  state is lost. It cannot take the state. A refill needs no deposit, and its
+  inputs can be any Colored UTXOs of the enclave that RR0 and RR10 allow, with
+  fees from the enclave's Colored sats. The hourly refill limit is in memory
+  and per process, not a total: a full mint wallet can lose its rights within
+  a day, faster after a relaunch or with a second replica. Minting stops
+  until the issuer sends new rights
   ([mint-flow.md](mint-flow.md), section 8).
 - **SignBtc spending.** `SignBtc` has no total or rate limit. A compromised
   host can submit the change again and again and turn the whole vanilla
@@ -599,8 +601,8 @@ deployed.
   non-zero `BTC_MAX_UNOWNED_SATS` it can also pay up to that budget to its own
   address on each request ([mint-flow.md](mint-flow.md), section 7).
 - **Replay guard.** The EVM -> RGB guard is in memory and per enclave. A
-  restart, its expiry or another replica lets a second request through. The
-  parent proof is the bound: Bitcoin confirms at most one spend of the right.
+  restart, its expiry or another replica lets a second request through. M6
+  is the bound (section 9).
 
 **Both**
 
