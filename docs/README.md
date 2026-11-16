@@ -45,6 +45,7 @@ hand.
 | Document | What it gives |
 |----------|---------------|
 | [validation-cost-model.md](validation-cost-model.md) | The model and the measurements behind the work caps of the burn signer. |
+| [burn-vector-provenance.md](burn-vector-provenance.md) | Fixed Burn vectors, their reference calculations, input sources and test scope. |
 | [AGENTS.md](../AGENTS.md) | The repository rules for a change. |
 
 ## Conventions

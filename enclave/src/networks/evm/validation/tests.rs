@@ -785,9 +785,14 @@ fn burn_id_matches_the_shared_vector() {
     release.source_burn_tx_id[1] = 0x01;
     release.source_burn_tx_id[31] = 0x03;
 
+    let expected = "29c56dee5d5c83392c91d778ef063a7e72432d0c5c3d85d509ad802df0a10fe5";
     assert_eq!(
         hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
-        "29c56dee5d5c83392c91d778ef063a7e72432d0c5c3d85d509ad802df0a10fe5"
+        expected
+    );
+    assert_eq!(
+        hex::encode(contract_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        expected
     );
 }
 
@@ -808,9 +813,14 @@ fn burn_id_matches_the_contract_vector() {
     };
     release.source_burn_tx_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
 
+    let expected = "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f";
     assert_eq!(
         hex::encode(expected_burn_id(&cfg, &release).to_be_bytes::<32>()),
-        "8e9c5e1d3bdacfe89bda87a85bbb59bc1578888f8d63c5de8744c13ff8c9423f"
+        expected
+    );
+    assert_eq!(
+        hex::encode(contract_burn_id(&cfg, &release).to_be_bytes::<32>()),
+        expected
     );
 }
 

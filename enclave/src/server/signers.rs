@@ -50,8 +50,8 @@ pub(super) fn handle_sign_evm(
     params: Option<&crate::networks::evm::validation::FundsOutParams>,
     #[cfg(feature = "rgb-validation")] pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
 ) -> Result<EnclaveResponse> {
-    // Domain name and version are pinned to the deployed MultisigProxy.
-    // See `test_domain_separator_matches_deployed_contract`.
+    // The domain must match MultisigProxy's EIP-712 format. The reference
+    // separator is checked by `test_domain_separator_matches_reference_vector`.
     let domain = build_evm_domain(&req)?;
 
     let domain_sep = domain.separator_hash();

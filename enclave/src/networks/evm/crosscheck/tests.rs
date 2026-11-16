@@ -1638,10 +1638,11 @@ mod btc_relay {
         assert!(err.to_string().contains("has no chainwork"), "got: {err}");
     }
 
-    /// Records produced by `StoredBlockHeaderTestnet.updateChain` for the
-    /// headers of `chain_to(2030)`, seeded at [`h0`] with chainwork 2.
+    /// Fixed records are checked against a separate packing model over the same
+    /// deterministic regtest headers. This does not execute the Solidity relay
+    /// or independently verify Bitcoin consensus.
     #[test]
-    fn relay_record_matches_the_relay_contract() {
+    fn relay_record_matches_reference_model_vectors() {
         let (chain, _) = chain_to(2030);
         let fixture = include_str!("../../../../tests/fixtures/btc_relay_records.txt");
         let mut lines = 0;

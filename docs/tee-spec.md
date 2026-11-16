@@ -627,7 +627,9 @@ deployed.
 - **Build reproducibility.** CI does not pin the Docker and BuildKit versions
   ([building.md](building.md#reproducibility)).
 - **Contract integration.** The Bridge must derive RGB deposit ids as the
-  enclave does. Tests compare the EIP-712 domain and digests with stored
-  contract fixtures; they do not read the deployed contracts.
+  enclave does. Tests compare identifiers, the EIP-712 domain and digests
+  with [independent protocol vectors](burn-vector-provenance.md). They do
+  not read deployed contracts or establish acceptance of an enclave signature
+  by a contract.
 - **Amounts.** Asset amounts on the wire are `u64`. The enclave refuses a
   larger value.

@@ -80,9 +80,7 @@ fn test_tee_lz_funds_out_typehash_matches_contract() {
     );
 }
 
-/// Cross-implementation vector: Solidity, Go and this module must agree
-/// byte-for-byte. Else the chain recovers a wrong signer and reports only
-/// "not a registered enclave signer".
+/// Fixed digest mathematics for fields outside the current RGB admission rules.
 ///
 /// Fields: recipient 0xf39F...2266, amount 1_000_000, burnId 123_456_789,
 /// sourceChainId 96, destinationChainId 31337, sourceAddress
@@ -90,10 +88,8 @@ fn test_tee_lz_funds_out_typehash_matches_contract() {
 /// settlementData = abi.encode([0xcc...], [999]), sourceBurnTxId 0xdd..dd,
 /// nonce 3, deadline 1_700_000_000, on the Arbitrum One domain.
 ///
-/// The alloy EIP-712 encoder over `TeeFundsOut` (an independent
-/// implementation) made the pinned digest. [`test_digest_matches_alloy_eip712`]
-/// derives it again at test time. No vector from the contracts repository
-/// pins this digest.
+/// The independent Alloy encoder in [`test_digest_matches_alloy_eip712`]
+/// reproduces these bytes. This does not execute Solidity or an admitted Burn.
 #[test]
 fn test_digest_matches_reference_vector() {
     let digest =
@@ -161,7 +157,7 @@ fn test_digest_matches_alloy_eip712() {
 }
 
 #[test]
-fn test_domain_separator_matches_deployed_contract() {
+fn test_domain_separator_matches_reference_vector() {
     let domain = Eip712Domain {
         name: "MultisigProxy".to_string(),
         version: "1".to_string(),
@@ -172,9 +168,9 @@ fn test_domain_separator_matches_deployed_contract() {
             addr
         },
     };
-    let on_chain =
+    let expected =
         decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff").unwrap();
-    assert_eq!(domain.separator_hash(), on_chain.as_slice());
+    assert_eq!(domain.separator_hash(), expected.as_slice());
 }
 
 // --- LZ digest tests ---
@@ -188,8 +184,7 @@ fn lz_test_domain() -> Eip712Domain {
     }
 }
 
-/// Packs `lzFundsOut` calldata with the same ABI as the node test helper
-/// `packIMultisigProxyLzFundsOut`: individual params, no struct.
+/// The inner LZ intent uses individual ABI parameters rather than a tuple.
 fn lz_test_calldata() -> Vec<u8> {
     use crate::networks::evm::validation::lzFundsOutCall;
     use alloy_primitives::{Bytes, FixedBytes, U256};
@@ -247,6 +242,7 @@ fn test_lz_rejects_recipient_mismatch() {
 
 /// The independent Alloy EIP-712 encoder checks field order, dynamic-field
 /// hashes, and every signed value against the handwritten production encoder.
+/// These synthetic fields test hash mathematics, not complete Burn admission.
 #[test]
 fn test_lz_digest_matches_independent_encoder_for_every_field() {
     use crate::networks::evm::validation::lzFundsOutCall;

@@ -1,8 +1,12 @@
 use super::*;
 use sha3::{Digest, Keccak256};
 
-/// Shared cross-language vectors, made with go-ethereum `accounts/abi`.
+/// Manual ABI words independently check the production EIP-712 encoder.
 const VECTORS: &str = include_str!("../../../../../docs/burn-destination-vectors.json");
+
+fn destination_vectors() -> serde_json::Value {
+    serde_json::from_str(VECTORS).unwrap()
+}
 
 fn unhex(s: &str) -> Vec<u8> {
     hex::decode(s.strip_prefix("0x").unwrap_or(s)).unwrap()
@@ -22,7 +26,7 @@ fn padded(recipient: &[u8]) -> [u8; 32] {
 
 #[test]
 fn vectors_match() {
-    let doc: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+    let doc = destination_vectors();
     let type_v1 = UtexoBurnDestinationV1::eip712_encode_type();
     let typehash = Keccak256::digest(type_v1.as_bytes()).to_vec();
     assert_eq!(doc["typeV1"].as_str().unwrap(), type_v1);
@@ -49,6 +53,44 @@ fn vectors_match() {
         assert_eq!(rec.hash_v1(), hash, "{name}");
         // The vector also resolves end to end.
         assert!(resolve(&hash, Some(&rec)).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn vectors_match_independent_manual_abi_words() {
+    const TYPE: &str =
+        "UtexoBurnDestinationV1(uint64 destinationChainId,uint32 dstEid,bytes recipient)";
+    let doc = destination_vectors();
+    assert_eq!(doc["typeV1"].as_str().unwrap(), TYPE);
+    let typehash = Keccak256::digest(TYPE.as_bytes());
+    assert_eq!(
+        typehash.as_slice(),
+        unhex(doc["typehashV1"].as_str().unwrap())
+    );
+    let vectors = doc["vectors"].as_array().unwrap();
+    assert_eq!(vectors.len(), 5);
+    for vector in vectors {
+        let name = vector["name"].as_str().unwrap();
+        assert_eq!(vector["version"].as_u64(), Some(1), "{name}");
+        let chain = vector["destinationChainId"].as_u64().unwrap();
+        let eid = u32::try_from(vector["dstEid"].as_u64().unwrap()).unwrap();
+        let recipient = unhex(vector["recipient"].as_str().unwrap());
+        // Explicit word offsets check Alloy's field widths and dynamic-bytes hash.
+        let mut encoded = [0u8; 128];
+        encoded[..32].copy_from_slice(&typehash);
+        encoded[56..64].copy_from_slice(&chain.to_be_bytes());
+        encoded[92..96].copy_from_slice(&eid.to_be_bytes());
+        encoded[96..].copy_from_slice(&Keccak256::digest(&recipient));
+        assert_eq!(
+            encoded.as_slice(),
+            unhex(vector["encoded"].as_str().unwrap()),
+            "{name}"
+        );
+        assert_eq!(
+            Keccak256::digest(encoded).as_slice(),
+            unhex(vector["hash"].as_str().unwrap()),
+            "{name}"
+        );
     }
 }
 
@@ -140,7 +182,7 @@ fn v1_field_limits() {
 /// this vector, so a swapped or dropped field changes the hash.
 #[test]
 fn wire_record_maps_every_field_and_hashes_to_the_vector() {
-    let doc: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+    let doc = destination_vectors();
     let v = doc["vectors"]
         .as_array()
         .unwrap()
