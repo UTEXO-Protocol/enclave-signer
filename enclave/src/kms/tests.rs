@@ -144,10 +144,31 @@ fn recipient_envelope_round_trips_and_rejects_every_deviation() {
     assert!(open_envelope(&key, &[]).is_err());
     assert!(open_envelope(&key, &vec![0x30; MAX_ENVELOPE_BYTES + 1]).is_err());
     assert!(open_envelope(&key, &envelope[..envelope.len() - 1]).is_err());
+
+    // CBC carries no integrity check. A flipped last byte garbles the padding
+    // block, and about one garbled block in 256 still ends in valid padding.
+    // The content then has another length, so the rule that refuses a flipped
+    // envelope is the seed length rule of `Recipient::open`.
+    let recipient = Recipient {
+        key: key.clone(),
+        info: aws_sdk_kms::types::RecipientInfo::builder().build(),
+    };
+    let opened = recipient.open(Some(&Blob::new(envelope.clone())));
+    assert_eq!(*opened.unwrap(), seed);
     let mut flipped = envelope.clone();
     let last = flipped.len() - 1;
     flipped[last] ^= 0x01;
-    assert!(open_envelope(&key, &flipped).is_err());
+    assert!(recipient.open(Some(&Blob::new(flipped))).is_err());
+    // Content that is not exactly one seed is refused, and so is no envelope.
+    for content in [&seed[..SEED_BYTES - 1], &[7u8; SEED_BYTES + 1][..]] {
+        let sealed = Blob::new(seal(&public_key, content));
+        assert_eq!(
+            open_envelope(&key, sealed.as_ref()).unwrap().len(),
+            content.len()
+        );
+        assert!(recipient.open(Some(&sealed)).is_err());
+    }
+    assert!(recipient.open(None).is_err());
 
     // Not EnvelopedData at all.
     let signed = ContentInfo {
