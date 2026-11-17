@@ -664,13 +664,6 @@ fn a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib() {
 
 // ===== release-mode timings (ignored) =====
 
-/// The sizes a timing runs, from `var` (comma separated) or `default`.
-fn sizes(var: &str, default: &[u64]) -> Vec<u64> {
-    std::env::var(var)
-        .map(|v| v.split(',').map(|n| n.trim().parse().unwrap()).collect())
-        .unwrap_or_else(|_| default.to_vec())
-}
-
 fn reads_unrelated(_: &RejectListContract) -> Result<Decisions> {
     let unrelated = OpoutKey {
         op: [0x99; 32],
@@ -740,26 +733,6 @@ fn a_chain_from_a_255_right_genesis_is_modeled_at_or_above_its_time() {
         took.as_millis()
     );
     assert!(u128::from(model) >= took.as_nanos());
-}
-
-/// Our read of the last bundle once rgb-lib passed, on burns of `READ_N`
-/// rights (default 8192, 65535) from a 255-right genesis.
-#[test]
-#[ignore = "release-mode timing; run on request"]
-fn reads_the_last_bundle_of_a_wide_burn_from_a_255_right_genesis_within_a_second() {
-    for n in sizes("READ_N", &[8_192, 65_535]) {
-        let burn = rights_burn(issue_of(255, false), u16::try_from(n).unwrap());
-        let transfer = load(&burn);
-        let start = Instant::now();
-        let last = read_last_bundle(&transfer).unwrap().unwrap();
-        let took = start.elapsed();
-        println!(
-            "read_last_bundle n={n}, 255 rights: {} ms",
-            took.as_millis()
-        );
-        assert_eq!(last.closed_seals.len(), usize::try_from(n).unwrap());
-        assert!(took < Duration::from_secs(1), "{took:?}");
-    }
 }
 
 /// `n` mints, each from its own right of one propagate and moved on by

@@ -24,7 +24,6 @@ fn validated_consignment(
             burn_reason: None,
         }),
         last_witness_txid: None,
-        last_transfer_witness_prevouts: vec![],
         last_transfer_op_id: None,
         non_mined_witness_txids: vec![],
         // These cases do not reach the PSBT bind.

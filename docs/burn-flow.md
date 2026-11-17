@@ -143,8 +143,8 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
-- **B2.1** The bytes must be a V1 transfer file. The genesis schema must be
-  BFA.
+- **B2.1** The bytes must be a V1 transfer file. Its genesis is the one the
+  `RGB_ASSET_ID` pin names (B2.7), so its schema is BFA.
 - **B2.2** Before rgb-lib runs, the contract id must pass the asset bind
   (B2.7). So a foreign genesis never reaches rgb-lib, and it cannot choose
   what the enclave reads. Then, if the genesis names a reject list
@@ -186,10 +186,24 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 - **B2.8** The settling transition must be a `TS_BURN`: the burn of the last
   witness bundle. Two burns there are refused. The amount comes from
   `burnedAsset`, never from the outputs or the host. The burn signer reads
-  the burn facts (`burnedAsset`, `burnReason`, the OpId) from the validated
-  transfer, and a summary of every transition from rgb-lib's
-  `inspect_consignment` on the same file. The two readings must name the same
-  settling transition.
+  every transition, with its `burnedAsset`, `burnReason` and OpId, from
+  rgb-lib's `inspect_consignment` over every bundle of the file that
+  validation accepted. That inspection reverifies each witness commitment,
+  resolves every transition input to the outpoint its witness spends, and
+  refuses an input it cannot resolve, a transition stored under an id that is
+  not its own commitment, a transition in two bundles, and any type the
+  pinned BFA schema does not define.
+- **B2.9a** A bundle discloses the transitions the history needs and conceals
+  the rest: the export builds each one with
+  `TransitionBundle::to_concealed_except`, then reveals each further transition
+  the walk needs. So a bundle of any consignment can commit more transitions
+  than it carries, the bundle of the burn included, and the burn signer does
+  not require otherwise. It needs no such rule: consensus refuses a
+  consignment that conceals a transition the burned units descend from, since
+  the spending transition then references a previous state that cannot be
+  found. What a bundle may conceal is therefore a transition the release does
+  not pay for, and a concealed burn beside the settling one gets no release of
+  its own.
 - **B2.9** The witness resolver counts a witness transaction as mined only
   through the Merkle proof that the request carries for it. That proof must
   pass B3.3 and B3.4 first. A witness with no such proof is unmined and fails

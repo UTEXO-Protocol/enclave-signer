@@ -377,7 +377,7 @@ fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
         bfa_schema::TS_BURN,
     ] {
         let (history, mut send) = rights_send(&[1, 2]);
-        send.transition_type = transition_type;
+        send.transition_type = rgbstd::TransitionType::with(transition_type);
         let err = refusal_of(history, send);
         assert!(err.contains("requires a propagate transition"), "{err}");
     }
