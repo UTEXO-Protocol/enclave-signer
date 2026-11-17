@@ -3,7 +3,7 @@
 use crate::error::EnclaveError;
 use crate::error::Result;
 use crate::networks::rgb::spv::Network;
-use rgbstd::ChainNet;
+use rgb_lib::ChainNet;
 
 /// Validates RGB consignments of the configured Bitcoin network.
 ///

@@ -4,10 +4,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use bitcoin::{Transaction, Txid};
-use rgbstd::containers::Transfer;
-use rgbstd::validation::{ResolveWitness, WitnessResolverError, WitnessStatus};
-use rgbstd::vm::{WitnessOrd, WitnessPos};
-use rgbstd::ChainNet;
+use rgb_lib::{
+    ChainNet, ResolveWitness, RgbTransfer as Transfer, WitnessOrd, WitnessPos,
+    WitnessResolverError, WitnessStatus,
+};
 
 /// The on-chain status of witness txs.
 pub trait ConfirmedWitnesses {

@@ -12,7 +12,8 @@
 //! location read below: the pin fixes it, so a location this enclave cannot
 //! read is an operator error, not caller-chosen data.
 
-use rgbstd::{Genesis, GlobalStateType};
+use rgb_lib::Genesis;
+use rgbstd::GlobalStateType;
 
 /// Where the issuer publishes the asset's reject list, if anywhere. A
 /// `ContractId` is the genesis commitment, so the `RGB_ASSET_ID` pin fixes
