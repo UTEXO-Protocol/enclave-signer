@@ -13,13 +13,18 @@ import tarfile
 import tempfile
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from toolchain import EVIDENCE, validate as validate_toolchain, validate_observations
+
+
 PROFILES = {
     "stage-signet": ("signet", "Public Signet"),
     "stage-mainnet": ("bitcoin", "Bitcoin Mainnet"),
 }
 ROLES = ("burn", "mint")
 COMMON = ("PCR.json", "IMAGE-ENV.json", "SHA256SUMS", "metadata.json",
-          "utexo-bridge-parent", "utexo-bridge-parent-cli", "HOST-SHA256SUMS")
+          "utexo-bridge-parent", "utexo-bridge-parent-cli", "HOST-SHA256SUMS",
+          *EVIDENCE, "TOOLCHAIN-SHA256SUMS")
 OUTPUT = Path("release-output")
 
 
@@ -128,7 +133,14 @@ def verify_bundle(directory, reference, role, sha, build_run, profile="stage-sig
                 f"S3 differs from the Build EIF Actions artifact: {role}/{name}")
     verify_sums(directory, "SHA256SUMS", [names[0]])
     verify_sums(directory, "HOST-SHA256SUMS", ["utexo-bridge-parent", "utexo-bridge-parent-cli"])
+    verify_sums(directory, "TOOLCHAIN-SHA256SUMS", EVIDENCE)
+    toolchain = validate_toolchain(read_json(directory / "toolchain.json"))
+    validate_observations(toolchain, read_json(directory / "builder-info.json"))
     metadata = read_json(directory / "metadata.json")
+    require(metadata.get("toolchain_sha256") == digest(directory / "toolchain.json"),
+            "Toolchain hash differs from build metadata")
+    require(metadata.get("nitro_cli_version") == toolchain["nitro_version"],
+            "Nitro version differs from build metadata")
     expected = {"git_sha": sha, "variant": f"rgb-{role}", "build_profile": profile,
                 "eif_name": names[0], "run_id": build_run}
     require(all(metadata.get(k) == v for k, v in expected.items()), f"Wrong {role} metadata")
@@ -161,13 +173,22 @@ def verify_bundle(directory, reference, role, sha, build_run, profile="stage-sig
             "files": {name: digest(directory / name) for name in names}}
 
 
-def package(bundles, references, output, sha, build_run, tag, repo, branch, profile="stage-signet"):
+def verify_source_toolchain(bundles, source_bytes):
+    validate_toolchain(json.loads(source_bytes))
+    for role in ROLES:
+        require((bundles / role / "toolchain.json").read_bytes() == source_bytes,
+                "Toolchain differs from the build source commit")
+
+
+def package(bundles, references, output, sha, build_run, tag, repo, branch, profile="stage-signet",
+            *, source_toolchain):
     network, label = profile_settings(profile)
     # Validate both roles before producing any publishable output.
     roles = {role: verify_bundle(bundles / role, references / role, role, sha, build_run, profile)
              for role in ROLES}
     require(roles["mint"]["rgb_asset_id"] == roles["burn"]["rgb_asset_id"], "Roles use different assets")
     require(roles["mint"]["pcrs"]["PCR0"] != roles["burn"]["pcrs"]["PCR0"], "Roles share a PCR0")
+    verify_source_toolchain(bundles, source_toolchain)
     output.mkdir()
     assets = output / "assets"
     assets.mkdir()
@@ -182,8 +203,10 @@ def package(bundles, references, output, sha, build_run, tag, repo, branch, prof
                 with path.open("rb") as stream:
                     archive.addfile(info, stream)
         shutil.copyfile(bundles / role / "PCR.json", assets / f"PCR-{role}.json")
+    shutil.copyfile(bundles / "burn/toolchain.json", assets / "toolchain.json")
     manifest = {"release_tag": tag, "git_sha": sha, "source_branch": branch,
                 "build_profile": profile, "bitcoin_network": network, "evm_chain_id": 42161,
+                "toolchain_sha256": digest(assets / "toolchain.json"),
                 "build_url": f"https://github.com/{repo}/actions/runs/{build_run}", "roles": roles}
     (assets / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (assets / "SHA256SUMS").write_text("".join(
@@ -192,7 +215,8 @@ def package(bundles, references, output, sha, build_run, tag, repo, branch, prof
              "Recommended artifacts for Stage signers. This is a Stage prerelease.", "",
              f"- Bitcoin: **{label}**", "- EVM: **Arbitrum One (42161)**",
              f"- Build profile: `{profile}`", f"- Source branch: `{branch}`",
-             f"- Source commit: `{sha}`", f"- [Build EIF run]({manifest['build_url']})", ""]
+             f"- Source commit: `{sha}`", f"- [Build EIF run]({manifest['build_url']})",
+             f"- Builder profile: `toolchain.json` (SHA-256 `{manifest['toolchain_sha256']}`)", ""]
     for role in ROLES:
         notes += [f"## {role.title()}", "", f"Download `{tag}-{role}.tar.gz`.", ""]
         notes += [f"- {key}: `{roles[role]['pcrs'][key]}`" for key in ("PCR0", "PCR1", "PCR2")]
@@ -200,7 +224,10 @@ def package(bundles, references, output, sha, build_run, tag, repo, branch, prof
     notes += ["## Verify the download", "", "Download `SHA256SUMS` and all release assets, then run:",
               "", "```sh", "sha256sum --check SHA256SUMS", "```", "",
               "Each role archive contains its EIF, PCR.json, IMAGE-ENV.json, metadata.json,",
-              "Parent, CLI and build checksums. release-manifest.json hashes every file in each archive.",
+              "Parent, CLI, toolchain.json, builder-info.json, host-packages.txt and build checksums.",
+              "release-manifest.json hashes every file in each archive.",
+              "Use toolchain.json with the builder setup in the TEE guide. The profile pins tools;",
+              "publication does not prove that two independent builds reproduce the PCRs.",
               "Use the Burn archive for a Burn cosigner. Use the CLI from the same release.", "",
               "Publication does not deploy a signer or prove the current Stage deployment.",
               "These are build measurements, not a live AWS attestation. Verify the signer's",
@@ -216,6 +243,10 @@ def prepare():
     build_run = os.environ["BUILD_RUN_ID"]
     bucket = os.environ["EIF_S3_BUCKET"]
     require(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket), "Invalid EIF_S3_BUCKET")
+    # Read data from the EIF commit, not the workflow checkout or today's vars.
+    # Old builds without a committed profile must be rebuilt; never backfill pins.
+    source_toolchain = subprocess.check_output(["git", "show", f"{sha}:build/toolchain.json"])
+    validate_toolchain(json.loads(source_toolchain))
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         for role in ROLES:
@@ -228,7 +259,8 @@ def prepare():
             for name in file_names(role):
                 run("aws", "s3", "cp", f"s3://{bucket}/eif/{sha}/{profile}/rgb-{role}/{name}",
                     str(destination / name), "--only-show-errors")
-        package(root / "s3", root / "actions", OUTPUT, sha, build_run, tag, repo, os.environ["SOURCE_BRANCH"], profile)
+        package(root / "s3", root / "actions", OUTPUT, sha, build_run, tag, repo, os.environ["SOURCE_BRANCH"], profile,
+                source_toolchain=source_toolchain)
 
 
 def publish():
@@ -238,13 +270,20 @@ def publish():
     network, label = profile_settings(profile)
     assets = OUTPUT / "assets"
     names = {f"{tag}-{role}.tar.gz" for role in ROLES} | {
-        "PCR-burn.json", "PCR-mint.json", "release-manifest.json"}
+        "PCR-burn.json", "PCR-mint.json", "release-manifest.json", "toolchain.json"}
     require({p.name for p in assets.iterdir()} == names | {"SHA256SUMS"}, "Unexpected release assets")
     verify_sums(assets, "SHA256SUMS", names)
     manifest = read_json(assets / "release-manifest.json")
     require(manifest.get("git_sha") == sha and manifest.get("release_tag") == tag
             and manifest.get("build_profile") == profile and manifest.get("bitcoin_network") == network,
             "Prepared release does not match publication inputs")
+    validate_toolchain(read_json(assets / "toolchain.json"))
+    require(manifest.get("toolchain_sha256") == digest(assets / "toolchain.json"),
+            "Prepared toolchain does not match the release manifest")
+    # Both role bundles must bind the separately downloadable profile.
+    require(all(manifest.get("roles", {}).get(role, {}).get("files", {}).get("toolchain.json")
+                == manifest["toolchain_sha256"] for role in ROLES),
+            "Role toolchain does not match the release manifest")
     unused_tag(repo, tag)
     # Creating the ref fails on a concurrent publisher; never move an existing tag.
     run("gh", "api", f"repos/{repo}/git/refs", "-f", f"ref=refs/tags/{tag}", "-f", f"sha={sha}")
