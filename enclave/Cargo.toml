@@ -40,15 +40,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature). The
-# versions are the crates.io ones the pinned rgb-lib takes: another version can
-# change the RGB consensus code the enclave runs. Exact pins keep a newer
-# prerelease out.
+# version is the crates.io one the pinned rgb-lib takes: another version can
+# change the RGB consensus code the enclave runs. `Cargo.lock` fixes the whole
+# graph, and the EIF builds pass `--locked`, so the crates the enclave does not
+# name are pinned too.
 rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-# Not used directly: pins the consensus and VM crates that rgb-ops pulls with a
-# caret requirement, which a later release candidate would satisfy. rgb-lib pins
-# the other RGB crates itself.
-rgb-consensus = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-rgb-aluvm = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
 # Decodes the fascia rgb-lib writes for a mint or refill tx, which carries its
@@ -142,7 +138,7 @@ allow-seed-import = []
 #
 # Every witness txid is checked against the enclave's SPV header chain before
 # EVM signing. Builds without RGB validation refuse RGB sources.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
+rgb-validation = ["rgb-ops", "rgb-lib", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]

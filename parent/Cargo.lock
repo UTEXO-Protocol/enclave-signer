@@ -6378,8 +6378,6 @@ dependencies = [
  "k256 0.14.0",
  "nix",
  "prost",
- "rgb-aluvm",
- "rgb-consensus",
  "rgb-lib",
  "rgb-ops",
  "rustls",

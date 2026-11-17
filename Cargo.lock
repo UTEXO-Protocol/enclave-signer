@@ -6116,8 +6116,6 @@ dependencies = [
  "nix",
  "prost",
  "rand 0.10.3",
- "rgb-aluvm",
- "rgb-consensus",
  "rgb-consignment",
  "rgb-lib",
  "rgb-ops",
