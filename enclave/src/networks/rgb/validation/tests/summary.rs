@@ -57,7 +57,7 @@ fn reference_transition(t: &rgbstd::Transition, opid: rgbstd::OpId) -> Transitio
     };
     TransitionSummary {
         op_id: opid.to_string(),
-        transition_type: t.transition_type.to_inner(),
+        transition_type: bfa_schema::type_of(t.transition_type.to_inner()),
         asset_output_amount: total,
         outputs,
         burned_asset_amount: global(bfa_schema::GS_BURNED_ASSET)
@@ -429,7 +429,7 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                     };
                     TransitionSummary {
                         op_id: t.op_id.clone(),
-                        transition_type: t.transition_type,
+                        transition_type: bfa_schema::type_of(t.transition_type),
                         asset_output_amount: total,
                         outputs,
                         burned_asset_amount: global(bfa_schema::GS_BURNED_ASSET.to_inner())

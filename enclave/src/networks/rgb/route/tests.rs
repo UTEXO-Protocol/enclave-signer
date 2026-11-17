@@ -1,12 +1,14 @@
+#[cfg(rgb_to_evm)]
+use rgb_lib::TypeOfTransition;
+
 use super::*;
 #[cfg(rgb_to_evm)]
-use crate::test_support::bfa_ids;
 #[cfg(rgb_to_evm)]
 use validation::{TransitionSummary, ValidatedConsignment};
 
 #[cfg(rgb_to_evm)]
 fn validated_consignment(
-    transition_type: u16,
+    transition_type: TypeOfTransition,
     asset_output_amount: u64,
     burned_asset_amount: Option<u64>,
     op_id: &str,
@@ -37,7 +39,7 @@ fn validated_consignment(
 fn route_proof_uses_burn_metadata_amount() {
     let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let proof = route_proof_from_validated_consignment(&validated_consignment(
-        bfa_ids::TS_BURN,
+        TypeOfTransition::Burn,
         0,
         Some(700),
         op_id,
@@ -51,7 +53,7 @@ fn route_proof_uses_burn_metadata_amount() {
 #[test]
 fn route_proof_rejects_burn_without_burned_amount() {
     let err = route_proof_from_validated_consignment(&validated_consignment(
-        bfa_ids::TS_BURN,
+        TypeOfTransition::Burn,
         0,
         None,
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -66,7 +68,7 @@ fn route_proof_rejects_burn_without_burned_amount() {
 #[test]
 fn route_proof_rejects_a_transfer() {
     let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    let wrong = validated_consignment(bfa_ids::TS_TRANSFER, 700, None, op_id);
+    let wrong = validated_consignment(TypeOfTransition::Transfer, 700, None, op_id);
 
     let err = route_proof_from_validated_consignment(&wrong).unwrap_err();
     assert!(

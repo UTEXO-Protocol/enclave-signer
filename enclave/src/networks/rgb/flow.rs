@@ -6,24 +6,22 @@
 //! flow-specific: consignment parsing ([`super::validation`]), SPV anchoring,
 //! and the PSBT mechanics in [`super::psbt_validation`].
 
+use rgb_lib::TypeOfTransition;
+
 use crate::error::{EnclaveError, Result};
 #[cfg(rgb_to_evm)]
-use crate::networks::rgb::bfa_schema;
-#[cfg(rgb_to_evm)]
 use crate::networks::rgb::validation::TransitionSummary;
-use crate::networks::rgb::validation::{is_mint_transition, transition_type_id};
 
 /// Flow name for rejection messages. It lets an operator tell "wrong shape"
 /// from "wrong enclave".
 pub const FLOW_NAME: &str = "mint/burn";
 
-/// Returns true if a deposit PSBT can finalize this inspected transition type.
+/// Returns true if a deposit PSBT can finalize this transition type.
 ///
-/// The signing shape of this flow is the mint shape. Thus it maps the type to
-/// its BFA id and calls [`is_mint_transition`], so that no second list can
-/// drift from it.
-pub fn is_signing_transition(ty: rgb_lib::TypeOfTransition) -> bool {
-    is_mint_transition(transition_type_id(ty))
+/// The signing shape of this flow is the mint shape, and in BFA only a `mint`
+/// creates units.
+pub fn is_signing_transition(ty: TypeOfTransition) -> bool {
+    ty == TypeOfTransition::Mint
 }
 
 /// The minted units equal the net deposit (M5).
@@ -51,12 +49,11 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 /// destroys no asset units, so it cannot back a release.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if last.transition_type != bfa_schema::TS_BURN {
+    if last.transition_type != TypeOfTransition::Burn {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut requires a burn transition (last transition_type = {}, want {}) - \
-             this enclave is built for the {FLOW_NAME} flow",
-            last.transition_type,
-            bfa_schema::TS_BURN
+            "fundsOut requires a burn transition (last transition is a {:?}) - this enclave is \
+             built for the {FLOW_NAME} flow",
+            last.transition_type
         )));
     }
     last.burned_asset_amount.ok_or_else(|| {

@@ -12,11 +12,17 @@
 //! location read below: the pin fixes it, so a location this enclave cannot
 //! read is an operator error, not caller-chosen data.
 
-use rgbstd::Genesis;
+use rgbstd::{Genesis, GlobalStateType};
+
+/// Where the issuer publishes the asset's reject list, if anywhere. A
+/// `ContractId` is the genesis commitment, so the `RGB_ASSET_ID` pin fixes
+/// this location: nothing an operator or the parent sets can point the
+/// enclave at another list. `tests` keeps the id equal to the pinned
+/// `rgb-schemas`.
+const GS_REJECT_LIST: GlobalStateType = GlobalStateType::with(3010);
 
 use super::reject_list::RejectListContract;
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::bfa_schema;
 
 /// Strict encoding of `RejectListLocation::Evm`: tag 1, the chain id as a
 /// little-endian `u64`, the 20-byte address.
@@ -26,7 +32,7 @@ const EVM_LOCATION_TAG: u8 = 1;
 /// The reject list the genesis names, if any. Only an EVM contract is read: a
 /// URL list is refused, since its host would be untrusted.
 pub(super) fn reject_list(genesis: &Genesis) -> Result<Option<RejectListContract>> {
-    let Some(values) = genesis.globals.get(&bfa_schema::GS_REJECT_LIST) else {
+    let Some(values) = genesis.globals.get(&GS_REJECT_LIST) else {
         return Ok(None);
     };
     let [value] = values.as_slice() else {

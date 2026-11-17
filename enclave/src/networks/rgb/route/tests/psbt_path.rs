@@ -944,7 +944,7 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     );
     assert_eq!(
         validated.last_transition.map(|t| t.transition_type),
-        Some(bfa_schema::TS_PROPAGATE)
+        Some(rgb_lib::TypeOfTransition::Propagate)
     );
     // The rights themselves are the mint signer's rule (RR8, RR9): a refill
     // moves no units, so the burn path's summary carries no output for them.
