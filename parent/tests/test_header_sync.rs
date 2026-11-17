@@ -573,7 +573,19 @@ async fn long_catch_up_batches_and_rate() {
     let chain = extend(&genesis(), 50_400, 1);
     let electrum = Electrum::start(chain.clone());
     let (enclave, log) = start_scripted_enclave(chain.clone(), |_| None);
-    let (task, mut rx) = start_sync(enclave, Some(&electrum.url));
+    // The first batch reaches the enclave late; the rate still holds there.
+    let late = AtomicBool::new(true);
+    let (relay, _) = start_enclave_with(move |req| {
+        if let Some(enclave_request::Request::SubmitHeaders(_)) = req.request {
+            if late.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let mut s = TcpStream::connect(("127.0.0.1", enclave)).unwrap();
+        framing::write_message(&mut s, &req).unwrap();
+        Some(framing::read_message(&mut s).unwrap())
+    });
+    let (task, mut rx) = start_sync(relay, Some(&electrum.url));
     wait(&mut rx, 120, synced_at(50_400)).await;
     task.abort();
 

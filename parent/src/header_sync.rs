@@ -203,7 +203,11 @@ impl HeaderSync {
             .context("source sent no headers")?
             .block_hash();
         self.wait_for_rate(len, rate).await;
-        let reply = self.submit(start, &headers).await?;
+        let reply = self.submit(start, &headers).await;
+        // Count the batch after the submit: the enclave counts it before it
+        // replies, so the rate holds at the enclave at any transport delay.
+        self.sent.push_back((Instant::now(), len));
+        let reply = reply?;
         ensure!(
             reply.headers_accepted == len
                 && reply.last_block_height == last_height
@@ -288,7 +292,6 @@ impl HeaderSync {
                 _ => break,
             }
         }
-        self.sent.push_back((Instant::now(), n));
     }
 
     async fn enclave_tip(&self) -> anyhow::Result<(u32, BlockHash)> {
