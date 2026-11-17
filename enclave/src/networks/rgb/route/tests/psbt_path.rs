@@ -276,9 +276,11 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     // M6 reads the lock of this mint in this exact tx.
     assert_eq!(bound.lock_id, mint.lock_id());
     assert_eq!((bound.issued, bound.before_block), (MINTED, BEFORE_BLOCK));
+    // rgb-lib renders a concealed seal as an invoice recipient id, which
+    // carries the chain-net prefix of the image.
     assert_eq!(
         bound.recipient,
-        MintRecipient::Blinded(recipient().to_string())
+        MintRecipient::Blinded(format!("bc:{}", recipient()))
     );
 }
 
@@ -320,7 +322,7 @@ fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     let side = history.rights_transition(rights[1], &[1]);
     let mint = committed_bundle(&mut history, vec![mint, side], rights[0]);
     let err = mint_refusal(&destination(&history, &mint), &history);
-    assert!(err.contains("discloses 2 transitions"), "{err}");
+    assert!(err.contains("input map that names 2 transitions"), "{err}");
 }
 
 /// The mint's transition in another tx, which spends another of our Colored
@@ -369,7 +371,7 @@ fn refuses_mint_without_one_mint_right_input() {
 fn refuses_mint_passing_a_right_on() {
     let seal = GraphSeal::with_blinded_vout(1u32, 3);
     let err = mint_refusal_of(|mint| mint.add_rights("mintRight", seal).unwrap(), |_| {});
-    assert!(err.contains("passes 1 mintRight"), "{err}");
+    assert!(err.contains("mint assigns [MintRight]"), "{err}");
 }
 
 #[test]
@@ -644,7 +646,7 @@ fn refuses_a_witness_seal_on_another_tx() {
     our_input(&mut mint.psbt, &keys, 1);
     claim_change(&mut mint.psbt, &keys, 2);
     let err = mint_refusal(&destination(&history, &mint), &history);
-    assert!(err.contains("vout 1 of another transaction"), "{err}");
+    assert!(err.contains("the transaction that makes it"), "{err}");
 }
 
 /// The OpId commits the seal's vout, not the script on it. One mint transition in a tx paying the user and in one paying
@@ -929,10 +931,8 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let (refill, request) = refill_request(&mut history, rights[0]);
     let vouts = run_refill(&refill, &request, &history).unwrap();
     let bytes = refill.fascia_bytes();
-    let fascia = psbt_commit::parse_fascia(&bytes, "fascia").unwrap();
     let committed = psbt_commit::committed_transition(
         &refill.psbt,
-        fascia,
         &bytes,
         "fascia",
         psbt_commit::Pin::for_test(history.contract_id),
@@ -945,10 +945,16 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
         validated.last_transfer_op_id,
         Some(gen::opid_bytes(committed.opid))
     );
+    // The burn path reads seals from the validated transfer, where a seal of
+    // the witness tx carries no txid. The fascia path reads rgb-lib's
+    // inspection, which names that tx, so the two shapes differ.
     let from_consensus: Vec<u32> = validated
         .last_mint_rights
         .iter()
-        .map(|seal| psbt_commit::witness_vout(seal, "a right").unwrap())
+        .map(|seal| match seal {
+            validation::OutputSeal::Revealed { txid: None, vout } => *vout,
+            other => panic!("a refill right is revealed on its own tx, got {other:?}"),
+        })
         .collect();
     assert_eq!(from_consensus, vouts);
     assert_eq!(validated.last_closed_seals, vec![rights[0].outpoint]);

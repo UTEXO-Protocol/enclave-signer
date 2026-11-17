@@ -271,7 +271,7 @@ pub(super) fn transition_summary(
 }
 
 /// The BFA schema id of an inspected type: rgb-lib maps it from these ids.
-fn transition_type_id(ty: TypeOfTransition) -> u16 {
+pub fn transition_type_id(ty: TypeOfTransition) -> u16 {
     let ty = match ty {
         TypeOfTransition::Transfer => bfa_schema::TS_TRANSFER,
         TypeOfTransition::Inflate => bfa_schema::TS_INFLATION,

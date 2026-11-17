@@ -1027,7 +1027,7 @@ fn refuses_a_lock_at_or_after_before_block() {
 #[test]
 fn refuses_a_mint_that_passes_its_right_on() {
     let refusal = refusal(&drive(&build_on(None, None, true, Payee::Blinded)));
-    assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
+    assert!(refusal.contains("mint assigns [MintRight]"), "{refusal}");
 }
 
 fn build_listed() -> Built {

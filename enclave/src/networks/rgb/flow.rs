@@ -9,20 +9,21 @@
 use crate::error::{EnclaveError, Result};
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::bfa_schema;
-use crate::networks::rgb::validation::is_mint_transition;
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::validation::TransitionSummary;
+use crate::networks::rgb::validation::{is_mint_transition, transition_type_id};
 
 /// Flow name for rejection messages. It lets an operator tell "wrong shape"
 /// from "wrong enclave".
 pub const FLOW_NAME: &str = "mint/burn";
 
-/// Returns true if a deposit PSBT can finalize this transition type.
+/// Returns true if a deposit PSBT can finalize this inspected transition type.
 ///
-/// The signing shape of this flow is the mint shape. Thus it calls
-/// [`is_mint_transition`], so that no second list can drift from it.
-pub fn is_signing_transition(transition_type: u16) -> bool {
-    is_mint_transition(transition_type)
+/// The signing shape of this flow is the mint shape. Thus it maps the type to
+/// its BFA id and calls [`is_mint_transition`], so that no second list can
+/// drift from it.
+pub fn is_signing_transition(ty: rgb_lib::TypeOfTransition) -> bool {
+    is_mint_transition(transition_type_id(ty))
 }
 
 /// The minted units equal the net deposit (M5).

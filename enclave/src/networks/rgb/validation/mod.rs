@@ -34,8 +34,8 @@ mod witness;
 mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
-pub use bfa::{lock_id, AnchorBinder, BoundAnchors, MintAnchor, VerifiedLock};
-pub use consignment::is_mint_transition;
+pub use bfa::{decode_opid, lock_id, AnchorBinder, BoundAnchors, MintAnchor, VerifiedLock};
+pub use consignment::{is_mint_transition, transition_type_id};
 pub use reject_list::{
     decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,
     RejectListReader,
