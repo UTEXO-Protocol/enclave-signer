@@ -17,6 +17,8 @@ SHA = "a" * 40
 TAG = "stage-signet-v0.1.0"
 REPO = "example/signer"
 RUN = "12345"
+TOOLCHAIN = (ROOT / "build/toolchain.json").read_bytes()
+PROFILE = json.loads(TOOLCHAIN)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -42,10 +44,20 @@ class ReleaseTests(unittest.TestCase):
                 "PCR1": "3" * 96, "PCR2": "4" * 96})
             self.write_json(directory / "IMAGE-ENV.json", [
                 "BITCOIN_NETWORK=signet", "EVM_CHAIN_ID=42161", "RGB_ASSET_ID=rgb:test-asset"])
+            (directory / "toolchain.json").write_bytes(TOOLCHAIN)
+            (directory / "host-packages.txt").write_text("fixture-package\t1.0\n")
+            self.write_json(directory / "builder-info.json", {
+                "versions": {key: PROFILE[("docker" if key.startswith("docker_") else key) + "_version"]
+                             for key in ("docker_client", "docker_server", "buildx", "rust", "rustup", "awscli", "nitro")},
+                **{key: PROFILE[key] for key in ("buildkit_image", "nitro_build_image", "nitro_commit")},
+                "hashes": {key: "a" * 64 for key in ("nitro-cli", "blobs/bzImage", "blobs/init", "blobs/linuxkit")},
+            })
             self.write_json(directory / "metadata.json", {
                 "git_sha": SHA, "variant": f"rgb-{role}", "build_profile": "stage-signet",
-                "eif_name": eif, "run_id": RUN, "rgb_asset_id": "rgb:test-asset"})
-            for manifest, names in (("SHA256SUMS", [eif]), ("HOST-SHA256SUMS", [
+                "eif_name": eif, "run_id": RUN, "rgb_asset_id": "rgb:test-asset",
+                "nitro_cli_version": PROFILE["nitro_version"],
+                "toolchain_sha256": publisher.digest(directory / "toolchain.json")})
+            for manifest, names in (("SHA256SUMS", [eif]), ("TOOLCHAIN-SHA256SUMS", publisher.EVIDENCE), ("HOST-SHA256SUMS", [
                     "utexo-bridge-parent", "utexo-bridge-parent-cli"])):
                 (directory / manifest).write_text("".join(
                     f"{publisher.digest(directory / name)}  {name}\n" for name in names))
@@ -56,7 +68,7 @@ class ReleaseTests(unittest.TestCase):
         path.write_text(json.dumps(value))
 
     def package(self):
-        publisher.package(self.bundles, self.references, self.output, SHA, RUN, TAG, REPO, "stage")
+        publisher.package(self.bundles, self.references, self.output, SHA, RUN, TAG, REPO, "stage", source_toolchain=TOOLCHAIN)
 
     def edit_both(self, role, name, edit):
         for root in (self.bundles, self.references):
@@ -69,10 +81,12 @@ class ReleaseTests(unittest.TestCase):
         assets = self.output / "assets"
         publisher.verify_sums(assets, "SHA256SUMS", {
             f"{TAG}-burn.tar.gz", f"{TAG}-mint.tar.gz", "PCR-burn.json", "PCR-mint.json",
-            "release-manifest.json"})
+            "release-manifest.json", "toolchain.json"})
         manifest = json.loads((assets / "release-manifest.json").read_text())
         self.assertEqual(manifest["git_sha"], SHA)
         self.assertEqual(manifest["bitcoin_network"], "signet")
+        self.assertEqual((assets / "toolchain.json").read_bytes(), TOOLCHAIN)
+        self.assertEqual(manifest["toolchain_sha256"], publisher.digest(assets / "toolchain.json"))
         for role in publisher.ROLES:
             with tarfile.open(assets / f"{TAG}-{role}.tar.gz") as archive:
                 self.assertEqual(set(archive.getnames()), {
@@ -93,7 +107,7 @@ class ReleaseTests(unittest.TestCase):
 
     def package_mainnet(self):
         publisher.package(self.bundles, self.references, self.output, SHA, RUN,
-                          "stage-mainnet-v0.1.0", REPO, "dev", "stage-mainnet")
+                          "stage-mainnet-v0.1.0", REPO, "dev", "stage-mainnet", source_toolchain=TOOLCHAIN)
 
     def test_mainnet_packages_are_labeled_and_keep_stage_prerelease(self):
         self.use_mainnet()
@@ -292,11 +306,50 @@ class ReleaseTests(unittest.TestCase):
         env = dict(BUILD_RUN_ID=RUN, SOURCE_BRANCH="dev", EIF_S3_BUCKET="test-bucket")
         with patch.dict(os.environ, env), patch.object(publisher, "validate", return_value=values), \
                 patch.object(publisher, "run", side_effect=fake_run), \
-                patch.object(publisher, "OUTPUT", self.output):
+                patch.object(publisher, "OUTPUT", self.output), \
+                patch.object(publisher.subprocess, "check_output", return_value=TOOLCHAIN) as source_read:
             publisher.prepare()
-        self.assertEqual(len(calls), 18)  # Two Actions archives and eight S3 files per role.
+        source_read.assert_called_once_with(["git", "show", f"{SHA}:build/toolchain.json"])
+        self.assertEqual(len(calls), 2 + 2 * len(publisher.file_names("burn")))
         manifest = json.loads((self.output / "assets/release-manifest.json").read_text())
         self.assertEqual(manifest["build_profile"], "stage-mainnet")
+
+    def refresh_toolchain_sums(self, role):
+        for root in (self.bundles, self.references):
+            directory = root / role
+            (directory / "TOOLCHAIN-SHA256SUMS").write_text("".join(
+                f"{publisher.digest(directory / name)}  {name}\n" for name in publisher.EVIDENCE))
+
+    def test_missing_toolchain_requires_a_new_build(self):
+        (self.bundles / "mint/toolchain.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing.*toolchain"):
+            self.package()
+        self.assertFalse(self.output.exists())
+
+    def test_wrong_observed_builder_rejected(self):
+        self.edit_both("mint", "builder-info.json", lambda d: dict(d, buildkit_image="moby/buildkit:latest"))
+        self.refresh_toolchain_sums("mint")
+        with self.assertRaisesRegex(ValueError, "Observed buildkit_image"):
+            self.package()
+
+    def test_toolchain_hash_in_metadata_required(self):
+        self.edit_both("burn", "metadata.json", lambda d: dict(d, toolchain_sha256="0" * 64))
+        with self.assertRaisesRegex(ValueError, "Toolchain hash"):
+            self.package()
+
+    def test_toolchain_evidence_checksum_required(self):
+        self.edit_both("burn", "builder-info.json", lambda d: dict(d, host_os="changed"))
+        with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
+            self.package()
+
+    def test_valid_but_different_toolchain_cannot_replace_source_profile(self):
+        self.edit_both("mint", "toolchain.json", lambda d: dict(d, docker_sha256="a" * 64))
+        self.refresh_toolchain_sums("mint")
+        checksum = publisher.digest(self.bundles / "mint/toolchain.json")
+        self.edit_both("mint", "metadata.json", lambda d: dict(d, toolchain_sha256=checksum))
+        with self.assertRaisesRegex(ValueError, "differs from the build source commit"):
+            self.package()
+        self.assertFalse(self.output.exists())
 
     def test_failed_upload_never_publishes(self):
         calls = self.publish_with_fake_upload(corrupt=True)

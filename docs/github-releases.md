@@ -61,10 +61,15 @@ are refused; the workflow never moves a tag or replaces published assets.
 ## Verification before publication
 
 The publisher checks a successful Build EIF run from this repository, its SHA
-and approved source history. It downloads the eight expected files for each
+and approved source history. It downloads the twelve expected files for each
 role from S3 and compares every byte by SHA-256 against the corresponding
 Actions artifact from that run. It then checks the EIF/host checksum manifests,
-role/profile/commit/run metadata, nonzero SHA-384 PCR0/PCR1/PCR2, the selected
+role/profile/commit/run metadata and toolchain checksums. The profile must match
+`build/toolchain.json` at the EIF source commit byte for byte, be the same for
+both roles, and match the build metadata hash and observed tool versions.
+A missing committed profile or builder evidence blocks publication; rebuild
+older source with the pinned workflow instead of adding a guessed profile to
+its artifacts. The publisher also checks nonzero SHA-384 PCR0/PCR1/PCR2, the selected
 Bitcoin network, Arbitrum settings, and the same RGB asset in both images.
 Mainnet bundles must also record `BTC_RELAY_MODE=required`,
 `SPV_MIN_CONFIRMATIONS=3` and `EVM_FINALITY_TAG=finalized`. The publisher does
@@ -91,11 +96,15 @@ profile and separate Burn/Mint PCR0/PCR1/PCR2. Assets are:
 
 - `<tag>-burn.tar.gz` and `<tag>-mint.tar.gz`: each contains the role's EIF,
   `PCR.json`, `IMAGE-ENV.json`, `metadata.json`, Parent, CLI, `SHA256SUMS` and
-  `HOST-SHA256SUMS`, under a `burn/` or `mint/` directory. Executable permissions
+  `HOST-SHA256SUMS`, `toolchain.json`, `builder-info.json`, `host-packages.txt` and
+  `TOOLCHAIN-SHA256SUMS`, under a `burn/` or `mint/` directory. Executable permissions
   are set for Parent and CLI in the archives.
 - `PCR-burn.json` and `PCR-mint.json`: measurements available without extracting
   the archives.
-- `release-manifest.json`: source/build information and SHA-256 hashes for
+- `toolchain.json`: the exact builder profile for the source revision, ready
+  for the TEE guide's builder setup. Its SHA-256 is in the release body and
+  manifest. See [builder profile](building.md#builder-profile) for scope and limits.
+- `release-manifest.json`: source/build information, the builder profile hash and SHA-256 hashes for
   every original file in each role bundle, including JSON manifests.
 - `SHA256SUMS`: hashes of every other release asset.
 
@@ -110,6 +119,7 @@ the title. Share the exact approved tag URL with cosigners; GitHub's
 `releases/latest` URL is not a Stage channel. Publishing an older build for
 rollback does not automatically make it the current approved deployment.
 
+Publication does not prove that two independent builders reproduce the PCRs.
 Publication is an operator's release approval, not evidence that Stage is
 running that image. The profile's validation assumptions are recorded in the
 source commit's `build/profiles/README.md`. A private repository's releases

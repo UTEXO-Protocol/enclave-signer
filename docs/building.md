@@ -140,8 +140,9 @@ of the parent and of the dev enclave images only.
 
 ## Reproducibility
 
-The recipes pin the inputs below, so that a rebuild of the same commit with
-the same inputs gives the same PCR0, PCR1 and PCR2. Every source of the
+The recipes and builder profile pin the inputs below to support reproducing
+PCR0, PCR1 and PCR2 from the same commit and measured inputs. Confirm matching
+measurements with independent builds before approving them. Every source of the
 enclave workspace is public, so a rebuild needs no credential. No CI job
 compares two builds.
 
@@ -153,7 +154,9 @@ compares two builds.
 - the build timestamps, through `SOURCE_DATE_EPOCH` (the commit time);
 - the build paths, through path-prefix remapping, with `CARGO_INCREMENTAL=0`;
 - the generated proto code, which is committed;
-- `nitro-cli` and its kernel and init blobs, in the EIF workflow. PCR0 and
+- Docker, Buildx, BuildKit and the host tool installers, in
+  [`build/toolchain.json`](../build/toolchain.json);
+- `nitro-cli` and its kernel and init blobs, by source commit in that profile. PCR0 and
   PCR1 depend on them, so a local rebuild must use the same version and
   blobs.
 
@@ -161,12 +164,15 @@ Limits:
 
 - `enclave/Cargo.toml` pins rgb-lib to a commit, not to a release tag, so a
   rebuild depends on RGB-Tools keeping that commit reachable.
-- CI does not pin the Docker, Buildx and BuildKit versions.
+- The builder host's APT support packages are recorded, not frozen. The
+  upstream Nitro helper image also installs live packages and additional Rust
+  tools. Pinning its base image does not freeze all those downloads. The
+  resulting CLI and kernel/init blob hashes are recorded for comparison.
 - The parent image and the dev images use live APT repositories. They are
   not measured.
 
 To reproduce a published EIF, use the values recorded with it
-(`metadata.json`, `IMAGE-ENV.json`): the asset id, the account list and every
+(`toolchain.json`, `builder-info.json`, `metadata.json`, `IMAGE-ENV.json`): the asset id, the account list and every
 setting that differs from the recipe. Do not use the current repository
 variables.
 A change of a base image, the toolchain or a measured input changes the
@@ -181,6 +187,59 @@ deployment.
 To publish a Stage Signet or Stage mainnet build and its measurements for cosigners, use
 [Publish EIF Release](github-releases.md). It promotes existing build artifacts
 without rebuilding or deploying them.
+
+## Builder profile
+
+[`build/toolchain.json`](../build/toolchain.json) is the versioned builder input
+for this source revision. It uses the same flat schema as the TEE deployment
+guide's `00-builder/toolchain.example.json`:
+
+- `docker_version`, `buildx_version`, `rustup_version`, `awscli_version` are
+  exact three-part versions; the corresponding `*_sha256` fields verify the
+  downloaded Linux x86_64 archive/binary before installation.
+- `rust_version` must equal `rust-toolchain.toml`. It selects the host compiler
+  for Parent/CLI; the EIF recipes also pin their own compiler image.
+- `nitro_version` is the expected CLI version; `nitro_commit` selects its exact
+  source and kernel/init blobs. `nitro_build_image` pins the base of its upstream
+  helper Dockerfile.
+- `buildkit_image` pins the BuildKit image by SHA-256 digest for the selected
+  `docker-container` builder that exports the EIF's Docker image.
+
+There are no defaults or repository-variable overrides. Missing fields,
+floating versions/tags, invalid hashes, a Rust mismatch or observed tools that
+differ from the profile fail the build. Tool versions change only when the
+build environment changes; an ordinary signer-code or asset change can keep
+this file unchanged. Review profile updates in the same change as their use.
+
+Build EIF uses a disposable **Ubuntu 22.04 x86_64** GitHub-hosted runner.
+`build/prepare-ci-builder.py` installs the profile, uses fresh Docker state,
+builds Nitro from the pinned commit and selects the digest-pinned BuildKit.
+It replaces the runner's Docker service and refuses other host types. Do not
+run this CI installer on a signer, a shared host or a local workstation.
+For an independent EC2 build, use the TEE guide's builder setup with the
+`toolchain.json` downloaded from the specific release.
+
+Before the EIF build, `build/toolchain.py record` checks the actual Docker
+client/server, Buildx, Rust, rustup, AWS CLI and Nitro versions, plus the selected
+BuildKit container image. It writes these public files alongside each EIF:
+
+- `toolchain.json`: an exact copy of the committed profile.
+- `builder-info.json`: observed versions, BuildKit image and Nitro CLI/blob hashes.
+- `host-packages.txt`: installed host packages for diagnosis.
+- `TOOLCHAIN-SHA256SUMS`: hashes of those three files.
+
+`metadata.json` binds the profile with `toolchain_sha256`. Both Actions and S3
+receive these files. No credentials or runtime endpoint configuration belong
+in this profile or its evidence. Check the schema locally without installing:
+
+```sh
+python3 build/toolchain.py check build/toolchain.json
+```
+
+A profile and a successful CI run do not prove independent reproducibility.
+Compare PCR0/PCR1/PCR2 from two fresh builders with the release before claiming
+that result. Profiles cannot be retroactively assigned to older builds whose
+actual tools were not recorded; build and publish a new source revision.
 
 ## Parent image
 

@@ -1,0 +1,15 @@
+{
+  "docker_version": "28.5.1",
+  "buildx_version": "0.29.1",
+  "rustup_version": "1.28.2",
+  "awscli_version": "2.31.17",
+  "rust_version": "1.96.1",
+  "nitro_version": "1.4.5",
+  "nitro_commit": "18a5f6f35f110c0f235f193ae3caff9434d64ee1",
+  "docker_sha256": "5c0d19f31fece1accd0358bb8cff591fe25d7b6cba19f0fd412cbfdc07f75ff6",
+  "buildx_sha256": "7d2d7d6d4680aa349614965aaa33ccec43f1a9a21e908a5ce4cb6adfa5ad5141",
+  "rustup_sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c",
+  "awscli_sha256": "1222943e395cabb2a6b987cd75d0f59d566aa40bbdbab6e55232ee7272900d7f",
+  "buildkit_image": "moby/buildkit@sha256:79cc6476ab1a3371c9afd8b44e7c55610057c43e18d9b39b68e2b0c2475cc1b6",
+  "nitro_build_image": "library/ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+}
