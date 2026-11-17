@@ -76,7 +76,6 @@ fn send(port: u16, request: Request) -> Response {
 
 fn endpoints() -> SetEndpointsRequest {
     let request = SetEndpointsRequest {
-        electrum_url: "ssl://electrum.test:50002".into(),
         evm_rpc_host: "rpc.test".into(),
         evm_rpc_ca_der: hex::decode(include_str!("fixtures/evm_rpc_tls/ca_a.der.hex").trim())
             .unwrap(),
@@ -264,7 +263,6 @@ fn public_signet_accepts_independent_runtime_endpoints_without_changing_the_buil
         ..endpoints()
     };
     let second = SetEndpointsRequest {
-        electrum_url: "ssl://member-two-indexer.test:50003".into(),
         evm_rpc_host: "member-two-rpc.test".into(),
         evm_rpc_ca_der: hex::decode(include_str!("fixtures/evm_rpc_tls/ca_b.der.hex").trim())
             .unwrap(),
@@ -315,22 +313,10 @@ fn public_signet_accepts_independent_runtime_endpoints_without_changing_the_buil
 fn public_signet_rejects_malformed_endpoints_without_consuming_the_launch_slot() {
     let (port, ctx) = start_with_config(config());
     type MalformedEndpoint = (fn(&mut SetEndpointsRequest), &'static str);
-    let malformed: [MalformedEndpoint; 11] = [
+    let malformed: [MalformedEndpoint; 7] = [
         (
             |r| r.evm_rpc_path = "/v2/../private-api-key".into(),
             "evm_rpc_path must be an absolute ASCII path",
-        ),
-        (
-            |r| r.electrum_url = "ftp://indexer.test:50002".into(),
-            "is not ssl://",
-        ),
-        (
-            |r| r.electrum_url = "ssl://indexer.test:0".into(),
-            "electrum_url port 0 is not in 1-65535",
-        ),
-        (
-            |r| r.electrum_url = "ssl://indexer.test:65536".into(),
-            "electrum_url port 65536 is not in 1-65535",
         ),
         (|r| r.evm_rpc_host.clear(), "evm_rpc_host"),
         (
@@ -353,7 +339,6 @@ fn public_signet_rejects_malformed_endpoints_without_consuming_the_launch_slot()
             |r| r.evm_rpc_tls_port = 65536,
             "evm_rpc_tls_port 65536 is not in 1-65535",
         ),
-        (|r| r.evm_rpc_tls_port = 50002, "is also the Electrum port"),
     ];
     for (mutate, expected) in malformed {
         let mut request = endpoints();
@@ -571,7 +556,7 @@ fn public_signet_release_launches_on_its_policy() {
 fn public_signet_release_policy_is_development() {
     let mut build = BuildContext::current();
     build.debug_or_test = false;
-    let policy = SecurityPolicy::resolve(&build, &config(), EvmDataSource::Disabled, None, "");
+    let policy = SecurityPolicy::resolve(&build, &config(), EvmDataSource::Disabled, None);
     assert!(matches!(
         policy,
         SecurityPolicy::Development {
@@ -616,7 +601,7 @@ fn public_signet_release_refuses_other_networks_and_missing_pins() {
     build.debug_or_test = false;
     for cfg in invalid {
         assert!(cfg.validate_public_signet().is_err());
-        let policy = SecurityPolicy::resolve(&build, &cfg, EvmDataSource::Disabled, None, "");
+        let policy = SecurityPolicy::resolve(&build, &cfg, EvmDataSource::Disabled, None);
         assert!(policy.assert_valid_at_boot(&build).is_err());
         assert!(policy.assert_valid_for_build(&build).is_err());
     }

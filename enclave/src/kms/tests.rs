@@ -98,7 +98,10 @@ fn seal(public_key: &RsaPublicKey, plaintext: &[u8]) -> Vec<u8> {
 #[test]
 fn configuration_rejects_endpoint_injection_alias_and_wrong_region() {
     assert!(config().validate().is_ok());
-    assert_eq!(config().endpoint_host(), "kms.eu-west-1.amazonaws.com");
+    assert_eq!(
+        endpoint_host(&config().region),
+        "kms.eu-west-1.amazonaws.com"
+    );
     for region in [
         "eu-west-1.attacker.example/",
         "eu-west-1:443",

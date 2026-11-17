@@ -124,7 +124,7 @@ which the enclave and every verifier share. The response carries the bytes
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
+    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
     // Production (release, fully pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path on?
@@ -139,7 +139,6 @@ policy_commitment =
     funds_in_contract(20)                           // authorized event emitter
     u8(evm_finality_tag)                            // 0 latest | 1 safe | 2 finalized
     spv_min_confirmations_be4                       // required Bitcoin witness depth
-    u32_be(len(electrum_host)) || electrum_host     // indexer host, set at launch
     u8(evm_rpc_tls_present)                         // 0 absent; 1 followed by:
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
     // Gas-tx (SignRawDigest) rule:
@@ -177,10 +176,10 @@ Notes on the fields:
 - **`clone_peer_pcr3`.** A verifier sets no expected value. It takes PCR3
   from the verified document, requires it to be present and not all zero for
   a cloning role, and expects none for the mint signer.
-- **Not committed.** The scheme and port of the indexer URL, the EVM RPC
-  port and path, `BTC_MAX_UNOWNED_SATS`, the value of `BTC_MAX_TOTAL_SATS`
-  (only on or off, as `allow_vanilla_psbt`), `MINT_WITNESS_SAT` and the
-  runtime limits ([tee-spec.md](tee-spec.md#4-security-policy)).
+- **Not committed.** The EVM RPC port and path, `BTC_MAX_UNOWNED_SATS`, the
+  value of `BTC_MAX_TOTAL_SATS` (only on or off, as `allow_vanilla_psbt`),
+  `MINT_WITNESS_SAT` and the runtime limits
+  ([tee-spec.md](tee-spec.md#4-security-policy)).
 
 ## Expected values
 
@@ -262,7 +261,6 @@ attest-verify \
     --expect-evm-finality-tag finalized \
     --expect-spv-min-confirmations 3 \
     --expect-gas-tx-to 0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
-    --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> \
     --expect-evm-rpc-ca-sha256 <64-hex-chars>
 ```
@@ -274,7 +272,6 @@ attest-verify \
 | `--expect-evm-finality-tag` | Required: `safe` or `finalized`. |
 | `--expect-funds-in-contract`, `--expect-token-contract` | Required: the image pins. |
 | `--expect-spv-min-confirmations`, `--expect-bitcoin-network` | The image values. Defaults: 3 and `bitcoin`. |
-| `--expect-electrum-host` | Required: the approved indexer host. |
 | `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | Required with the `tls` source: the approved RPC host and CA hash. |
 | `--expect-evm-source` | `tls` (the default, and what the images use) or `disabled`. |
 | `--expect-gas-tx-to`, `--expect-gas-max-gas-limit`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. |
@@ -295,7 +292,6 @@ attest-verify --endpoint https://parent.example:50051 \
     --pcr0 <..> --pcr1 <..> --pcr2 <..> --expect-signer-role mint \
     --expect-funds-in-contract <hex20> --expect-token-contract <hex20> \
     --expect-evm-finality-tag finalized \
-    --expect-electrum-host <electrum host> \
     --expect-evm-rpc-host <rpc host> --expect-evm-rpc-ca-sha256 <64-hex-chars> \
     --expect-kms-key-arn <arn> --expect-kms-region <region> --expect-kms-seed-id <id> \
     --expect-vanilla-psbt

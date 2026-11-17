@@ -22,7 +22,6 @@ fn prod(
         funds_in_contract: [0x44; 20],
         evm_finality_tag: EvmFinalityTag::Safe,
         spv_min_confirmations: 6,
-        electrum_host: "electrum.test".into(),
         evm_rpc_tls: None,
         gas_tx_allowed_to: [0xAA; 20],
         gas_tx_max_gas_limit: 21_000,
@@ -118,7 +117,6 @@ fn base_with_gas(
             funds_in_contract,
             evm_finality_tag,
             spv_min_confirmations,
-            electrum_host,
             evm_rpc_tls,
             token_contract,
             kms,
@@ -137,7 +135,6 @@ fn base_with_gas(
             funds_in_contract,
             evm_finality_tag,
             spv_min_confirmations,
-            electrum_host,
             evm_rpc_tls,
             gas_tx_allowed_to: to,
             gas_tx_max_gas_limit: max_gas,
@@ -154,18 +151,18 @@ fn base_with_gas(
 
 #[test]
 fn every_encoding_starts_with_the_version_tag() {
-    assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
+    assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V2);
     assert_eq!(
         AttestedPolicy::Development.to_bytes()[0],
-        POLICY_COMMITMENT_V1
+        POLICY_COMMITMENT_V2
     );
 }
 
 #[test]
-fn rejects_every_version_other_than_v1() {
+fn rejects_every_version_other_than_v2() {
     for policy in [base(), AttestedPolicy::Development] {
         let current = policy.to_bytes();
-        for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V1) {
+        for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V2) {
             let mut other = current.clone();
             other[0] = version;
             assert_eq!(
@@ -328,15 +325,6 @@ fn token_contract_changes_the_bytes() {
     assert_eq!(&a[a.len() - 22..a.len() - 2], &[0x77; 20]);
 }
 
-#[test]
-fn electrum_host_changes_the_bytes() {
-    let mut other = base();
-    if let AttestedPolicy::Production { electrum_host, .. } = &mut other {
-        *electrum_host = "other.test".into();
-    }
-    assert_ne!(base().to_bytes(), other.to_bytes());
-}
-
 fn with_tls(host: &str, ca_sha256: [u8; 32]) -> AttestedPolicy {
     let mut p = base();
     if let AttestedPolicy::Production { evm_rpc_tls, .. } = &mut p {
@@ -448,7 +436,7 @@ fn from_bytes_refuses_bad_input() {
     }
     let mut bad = vec![[&good[..], &[0]].concat()];
     let mut version = good.clone();
-    version[0] = 2;
+    version[0] = 1;
     bad.push(version);
     // The last byte is the PCR3 presence flag. Only 0 and 1 are valid.
     let mut flag = good.clone();
@@ -468,11 +456,8 @@ fn from_bytes_refuses_bad_input() {
     let mut evm = good.clone();
     evm[5] = 2;
     bad.push(evm);
-    // The Electrum host is "electrum.test"; make its first byte invalid UTF-8.
-    let at = good
-        .windows(13)
-        .position(|w| w == b"electrum.test")
-        .unwrap();
+    // The asset id is "rgb:asset"; make its first byte invalid UTF-8.
+    let at = good.windows(9).position(|w| w == b"rgb:asset").unwrap();
     let mut utf8 = good.clone();
     utf8[at] = 0xff;
     bad.push(utf8);
@@ -498,7 +483,7 @@ fn from_bytes_refuses_bad_input() {
 
 #[test]
 fn asset_length_prefix_matches_the_wire_contract() {
-    // Fixed offset from the documented V1 layout: tags (7), chain (8),
+    // Fixed offset from the documented layout: tags (7), chain (8),
     // network (1), bridge address (20). Do not discover it with to_bytes.
     const OFFSET: usize = 36;
     let policy = prod(false, EvmDataSource::Disabled, 1, 0x11, "ab");
@@ -559,8 +544,8 @@ fn selector_allowlist_is_order_and_dup_independent() {
 
 #[test]
 fn selector_count_prefix_matches_the_wire_contract() {
-    // V1 offset for base(): 9-byte asset, 13-byte indexer host, no TLS pin.
-    const OFFSET: usize = 152;
+    // Offset for base(): 9-byte asset, no TLS pin.
+    const OFFSET: usize = 135;
     let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
     let two = base_with_gas(
         [0xAA; 20],

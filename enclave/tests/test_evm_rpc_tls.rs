@@ -354,19 +354,16 @@ fn answer(
 /// The client a launch set installs: TLS to `rpc.test` on `port`, under
 /// `ca_der_hex`.
 fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Send + Sync> {
-    // With `vsock`, the set binds a forwarder on each port and pins the
-    // Electrum host in /etc/hosts. Give it free ports and `localhost`.
+    // With `vsock`, the set binds a forwarder on the RPC port. Give it a free
+    // port.
     #[cfg(feature = "vsock")]
-    let (electrum_url, set_port) = {
-        let a = TcpListener::bind("127.0.0.1:0").unwrap();
-        let b = TcpListener::bind("127.0.0.1:0").unwrap();
-        (
-            format!("ssl://localhost:{}", a.local_addr().unwrap().port()),
-            b.local_addr().unwrap().port(),
-        )
-    };
+    let set_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     #[cfg(not(feature = "vsock"))]
-    let (electrum_url, set_port) = ("ssl://electrum.test:1".to_string(), port);
+    let set_port = port;
     let config = BridgeConfig::default();
     let network = Network::Regtest;
     let ctx = ServerContext::awaiting_launch(
@@ -376,7 +373,6 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
         BuildContext::current(),
     );
     let endpoints = SetEndpointsRequest {
-        electrum_url,
         evm_rpc_host: "rpc.test".into(),
         evm_rpc_ca_der: hex::decode(ca_der_hex.trim()).unwrap(),
         evm_rpc_tls_port: set_port.into(),

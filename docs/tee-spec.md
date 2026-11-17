@@ -56,7 +56,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 | Enclave code (this repository) | Validation, key custody, signing | - (the attestation measures it) |
 | Parent, listener, backend | Liveness and delivery of data. On a public-Signet image, also the Bitcoin headers that the parent sends ([known limits](#10-known-limits)). | Every claim in a request. The enclave checks each one. |
 | EVM RPC (pinned host and CA) | Mint signer: receipts, canonical blocks and the selected finality head. Burn signer: only the content of an asset's reject list. | TLS authenticates the endpoint. It does not prove EVM history or the answer of an `eth_call`. |
-| Bitcoin indexer (pinned URL) | Nothing. The enclave makes no indexer call. | - |
+| Bitcoin indexer | Nothing. The enclave makes no indexer call. | - |
 | Bridge contracts and their governance | Honest deposit events. The on-chain release rules and the signature quorum. | - |
 | Operator | Deployment, launch values, the cloning secret | Export of the plaintext seed |
 | AWS KMS (mint only) | Seed generation, encryption and decryption, under the configured key policy | - |
@@ -135,13 +135,12 @@ version field. Each connection carries one request.
 
 The enclave has no network stack of its own. It reaches the EVM RPC and KMS
 through loopback forwarders that bridge to `vsock-proxy` processes on the
-host. TLS ends inside the enclave, so a proxy relays bytes only. A forwarder
-of a TLS endpoint passes only a connection that starts with a TLS handshake,
-so no client in the enclave can send plaintext to the host for that endpoint.
-The EVM RPC client follows no redirect. The launch also starts a forwarder for
-the indexer URL, which no client in the enclave uses. A mint signer also
-connects to the seed broker of the parent over vsock, for the AWS credentials
-and the stored ciphertext of the seed.
+host. TLS ends inside the enclave, so a proxy relays bytes only. Each
+forwarder passes only a connection that starts with a TLS handshake, so no
+client in the enclave can send plaintext through a forwarder. The EVM RPC client
+follows no redirect. A mint signer also connects to the seed broker of the
+parent over vsock, for the AWS credentials and the stored ciphertext of the
+seed.
 
 ### The parent
 
@@ -166,8 +165,8 @@ vsock. So every signing check runs inside the enclave.
 ### Launch values
 
 The operator sends the chain endpoints once after launch, in `SetEndpoints`:
-the indexer URL, the EVM RPC host, CA, port and optional path, and on a mint
-signer the KMS values ([configuration.md](configuration.md#launch-values)).
+the EVM RPC host, CA, port and optional path, and on a mint signer the KMS
+values ([configuration.md](configuration.md#launch-values)).
 
 - Until the set, the enclave refuses `Sign`, `SignBtc`, `SignRightsRefill`,
   `SignRawDigest`, `GetAttestedPublicKey`, `GetClone`, `SetClone` and, on the
@@ -179,10 +178,8 @@ signer the KMS values ([configuration.md](configuration.md#launch-values)).
   same role, release and build profile run one EIF with different endpoints.
   A mint image also holds `KMS_ALLOWED_ACCOUNT_IDS`, so members share it only
   if the list has the account of each member's key.
-- A release image accepts only a TLS indexer URL (`ssl://` or `https://`).
-- A `Production` policy commits the indexer host, the EVM RPC host, the CA
-  hash and the KMS values (section 4). A `Development` policy commits none of
-  them.
+- A `Production` policy commits the EVM RPC host, the CA hash and the KMS
+  values (section 4). A `Development` policy commits none of them.
 
 Endpoint approval is a deployment duty. The enclave checks no operator
 signature on these values. TLS authenticates the endpoint that the launch
@@ -224,7 +221,7 @@ SecurityPolicy = Production {
     signer_role: Mint | Burn | Combined,
     attestation: Real,
     evm_source:  Disabled | PinnedTlsRpc,
-    electrum_host, evm_rpc_tls, gas_tx_rule,
+    evm_rpc_tls, gas_tx_rule,
     btc_source:  SpvVerified,
     kms,                                         -- mint signer only
     clone_peer_pcr3,                             -- cloning roles only
@@ -248,8 +245,7 @@ on an error. The `Production` gate requires:
 - `BITCOIN_NETWORK=bitcoin` when `EVM_CHAIN_ID` is 1 or 42161;
 - an `EVM_FINALITY_TAG` of `safe` or `finalized`;
 - `SPV_MIN_CONFIRMATIONS` of at least 1;
-- at `SetEndpoints`: an indexer host, and a host and CA pin for the
-  pinned-TLS source;
+- at `SetEndpoints`: a host and CA pin for the pinned-TLS source;
 - at `SetEndpoints`, for a cloning role: a PCR3 that is not all zero.
 
 A release public-Signet image needs at least one confirmation in
@@ -276,9 +272,8 @@ endpoint is configured; it does not show that the provider is honest.
 
 **Not in the commitment.**
 
-- Launch values that nothing attests or measures: the scheme and port of the
-  indexer URL, and the port and path of the EVM RPC. A release image accepts
-  only TLS for the indexer; PCR0 measures that rule, not the value.
+- Launch values that nothing attests or measures: the port and path of the
+  EVM RPC.
 - Image settings that PCR0 measures and the policy does not commit: the
   values of `BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS` (only "plain BTC
   on or off" is committed), `MINT_WITNESS_SAT` and `KMS_ALLOWED_ACCOUNT_IDS`.

@@ -84,11 +84,6 @@ struct Cli {
     #[arg(long, default_value = "tls")]
     expect_evm_source: String,
 
-    /// Expected Electrum host set at launch (the host of `ELECTRUM_URL`).
-    /// Required for production verification. Ignored with --mock.
-    #[arg(long)]
-    expect_electrum_host: Option<String>,
-
     /// Expected EVM RPC TLS host (`EVM_RPC_HOST`). Required with
     /// `--expect-evm-source tls`. Ignored otherwise.
     #[arg(long)]
@@ -361,10 +356,6 @@ async fn run(cli: Cli) -> Result<()> {
         let pcrs = attestation_verify::ExpectedPcrs::from_hex(&pcr0, &pcr1, &pcr2)
             .context("invalid PCR hex")?;
         let evm_source = parse_evm_source(&cli.expect_evm_source)?;
-        let electrum_host = cli
-            .expect_electrum_host
-            .clone()
-            .context("--expect-electrum-host required (or pass --mock)")?;
         let evm_rpc_tls = (evm_source == EvmDataSource::PinnedTlsRpc)
             .then(|| {
                 parse_evm_rpc_tls(
@@ -390,7 +381,6 @@ async fn run(cli: Cli) -> Result<()> {
             allow_vanilla_psbt: cli.expect_vanilla_psbt,
             signer_role,
             evm_source,
-            electrum_host,
             evm_rpc_tls,
             expected_chain_id: cli.expect_chain_id,
             bitcoin_network: BitcoinNetwork::from_env_str(&cli.expect_bitcoin_network)

@@ -239,11 +239,6 @@ enum LimitsAction {
 /// A value that is not given is sent empty.
 #[derive(Args)]
 struct EndpointArgs {
-    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). A
-    /// release enclave refuses plaintext; only a dev build accepts
-    /// `tcp://host:port` or `http://host[:port]`.
-    #[arg(long, env = "ELECTRUM_URL")]
-    electrum_url: Option<String>,
     /// TLS host name of the EVM RPC.
     #[arg(long, env = "EVM_RPC_HOST")]
     evm_rpc_host: Option<String>,
@@ -298,7 +293,6 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         .map(|path| read_rpc_path(&path).unwrap_or_else(|e| fail(e)))
         .unwrap_or_default();
     SetEndpointsRequest {
-        electrum_url: args.electrum_url.unwrap_or_default(),
         evm_rpc_host: args.evm_rpc_host.unwrap_or_default(),
         evm_rpc_ca_der,
         evm_rpc_tls_port,
@@ -1090,8 +1084,6 @@ mod tests {
             let cli = Cli::try_parse_from([
                 "cli",
                 "set-endpoints",
-                "--electrum-url",
-                "ssl://Indexer.test:50002/",
                 "--evm-rpc-host",
                 host,
                 "--evm-rpc-tls-port",
@@ -1119,7 +1111,6 @@ mod tests {
             assert_eq!(
                 request,
                 SetEndpointsRequest {
-                    electrum_url: "ssl://Indexer.test:50002/".into(),
                     evm_rpc_host: host.into(),
                     evm_rpc_ca_der: ca,
                     evm_rpc_tls_port: port.parse().unwrap(),

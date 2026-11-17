@@ -72,8 +72,6 @@ pub enum ExpectedPolicy {
         /// fails verification.
         signer_role: SignerRole,
         evm_source: EvmDataSource,
-        /// The Electrum host the operator set at launch.
-        electrum_host: String,
         /// Expected EVM RPC TLS host and CA hash. Required when `evm_source`
         /// is [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
@@ -646,7 +644,6 @@ fn expected_attested_policy(
             allow_vanilla_psbt,
             signer_role,
             evm_source,
-            electrum_host,
             evm_rpc_tls,
             expected_chain_id,
             bitcoin_network,
@@ -720,7 +717,6 @@ fn expected_attested_policy(
                 funds_in_contract: *funds_in_contract,
                 evm_finality_tag: *evm_finality_tag,
                 spv_min_confirmations: *spv_min_confirmations,
-                electrum_host: electrum_host.clone(),
                 evm_rpc_tls: evm_rpc_tls.clone(),
                 // The operator declares the gas-tx rule. `to_bytes` sorts the
                 // selector set, so the caller does not need to sort it.

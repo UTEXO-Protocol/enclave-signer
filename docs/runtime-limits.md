@@ -74,8 +74,6 @@ checks them at launch.
 | `total_request_timeout_secs` | 90 | 10 | 86400 | Socket deadline of a request, from accept. |
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
-| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
-| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
 | `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
@@ -119,12 +117,10 @@ refuses the request and changes nothing.
   A request that passes the deadline does all its work, and then it cannot send
   its reply. So 30 s of rgb-lib needs a deadline of at least 40 s.
 - Each per-call timeout must be at most `total_request_timeout_secs`:
-  `io_idle_timeout_secs`, `first_bytes_timeout_secs`, `electrum_timeout_secs`,
-  `esplora_timeout_secs` and `evm_rpc_timeout_secs`. The deadline does not stop a
-  network call of the enclave, so a longer network timeout lets one stalled call
-  hold a worker past the deadline. With the image timeouts, a deadline below 30 s
-  also needs a lower `esplora_timeout_secs`, and a deadline below 15 s also needs
-  lower `electrum_timeout_secs` and `evm_rpc_timeout_secs`.
+  `io_idle_timeout_secs`, `first_bytes_timeout_secs` and `evm_rpc_timeout_secs`.
+  The deadline does not stop a network call of the enclave, so a longer network
+  timeout lets one stalled call hold a worker past the deadline. With the image
+  timeouts, a deadline below 15 s also needs a lower `evm_rpc_timeout_secs`.
 - `mint_replay_ttl_secs` must be above `total_request_timeout_secs`, so an entry
   outlives the request that made it.
 - The densest consignment at `max_consignment_bytes` must fit the heap of a frame

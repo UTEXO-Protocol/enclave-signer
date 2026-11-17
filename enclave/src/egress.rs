@@ -4,12 +4,10 @@
 //! through a loopback forwarder ([`crate::vsock_forwarder`]) to the host. The
 //! host can read and change each plaintext byte on that path.
 //!
-//! A forwarder for a TLS endpoint (`ssl://` or `https://` indexer, EVM RPC,
-//! KMS) accepts only a connection that starts with a TLS handshake record.
-//! Thus no client in the enclave can send plaintext to such an endpoint, not
-//! even after an HTTPS -> HTTP redirect. The EVM RPC client (`reqwest`) does
-//! not follow redirects. `esplora-client` (`minreq`) can follow them, and the
-//! enclave cannot turn that off through its API. A redirect to a port with no
+//! Each forwarder (EVM RPC, KMS) accepts only a connection that starts with a
+//! TLS handshake record. Thus no client in the enclave can send plaintext
+//! through a forwarder, not even after an HTTPS -> HTTP redirect. The EVM RPC client
+//! (`reqwest`) does not follow redirects. A redirect to a port with no
 //! forwarder, or to another host, has no route out.
 
 use std::io::{self, Read};
@@ -23,7 +21,7 @@ pub const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
 /// True for the header of a TLS handshake record: content type 22, protocol
 /// major version 3. A ClientHello record uses minor version 1 to 3, and TLS
 /// 1.3 also writes 1 or 3 here. Plaintext HTTP starts with an ASCII method
-/// name, and plaintext Electrum with `{`.
+/// name.
 pub fn is_tls_handshake(header: &[u8; 3]) -> bool {
     header[0] == 0x16 && header[1] == 0x03 && (0x01..=0x04).contains(&header[2])
 }
@@ -91,19 +89,9 @@ mod tests {
     #[test]
     fn refuses_plaintext_http() {
         let (addr, rx) = gate();
-        send(
-            addr,
-            b"GET /tx/00/raw HTTP/1.1\r\nHost: esplora.test\r\n\r\n",
-        );
+        send(addr, b"POST / HTTP/1.1\r\nHost: rpc.test\r\n\r\n");
         let err = rx.recv().unwrap().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
-    }
-
-    #[test]
-    fn refuses_plaintext_electrum() {
-        let (addr, rx) = gate();
-        send(addr, br#"{"jsonrpc":"2.0","method":"server.version"}"#);
-        assert!(rx.recv().unwrap().is_err());
     }
 
     #[test]
@@ -114,31 +102,5 @@ mod tests {
         assert!(!is_tls_handshake(&[0x16, 0x03, 0x00])); // SSL 3
         assert!(!is_tls_handshake(b"GET"));
         assert!(!is_tls_handshake(b"POS"));
-    }
-
-    /// A redirect downgrade: `esplora-client` follows an HTTPS -> HTTP
-    /// redirect, and its next request is plaintext. Here the client sends
-    /// that plaintext request to a gated forwarder port. The gate refuses it
-    /// before any byte goes on, and the client gets an error, not an answer.
-    #[cfg(feature = "rgb-validation")]
-    #[test]
-    fn a_downgraded_esplora_request_does_not_leave_the_enclave() {
-        use rgbstd::indexers::esplora_blocking::esplora_client;
-
-        let (addr, rx) = gate();
-        let client = esplora_client::Builder::new(&format!("http://{addr}"))
-            .timeout(5)
-            .build_blocking();
-        let txid: bitcoin::Txid =
-            "8c2a99d569e9d3cfb5abe1697cdb73d170835672db9c161d684cb01d50c6b9e6"
-                .parse()
-                .unwrap();
-        assert!(client.get_tx(&txid).is_err(), "the client got no answer");
-        let gated = rx.recv().unwrap();
-        assert_eq!(
-            gated.unwrap_err().kind(),
-            io::ErrorKind::InvalidData,
-            "the gate saw the plaintext request and refused it"
-        );
     }
 }

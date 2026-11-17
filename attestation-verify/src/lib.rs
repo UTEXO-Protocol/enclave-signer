@@ -32,7 +32,7 @@ pub mod policy;
 pub use policy::{
     policy_commitment, AttestationMode, AttestedPolicy, BitcoinNetwork, BtcDataSource,
     EvmDataSource, EvmFinalityTag, EvmRpcTlsPin, KmsPin, PolicyDecodeError, SignerRole,
-    POLICY_COMMITMENT_V1,
+    POLICY_COMMITMENT_V2,
 };
 
 // Public types

@@ -6,7 +6,6 @@
 # Set ENCLAVE_CID=18 or 20 to deploy one of the other supported CIDs.
 #
 # Optional chain endpoints, set on each enclave at start:
-#   ELECTRUM_URL=ssl://<host>:<port> (Electrum) or https://<host>[:<port>] (Esplora)
 #   EVM_RPC_TLS_CA_DER_FILE=<CA in DER>
 #   EVM_RPC_PATH_FILE=<restricted file with a private RPC path, for example /v2/<key>>
 # The EVM RPC host and port come from host-prep-evmrpc.sh.
@@ -14,9 +13,8 @@
 # /etc/utexo/evm-rpc-path-<CID> that only the service user can read. A deploy
 # without EVM_RPC_PATH_FILE keeps that CID's copy. To use /, delete that copy.
 # Each parent reads Bitcoin headers from HEADER_ELECTRUM_URL, passed through as
-# set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. It is not
-# copied from ELECTRUM_URL, whose enclave-side rules differ. An invalid header
-# source leaves header sync unconfigured. The parent still starts.
+# set: ssl://<host>:<port> (WebPKI roots) or tcp:// to a loopback IP. An invalid
+# header source leaves header sync unconfigured. The parent still starts.
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
@@ -80,7 +78,6 @@ fi
 # runtime-PCR check is skipped (the static describe-eif measurement in step 3
 # still verifies the EIF file). Default 0 keeps the normal production path.
 ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-0}"
-ELECTRUM_URL="${ELECTRUM_URL:-}"
 HEADER_ELECTRUM_URL="${HEADER_ELECTRUM_URL:-}"
 EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
 EVM_RPC_PATH_FILE="${EVM_RPC_PATH_FILE:-}"
@@ -580,8 +577,8 @@ User=ubuntu
 # Allow for the serialized start lock (flock -w 180), run-enclave retries,
 # 60 s for the endpoint set and 50 s for the launch check.
 TimeoutStartSec=390
-# EIF path, cpu/memory, CLI, Electrum URL, EVM RPC CA and private RPC path file
-# come from the deploy-written env file. The EVM RPC host and port come from
+# EIF path, cpu/memory, CLI, EVM RPC CA and private RPC path file come from
+# the deploy-written env file. The EVM RPC host and port come from
 # host-prep-evmrpc.sh.
 EnvironmentFile=/etc/utexo/enclave-%i.env
 EnvironmentFile=-/etc/nitro_enclaves/vsock-proxy-evmrpc.env
@@ -648,7 +645,6 @@ PCR_FILE=$DIR/PCR.json
 IMAGE_ENV=$DIR/IMAGE-ENV.json
 ENCLAVE_LIMITS_FILE=$ENCLAVE_LIMITS_FILE
 SIGNER_ROLE=$SIGNER_ROLE
-ELECTRUM_URL=$ELECTRUM_URL
 EVM_RPC_TLS_CA_DER_FILE=$EVM_RPC_TLS_CA_DER_FILE
 EVM_RPC_PATH_FILE=$EVM_RPC_PATH_FILE
 KMS_KEY_ARN=$KMS_KEY_ARN

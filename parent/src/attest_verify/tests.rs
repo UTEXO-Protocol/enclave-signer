@@ -18,7 +18,6 @@ fn expect_prod(
         allow_vanilla_psbt: false,
         evm_source: EvmDataSource::Disabled,
         signer_role: SignerRole::Combined,
-        electrum_host: "electrum.test".into(),
         evm_rpc_tls: None,
         funds_in_contract: [0x11; 20],
         evm_finality_tag: EvmFinalityTag::Safe,
@@ -42,7 +41,6 @@ fn production(signer_role: SignerRole) -> ExpectedPolicy {
         allow_vanilla_psbt: false,
         signer_role,
         evm_source: EvmDataSource::PinnedTlsRpc,
-        electrum_host: "electrum.test".into(),
         evm_rpc_tls: Some(EvmRpcTlsPin {
             host: "rpc.test".into(),
             ca_sha256: [0x33; 32],

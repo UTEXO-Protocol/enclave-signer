@@ -25,7 +25,6 @@ By hand:
 
 ```bash
 # Host proxies. Allowlist each upstream.
-vsock-proxy 8001 <electrum-host> 50002
 vsock-proxy 8002 <EVM_RPC_HOST> 443
 
 nitro-cli run-enclave --cpu-count 2 --memory 4096 --enclave-cid 16 \
@@ -33,7 +32,6 @@ nitro-cli run-enclave --cpu-count 2 --memory 4096 --enclave-cid 16 \
 
 # Once per boot. The enclave signs nothing before it.
 utexo-bridge-parent-cli --addr vsock://16:5000 set-endpoints \
-  --electrum-url ssl://<electrum-host>:50002 \
   --evm-rpc-host <EVM_RPC_HOST> --evm-rpc-tls-port 443 --evm-rpc-ca-der-file ca.der \
   --kms-key-arn <KMS_KEY_ARN> --kms-region <KMS_REGION> --kms-seed-id <KMS_SEED_ID>   # mint only
 

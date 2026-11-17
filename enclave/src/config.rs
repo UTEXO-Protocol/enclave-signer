@@ -576,8 +576,7 @@ fn parse_eth_address(s: &str) -> Result<[u8; 20]> {
 pub const MAX_EVM_RPC_CA_DER_BYTES: usize = 16 * 1024;
 
 /// The most bytes of each string in `SetEndpoints`. It fits the longest AWS
-/// key ARN. The longest other legal value is an Electrum URL with a
-/// 253-byte host name.
+/// key ARN, and the other strings are shorter.
 pub const MAX_ENDPOINT_STRING_BYTES: usize = 2048;
 
 /// The TLS pin of the EVM RPC endpoint.
@@ -627,12 +626,6 @@ fn parse_evm_rpc_path(value: &str) -> std::result::Result<String, String> {
 /// public fields; Development policy does not attest these runtime values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoints {
-    /// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora).
-    /// Test and dev builds also accept `tcp://` and `http://`. Empty without
-    /// `rgb-validation`.
-    pub electrum_url: String,
-    pub electrum_host: String,
-    pub electrum_port: u16,
     /// `None` without `rgb-validation`.
     pub evm_rpc_tls: Option<EvmRpcTls>,
     /// `None` without `kms-persistence`, and in an import-only build with no
@@ -641,12 +634,6 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    /// True for an `ssl://` or `https://` indexer. Its forwarder then sends on
-    /// only TLS ([`crate::egress`]).
-    pub fn indexer_uses_tls(&self) -> bool {
-        self.electrum_url.starts_with("ssl://") || self.electrum_url.starts_with("https://")
-    }
-
     /// Check the values this build uses. A value the build does not use
     /// must be empty. `kms_accounts` is the image's account list
     /// (`KMS_ALLOWED_ACCOUNT_IDS`). With no list, `allow_unpinned`
@@ -659,7 +646,6 @@ impl Endpoints {
         // The parsers below split a string into parts that take more memory
         // than its bytes, so the size limit runs first (`memory.rs`).
         for (name, value) in [
-            ("electrum_url", &req.electrum_url),
             ("evm_rpc_host", &req.evm_rpc_host),
             ("kms_key_arn", &req.kms_key_arn),
             ("kms_region", &req.kms_region),
@@ -673,19 +659,6 @@ impl Endpoints {
                 ));
             }
         }
-        // Allow one trailing slash. The Electrum client does not.
-        let electrum_url = req
-            .electrum_url
-            .strip_suffix('/')
-            .unwrap_or(&req.electrum_url);
-        #[cfg(feature = "rgb-validation")]
-        let (electrum_host, electrum_port) = parse_electrum_url(electrum_url)?;
-        #[cfg(not(feature = "rgb-validation"))]
-        let (electrum_host, electrum_port) = {
-            unused("electrum_url", req.electrum_url.is_empty())?;
-            (String::new(), 0)
-        };
-
         #[cfg(feature = "rgb-validation")]
         let evm_rpc_tls = {
             let host = parse_host("evm_rpc_host", &req.evm_rpc_host)?;
@@ -702,17 +675,10 @@ impl Endpoints {
             // attested.
             webpki::anchor_from_trusted_cert(&ca)
                 .map_err(|e| format!("evm_rpc_ca_der is not a valid CA certificate: {e}"))?;
-            let tls_port = parse_port("evm_rpc_tls_port", req.evm_rpc_tls_port)?;
-            // Both forwarders listen on loopback in the enclave.
-            if tls_port == electrum_port {
-                return Err(format!(
-                    "evm_rpc_tls_port {tls_port} is also the Electrum port"
-                ));
-            }
             Some(EvmRpcTls {
                 host,
                 ca_der: req.evm_rpc_ca_der.clone(),
-                tls_port,
+                tls_port: parse_port("evm_rpc_tls_port", req.evm_rpc_tls_port)?,
                 path: parse_evm_rpc_path(&req.evm_rpc_path)?,
             })
         };
@@ -747,10 +713,6 @@ impl Endpoints {
             config
                 .validate_account(kms_accounts, allow_unpinned)
                 .map_err(|e| e.to_string())?;
-            // The Electrum pin must not catch the KMS host.
-            if electrum_host == config.endpoint_host() {
-                return Err(format!("electrum_url host {electrum_host} is the KMS host"));
-            }
             let address = &req.kms_expected_evm_address;
             let expected_evm_address = if address.is_empty() {
                 None
@@ -779,13 +741,7 @@ impl Endpoints {
             None
         };
 
-        Ok(Self {
-            electrum_url: electrum_url.to_string(),
-            electrum_host,
-            electrum_port,
-            evm_rpc_tls,
-            kms,
-        })
+        Ok(Self { evm_rpc_tls, kms })
     }
 }
 
@@ -804,75 +760,6 @@ fn parse_port(name: &str, port: u32) -> std::result::Result<u16, String> {
         .ok()
         .filter(|&p| p != 0)
         .ok_or_else(|| format!("{name} {port} is not in 1-65535"))
-}
-
-/// `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora, port 443 by
-/// default). Nothing after the port.
-///
-/// The plaintext forms `tcp://host:port` and `http://host[:port]` (port 80 by
-/// default) are accepted only by a build that can never attest a production
-/// policy. See [`plaintext_indexer_allowed`].
-#[cfg(feature = "rgb-validation")]
-fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
-    parse_indexer_url(url, plaintext_indexer_allowed())
-}
-
-/// Only test, debug, mock-attestation and seed-import builds allow plaintext.
-/// Release images refuse it, whatever policy they attest. The release TLS rule
-/// is enforced by code and measured into PCR0.
-#[cfg(feature = "rgb-validation")]
-fn plaintext_indexer_allowed() -> bool {
-    let ctx = crate::policy::BuildContext::current();
-    ctx.debug_or_test || ctx.mock_attestation || ctx.allow_seed_import
-}
-
-/// [`parse_electrum_url`] with the plaintext rule as an input, so tests can
-/// check the release rule.
-#[cfg(feature = "rgb-validation")]
-fn parse_indexer_url(
-    url: &str,
-    allow_plaintext: bool,
-) -> std::result::Result<(String, u16), String> {
-    let plaintext = |scheme: &str| {
-        url.strip_prefix(scheme)
-            .map(|rest| {
-                if allow_plaintext {
-                    Ok(rest)
-                } else {
-                    Err(format!(
-                        "electrum_url {url:?} is plaintext ({scheme}); a release image \
-                         accepts only ssl:// or https://"
-                    ))
-                }
-            })
-            .transpose()
-    };
-    let (rest, default_port) = if let Some(rest) = url.strip_prefix("ssl://") {
-        (rest, None)
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        (rest, Some(443))
-    } else if let Some(rest) = plaintext("tcp://")? {
-        (rest, None)
-    } else if let Some(rest) = plaintext("http://")? {
-        (rest, Some(80))
-    } else {
-        return Err(format!(
-            "electrum_url {url:?} is not ssl://, tcp://, https:// or http://"
-        ));
-    };
-    let (host, port) = match (rest.rsplit_once(':'), default_port) {
-        (Some((host, port)), _) => (
-            host,
-            port.parse::<u32>()
-                .map_err(|_| format!("electrum_url {url:?} has a bad port"))?,
-        ),
-        (None, Some(port)) => (rest, port),
-        (None, None) => return Err(format!("electrum_url {url:?} has no port")),
-    };
-    Ok((
-        parse_host("electrum_url host", host)?,
-        parse_port("electrum_url port", port)?,
-    ))
 }
 
 /// A DNS host name, lowercased. No scheme, `/`, `:`, whitespace or IP

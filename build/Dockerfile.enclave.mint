@@ -32,8 +32,8 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/build=/src -C debuginfo=0 -C strip=symbols"
 # `--no-default-features` keeps the feature list explicit (so this binary is
 # RGB-only). The signer role implies `rgb-validation`, which includes the SPV
-# header chain and in-enclave FundsIn verification (alloy + tokio). It needs a
-# second host vsock-proxy (EVM_RPC_VSOCK_PORT, default 8002).
+# header chain and in-enclave FundsIn verification (alloy + tokio). It needs the
+# host vsock-proxy of the EVM RPC (`EVM_RPC_VSOCK_PORT`).
 #
 # `mint-signer` (implies `rgb-validation`: the mint/burn flow + BFA validation)
 # builds the EVM -> RGB direction only: it signs the RGB mint PSBT after
@@ -81,9 +81,6 @@ RUN /lib64/ld-linux-x86-64.so.2 --list /app/utexo-bridge-enclave > /dev/null
 # Bridge pins are baked into PCR0. Defaults use Bitcoin mainnet + Arbitrum One
 # (chain_id 42161) and Production policy. A public-Signet image
 # (BITCOIN_NETWORK=signet, BTC_RELAY_MODE=none) attests Development policy.
-# Electrum is set at launch. The enclave pins its host to 127.0.0.1 behind the
-# vsock forwarder (host runs `vsock-proxy 8001 <electrum host> <port>`). No
-# client in the enclave calls it.
 # TWO-CONTRACT deployment: the EVM funds-out EIP-712 verifyingContract is the
 # MultisigProxy (EVM_PROXY_CONTRACT_ADDRESS), which DIFFERS from the bridge
 # *entry* contract that emits FundsIn (FUNDS_IN_CONTRACT, set below).
@@ -124,9 +121,9 @@ ENV KMS_ALLOWED_ACCOUNT_IDS=${KMS_ALLOWED_ACCOUNT_IDS} \
 # points FundsIn verification at the wrong contract.
 # The mint signer also signs plain-BTC create_utxo PSBTs (`SignBtc`), which fail
 # closed unless BTC_MAX_TOTAL_SATS is pinned. The gas-tx path is not compiled in.
-# The operator supplies Electrum and EVM endpoints at launch (SetEndpoints).
-# They remain outside the image. Production policy commits
-# the Electrum/EVM hosts and EVM CA; Development policy does not commit them.
+# The operator supplies the EVM endpoint at launch (SetEndpoints). It remains
+# outside the image. Production policy commits the EVM host and CA;
+# Development policy does not commit them.
 # A Production policy attests SPV_MIN_CONFIRMATIONS (at least 1), but no mint check reads it:
 # the mint signer signs from the PSBT alone and checks no Bitcoin witness depth.
 # It only decides when the health check reports the SPV header chain

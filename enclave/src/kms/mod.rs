@@ -152,16 +152,11 @@ impl KmsConfig {
         }
         Ok(())
     }
-
-    /// The KMS host name the SDK resolves for this region. A vsock build pins
-    /// it to loopback and forwards [`KMS_PORT`] to the parent.
-    pub fn endpoint_host(&self) -> String {
-        endpoint_host(&self.region)
-    }
 }
 
 /// `kms.<region>.amazonaws.com`, the SDK default endpoint in the commercial
-/// partition.
+/// partition. A vsock build pins it to loopback and forwards [`KMS_PORT`] to
+/// the parent.
 pub fn endpoint_host(region: &str) -> String {
     format!("kms.{region}.amazonaws.com")
 }

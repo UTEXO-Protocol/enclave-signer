@@ -11,17 +11,12 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V1`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V2`] instead.
 
-/// Version tag at the start of every policy commitment. A verifier rejects a
-/// different policy version instead of accepting different security semantics.
-/// Bump it on every layout change or change to a fixed policy requirement.
-/// V1 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
-/// Every accepted FundsIn receipt must belong to the canonical chain at or
-/// below that tagged head. The selected tag is attested so verifiers can
-/// reject a weaker policy, including `latest` when they require `safe`.
-/// It also commits the clone-peer PCR3 of a cloning role.
-pub const POLICY_COMMITMENT_V1: u8 = 1;
+/// Version tag at the start of every policy commitment. A verifier refuses any
+/// other version. Bump it on every layout change or change to a fixed policy
+/// requirement.
+pub const POLICY_COMMITMENT_V2: u8 = 2;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -158,7 +153,7 @@ pub struct KmsPin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
     /// Witness txids are checked against the enclave's SPV header chain, not
-    /// the host-controlled indexer.
+    /// against an indexer.
     SpvVerified = 1,
 }
 
@@ -197,12 +192,10 @@ pub enum AttestedPolicy {
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
-        /// Required RPC head tag, selected at boot.
+        /// Required RPC head tag, selected at boot; a verifier can refuse a weaker one.
         evm_finality_tag: EvmFinalityTag,
         /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
         spv_min_confirmations: u32,
-        /// Host of the Electrum server the operator set at launch.
-        electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the gas and
@@ -238,7 +231,7 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V1]
+    /// [POLICY_COMMITMENT_V2]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bitcoin_network u8]
@@ -246,7 +239,6 @@ impl AttestedPolicy {
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_finality_tag u8: 0 latest | 1 safe | 2 finalized]
     ///              [spv_min_confirmations u32 BE]
-    ///              [len(electrum_host) u32 BE][electrum_host bytes]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
     ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
@@ -262,7 +254,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V1);
+        out.push(POLICY_COMMITMENT_V2);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -277,7 +269,6 @@ impl AttestedPolicy {
                 funds_in_contract,
                 evm_finality_tag,
                 spv_min_confirmations,
-                electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
                 gas_tx_max_gas_limit,
@@ -302,8 +293,6 @@ impl AttestedPolicy {
                 out.extend_from_slice(funds_in_contract);
                 out.push(*evm_finality_tag as u8);
                 out.extend_from_slice(&spv_min_confirmations.to_be_bytes());
-                out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
-                out.extend_from_slice(electrum_host.as_bytes());
                 match evm_rpc_tls {
                     Some(pin) => {
                         out.push(0x01);
@@ -366,7 +355,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V1 {
+        if r.u8()? != POLICY_COMMITMENT_V2 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
@@ -413,7 +402,6 @@ impl AttestedPolicy {
                     _ => return Err(PolicyDecodeError("unknown EVM finality tag")),
                 };
                 let spv_min_confirmations = u32::from_be_bytes(r.array()?);
-                let electrum_host = r.string()?;
                 let evm_rpc_tls = r
                     .flag()?
                     .then(|| -> Result<_, PolicyDecodeError> {
@@ -462,7 +450,6 @@ impl AttestedPolicy {
                     funds_in_contract,
                     evm_finality_tag,
                     spv_min_confirmations,
-                    electrum_host,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
                     gas_tx_max_gas_limit,

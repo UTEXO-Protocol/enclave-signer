@@ -31,9 +31,6 @@ const KEY_ARN: &str = "arn:aws:kms:eu-west-1:123456789012:key/mrk-0123456789abcd
 fn valid(n: u8) -> SetEndpointsRequest {
     let mut req = SetEndpointsRequest::default();
     if cfg!(feature = "rgb-validation") {
-        req.electrum_url = format!("ssl://electrum{n}.test:50002");
-    }
-    if cfg!(feature = "rgb-validation") {
         req.evm_rpc_host = format!("rpc{n}.test");
         req.evm_rpc_ca_der =
             hex::decode(include_str!("../../../tests/fixtures/evm_rpc_tls/ca_a.der.hex").trim())
@@ -148,15 +145,12 @@ fn a_key_in_an_unpinned_account_is_refused() {
 #[test]
 fn a_refused_set_leaves_the_slot_empty() {
     let ctx = awaiting(BuildContext::current());
+    // Not a host name, or a value that this build does not use.
     let mut bad = vec![SetEndpointsRequest {
-        electrum_url: "ftp://electrum.test:1".into(),
+        evm_rpc_host: "rpc.test:443".into(),
         ..valid(1)
     }];
     if cfg!(feature = "rgb-validation") {
-        bad.push(SetEndpointsRequest {
-            evm_rpc_host: "rpc.test:443".into(),
-            ..valid(1)
-        });
         bad.push(SetEndpointsRequest {
             evm_rpc_ca_der: b"not der".to_vec(),
             ..valid(1)
@@ -223,7 +217,7 @@ fn the_forwarders_bind_together() {
         return;
     }
     let plan = forwarder_plan(&Endpoints::parse(&valid(1), &[], true).unwrap());
-    let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _, _)| *a).collect();
+    let addrs: std::collections::HashSet<_> = plan.iter().map(|(a, _)| *a).collect();
     assert_eq!(addrs.len(), plan.len(), "{plan:?}");
     let free = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -232,9 +226,9 @@ fn the_forwarders_bind_together() {
         .port();
     let plan: Vec<_> = plan
         .into_iter()
-        .map(|(a, v, t)| {
+        .map(|(a, v)| {
             let port = if a.port() == 443 { free } else { 0 };
-            (SocketAddrV4::new(*a.ip(), port), v, t)
+            (SocketAddrV4::new(*a.ip(), port), v)
         })
         .collect();
     let listeners = bind_all(&plan).unwrap();
@@ -243,7 +237,7 @@ fn the_forwarders_bind_together() {
     {
         let bound: Vec<_> = listeners
             .iter()
-            .map(|(l, _, _)| l.local_addr().unwrap())
+            .map(|(l, _)| l.local_addr().unwrap())
             .collect();
         for ip in [Ipv4Addr::LOCALHOST, crate::kms::KMS_LOOPBACK] {
             assert!(bound.contains(&(ip, free).into()), "{bound:?}");
@@ -252,48 +246,9 @@ fn the_forwarders_bind_together() {
         // Control: KMS on 127.0.0.1 collides with the EVM RPC forwarder.
         let control: Vec<_> = plan
             .iter()
-            .map(|&(a, v, t)| (SocketAddrV4::new(Ipv4Addr::LOCALHOST, a.port()), v, t))
+            .map(|&(a, v)| (SocketAddrV4::new(Ipv4Addr::LOCALHOST, a.port()), v))
             .collect();
         assert!(bind_all(&control).is_err());
-    }
-}
-
-/// Each forwarder of a TLS endpoint refuses plaintext. The indexer
-/// forwarder follows the URL scheme: a dev build can still use a
-/// plaintext indexer.
-#[test]
-fn tls_endpoints_get_tls_only_forwarders() {
-    let tls = forwarder_plan(&Endpoints::parse(&valid(1), &[], true).unwrap());
-    assert!(
-        tls.iter().all(|&(_, _, require_tls)| require_tls),
-        "{tls:?}"
-    );
-
-    #[cfg(feature = "rgb-validation")]
-    {
-        let plaintext = forwarder_plan(
-            &Endpoints::parse(
-                &SetEndpointsRequest {
-                    electrum_url: "tcp://electrum1.test:50001".into(),
-                    ..valid(1)
-                },
-                &[],
-                true,
-            )
-            .unwrap(),
-        );
-        let indexer = plaintext
-            .iter()
-            .find(|(a, _, _)| a.port() == 50001)
-            .unwrap();
-        assert!(!indexer.2, "a plaintext dev indexer is not gated");
-        assert!(
-            plaintext
-                .iter()
-                .filter(|(a, _, _)| a.port() != 50001)
-                .all(|&(_, _, require_tls)| require_tls),
-            "the EVM RPC and KMS forwarders stay TLS-only: {plaintext:?}"
-        );
     }
 }
 
@@ -355,7 +310,6 @@ fn a_second_set_is_refused_and_the_first_values_stay() {
 fn the_same_build_accepts_different_runtime_hosts_ports_and_ca() {
     let first = valid(1);
     let second = SetEndpointsRequest {
-        electrum_url: "ssl://member-two-indexer.test:50003".into(),
         evm_rpc_host: "member-two-rpc.test".into(),
         evm_rpc_ca_der: hex::decode(
             include_str!("../../../tests/fixtures/evm_rpc_tls/ca_b.der.hex").trim(),

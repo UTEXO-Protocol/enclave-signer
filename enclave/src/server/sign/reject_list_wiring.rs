@@ -57,8 +57,7 @@ fn sign_listed(entries: Vec<RejectListEntry>) -> (String, Vec<[u8; 4]>) {
     let rpc = ListEvm::new(CHAIN, entries);
     let calls = rpc.calls.clone();
     let launch = ctx.launch.get_mut().unwrap();
-    launch.rgb_validator =
-        Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
+    launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap());
     launch.evm_rpc_client = Some(Box::new(rpc));
 
     let request = EnclaveRequest {

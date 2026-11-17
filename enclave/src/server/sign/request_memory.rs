@@ -72,8 +72,7 @@ fn framed_burn(history: &History) -> (Vec<u8>, ServerContext) {
     let state = EnclaveState::default();
     state.initialize_from_seed([7; 64]).unwrap();
     let mut ctx = ServerContext::new(state, cfg, chain);
-    ctx.launch.get_mut().unwrap().rgb_validator =
-        Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
+    ctx.launch.get_mut().unwrap().rgb_validator = Some(RgbValidator::new("regtest").unwrap());
 
     let request = EnclaveRequest {
         request: Some(Request::Sign(SignRequest {

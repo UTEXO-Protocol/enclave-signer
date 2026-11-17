@@ -60,14 +60,13 @@ them, and decide whether you accept each one:
 | `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json`: `safe` or `finalized`. `latest` is refused. |
 | `spv_min_confirmations` | `--expect-spv-min-confirmations` | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json`. |
 | `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json`. |
-| `electrum_host` | `--expect-electrum-host` | The indexer host that you accept. |
 | `evm_rpc_tls.host` | `--expect-evm-rpc-host` | The EVM RPC host that you accept. |
 | `evm_rpc_tls.ca_sha256` | `--expect-evm-rpc-ca-sha256` | The SHA-256 of the CA that you accept, without `0x`. |
 
 The script sets `chain_id` (42161) and `bridge_contract` (your
 `MULTISIG_PROXY`) itself.
 
-- The hosts and the CA hash are launch values. They are not in the image, so
+- The host and the CA hash are launch values. They are not in the image, so
   the PCRs do not cover them. Approve them independently.
 - A provider API key is in the RPC path, which is not attested and is not in
   the bundle. Approval covers the endpoint, not one provider account.
@@ -93,7 +92,6 @@ bash build/verify-signer.sh https://<published location>/attestation-16.json \
   --expect-evm-finality-tag finalized \
   --expect-spv-min-confirmations 3 \
   --expect-gas-tx-to 0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A \
-  --expect-electrum-host <electrum host> \
   --expect-evm-rpc-host <rpc host> \
   --expect-evm-rpc-ca-sha256 <64 hex characters>
 ```

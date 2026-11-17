@@ -30,7 +30,6 @@ fn image_env() -> String {
 
 fn endpoints() -> SetEndpointsRequest {
     SetEndpointsRequest {
-        electrum_url: "ssl://electrum.example:50002".into(),
         evm_rpc_host: "rpc.example".into(),
         evm_rpc_ca_der: vec![0xca; 40],
         evm_rpc_tls_port: 443,
@@ -325,14 +324,6 @@ fn spv_min_confirmations_mismatch_aborts() {
 }
 
 #[test]
-fn electrum_host_mismatch_aborts() {
-    assert_mismatch(
-        set!(electrum_host, "evil.example".into()),
-        "electrum_host mismatch: expected electrum.example, attested evil.example",
-    );
-}
-
-#[test]
 fn evm_rpc_tls_host_mismatch_aborts() {
     assert_mismatch(
         tls(|pin| pin.host = "evil.example".into()),
@@ -614,31 +605,11 @@ fn mock_mode_refuses_a_production_expectation() {
 }
 
 #[test]
-fn mixed_case_hosts_match_the_lowercased_attestation() {
+fn a_mixed_case_rpc_host_matches_the_lowercased_attestation() {
     let mut upper = endpoints();
-    upper.electrum_url = "ssl://Electrum.Example:50002/".into();
     upper.evm_rpc_host = "RPC.Example".into();
     let policy = expected_policy(SignerRole::Combined, &image_env(), &upper).unwrap();
     assert_eq!(policy, expected());
-}
-
-#[test]
-fn esplora_urls_give_the_attested_host() {
-    for url in [
-        "https://esplora.example",
-        "https://Esplora.Example:443/",
-        "http://esplora.example:3000",
-        "tcp://esplora.example:50001",
-    ] {
-        assert_eq!(indexer_host(url).unwrap(), "esplora.example", "{url}");
-    }
-    for url in [
-        "ssl://esplora.example",
-        "esplora.example:443",
-        "ftp://e.example:1",
-    ] {
-        assert!(indexer_host(url).is_err(), "{url}");
-    }
 }
 
 #[test]

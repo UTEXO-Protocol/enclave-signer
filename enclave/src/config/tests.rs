@@ -277,9 +277,6 @@ const CA_HEX: &str = include_str!("../../tests/fixtures/evm_rpc_tls/ca_a.der.hex
 fn valid() -> SetEndpointsRequest {
     let mut req = SetEndpointsRequest::default();
     if cfg!(feature = "rgb-validation") {
-        req.electrum_url = "ssl://Electrum.test:50002".into();
-    }
-    if cfg!(feature = "rgb-validation") {
         req.evm_rpc_host = "RPC.Test".into();
         req.evm_rpc_ca_der = hex::decode(CA_HEX.trim()).unwrap();
         req.evm_rpc_tls_port = 443;
@@ -319,106 +316,10 @@ fn the_account_list_parses_ids_and_refuses_a_malformed_entry() {
 #[test]
 fn valid_endpoints_parse_and_hosts_are_lowercased() {
     let e = parse_with(|_| {}).unwrap();
-    if cfg!(feature = "rgb-validation") {
-        assert_eq!(e.electrum_host, "electrum.test");
-        assert_eq!(e.electrum_port, 50002);
-    }
     assert_eq!(e.evm_rpc_tls.is_some(), cfg!(feature = "rgb-validation"));
     if let Some(tls) = e.evm_rpc_tls {
         assert_eq!(tls.host, "rpc.test");
         assert_eq!(tls.tls_port, 443);
-    }
-}
-
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn electrum_url_must_be_ssl_or_tcp_host_and_port() {
-    assert!(parse_with(|r| r.electrum_url = "tcp://electrum.test:50001".into()).is_ok());
-    let e = parse_with(|r| r.electrum_url = "ssl://electrum.test:50002/".into()).unwrap();
-    assert_eq!(e.electrum_url, "ssl://electrum.test:50002");
-    for url in [
-        "",
-        "ftp://electrum.test:50001",
-        "electrum.test:50001",
-        "ssl://electrum.test",
-        "ssl://electrum.test:50002/x",
-        "ssl://electrum.test:0",
-        "ssl://electrum.test:65536",
-        "ssl://127.0.0.1:50002",
-        "ssl://electrum_test:50002",
-        "ssl://electrum test:50002",
-    ] {
-        assert!(
-            parse_with(|r| r.electrum_url = url.into()).is_err(),
-            "{url:?}"
-        );
-    }
-}
-
-/// A release image refuses a plaintext indexer. The host relays the
-/// bytes, so over `tcp://` or `http://` it can forge every answer.
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn a_release_build_refuses_a_plaintext_indexer() {
-    for url in [
-        "tcp://electrum.test:50001",
-        "http://esplora.test:3000",
-        "http://esplora.test",
-    ] {
-        let err = parse_indexer_url(url, false).unwrap_err();
-        assert!(err.contains("plaintext"), "{url:?}: {err}");
-        assert!(
-            parse_indexer_url(url, true).is_ok(),
-            "{url:?} in a dev build"
-        );
-    }
-    assert_eq!(
-        parse_indexer_url("ssl://electrum.test:50002", false).unwrap(),
-        ("electrum.test".to_string(), 50002)
-    );
-    assert_eq!(
-        parse_indexer_url("https://esplora.test", false).unwrap(),
-        ("esplora.test".to_string(), 443)
-    );
-    assert!(parse_indexer_url("ftp://electrum.test:1", false)
-        .unwrap_err()
-        .contains("is not ssl://"));
-}
-
-/// The test build is a dev build, so the launch path takes plaintext.
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn a_test_build_allows_a_plaintext_indexer() {
-    assert!(plaintext_indexer_allowed());
-}
-
-#[cfg(feature = "rgb-validation")]
-#[test]
-fn esplora_url_takes_a_default_port() {
-    // The EVM RPC forwarder takes another loopback port than Esplora's 443.
-    let e = parse_with(|r| {
-        r.electrum_url = "https://esplora.test".into();
-        r.evm_rpc_tls_port = 8443;
-    })
-    .unwrap();
-    assert_eq!(
-        (e.electrum_host.as_str(), e.electrum_port),
-        ("esplora.test", 443)
-    );
-    let e = parse_with(|r| r.electrum_url = "http://esplora.test:3000/".into()).unwrap();
-    assert_eq!(
-        (e.electrum_host.as_str(), e.electrum_port),
-        ("esplora.test", 3000)
-    );
-    for url in [
-        "https://esplora.test/api",
-        "https://esplora.test:0",
-        "https://",
-    ] {
-        assert!(
-            parse_with(|r| r.electrum_url = url.into()).is_err(),
-            "{url:?}"
-        );
     }
 }
 
@@ -487,8 +388,7 @@ fn a_set_endpoints_string_over_the_limit_is_refused_before_the_parse() {
     use crate::memory::peak;
 
     type Set = fn(&mut SetEndpointsRequest, String);
-    let fields: [(&str, Set); 6] = [
-        ("electrum_url", |r, v| r.electrum_url = v),
+    let fields: [(&str, Set); 5] = [
         ("evm_rpc_host", |r, v| r.evm_rpc_host = v),
         ("kms_key_arn", |r, v| r.kms_key_arn = v),
         ("kms_region", |r, v| r.kms_region = v),
@@ -515,8 +415,8 @@ fn a_set_endpoints_string_over_the_limit_is_refused_before_the_parse() {
 
 #[cfg(feature = "rgb-validation")]
 #[test]
-fn evm_rpc_tls_port_must_be_a_free_port() {
-    for port in [0, 65536, 50002] {
+fn evm_rpc_tls_port_must_be_a_port() {
+    for port in [0, 65536] {
         assert!(parse_with(|r| r.evm_rpc_tls_port = port).is_err(), "{port}");
     }
 }
@@ -573,9 +473,6 @@ fn rpc_path_rejects_authority_query_fragment_and_normalization() {
 #[test]
 fn a_value_the_build_does_not_use_is_refused() {
     if !cfg!(feature = "rgb-validation") {
-        assert!(parse_with(|r| r.electrum_url = "ssl://electrum.test:50002".into()).is_err());
-    }
-    if !cfg!(feature = "rgb-validation") {
         assert!(parse_with(|r| r.evm_rpc_host = "rpc.test".into()).is_err());
         assert!(parse_with(|r| r.evm_rpc_ca_der = vec![1]).is_err());
         assert!(parse_with(|r| r.evm_rpc_tls_port = 443).is_err());
@@ -585,7 +482,7 @@ fn a_value_the_build_does_not_use_is_refused() {
 #[cfg(feature = "kms-persistence")]
 #[test]
 fn kms_values_are_checked_at_launch() {
-    let edits: [fn(&mut SetEndpointsRequest); 8] = [
+    let edits: [fn(&mut SetEndpointsRequest); 7] = [
         |r| r.kms_key_arn = "arn:aws:kms:eu-west-1:123456789012:alias/seed".into(),
         |r| r.kms_key_arn = KEY_ARN.replace("eu-west-1", "eu-west-2"),
         |r| {
@@ -599,7 +496,6 @@ fn kms_values_are_checked_at_launch() {
             r.kms_region.clear();
             r.kms_seed_id.clear();
         },
-        |r| r.electrum_url = "ssl://kms.eu-west-1.amazonaws.com:50002".into(),
     ];
     for edit in edits {
         assert!(parse_with(edit).is_err());

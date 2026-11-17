@@ -48,24 +48,24 @@ mod log_filter_tests {
     }
 }
 
-/// Add each missing `addr host` line to the hosts file at `path`, so the
-/// connection to `host` goes to its local vsock forwarder and TLS still checks
-/// the real certificate of `host`. All lines land in one rename, or none do.
-#[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
-pub fn pin_hosts(
+/// Add the line `addr host` to the hosts file at `path` if it is missing, so
+/// the connection to `host` goes to its local vsock forwarder and TLS still
+/// checks the real certificate of `host`. The file changes in one rename.
+#[cfg(any(
+    test,
+    all(feature = "vsock", feature = "kms-persistence", target_os = "linux")
+))]
+pub fn pin_host(
     path: &std::path::Path,
-    entries: &[(std::net::Ipv4Addr, &str)],
+    addr: std::net::Ipv4Addr,
+    host: &str,
 ) -> std::io::Result<()> {
     let existing = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         other => other?,
     };
-    let missing: String = entries
-        .iter()
-        .map(|(addr, host)| format!("{addr} {host}\n"))
-        .filter(|line| !existing.lines().any(|l| l.trim() == line.trim_end()))
-        .collect();
-    if missing.is_empty() {
+    let line = format!("{addr} {host}");
+    if existing.lines().any(|l| l.trim() == line) {
         return Ok(());
     }
     let sep = if existing.is_empty() || existing.ends_with('\n') {
@@ -75,7 +75,7 @@ pub fn pin_hosts(
     };
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    std::fs::write(&tmp, format!("{existing}{sep}{missing}"))?;
+    std::fs::write(&tmp, format!("{existing}{sep}{line}\n"))?;
     std::fs::rename(&tmp, path)
 }
 
@@ -201,11 +201,11 @@ pub fn load_schema_rules() {
     let _ = schemata::BridgedFungibleAsset::schema_rules();
 }
 
-/// Build the RGB consignment validator for the Electrum URL set at launch.
-/// `None` makes the launch fail.
+/// Build the RGB consignment validator of `BITCOIN_NETWORK`. `None` makes the
+/// launch fail.
 #[cfg(feature = "rgb-validation")]
-pub fn build_rgb_validator(indexer_url: String) -> Option<RgbValidator> {
-    match RgbValidator::new(indexer_url, &bitcoin_network_str()) {
+pub fn build_rgb_validator() -> Option<RgbValidator> {
+    match RgbValidator::new(&bitcoin_network_str()) {
         Ok(v) => {
             tracing::info!("RGB validator initialized");
             Some(v)
@@ -297,12 +297,10 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use super::pin_hosts;
+    use super::pin_host;
 
-    const PINS: [(Ipv4Addr, &str); 2] = [
-        (Ipv4Addr::new(127, 0, 0, 1), "electrum.test"),
-        (Ipv4Addr::new(127, 0, 0, 2), "kms.eu-west-1.amazonaws.com"),
-    ];
+    const ADDR: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+    const HOST: &str = "kms.eu-west-1.amazonaws.com";
 
     /// A fresh hosts file next to the test binary, not in /tmp.
     fn hosts(name: &str) -> PathBuf {
@@ -319,15 +317,15 @@ mod tests {
     }
 
     #[test]
-    fn pins_are_written_once_and_together() {
-        let path = hosts("pins_are_written_once_and_together");
-        pin_hosts(&path, &PINS).unwrap();
+    fn a_pin_is_written_once() {
+        let path = hosts("a_pin_is_written_once");
+        pin_host(&path, ADDR, HOST).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             first,
-            "127.0.0.1 localhost\n127.0.0.1 electrum.test\n127.0.0.2 kms.eu-west-1.amazonaws.com\n"
+            "127.0.0.1 localhost\n127.0.0.2 kms.eu-west-1.amazonaws.com\n"
         );
-        pin_hosts(&path, &PINS).unwrap();
+        pin_host(&path, ADDR, HOST).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
     }
 
@@ -338,13 +336,11 @@ mod tests {
         // A directory in the way makes the write fail, also as root.
         let tmp = path.with_extension("tmp");
         std::fs::create_dir(&tmp).unwrap();
-        assert!(pin_hosts(&path, &PINS).is_err());
+        assert!(pin_host(&path, ADDR, HOST).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::remove_dir(&tmp).unwrap();
-        pin_hosts(&path, &PINS).unwrap();
+        pin_host(&path, ADDR, HOST).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
-        for (addr, host) in PINS {
-            assert_eq!(after.matches(&format!("{addr} {host}")).count(), 1);
-        }
+        assert_eq!(after.matches(&format!("{ADDR} {HOST}")).count(), 1);
     }
 }

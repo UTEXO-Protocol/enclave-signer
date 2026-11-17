@@ -15,7 +15,7 @@
 #   utexo-parent@{16,18,20}       -> {instance_id}/parent    (gRPC adapter — the noisy one)
 #   utexo-enclave@{16,18,20}      -> {instance_id}/enclave   (host-side run/terminate lifecycle)
 #   nitro-enclaves-allocator      -> {instance_id}/nitro     (CPU/mem pool)
-#   vsock-proxy-*                 -> {instance_id}/nitro     (electrs / evm-rpc egress)
+#   vsock-proxy-*                 -> {instance_id}/nitro     (evm-rpc egress)
 #
 # ⚠️ SCOPE / TEE NOTE: this collects the HOST-SIDE `utexo-enclave@` unit (the
 # systemd wrapper that runs/terminates the enclave) + the allocator + vsock

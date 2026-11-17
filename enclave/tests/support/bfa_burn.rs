@@ -402,10 +402,8 @@ impl Fixture {
         let mut ctx = ServerContext::new(state, config, Mutex::new(chain));
         let list_reads = Arc::new(AtomicUsize::new(0));
         let launch = ctx.launch.get_mut().unwrap();
-        // SPV supplies every witness. Contacting this unreachable indexer is
-        // a failure, rather than a second source of trusted validation facts.
-        launch.rgb_validator =
-            Some(RgbValidator::new("tcp://127.0.0.1:1".into(), "regtest").unwrap());
+        // SPV supplies every witness.
+        launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap());
         launch.evm_rpc_client = Some(Box::new(EmptyRejectList(list_reads.clone())));
         Self {
             ctx,

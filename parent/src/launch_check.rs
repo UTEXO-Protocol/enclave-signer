@@ -53,7 +53,6 @@ pub fn expected_policy(
     let signs_gas_tx = role != SignerRole::Mint;
     let gas = |key: &str| optional(key).filter(|_| signs_gas_tx);
 
-    let electrum_host = indexer_host(&endpoints.electrum_url)?;
     let evm_rpc_tls = (!endpoints.evm_rpc_ca_der.is_empty()).then(|| EvmRpcTlsPin {
         host: endpoints.evm_rpc_host.to_ascii_lowercase(),
         ca_sha256: Sha256::digest(&endpoints.evm_rpc_ca_der).into(),
@@ -103,7 +102,6 @@ pub fn expected_policy(
             "SPV_MIN_CONFIRMATIONS",
             Some(required("SPV_MIN_CONFIRMATIONS")?),
         )?,
-        electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
             .map_or(Ok([0; 20]), |v| address20("GAS_TX_ALLOWED_TO", v))?,
@@ -126,32 +124,6 @@ pub fn expected_policy(
         kms,
         clone_peer_pcr3: None,
     })
-}
-
-/// The lowercased host of an indexer URL, as the enclave attests it:
-/// `ssl://` or `tcp://host:port` (Electrum), `https://` or `http://host[:port]`
-/// (Esplora). The enclave checks the scheme and port rules itself.
-fn indexer_host(url: &str) -> Result<String> {
-    let url = url.strip_suffix('/').unwrap_or(url);
-    let (rest, port_optional) = if let Some(rest) = url
-        .strip_prefix("ssl://")
-        .or_else(|| url.strip_prefix("tcp://"))
-    {
-        (rest, false)
-    } else if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        (rest, true)
-    } else {
-        bail!("electrum_url {url:?} is not ssl://, tcp://, https:// or http://");
-    };
-    let host = match rest.rsplit_once(':') {
-        Some((host, _)) => host,
-        None if port_optional => rest,
-        None => bail!("electrum_url {url:?} has no port"),
-    };
-    Ok(host.to_ascii_lowercase())
 }
 
 /// `expected` with the clone-peer PCR3 taken from the verified document PCRs,
@@ -250,7 +222,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         funds_in_contract,
         evm_finality_tag,
         spv_min_confirmations,
-        electrum_host,
         evm_rpc_tls,
         gas_tx_allowed_to,
         gas_tx_max_gas_limit,
@@ -283,7 +254,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         ("funds_in_contract", hex(funds_in_contract)),
         ("evm_finality_tag", evm_finality_tag.to_string()),
         ("spv_min_confirmations", spv_min_confirmations.to_string()),
-        ("electrum_host", electrum_host.clone()),
         ("evm_rpc_tls", presence(evm_rpc_tls.is_some())),
     ];
     if let Some(pin) = evm_rpc_tls {
