@@ -197,7 +197,7 @@ pub mod deposit_stub {
     sol! {
         event BridgeFundsIn(
             bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
-            uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
+            bytes32 authorizationNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
             uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
             string destinationAddress, bytes settlementData
         );
@@ -223,7 +223,7 @@ pub mod deposit_stub {
                 operationId: self.operation_id.into(),
                 sourceSender: [0x5c; 32].into(),
                 sender: [0xde; 20].into(),
-                senderNonce: U256::ZERO,
+                authorizationNonce: [0u8; 32].into(),
                 amount: U256::from(self.gross),
                 netAmount: U256::from(self.gross - self.commission),
                 tokenCommission: U256::from(self.commission),

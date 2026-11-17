@@ -15,7 +15,7 @@ use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
 /// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map, filled from verified SPV proofs, or from the indexer on a no-SPV burn.
+/// ordinal map, filled from verified SPV proofs.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
     if !validated.non_mined_witness_txids.is_empty() {
         let list: Vec<String> = validated
@@ -282,9 +282,10 @@ struct ProofBlock {
 /// - [`Required`](BtcRelayMode::Required): the default, and the only mode a
 ///   production policy boots with. Both words must match. A zero word is
 ///   refused, because the bridge sends zeros only when it has no relay.
-/// - [`None`](BtcRelayMode::None): a local stand with no BtcRelay. Both words
-///   must be zero, and no compare occurs. A non-zero word means the bridge
-///   and the enclave disagree about the relay, so it is refused.
+/// - [`None`](BtcRelayMode::None): no BtcRelay, on a local stand or a
+///   public-Signet image. Both words must be zero, and no compare occurs. A
+///   non-zero word means the bridge and the enclave disagree about the relay,
+///   so it is refused.
 ///
 /// Steps 1-3 run in both modes. No build flag affects the choice.
 ///

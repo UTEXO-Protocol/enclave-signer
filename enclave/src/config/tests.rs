@@ -6,7 +6,7 @@ fn endpoints_sha256_env_does_not_affect_bridge_configuration() {
     const CHILD: &str = "UTEXO_TEST_ENDPOINTS_ENV_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let config = BridgeConfig::from_env();
-        config.validate_indexer_only().unwrap();
+        config.validate_public_signet().unwrap();
         assert_eq!(config.chain_id, 42161);
         assert_eq!(config.bridge_contract, [1; 20]);
         assert_eq!(config.funds_in_contract, [2; 20]);

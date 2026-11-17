@@ -919,20 +919,53 @@ fn real_mainnet_headers_above_the_checkpoint_pass() {
 /// holds the checkpoint, and it passes with any checkpoint time, so the test
 /// does not pin that time.
 #[test]
-fn real_signet_headers_above_the_checkpoint_pass() {
+fn real_custom_signet_headers_above_the_checkpoint_pass() {
+    let mut chain = HeaderChain::new(
+        Network::SignetCustom,
+        crate::networks::rgb::spv::checkpoint::SIGNET_CUSTOM_CHECKPOINT,
+    );
+    let outcome = chain
+        .submit_headers(
+            334_001,
+            &fixture_headers(include_str!("signetcustom_334001_334012.hex")),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(outcome.headers_accepted, 12);
+    assert_eq!(chain.tip_height(), 334_012);
+}
+
+/// Real public Signet headers 320_545..=320_556 link to the compiled checkpoint
+/// and pass the median rule at 320_555 and 320_556.
+#[test]
+fn real_public_signet_headers_above_the_checkpoint_pass() {
     let mut chain = HeaderChain::new(
         Network::Signet,
         crate::networks::rgb::spv::checkpoint::SIGNET_CHECKPOINT,
     );
     let outcome = chain
         .submit_headers(
-            334_001,
-            &fixture_headers(include_str!("signet_334001_334012.hex")),
+            320_545,
+            &fixture_headers(include_str!("signet_320545_320556.hex")),
             NOW,
         )
         .unwrap();
     assert_eq!(outcome.headers_accepted, 12);
-    assert_eq!(chain.tip_height(), 334_012);
+    assert_eq!(chain.tip_height(), 320_556);
+}
+
+/// The real public Signet header 320_544 (blockstream.info and mempool.space)
+/// is the compiled checkpoint: the same hash, time and bits.
+#[test]
+fn the_public_signet_checkpoint_is_the_real_block() {
+    use crate::networks::rgb::spv::checkpoint::SIGNET_CHECKPOINT;
+
+    let raw = &fixture_headers(include_str!("signet_320544.hex"))[0];
+    let header: Header = bitcoin::consensus::deserialize(raw).unwrap();
+    assert_eq!(SIGNET_CHECKPOINT.height, 320_544);
+    assert_eq!(header.block_hash().to_byte_array(), SIGNET_CHECKPOINT.hash);
+    assert_eq!(header.time, SIGNET_CHECKPOINT.time);
+    assert_eq!(header.bits.to_consensus(), SIGNET_CHECKPOINT.bits);
 }
 
 /// The real mainnet header 951_552 (blockstream.info) is the compiled

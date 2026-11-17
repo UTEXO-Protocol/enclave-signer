@@ -1,6 +1,6 @@
 //! The caps on the work rgb-lib does, checked before it runs, and
 //! release-mode timings: `cargo test --release -p utexo-bridge-enclave
-//! --no-default-features --features spv,burn-signer --lib caps -- --ignored
+//! --no-default-features --features burn-signer --lib caps -- --ignored
 //! --nocapture --test-threads=1`. `docs/validation-cost-model.md` has the
 //! measurements behind the cap values.
 
@@ -21,12 +21,12 @@ use rgbstd::tapret::{TapretNodePartner, TapretPathProof, TapretProof};
 use rgbstd::validation::DbcProof;
 use rgbstd::{ChainNet, Operation, Opout};
 
+use super::super::super::scratch::with_scratch_file;
 use super::super::cost::{
     assert_bounded_for_rgb_lib, bundle_id_cost, genesis_hash_cost, inspection_ns, opout_count,
     reject_walk_cost, rgb_lib_ns, uncapped_costs, validation_ns, witness_check_cost,
     MAX_BUNDLE_ID_COST, MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
 };
-use super::super::scratch::with_scratch_file;
 use super::*;
 
 mod timings;
@@ -317,8 +317,7 @@ fn validate_unmined(bytes: &[u8]) -> (String, usize) {
         chain: &chain,
         asked: RefCell::new(Vec::new()),
     };
-    let result =
-        validator().validate_consignment(bytes, Some(&bind_all), &on_chain(&source), &open_lists());
+    let result = validator().validate_consignment(bytes, Some(&bind_all), &source, &open_lists());
     (error_of(result), source.asked.into_inner().len())
 }
 
@@ -703,7 +702,7 @@ fn time_rgb_lib(
         offchain_txid: None,
     };
     let start = Instant::now();
-    let result = with_scratch_file(bytes, |path| {
+    let result = with_scratch_file("consignment", bytes, |path| {
         validate_consignment_with_resolver(
             path.to_str().unwrap(),
             &witnesses,

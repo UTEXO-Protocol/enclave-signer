@@ -36,24 +36,6 @@ dev_feature_release_guard!(
      in debug mode."
 );
 
-// Builds without SPV require real attestation and an explicit signer role.
-#[cfg(all(
-    feature = "rgb-validation",
-    not(feature = "spv"),
-    any(
-        feature = "allow-seed-import",
-        feature = "mock-attestation",
-        feature = "allow-debug-pcrs"
-    )
-))]
-compile_error!("rgb-validation without spv requires real attestation; seed import and mock/debug attestation features are forbidden");
-#[cfg(all(
-    feature = "rgb-validation",
-    not(feature = "spv"),
-    not(any(feature = "mint-signer", feature = "burn-signer"))
-))]
-compile_error!("rgb-validation without spv requires mint-signer or burn-signer");
-
 // Exactly one mint/burn signer role: each role is its own image with its own
 // seed. `build.rs` derives the direction cfgs from the same two features.
 #[cfg(all(feature = "mint-signer", feature = "burn-signer"))]
@@ -70,7 +52,7 @@ compile_error!(
 compile_error!(
     "an RGB build requires a signer role: enable exactly one of `mint-signer` \
      (EVM -> RGB) or `burn-signer` (RGB -> EVM), e.g. `--no-default-features --features \
-     vsock,spv,mint-signer`"
+     vsock,mint-signer`"
 );
 
 // The attested role reads the features. The gates read the `build.rs` cfgs.

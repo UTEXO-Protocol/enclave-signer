@@ -7,9 +7,10 @@
 //! image: the SPV depth, the fee limits, the clone replay guard and the pins.
 //!
 //! The mint replay guard is here because it is not a safety rule. A shorter
-//! window lets a rebuilt mint for one deposit reach the signer sooner. Each
-//! signature for that mint spends the same UTXO, so Bitcoin confirms at most
-//! one (`docs/mint-flow.md`, section 6). A restart clears the guard anyway.
+//! window lets a retry for one deposit reach the signer sooner. Each signature
+//! for that deposit is for the one transaction that its lockId names (M6), so
+//! Bitcoin confirms at most one (`docs/mint-flow.md`, section 6). A restart
+//! clears the guard anyway.
 //!
 //! The image sets the start values. [`Limits::DEFAULTS`] holds the constants of
 //! the image, and [`Limits::image`] adds the request limits of `BridgeConfig`.
@@ -105,11 +106,11 @@ limits! {
     io_idle_timeout_secs: IO_IDLE_TIMEOUT.as_secs(), 2, 3_600;
     /// Time for the first bytes of an egress client connection.
     first_bytes_timeout_secs: crate::egress::FIRST_BYTES_TIMEOUT.as_secs(), 1, 3_600;
-    /// Time for each socket operation of the Electrum client. Without a
-    /// timeout, a stalled read blocks the worker thread for ever. The ingress
-    /// deadline does not cancel indexer work.
+    /// Time for each socket operation of an Electrum client. No client in the
+    /// enclave uses it. `Limits::check` keeps it within the request deadline.
     electrum_timeout_secs: 15, 1, 3_600;
-    /// Time for one Esplora HTTP call, connect and read.
+    /// Time for one Esplora HTTP call. No client in the enclave uses it.
+    /// `Limits::check` keeps it within the request deadline.
     esplora_timeout_secs: 30, 1, 3_600;
     /// Time for one EVM JSON-RPC call. Without a timeout, a hung RPC blocks the
     /// worker thread for ever: `block_on` has no deadline, and alloy and reqwest
@@ -304,11 +305,14 @@ impl Limits {
         crate::memory::REQUEST_MEMORY_FACTOR as u64 * self.max_message_bytes + self.elements_bytes()
     }
 
-    /// The most RAM the consignment scratch file of one request can take
-    /// (`memory.rs`). The file holds the consignment bytes, and a frame
-    /// cannot carry more than itself.
+    /// The most RAM the scratch file of one request can take (`memory.rs`).
+    /// A request holds one file at a time: the consignment of a burn, or one
+    /// fascia of a mint or refill. So the larger limit sets the bound, and a
+    /// frame cannot carry more than itself.
     pub fn scratch_file_bytes(&self) -> u64 {
-        self.max_consignment_bytes.min(self.max_message_bytes)
+        self.max_consignment_bytes
+            .max(self.max_psbt_bytes)
+            .min(self.max_message_bytes)
     }
 
     /// The socket deadline of one request.

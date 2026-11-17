@@ -16,9 +16,7 @@ WORKDIR /build
 COPY . /build/
 
 WORKDIR /build/enclave
-# The dev image keeps `spv` (which implies `rgb-validation`), so the SPV path
-# runs without vsock. Without spv, the enclave fails closed on any request
-# that carries merkle_proofs, so a build mismatch fails loudly.
+# The signer role turns on the SPV path, which runs without vsock.
 #
 # DEBUG build (no `--release`): `allow-seed-import` is one of the dev-only
 # features that `compile_error!`s in a release build (`debug_assertions`
@@ -33,7 +31,7 @@ WORKDIR /build/enclave
 ARG SIGNER_ROLE
 RUN case "$SIGNER_ROLE" in mint-signer|burn-signer) ;; \
       *) echo "SIGNER_ROLE must be mint-signer or burn-signer, got '$SIGNER_ROLE'" >&2; exit 1 ;; esac
-RUN cargo build --locked --no-default-features --features allow-seed-import,spv,mock-attestation,$SIGNER_ROLE
+RUN cargo build --locked --no-default-features --features allow-seed-import,mock-attestation,$SIGNER_ROLE
 
 # ===== Runtime Stage =====
 FROM debian:trixie-slim

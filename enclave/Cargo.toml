@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 bip39 = { version = "3", features = ["zeroize"] }
-bitcoin = { version = "0.32", features = ["std"] }
+# `base64` writes the PSBT string that rgb-lib's fascia inspection parses.
+bitcoin = { version = "0.32", features = ["std", "base64"] }
 chacha20poly1305 = "0.11"
 enclave-proto = { path = "../enclave-proto" }
 getrandom = "0.4.2"
@@ -54,8 +55,9 @@ amplify = { version = "=4.8.1", optional = true }
 # RGB data (rgb-lib strips it from the PSBT). The version rgb-ops pins.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6", optional = true }
 # RGB-Tools rgb-lib 0.3.0-beta.8, without the wallet. It validates a consignment
-# and reads its flat summary (`inspect_consignment`).
-rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "567e5b8308f70a6242137475394be5a82fc15c95", default-features = false, optional = true }
+# and reads its flat summary (`inspect_consignment`), and it inspects the
+# fascia of a mint or refill transaction (`inspect_fascia`).
+rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "ea2b745b66b20fbaf3001e2121e1329c4695f647", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -92,8 +94,8 @@ aws-nitro-enclaves-nsm-api = "0.5"
 # `vsock`.
 #
 # The production EIFs, one signer role each:
-#   RGB mint:         `--no-default-features --features vsock,spv,mint-signer`
-#   RGB burn:         `--no-default-features --features vsock,spv,burn-signer`
+#   RGB mint:         `--no-default-features --features vsock,mint-signer`
+#   RGB burn:         `--no-default-features --features vsock,burn-signer`
 # CI builds all of them. A `compile_error!` in lib.rs requires exactly one
 # signer role whenever `rgb-validation` is on.
 default = []
@@ -102,8 +104,8 @@ default = []
 # SPV). Key derivation and the attestation pubkey bundle are the same in every
 # build, so the parent verifier does not change.
 #
-# A signer role turns on the RGB/BTC bridge stack (`rgb-validation`). `spv` adds
-# the SPV header chain to it.
+# A signer role turns on the RGB/BTC bridge stack (`rgb-validation`), which
+# includes the SPV header chain.
 
 # Seed custody is a separate capability, enabled only by the mint signer.
 kms-persistence = [
@@ -135,14 +137,9 @@ allow-seed-import = []
 # the pinned RPC host and CA ends inside the enclave. The host relays only
 # ciphertext through the vsock forwarder.
 #
-# Without `spv`, only public-signet mint/burn builds are allowed
-# (lib.rs/policy.rs); Bitcoin confirmations are trusted from the TLS indexer.
+# Every witness txid is checked against the enclave's SPV header chain before
+# EVM signing. Builds without RGB validation refuse RGB sources.
 rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
-# Bitcoin SPV verification of consignment witness txids before EVM signing.
-# Implies `rgb-validation`: SPV reads the witness txids from the consignment.
-# Only a public-signet image can omit it (`build/build-enclave.sh`).
-# Builds without RGB validation refuse RGB sources.
-spv = ["rgb-validation"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]

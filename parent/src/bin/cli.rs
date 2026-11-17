@@ -118,9 +118,6 @@ enum Command {
         /// Hex-encoded rgb-lib fascia of the PSBT's tx
         #[arg(long, default_value = "")]
         fascia: String,
-        /// Hex-encoded rgb-lib fascia of the tx that made the spent mint right
-        #[arg(long, default_value = "")]
-        parent_fascia: String,
     },
     /// Get the enclave SPV chain tip (height and hash).
     /// The parent header sync reads it to find where to continue.
@@ -568,7 +565,6 @@ fn main() {
             evm_event_finalized,
             rgb_asset_id,
             fascia,
-            parent_fascia,
         } => {
             let psbt_bytes = match hex::decode(&psbt) {
                 Ok(d) => d,
@@ -581,13 +577,6 @@ fn main() {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("Invalid hex fascia: {}", e);
-                    process::exit(1);
-                }
-            };
-            let parent_fascia = match hex::decode(&parent_fascia) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Invalid hex parent fascia: {}", e);
                     process::exit(1);
                 }
             };
@@ -632,7 +621,6 @@ fn main() {
                 psbt_bytes,
                 rgb_asset_id,
                 fascia,
-                parent_fascia,
             };
             match client.sign_psbt(req) {
                 Ok(r) => {

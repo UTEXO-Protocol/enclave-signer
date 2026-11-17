@@ -17,7 +17,7 @@
 //! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
 //! Any unset pin fails the path closed. A `Production` policy commits the whole
-//! rule in the attestation `user_data`. A no-SPV image only measures it in PCR0.
+//! rule in the attestation `user_data`. A public-Signet image only measures it in PCR0.
 //!
 //! Not bounded here: total fee spend across many txs (validation is
 //! stateless). The LayerZero fee is not bound to its release.

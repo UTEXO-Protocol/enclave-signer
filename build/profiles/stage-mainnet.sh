@@ -2,8 +2,8 @@
 # Stage infrastructure with Bitcoin mainnet and the full Production/SPV policy.
 # Public configuration only. Dependency credentials remain BuildKit secrets.
 case "$DOCKERFILE" in
-    Dockerfile.enclave.mint) ENCLAVE_FEATURES=vsock,spv,mint-signer ;;
-    Dockerfile.enclave.burn) ENCLAVE_FEATURES=vsock,spv,burn-signer ;;
+    Dockerfile.enclave.mint) ENCLAVE_FEATURES=vsock,mint-signer ;;
+    Dockerfile.enclave.burn) ENCLAVE_FEATURES=vsock,burn-signer ;;
     *) echo 'Error: stage-mainnet supports only mint and burn recipes' >&2; exit 1 ;;
 esac
 

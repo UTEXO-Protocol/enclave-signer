@@ -1,5 +1,16 @@
 use super::*;
 
+/// Public Signet and the UTEXO custom signet are different chains.
+#[test]
+fn each_signet_has_its_own_checkpoint() {
+    assert_eq!(checkpoint_for(Network::Signet).hash, SIGNET_CHECKPOINT.hash);
+    assert_eq!(
+        checkpoint_for(Network::SignetCustom).hash,
+        SIGNET_CUSTOM_CHECKPOINT.hash
+    );
+    assert_ne!(SIGNET_CHECKPOINT.hash, SIGNET_CUSTOM_CHECKPOINT.hash);
+}
+
 #[test]
 fn mainnet_checkpoint_is_retarget_boundary_aligned() {
     // Else the chain stops at the first boundary above it.
@@ -12,16 +23,16 @@ fn mainnet_checkpoint_is_retarget_boundary_aligned() {
 
 // === SPV_CHECKPOINT override (dev-only boot anchor) ===
 
-/// The signet checkpoint spec must parse to the compiled-in constant. This
-/// tests the display-to-internal byte flip.
+/// The custom signet checkpoint spec must parse to the compiled-in constant.
+/// This tests the display-to-internal byte flip.
 #[test]
-fn parse_spec_round_trips_the_signet_constant() {
+fn parse_spec_round_trips_the_custom_signet_constant() {
     let spec = "334000:000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66:0x1e0377ae:1780464472";
     let cp = parse_checkpoint_spec(spec).unwrap();
-    assert_eq!(cp.height, SIGNET_CHECKPOINT.height);
-    assert_eq!(cp.hash, SIGNET_CHECKPOINT.hash);
-    assert_eq!(cp.bits, SIGNET_CHECKPOINT.bits);
-    assert_eq!(cp.time, SIGNET_CHECKPOINT.time);
+    assert_eq!(cp.height, SIGNET_CUSTOM_CHECKPOINT.height);
+    assert_eq!(cp.hash, SIGNET_CUSTOM_CHECKPOINT.hash);
+    assert_eq!(cp.bits, SIGNET_CUSTOM_CHECKPOINT.bits);
+    assert_eq!(cp.time, SIGNET_CUSTOM_CHECKPOINT.time);
     assert!(cp.is_real);
     assert_eq!(
         cp.chain_work, None,

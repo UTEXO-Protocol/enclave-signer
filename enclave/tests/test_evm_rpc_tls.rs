@@ -32,7 +32,7 @@ use utexo_bridge_enclave::state::EnclaveState;
 sol! {
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
-        uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
+        bytes32 authorizationNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
@@ -89,7 +89,7 @@ fn forged_receipt() -> String {
         operationId: OP_ID.into(),
         sourceSender: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
-        senderNonce: U256::ZERO,
+        authorizationNonce: [0u8; 32].into(),
         amount: U256::from(1000),
         netAmount: U256::from(950),
         tokenCommission: U256::from(50),
@@ -368,26 +368,9 @@ fn pinned_client(port: u16, ca_der_hex: &str) -> Box<dyn EvmReceiptProvider + Se
     #[cfg(not(feature = "vsock"))]
     let (electrum_url, set_port) = ("ssl://electrum.test:1".to_string(), port);
     let config = BridgeConfig::default();
-    // No-SPV launch validation still requires the public-signet profile and
-    // bridge pins. Reach the TLS client through the same launch handler.
-    #[cfg(not(feature = "spv"))]
-    let config = BridgeConfig {
-        bitcoin_network: utexo_bridge_enclave::policy::BitcoinNetwork::Signet,
-        btc_relay_mode: utexo_bridge_enclave::config::BtcRelayMode::None,
-        chain_id: 42161,
-        bridge_contract: [1; 20],
-        funds_in_contract: BRIDGE,
-        token_contract: [3; 20],
-        rgb_asset_id: "test-asset".into(),
-        ..config
-    };
-    let (bitcoin_network, network) = if cfg!(feature = "spv") {
-        (bitcoin::Network::Regtest, Network::Regtest)
-    } else {
-        (bitcoin::Network::Signet, Network::Signet)
-    };
+    let network = Network::Regtest;
     let ctx = ServerContext::awaiting_launch(
-        EnclaveState::new(bitcoin_network),
+        EnclaveState::new(bitcoin::Network::Regtest),
         config,
         std::sync::Mutex::new(HeaderChain::new(network, checkpoint_for(network))),
         BuildContext::current(),

@@ -370,7 +370,8 @@ impl History {
 
     #[cfg(evm_to_rgb)]
     /// A [`Self::mint`] that also passes a new right on to vout 1. The schema
-    /// refuses it; a refusal fixture only.
+    /// refuses it; a refusal fixture of the mint wire test only.
+    #[allow(dead_code)]
     pub fn mint_keeping_right(
         &mut self,
         right: Utxo,
@@ -379,19 +380,14 @@ impl History {
         to: BuilderSeal<GraphSeal>,
         extra_inputs: Vec<OutPoint>,
         outputs: Vec<TxOut>,
-    ) -> (Committed, Utxo) {
+    ) -> Committed {
         let mint = self
             .mint_transition(right, amount, before_block, to)
             .add_rights("mintRight", GraphSeal::with_blinded_vout(1u32, self.nonce))
             .unwrap()
             .complete_transition()
             .unwrap();
-        let minted = self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs);
-        let kept = Utxo {
-            opout: Opout::new(minted.opid, OS_MINT, 0),
-            outpoint: OutPoint::new(minted.tx.compute_txid(), 1),
-        };
-        (minted, kept)
+        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
     }
 
     /// The mint of `amount` to `to` on `right`, still open for more outputs.

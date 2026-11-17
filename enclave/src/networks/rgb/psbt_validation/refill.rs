@@ -7,22 +7,21 @@
 use std::collections::BTreeSet;
 
 use bitcoin::psbt::Psbt;
-use rgbstd::{Opout, Transition, TypedAssigns};
+use rgbstd::{Transition, TypedAssigns};
 
 use super::super::btc_ownership;
-use super::super::psbt_commit::{single_right_input, witness_vout, Committed};
+use super::super::psbt_commit::{assert_single_right_input, witness_vout, Committed};
 use super::super::signing::taproot::find_controlled_taproot_inputs;
 use super::super::validation::{output_seal, OutputSeal};
 use super::{assert_keeps_all_sats, assert_only_colored_inputs, fee_key_path_inputs_of};
 use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
 
-/// Most fee inputs a refill may spend beside its right. Each one can destroy
-/// the state it carries, so with [`MIN_REFILL_RIGHTS`] the count cannot drop.
+/// Most fee inputs a refill may spend beside its right (RR0). Each input can
+/// destroy the state it carries (`docs/mint-flow.md`, section 8).
 pub const MAX_REFILL_FEE_INPUTS: usize = 1;
 
-/// Fewest rights a refill makes: one right closed plus one destroyed on a
-/// hostile fee input.
+/// Fewest rights a refill makes (RR8): more than the one it closes.
 pub const MIN_REFILL_RIGHTS: usize = 2;
 
 /// Our own cap: rgb-lib sets no limit. RR9, RR12 and RR13 carry the security.
@@ -37,7 +36,7 @@ pub fn refill_gate(psbt: &Psbt, keys: &KeyManager) -> Result<()> {
     super::check_psbt_fee(psbt, &colored, "rights-refill")
 }
 
-/// RR0: the right's seal and at most [`MAX_REFILL_FEE_INPUTS`] fee inputs.
+/// RR0: at most 1 + [`MAX_REFILL_FEE_INPUTS`] inputs. It checks the count only.
 fn assert_refill_input_count(psbt: &Psbt) -> Result<()> {
     let inputs = psbt.unsigned_tx.input.len();
     if inputs > 1 + MAX_REFILL_FEE_INPUTS {
@@ -59,18 +58,18 @@ fn refill_colored_inputs(psbt: &Psbt, keys: &KeyManager) -> Result<Vec<usize>> {
 }
 
 /// RR6-RR8: one propagate that closes one right and makes rights only, on its
-/// own tx. Returns the closed right (for RR11) and the new rights' vouts (RR9).
-pub fn refill_rights(committed: &Committed) -> Result<(Opout, Vec<u32>)> {
+/// own tx. Returns the new rights' vouts (RR9).
+pub fn refill_rights(committed: &Committed) -> Result<Vec<u32>> {
     let transition = &committed.transition;
     assert_propagate(transition)?;
-    let right = single_right_input(transition, "a rights refill")?;
+    assert_single_right_input(transition, "a rights refill")?;
     assert_rights_only(transition)?;
     let seals: Vec<OutputSeal> = transition
         .assignments
         .get(&schemata::OS_MINT)
         .map(|typed| typed.seals().map(output_seal).collect())
         .unwrap_or_default();
-    Ok((right, assert_refill_rights(&seals)?))
+    assert_refill_rights(&seals)
 }
 
 /// RR6: rights move only by propagate; a transfer, a burn or a mint is not a refill.

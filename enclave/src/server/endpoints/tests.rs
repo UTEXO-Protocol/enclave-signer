@@ -350,9 +350,9 @@ fn a_second_set_is_refused_and_the_first_values_stay() {
     assert_eq!(ctx.launch().unwrap().endpoints, first);
 }
 
-#[cfg(feature = "spv")]
+#[cfg(feature = "rgb-validation")]
 #[test]
-fn the_same_spv_build_accepts_different_runtime_hosts_ports_and_ca() {
+fn the_same_build_accepts_different_runtime_hosts_ports_and_ca() {
     let first = valid(1);
     let second = SetEndpointsRequest {
         electrum_url: "ssl://member-two-indexer.test:50003".into(),

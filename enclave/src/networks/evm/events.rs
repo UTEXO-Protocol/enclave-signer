@@ -57,14 +57,14 @@ fn extract_uint256_as_u64(data: &[u8], offset: usize) -> Result<u64> {
 /// The enclave does not decode `bytes settlementData`, but it is part of the
 /// signature and thus of `topic0`.
 pub(crate) const BRIDGE_FUNDS_IN_SIG: &str =
-    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,\
+    "BridgeFundsIn(bytes32,bytes32,address,bytes32,uint256,\
      uint256,uint256,uint256,uint256,uint256,string,bytes)";
 
 /// `operationId` is `topic1` (topic0 is the event signature itself).
 const BFI_OPERATION_ID_TOPIC: usize = 1;
 
 /// Byte offsets of the NON-INDEXED `BridgeFundsIn` data words (each 32 bytes).
-/// Order: senderNonce, amount(gross), netAmount, tokenCommission,
+/// Order: authorizationNonce, amount(gross), netAmount, tokenCommission,
 /// nativeCommission, sourceChainId, destinationChainId, <string offset>,
 /// <settlementData offset>.
 ///

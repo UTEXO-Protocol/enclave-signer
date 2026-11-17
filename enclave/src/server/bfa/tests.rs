@@ -159,7 +159,6 @@ mod mint {
     /// The mint a PSBT commits: `issued` units of mint [`OPID`], before block 110.
     fn mint(issued: u64) -> MintFacts {
         MintFacts {
-            right: rgbstd::Opout::new(rgbstd::OpId::from([1; 32]), schemata::OS_MINT, 0),
             opid: OPID,
             lock_id: lock(),
             issued,

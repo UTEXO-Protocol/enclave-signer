@@ -51,21 +51,20 @@ The default feature set is empty. A production image has one signer role:
 
 ```bash
 # Mint signer (EVM -> RGB)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,spv,mint-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,mint-signer
 
 # Burn signer (RGB -> EVM)
-cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,spv,burn-signer
+cargo build --release -p utexo-bridge-enclave --no-default-features --features vsock,burn-signer
 
 # Local TCP dev build (debug profile, seed import allowed)
-cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,spv,mint-signer
+cargo build -p utexo-bridge-enclave --no-default-features --features allow-seed-import,mint-signer
 ```
 
 | Feature | Implies | Description |
 |---------|---------|-------------|
 | `mint-signer` | `rgb-validation`, `kms-persistence` | Signer role: EVM -> RGB only (mint PSBT, `SignBtc`, `SignRightsRefill`). |
 | `burn-signer` | `rgb-validation` | Signer role: RGB -> EVM only (`fundsOut`, gas transaction). |
-| `spv` | `rgb-validation` | The Bitcoin header chain in the enclave and the witness inclusion proofs. |
-| `rgb-validation` | The RGB crates and the EVM client | Consignment validation, the BFA checks and the EVM RPC client. Without it the enclave refuses every bridge request. |
+| `rgb-validation` | The RGB crates and the EVM client | Consignment validation, the BFA checks, the Bitcoin header chain with the witness inclusion proofs, and the EVM RPC client. Without it the enclave refuses every bridge request. |
 | `kms-persistence` | - | KMS seed generation and recovery with an encrypted copy in S3. Requires `mint-signer`. |
 | `vsock` | - | The vsock listener and forwarders (Linux). |
 | `allow-seed-import` | - | Mnemonic and raw-seed import. Dev only. |
@@ -76,8 +75,6 @@ Compile-time guards in `enclave/src/lib.rs`, each checked in CI:
 
 - `rgb-validation` needs exactly one of `mint-signer` and `burn-signer`.
 - `kms-persistence` needs `mint-signer`.
-- `rgb-validation` without `spv` needs a signer role and no dev feature.
-  The limit of such a build to public Signet is a boot check.
 - The three dev features do not compile in a release profile.
 
 Do not combine mutually exclusive features with `--all-features`.
@@ -122,9 +119,10 @@ enclave refuses any other schema, so an asset issued on another schema does
 not validate. Use the id of a BFA contract issued on this schema, for the
 mint image and the burn image.
 
-**Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles without
-`spv` for public Signet. `BUILD_PROFILE=stage-mainnet` builds both roles with
-`spv`, required relay checks and the Stage mainnet contracts. Each profile
+**Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles for public
+Signet, with relay checks off. `BUILD_PROFILE=stage-mainnet` builds both roles
+for Bitcoin mainnet, with required relay checks and the Stage mainnet
+contracts. Each profile
 uses dedicated release inputs and its own S3 subdirectory; see
 [build/profiles/README.md](../build/profiles/README.md).
 

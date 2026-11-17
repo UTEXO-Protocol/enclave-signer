@@ -85,12 +85,20 @@ forged histories a genesis of 1 right, unless the row names more.
   times from a real enclave. On every shape measured there, one request took
   at most its modeled time.
 
+**Outstanding measurement.** The table holds the rgb-lib revision it was
+measured at. `enclave/Cargo.toml` pins a newer one, which adds the
+wallet-less fascia inspection and reads more genesis globals in the
+consignment inspection. Nobody has measured the burn signer's validation and
+inspection again at that pin on the CPU of the burn hosts, so the ratios above
+do not cover it. Take the measurement below before the burn image of this pin
+is released.
+
 The ignored `caps::timings` test measures the twelve shapes. The `caps` tests
 also check the chain from a genesis of 255 rights and the read of the last
 bundle of a wide burn. Run them in release mode:
 
 ```bash
-cargo test --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib caps -- --ignored --nocapture --test-threads=1
+cargo test --release -p utexo-bridge-enclave --no-default-features --features burn-signer --lib caps -- --ignored --nocapture --test-threads=1
 ```
 
 Each `RGB_COST` line is a JSON record of one shape: the validation and

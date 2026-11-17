@@ -1,14 +1,13 @@
 //! A BFA mint over the wire, end to end, and the txid bind.
 //!
 //! The mint signer reads the mint from the fascia rgb-lib writes for the PSBT's
-//! tx and the fascia of the issuer's seed send that made its right. The txid
-//! bind assumes every input finalizes with an empty `scriptSig`. A P2SH-wrapped
-//! SegWit input pushes its redeemScript there (BIP-16), which changes the txid,
-//! so the broadcastable tx is not the one the PSBT commits.
+//! tx. The txid bind assumes every input finalizes with an empty `scriptSig`. A
+//! P2SH-wrapped SegWit input pushes its redeemScript there (BIP-16), which
+//! changes the txid, so the broadcastable tx is not the one the PSBT commits.
 //!
 //! Runs over the wire through `handle_sign`, so the `FundsIn` read with its
-//! finality, the mint-right rule and the parent proof are on the path. A
-//! receiving consumer then validates the consignment in full.
+//! finality and the mint-right rule are on the path. A receiving consumer then
+//! validates the consignment in full.
 //! Mint/burn flow only.
 // A full mint over the wire: the EVM -> RGB direction.
 #![cfg(all(feature = "rgb-validation", evm_to_rgb))]
@@ -90,7 +89,7 @@ sol! {
     event FundsIn(address indexed sender, uint256 indexed lockId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
-        uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
+        bytes32 authorizationNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
@@ -169,7 +168,7 @@ fn wrapped_segwit_aux() -> Aux {
 /// One BFA deposit, as the coordinator hands it to the enclave.
 struct Deposit {
     consignment: Vec<u8>,
-    /// The issuer's seed send. Its fascia is the mint's parent proof.
+    /// The issuer's seed send, which made the right.
     seed: Committed,
     mint: Committed,
     contract_id: ContractId,
@@ -254,9 +253,7 @@ fn issue_and_mint(
         .unwrap_or_default();
     let (to, outputs) = pay(payee, &user_funding, bridge_spk);
     let mint = if keeps_right {
-        history
-            .mint_keeping_right(right, issued, BEFORE_BLOCK, to, extra, outputs)
-            .0
+        history.mint_keeping_right(right, issued, BEFORE_BLOCK, to, extra, outputs)
     } else {
         history.mint(right, issued, BEFORE_BLOCK, to, extra, outputs)
     };
@@ -298,7 +295,7 @@ fn deposit_receipt(
         operationId: operation_id.into(),
         sourceSender: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
-        senderNonce: alloy_primitives::U256::ZERO,
+        authorizationNonce: [0u8; 32].into(),
         amount: alloy_primitives::U256::from(MINTED),
         netAmount: alloy_primitives::U256::from(MINTED),
         tokenCommission: alloy_primitives::U256::ZERO,
@@ -570,7 +567,6 @@ fn sign_request(built: &Built) -> SignRequest {
             psbt_bytes: built.psbt.serialize(),
             asset_id: built.deposit.contract_id.to_string(),
             fascia: built.deposit.mint.fascia_bytes(),
-            parent_fascia: built.deposit.seed.fascia_bytes(),
         })),
     }
 }
@@ -925,20 +921,11 @@ fn refusal_of_edited(edit: impl FnOnce(&mut RgbDestination)) -> String {
     refusal(&sign_over_the_wire(&ctx, request))
 }
 
-/// The mint signer needs the fascia of the tx that made the right: it pins the
-/// right's UTXO.
-#[test]
-fn refuses_a_mint_without_its_parent_fascia() {
-    let refusal = refusal_of_edited(|destination| destination.parent_fascia.clear());
-    assert!(refusal.contains("parent_fascia required"), "{refusal}");
-}
-
 /// rgb-lib strips the mint's PSBT, so without its fascia the request shows nothing.
 #[test]
 fn refuses_a_mint_without_its_fascia() {
     let refusal = refusal_of_edited(|destination| destination.fascia.clear());
     assert!(refusal.contains("fascia required"), "{refusal}");
-    assert!(!refusal.contains("parent_fascia"), "{refusal}");
 }
 
 /// The same deposit plus one P2SH-P2WPKH input. The enclave must refuse it.

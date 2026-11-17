@@ -398,7 +398,6 @@ fn sign_psbt_request(
             psbt_bytes,
             asset_id: String::new(),
             fascia: vec![],
-            parent_fascia: vec![],
         })),
     }
 }
@@ -514,10 +513,7 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
 }
 
 /// A build without `rgb-validation` must refuse an RGB source, even with no
-/// merkle_proofs. It has no consensus code to check a consignment with.
-///
-/// A no-SPV burn signer is a different build. It has `rgb-validation` and signs
-/// on the indexer's witness status, so it does not run this test. The
+/// merkle_proofs. It has no consensus code to check a consignment with. The
 /// refusal fires in RGB source validation, whose message names the missing
 /// `rgb-validation` feature.
 #[cfg(not(feature = "rgb-validation"))]

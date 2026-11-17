@@ -3,12 +3,11 @@
 The mint signer path, in code order. Step-by-step text:
 [mint flow](../mint-flow.md).
 
-The request must have the EVM deposit hash, the PSBT rgb-lib committed, its
-fascia and the parent fascia of the spent right. The mint signer reads no
-consignment and no RGB key of the PSBT (rgb-lib strips them). It
-uses Taproot key-path signatures from the colored BIP-86 account. A blinded
-mint pays no sat out; a witness mint pays exactly `MINT_WITNESS_SAT` to its
-seal's output (M8).
+The request must have the EVM deposit hash, the PSBT rgb-lib committed and its
+fascia. The mint signer reads no consignment and no RGB key of the PSBT
+(rgb-lib strips them). It uses Taproot key-path signatures from the colored
+BIP-86 account. A blinded mint pays no sat out; a witness mint pays exactly
+`MINT_WITNESS_SAT` to its seal's output (M8).
 
 Plain-BTC PSBTs do not use this path. They use the separate `SignBtc` request
 (vanilla account, attested `allow_vanilla_psbt`, `BTC_MAX_TOTAL_SATS`,
@@ -23,13 +22,13 @@ sequenceDiagram
     participant Srv as enclave/server/sign.rs<br/>handle_sign
     participant Evt as networks::evm::events
     participant Rpc as EVM RPC<br/>(TLS to pinned host, ends in enclave)
-    participant Core as networks::rgb::psbt_commit<br/>+ parent_proof (fascia)
+    participant Core as networks::rgb::psbt_commit<br/>(fascia)
     participant Anchor as networks::rgb::psbt_validation
     participant State as EnclaveState<br/>op_replay_guard
     participant Km as KeyManager::sign_psbt_scoped
 
     Orc->>Listener: FundsIn deposit observed on EVM
-    Listener->>Parent: gRPC Sign(TRANSACTION, PSBT + fascia + parent_fascia)
+    Listener->>Parent: gRPC Sign(TRANSACTION, PSBT + fascia)
     Parent->>Wire: Sign{EvmSource, RgbDestination}
     Wire->>Srv: dispatch (endpoints must be set)
 
@@ -39,7 +38,7 @@ sequenceDiagram
 
     Note over Srv,State: 1 — replay precheck (read only, before network I/O)
     Srv->>State: check(keccak(chain_id, proxy, evm_tx_hash,<br/>funds_in_operation_id, asset_id))
-    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is usually a different request, and an identical retry gets here when the parent has no reply for it: not read, above the byte limit, dropped at the count or byte limit, or a parent restart)
+    State-->>Srv: unexpired entry still in cache ⇒ REFUSE<br/>(the parent answers a retry of the same request from its kept reply, so this is usually a different request, and an identical retry gets here only when the parent has no reply for it, mint-flow S7.6)
 
     Note over Srv,Rpc: 2 — this deposit (verify_funds_in_event)
     Srv->>Evt: tx_hash, funds_in_operation_id (32 bytes each), amount, commission
@@ -52,11 +51,10 @@ sequenceDiagram
     Evt-->>Srv: this deposit backs the request's amount
 
     Note over Srv,Core: 3 - the committed mint (validate_destination_anchor)
-    Srv->>Core: F1 parse, F2 witness_utxo native SegWit, sighash ALL / DEFAULT
-    Srv->>Core: fascia decodes, its witness txid == the PSBT txid<br/>F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 one fascia bundle, of RGB_ASSET_ID (== asset_id)<br/>F5 MPC tree of every fascia bundle + its entropy == opret commitment<br/>F6 one transition, its own id, input map == its inputs
+    Srv->>Anchor: F1 parse, M0 inputs ≤ mint_max_inputs, outputs ≤ mint_max_outputs,<br/>F2 witness_utxo native SegWit, sighash ALL / DEFAULT
+    Srv->>Core: F3 first OP_RETURN-or-P2TR output is the OP_RETURN<br/>F4 fascia decodes, one bundle, of RGB_ASSET_ID (== asset_id)<br/>F5/F6 rgb-lib inspect_fascia on the fascia bytes in a scratch file:<br/>its witness txid == the PSBT txid, opret close method,<br/>MPC tree of every fascia bundle under the entropy it carries == opret commitment,<br/>one transition under its own id, input map == its inputs,<br/>and the same tx, asset and transition the enclave read
     Srv->>Anchor: M1 TS_MINT, M2 one OS_MINT input, M3 OS_ASSET only,<br/>M4 issuedSupply > 0 and beforeBlock (8 bytes each),<br/>M5 units == issuedSupply == amount − commission,<br/>M7 one leg, blinded or a witness seal of this tx
     Srv->>Anchor: F7 one input, Colored key path of this enclave
-    Srv->>Core: PP1-PP7 parent fascia: core again on its own tx, one-right TS_PROPAGATE parent,<br/>right alone on a witness seal, the PSBT spends that output
     Srv->>Anchor: fee ≤ MAX_FEE_SATS, ≤ MAX_FEE_RATE_SAT_VB (unsigned size),<br/>≥ MIN_FEE_RATE_SAT_VB (estimated signed size)
     Srv->>Anchor: M8 blinded: no sat out<br/>witness: exactly MINT_WITNESS_SAT to the seal's output, not ours, nothing else
     Note over Srv,Rpc: 4 - M6 the deposit is this mint's (server::bfa::bind_mint_deposit)
@@ -85,8 +83,8 @@ sequenceDiagram
 ```
 
 The mint signer checks no RGB history and reads no indexer: a bad history
-makes the mint invalid for every receiver. The parent proof pins the one UTXO
-the mint spends, so every signature for the mint spends it. The replay cache
+makes the mint invalid for every receiver. The deposit names one lockId (M6),
+so every signature for the deposit is for one transaction. The replay cache
 is in memory and per enclave. It is not a durable deposit ledger.
 
 See [mint-flow.md](../mint-flow.md#5-checks-in-order) for each rule.

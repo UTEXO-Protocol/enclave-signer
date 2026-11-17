@@ -9,10 +9,12 @@
 //! - Mainnet: [`MAINNET_CHECKPOINT`], aligned to a retarget boundary. The
 //!   retarget lookup for the first boundary needs the block at
 //!   `height - 2016`.
-//! - Signet: [`SIGNET_CHECKPOINT`], a block of the UTEXO custom signet.
-//!   Local/dev builds can move it forward at boot with `SPV_CHECKPOINT` (see
-//!   [`resolve_checkpoint`]). Production-shaped builds do not start when it is
-//!   set.
+//! - Signet: [`SIGNET_CHECKPOINT`], a block of public Signet.
+//! - Custom signet: [`SIGNET_CUSTOM_CHECKPOINT`], a block of the UTEXO custom
+//!   signet.
+//! - Local/dev builds can move a checkpoint forward at boot with
+//!   `SPV_CHECKPOINT` (see [`resolve_checkpoint`]). Production-shaped builds
+//!   do not start when it is set.
 //! - Testnet4: [`TESTNET4_CHECKPOINT`], a retarget boundary, without
 //!   chainwork.
 //! - Regtest: standard regtest constants.
@@ -68,9 +70,27 @@ pub const MAINNET_CHECKPOINT: Checkpoint = Checkpoint {
     ]),
 };
 
+/// Public Signet checkpoint: block 320_544 (2026-09-03), on a retarget boundary.
+/// It must stay below the first witness of the stage asset.
+/// hash (display): 000000049b3569afce7d8c61809c26c08a37cd181b8717bdf6648943b8316c31
+pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
+    height: 320_544,
+    hash: [
+        0x31, 0x6c, 0x31, 0xb8, 0x43, 0x89, 0x64, 0xf6, 0xbd, 0x17, 0x87, 0x1b, 0x18, 0xcd, 0x37,
+        0x8a, 0xc0, 0x26, 0x9c, 0x80, 0x61, 0x8c, 0x7d, 0xce, 0xaf, 0x69, 0x35, 0x9b, 0x04, 0x00,
+        0x00, 0x00,
+    ],
+    bits: 0x1d14_19ac,
+    time: 1_788_443_403,
+    is_real: true,
+    // Unknown, so a signet `fundsOut` fails under `BTC_RELAY_MODE=required`
+    // with this compiled checkpoint.
+    chain_work: None,
+};
+
 /// UTEXO custom signet checkpoint: block 334_000 (2026-06-02).
 /// hash (display): 000000ac5fccb8a26d3bf859952e164b4fb65190c8f29c8339c6a2c39f3aeb66
-pub const SIGNET_CHECKPOINT: Checkpoint = Checkpoint {
+pub const SIGNET_CUSTOM_CHECKPOINT: Checkpoint = Checkpoint {
     height: 334_000,
     hash: [
         0x66, 0xeb, 0x3a, 0x9f, 0xc3, 0xa2, 0xc6, 0x39, 0x83, 0x9c, 0xf2, 0xc8, 0x90, 0x51, 0xb6,
@@ -180,7 +200,8 @@ impl Checkpoint {
 pub fn checkpoint_for(network: Network) -> Checkpoint {
     match network {
         Network::Mainnet => MAINNET_CHECKPOINT,
-        Network::Signet | Network::SignetCustom => SIGNET_CHECKPOINT,
+        Network::Signet => SIGNET_CHECKPOINT,
+        Network::SignetCustom => SIGNET_CUSTOM_CHECKPOINT,
         Network::Testnet3 => TESTNET3_CHECKPOINT,
         Network::Testnet4 => TESTNET4_CHECKPOINT,
         Network::Regtest => REGTEST_CHECKPOINT,

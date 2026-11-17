@@ -76,6 +76,6 @@ fn route_proof_rejects_a_transfer() {
     );
 }
 
-/// The mint signer's routes, from the PSBT, its fascia and its parent's alone.
+/// The mint signer's routes, from the PSBT and its fascia alone.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 mod psbt_path;

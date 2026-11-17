@@ -27,10 +27,6 @@ fn main() {
     // Pinned bridge config. Committed in attestation `user_data` and checked on
     // every signing request.
     let bridge_config = BridgeConfig::from_env();
-    #[cfg(all(feature = "rgb-validation", not(feature = "spv")))]
-    bridge_config
-        .validate_indexer_only()
-        .expect("invalid indexer-only configuration");
     bootstrap::log_bridge_config(&bridge_config);
 
     // Validate the build policy before starting the server. SetEndpoints

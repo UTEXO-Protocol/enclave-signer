@@ -94,13 +94,8 @@ fn start_mock_enclave() -> u16 {
                 Some(enclave_request::Request::SignRightsRefill(req)) => EnclaveResponse {
                     response: Some(enclave_response::Response::SignedPsbt(
                         enclave_proto::SignedPsbtResponse {
-                            signed_psbt: [
-                                req.psbt_bytes,
-                                req.fascia,
-                                req.parent_fascia,
-                                req.asset_id.into_bytes(),
-                            ]
-                            .concat(),
+                            signed_psbt: [req.psbt_bytes, req.fascia, req.asset_id.into_bytes()]
+                                .concat(),
                             inputs_signed: 1,
                         },
                     )),
@@ -502,7 +497,7 @@ fn received_rgb_destination(
 }
 
 #[tokio::test]
-async fn grpc_rgb_destination_forwards_both_fascias() {
+async fn grpc_rgb_destination_forwards_the_psbt_and_its_fascia() {
     let (enclave_port, received) = start_sign_reply_mock(signed_psbt_reply());
     let grpc_port = start_grpc_server(enclave_port).await;
     let mut client = ParentServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
@@ -513,7 +508,6 @@ async fn grpc_rgb_destination_forwards_both_fascias() {
         psbt_bytes: vec![0xFF; 32],
         rgb_asset_id: "rgb:asset".into(),
         fascia: vec![0x05; 6],
-        parent_fascia: vec![0x04; 8],
     };
     client
         .sign(sign_rgb_request(evm_source(0, 0), payload))
@@ -523,13 +517,12 @@ async fn grpc_rgb_destination_forwards_both_fascias() {
     let destination = received_rgb_destination(&received);
     assert_eq!(destination.psbt_bytes, vec![0xFF; 32]);
     assert_eq!(destination.fascia, vec![0x05; 6]);
-    assert_eq!(destination.parent_fascia, vec![0x04; 8]);
     assert_eq!(destination.asset_id, "rgb:asset");
 }
 
-/// The CLI's sign-psbt path: the client puts each fascia in its own field.
+/// The CLI's sign-psbt path: the client puts the fascia in its own field.
 #[test]
-fn client_sign_psbt_forwards_both_fascias() {
+fn client_sign_psbt_forwards_its_fascia() {
     let (enclave_port, received) = start_sign_reply_mock(signed_psbt_reply());
     let client = EnclaveClient::new(&format!("127.0.0.1:{enclave_port}"));
     client
@@ -545,13 +538,11 @@ fn client_sign_psbt_forwards_both_fascias() {
             psbt_bytes: vec![0xFF; 32],
             rgb_asset_id: "rgb:asset".into(),
             fascia: vec![0x05; 6],
-            parent_fascia: vec![0x04; 8],
         })
         .unwrap();
 
     let destination = received_rgb_destination(&received);
     assert_eq!(destination.fascia, vec![0x05; 6]);
-    assert_eq!(destination.parent_fascia, vec![0x04; 8]);
 }
 
 #[tokio::test]
@@ -572,7 +563,6 @@ async fn grpc_sign_refuses_crossed_reply_type() {
         psbt_bytes: vec![0xFF; 32],
         rgb_asset_id: String::new(),
         fascia: vec![],
-        parent_fascia: vec![],
     };
 
     let cases = [
@@ -674,7 +664,6 @@ fn rights_refill_request() -> SignRequest {
             rgb_asset_id: "rgb:asset".into(),
             // The enclave reads no consignment for a refill.
             fascia: vec![0x05; 6],
-            parent_fascia: vec![0x04; 5],
         })),
     }
 }
@@ -692,13 +681,7 @@ async fn grpc_rights_refill_forwards_its_payload_and_returns_the_signed_psbt() {
         .await
         .unwrap()
         .into_inner();
-    let echoed = [
-        vec![0x01; 3],
-        vec![0x05; 6],
-        vec![0x04; 5],
-        b"rgb:asset".to_vec(),
-    ]
-    .concat();
+    let echoed = [vec![0x01; 3], vec![0x05; 6], b"rgb:asset".to_vec()].concat();
     assert_eq!(resp.signature, echoed);
     assert!(resp.public_key.is_empty() && resp.call_data.is_empty());
 }

@@ -16,13 +16,12 @@ pub type BlockHash = [u8; 32];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
     Mainnet,
-    /// Default global signet or a custom signet. Their challenge scripts
-    /// differ, and the enclave holds neither. Header validation is the same
-    /// for both: the BIP-325 coinbase signature is not verified (see
+    /// Public Signet (RGB `sb`), anchored at `SIGNET_CHECKPOINT`. Header
+    /// validation does not verify the BIP-325 coinbase signature (see
     /// `validation.rs`).
     Signet,
-    /// The UTEXO custom signet as RGB names it (`sbc`). Same headers and
-    /// checkpoint as [`Self::Signet`]; only the RGB chain-network differs.
+    /// The UTEXO custom signet (RGB `sbc`), anchored at
+    /// `SIGNET_CUSTOM_CHECKPOINT`, with the header rules of [`Self::Signet`].
     SignetCustom,
     Testnet3,
     /// Testnet4: the 20-minute min-difficulty rule plus BIP94.

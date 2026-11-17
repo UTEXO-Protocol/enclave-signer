@@ -5,8 +5,8 @@
 //! no units move.
 //!
 //! Cheapest first, since the listener gRPC has no auth: a PSBT-only gate and
-//! the rate limit, then the committed transition and its parent proof, then
-//! key ownership of each new right. No network.
+//! the rate limit, then the committed transition, then key ownership of each
+//! new right. No network.
 
 use std::time::Instant;
 
