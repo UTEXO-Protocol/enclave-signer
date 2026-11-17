@@ -144,22 +144,41 @@ fn seed_preserved_for_cloning() {
 
 #[test]
 fn test_sign_evm_recoverable() {
+    use alloy_primitives::U256;
     use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
     let seed = [0x42u8; 64];
     let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
-    let hash = [0xABu8; 32];
-    let sig_bytes = km.sign_evm(&hash).unwrap();
+    assert_eq!(
+        hex::encode(km.evm_address()),
+        "68bbc0fe8ecab9603a2dc725bd7f0003597cd0fa"
+    );
+    let half_order = U256::from_str_radix(
+        "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
+        16,
+    )
+    .unwrap();
 
-    let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
-    let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
-    let recovered_key = VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
+    // geth v1.17.3 independently calculates the address and both recovery IDs.
+    // The submitter adds 27 to the enclave's recovery ID before calling the contract.
+    for (hash, expected_recovery_id) in [([0xABu8; 32], 0), ([0x01u8; 32], 1)] {
+        let sig_bytes = km.sign_evm(&hash).unwrap();
+        assert_eq!(sig_bytes.len(), 65);
+        assert_eq!(sig_bytes[64], expected_recovery_id);
+        let s = U256::from_be_slice(&sig_bytes[32..64]);
+        assert!(s > U256::ZERO && s <= half_order, "signature must be low-S");
 
-    let pubkey_bytes = recovered_key.to_sec1_point(false);
-    let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
-    let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
+        let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
+        let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
+        let recovered_key =
+            VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
 
-    assert_eq!(&recovered_address, km.evm_address());
+        let pubkey_bytes = recovered_key.to_sec1_point(false);
+        let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
+        let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
+
+        assert_eq!(&recovered_address, km.evm_address());
+    }
 }
 
 /// A PSBT over the size limit is refused before the parse, for every account
