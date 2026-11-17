@@ -83,9 +83,11 @@ request must carry no record.
 ## Test vectors
 
 [burn-destination-vectors.json](burn-destination-vectors.json). Each vector
-gives the inputs, the `abi.encode` bytes and the hash. They were made with
-go-ethereum `accounts/abi`. The enclave unit tests check the same file. Run it
-in your language before you ship.
+gives the inputs, the `abi.encode` bytes and the hash. A manual ABI reference
+in the unit tests reproduces the bytes without the enclave's Alloy record
+type. The production comparison checks the same fixed values. See [vector
+provenance and commands](burn-vector-provenance.md) to repeat the checks.
+Run the vectors in your language before you ship.
 
 ## Transport
 

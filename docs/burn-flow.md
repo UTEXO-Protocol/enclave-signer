@@ -106,7 +106,7 @@ The [sequence diagram in code order](diagrams/03-seq-sign-evm.md) and the
 | `MAX_TEE_DEADLINE_SECS` | 1 day | The longest time a signature stays valid. The same value as `MultisigProxy.MAX_TEE_DEADLINE`. |
 | `MAX_LZ_RECEIVE_GAS` | 1,000,000 | The most gas a LayerZero `lzReceive` option may ask for. |
 | `MAX_RELAY_TIP_LAG_BLOCKS` | 100 | The largest distance from the BtcRelay tip to the enclave tip. |
-| EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Tests compare it with contract fixtures. |
+| EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Independent encoders and [protocol vectors](burn-vector-provenance.md) check its format. |
 
 `SPV_MIN_CONFIRMATIONS` is an image setting
 ([configuration.md](configuration.md)). The size and work limits named below

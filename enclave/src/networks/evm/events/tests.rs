@@ -1068,6 +1068,32 @@ fn verify_rgb_funds_in_rejects_a_log_from_an_unpinned_contract() {
     assert!(e.contains("no FundsIn log"), "got: {e}");
 }
 
+/// Alloy's tuple encoder independently checks the fixed RGB-network vectors.
+fn contract_mint_deposit_id(
+    cfg: &crate::config::BridgeConfig,
+    lock_id: &[u8; 32],
+    amount: u64,
+) -> [u8; 32] {
+    use alloy_primitives::{keccak256, Address, U256};
+    use alloy_sol_types::SolValue;
+
+    let typehash = keccak256(
+        "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,\
+         uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)",
+    );
+    let encoded = (
+        typehash,
+        Address::from(cfg.funds_in_contract),
+        U256::from(cfg.chain_id),
+        Address::from(cfg.token_contract),
+        U256::from(827166u64),
+        U256::from_be_bytes(*lock_id),
+        U256::from(amount),
+    )
+        .abi_encode();
+    keccak256(encoded).0
+}
+
 /// The shared vector, with `rgbNetwork` = `RGB_CHAIN_ID`. The id is a pure
 /// function of the 32-byte word, so it holds for a lockId word too.
 #[test]
@@ -1089,16 +1115,21 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
     lock_id[1] = 0x01;
     lock_id[31] = 0x02;
 
+    let expected = "37a9c9b5fe6b36b6ac70e27858cd0408becfe3ee3b10161e27d3faf7fc200d25";
     assert_eq!(
         hex::encode(rgb_mint_deposit_id(&cfg, &lock_id, 100_000).unwrap()),
-        "37a9c9b5fe6b36b6ac70e27858cd0408becfe3ee3b10161e27d3faf7fc200d25"
+        expected
+    );
+    assert_eq!(
+        hex::encode(contract_mint_deposit_id(&cfg, &lock_id, 100_000)),
+        expected
     );
 }
 
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
 /// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
-fn rgb_mint_deposit_id_matches_the_contract_vector() {
+fn rgb_mint_deposit_id_matches_adapted_contract_inputs() {
     let cfg = crate::config::BridgeConfig {
         funds_in_contract: [0x11; 20],
         token_contract: [0x22; 20],
@@ -1108,9 +1139,14 @@ fn rgb_mint_deposit_id_matches_the_contract_vector() {
     let mut lock_id = [0u8; 32];
     lock_id[29..].copy_from_slice(&[0xab, 0xcd, 0xef]);
 
+    let expected = "f275b61cb80792e5a40bf8de0b0d66b3ed9c29b774ea9df36d3ae567eb17c3c4";
     assert_eq!(
         hex::encode(rgb_mint_deposit_id(&cfg, &lock_id, 1_000_000).unwrap()),
-        "f275b61cb80792e5a40bf8de0b0d66b3ed9c29b774ea9df36d3ae567eb17c3c4"
+        expected
+    );
+    assert_eq!(
+        hex::encode(contract_mint_deposit_id(&cfg, &lock_id, 1_000_000)),
+        expected
     );
 }
 
