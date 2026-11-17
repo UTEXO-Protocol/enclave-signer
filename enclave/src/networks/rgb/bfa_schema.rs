@@ -11,7 +11,7 @@
 //! then names a contract of the old schema: the test fails until the ids and
 //! the asset are updated together.
 
-use rgbstd::{GlobalStateType, MetaType, TransitionType};
+use rgbstd::{GlobalStateType, MetaType};
 
 use rgb_lib::{AssignmentType, SchemaId};
 
@@ -40,17 +40,19 @@ pub const OS_ASSET: AssignmentType = AssignmentType::with(4000);
 /// A mint right. Only the bridge holds these.
 pub const OS_MINT: AssignmentType = AssignmentType::with(4013);
 
-pub const TS_INFLATION: TransitionType = TransitionType::with(8000);
-pub const TS_BURN: TransitionType = TransitionType::with(8010);
-pub const TS_LINK: TransitionType = TransitionType::with(8012);
-pub const TS_MINT: TransitionType = TransitionType::with(8013);
-pub const TS_PROPAGATE: TransitionType = TransitionType::with(8014);
-pub const TS_TRANSFER_INFLATION: TransitionType = TransitionType::with(8015);
-pub const TS_TRANSFER_LINK: TransitionType = TransitionType::with(8016);
-pub const TS_TRANSFER: TransitionType = TransitionType::with(10000);
+pub const TS_INFLATION: u16 = 8000;
+pub const TS_BURN: u16 = 8010;
+pub const TS_LINK: u16 = 8012;
+pub const TS_MINT: u16 = 8013;
+pub const TS_PROPAGATE: u16 = 8014;
+pub const TS_TRANSFER_INFLATION: u16 = 8015;
+pub const TS_TRANSFER_LINK: u16 = 8016;
+pub const TS_TRANSFER: u16 = 10000;
 
 #[cfg(test)]
 mod tests {
+    use amplify::Wrapper;
+
     use super::*;
 
     /// Every id must still be the pinned schema's. `rgb-schemas` is a
@@ -66,13 +68,16 @@ mod tests {
         assert_eq!(MS_BEFORE_BLOCK, schemata::MS_BEFORE_BLOCK);
         assert_eq!(OS_ASSET, schemata::OS_ASSET);
         assert_eq!(OS_MINT, schemata::OS_MINT);
-        assert_eq!(TS_INFLATION, schemata::TS_INFLATION);
-        assert_eq!(TS_BURN, schemata::TS_BURN);
-        assert_eq!(TS_LINK, schemata::TS_LINK);
-        assert_eq!(TS_MINT, schemata::TS_MINT);
-        assert_eq!(TS_PROPAGATE, schemata::TS_PROPAGATE);
-        assert_eq!(TS_TRANSFER_INFLATION, schemata::TS_TRANSFER_INFLATION);
-        assert_eq!(TS_TRANSFER_LINK, schemata::TS_TRANSFER_LINK);
-        assert_eq!(TS_TRANSFER, schemata::TS_TRANSFER);
+        assert_eq!(TS_INFLATION, schemata::TS_INFLATION.to_inner());
+        assert_eq!(TS_BURN, schemata::TS_BURN.to_inner());
+        assert_eq!(TS_LINK, schemata::TS_LINK.to_inner());
+        assert_eq!(TS_MINT, schemata::TS_MINT.to_inner());
+        assert_eq!(TS_PROPAGATE, schemata::TS_PROPAGATE.to_inner());
+        assert_eq!(
+            TS_TRANSFER_INFLATION,
+            schemata::TS_TRANSFER_INFLATION.to_inner()
+        );
+        assert_eq!(TS_TRANSFER_LINK, schemata::TS_TRANSFER_LINK.to_inner());
+        assert_eq!(TS_TRANSFER, schemata::TS_TRANSFER.to_inner());
     }
 }

@@ -34,31 +34,14 @@ pub struct ValidatedConsignment {
     /// A `bitcoin::Txid`, not display-order bytes, to prevent byte-order
     /// errors. `None` only for a consignment with no bundles.
     pub last_witness_txid: Option<bitcoin::Txid>,
-    /// Input prevouts of that witness tx. A V1 bundle always carries the full
-    /// tx. Only tests read this field.
-    pub last_transfer_witness_prevouts: Vec<bitcoin::OutPoint>,
-    /// The outpoints whose seals the last bundle's transitions close. Only
-    /// tests read this field, but reading these seals refuses a transition
-    /// input with no revealed seal.
-    pub last_closed_seals: Vec<bitcoin::OutPoint>,
-    /// Every transition of the last bundle is in the consignment. A hidden
-    /// one still counts in the bundle id, so a signature would commit to
-    /// state moves the enclave never saw. Only tests read this field.
-    pub last_bundle_fully_disclosed: bool,
-    /// The `mintRight` (`OS_MINT`) outputs of the settling transition. Only
-    /// tests read this field. The mint signer checks the fascia instead (M3).
-    pub last_mint_rights: Vec<OutputSeal>,
-    /// Authoritative OpId (32-byte commitment hash) of the **last**
-    /// transition, read from the rgbstd-**validated** `Transfer`
-    /// (`KnownTransition.opid` of the same bundle as `last_witness_txid`),
-    /// NOT from the flat summary.
+    /// OpId (32-byte commitment hash) of the settling transition, decoded
+    /// from the inspection's hex id. rgb-lib refuses to inspect a transition
+    /// stored under an id that is not its own commitment.
     ///
     /// The `fundsOut` bind of `sourceBurnTxId` reads it, so the burn that a
     /// release names is the burn that consensus validated. `Some` for a
     /// settling transition of any type: the flow check refuses one that is not a burn.
     /// `None` only for a consignment with no bundles.
-    /// Validation refuses a consignment where this OpId and the flat summary's
-    /// `last_transition.op_id` differ.
     pub last_transfer_op_id: Option<[u8; 32]>,
     /// Witness txids that are **not mined**, in **display (big-endian) byte
     /// order**, as [`Self::witness_txids`].

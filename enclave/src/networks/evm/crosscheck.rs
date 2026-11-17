@@ -170,9 +170,9 @@ pub fn validate_funds_out_source_burn_tx_id(
             "fundsOut requires a consignment with at least one transition".into(),
         ));
     }
-    // The OpId that RGB consensus validated, not the flat summary's copy.
-    // Validation fills it for a burn and refuses a consignment where the two
-    // walks disagree, so this bind cannot name one burn and pay another.
+    // The OpId of the settling transition, which validation decodes from the
+    // id the inspection reports for it, so this bind cannot name one burn and
+    // pay another.
     let expected = validated.last_transfer_op_id.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "fundsOut requires the validated OpId of the settling burn, but the consignment \
@@ -496,8 +496,8 @@ struct ConsignmentAnchor {
     txid: [u8; 32],
 }
 
-/// Finds that block from trusted evidence only: the txid from the
-/// rgbstd-validated consignment, the height from the tx SPV proof, and the hash
+/// Finds that block from trusted evidence only: the txid from the consignment
+/// that validation accepted, the height from the tx SPV proof, and the hash
 /// from the enclave header chain. Nothing comes from the calldata. If no header
 /// is at that height, the enclave is behind, so it refuses.
 ///

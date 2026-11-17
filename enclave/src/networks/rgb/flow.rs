@@ -51,7 +51,7 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 /// destroys no asset units, so it cannot back a release.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if rgbstd::TransitionType::with(last.transition_type) != bfa_schema::TS_BURN {
+    if last.transition_type != bfa_schema::TS_BURN {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut requires a burn transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",

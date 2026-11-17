@@ -22,7 +22,7 @@ use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
 
 use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
-use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
+use super::consignment::extract_transition_summary;
 use super::cost::assert_bounded_for_rgb_lib;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
 use super::schema::reject_list;
@@ -30,6 +30,7 @@ use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
 use super::witness::{ConfirmedWitnesses, OnChainResolver};
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::bfa_schema;
 
 impl RgbValidator {
     /// Validates raw consignment bytes and returns the extracted data.
@@ -221,29 +222,21 @@ fn summarize(
         .into_iter()
         .collect();
 
-    let last = read_last_bundle(transfer)?;
-    let last_transition = settling_summary(&transitions_by_witness, last.as_ref())?;
+    let last_transition = settling_summary(&transitions_by_witness)?;
+    let last_transfer_op_id = last_transition
+        .as_ref()
+        .map(|t| bfa::decode_opid(&t.op_id))
+        .transpose()?;
 
     Ok(ValidatedConsignment {
         contract_id: transfer.contract_id().to_string(),
         chain_net: transfer.genesis.chain_net.prefix().to_string(),
         witness_txids,
+        last_witness_txid: last_transition
+            .as_ref()
+            .and(transitions_by_witness.last().map(|(txid, _)| *txid)),
         last_transition,
-        last_witness_txid: last.as_ref().map(|l| l.witness_txid),
-        last_transfer_witness_prevouts: last
-            .as_ref()
-            .map(|l| l.prevouts.clone())
-            .unwrap_or_default(),
-        last_closed_seals: last
-            .as_ref()
-            .map(|l| l.closed_seals.clone())
-            .unwrap_or_default(),
-        last_bundle_fully_disclosed: last.as_ref().is_some_and(|l| l.fully_disclosed),
-        last_mint_rights: last
-            .as_ref()
-            .map(|l| l.settling.mint_rights.clone())
-            .unwrap_or_default(),
-        last_transfer_op_id: last.as_ref().map(|l| l.settling.opid),
+        last_transfer_op_id,
         non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
@@ -272,42 +265,23 @@ fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32
     Ok(txids.into_iter().collect())
 }
 
-/// The flat summary of the settling transition, with the burn facts of the
-/// validated one. The two walks must name the same transition: a mismatch is
-/// an rgb-lib change or a bug, so no bind may mix the fields of two transitions.
+/// The settling transition of the last bundle: its last burn, or its last
+/// transition when it burns nothing. Two burns in one bundle are refused,
+/// since only one of them could ever be released.
 pub(super) fn settling_summary(
     by_witness: &[(bitcoin::Txid, Vec<TransitionSummary>)],
-    last: Option<&LastBundle>,
 ) -> Result<Option<TransitionSummary>> {
-    let Some(last) = last else {
+    let Some((_, summaries)) = by_witness.last() else {
         return Ok(None);
     };
-    let flat = by_witness
-        .last()
-        .filter(|(txid, _)| *txid == last.witness_txid)
-        .and_then(|(_, summaries)| {
-            summaries
-                .iter()
-                .find(|t| bfa::decode_opid(&t.op_id).is_ok_and(|id| id == last.settling.opid))
-        })
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(format!(
-                "consignment settling transition 0x{} is missing from the inspected last bundle \
-                 - refusing to sign",
-                hex::encode(last.settling.opid)
-            ))
-        })?;
-    if flat.transition_type != last.settling.transition_type {
+    let is_burn = |t: &TransitionSummary| t.transition_type == bfa_schema::TS_BURN;
+    let burns = summaries.iter().filter(|t| is_burn(t)).count();
+    if burns > 1 {
         return Err(EnclaveError::CrossCheck(format!(
-            "consignment settling transition type {} disagrees with the inspected type {}",
-            last.settling.transition_type, flat.transition_type
+            "the last bundle carries {burns} burns - a release settles exactly one"
         )));
     }
-    Ok(Some(TransitionSummary {
-        burned_asset_amount: last.settling.burned_asset,
-        burn_reason: last.settling.burn_reason,
-        ..flat.clone()
-    }))
+    Ok(super::consignment::settling_index(summaries, is_burn).map(|i| summaries[i].clone()))
 }
 
 /// rgb-lib's refusal, with what it means for this enclave.

@@ -895,9 +895,6 @@ fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
             secret_seal: recipient().to_string()
         }]
     );
-    assert!(validated.last_mint_rights.is_empty());
-    let spent = mint.psbt.unsigned_tx.input[0].previous_output;
-    assert_eq!(validated.last_closed_seals, vec![spent]);
 }
 
 #[test]
@@ -945,17 +942,14 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
         validated.last_transfer_op_id,
         Some(gen::opid_bytes(committed.opid))
     );
-    // The burn path reads seals from the validated transfer, where a seal of
-    // the witness tx carries no txid. The fascia path reads rgb-lib's
-    // inspection, which names that tx, so the two shapes differ.
-    let from_consensus: Vec<u32> = validated
-        .last_mint_rights
-        .iter()
-        .map(|seal| match seal {
-            validation::OutputSeal::Revealed { txid: None, vout } => *vout,
-            other => panic!("a refill right is revealed on its own tx, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(from_consensus, vouts);
-    assert_eq!(validated.last_closed_seals, vec![rights[0].outpoint]);
+    assert_eq!(
+        validated.last_transition.map(|t| t.transition_type),
+        Some(bfa_schema::TS_PROPAGATE)
+    );
+    // The rights themselves are the mint signer's rule (RR8, RR9): a refill
+    // moves no units, so the burn path's summary carries no output for them.
+    assert_eq!(
+        vouts,
+        (1..=u32::try_from(vouts.len()).unwrap()).collect::<Vec<_>>()
+    );
 }
