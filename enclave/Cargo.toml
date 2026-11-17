@@ -82,9 +82,9 @@ tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-mu
 # already in the lock under reqwest.
 rustls-pki-types = { version = "1.15", optional = true }
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, optional = true }
-# The EVM RPC TLS (reqwest) offers the hybrid post-quantum key exchange first.
-# Already in the lock under reqwest.
-rustls = { version = "0.23", default-features = false, features = ["prefer-post-quantum"], optional = true }
+# The EVM RPC TLS (reqwest) offers the hybrid post-quantum key exchange first
+# and logs its TLS events. Already in the lock under reqwest.
+rustls = { version = "0.23", default-features = false, features = ["logging", "prefer-post-quantum"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
