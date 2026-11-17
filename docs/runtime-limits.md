@@ -137,12 +137,14 @@ refuses the request and changes nothing.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
   limits, a consignment scratch file for each request, and the baseline. rgb-lib
-  reads a consignment only from a file, and the enclave keeps that file in RAM. A
-  file takes up to `max_consignment_bytes`, and never more than
-  `max_message_bytes`. The enclave removes the file when rgb-lib ends, also after
-  a refusal. The boot check does not count the files. This check counts
-  them, also for a change that keeps the image values. A refusal states how many
-  MiB the new limits need. A larger frame or consignment limit can need a larger
+  reads a consignment, and a fascia, only from a file, and the enclave keeps that
+  file in RAM. A consignment file takes up to `max_consignment_bytes` and a
+  fascia file up to `max_psbt_bytes`, and never more than `max_message_bytes`. A
+  request holds one such file at a time. The enclave removes the file when
+  rgb-lib ends, also after a refusal. The boot check does not count the files.
+  This check counts one file at the larger of the two limits, also for a
+  change that keeps the image values. A refusal states how many MiB the new
+  limits need. A larger frame or consignment limit can need a larger
   `run-enclave --memory` value, which needs a new launch
   ([operations.md](operations.md#memory)).
 

@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 bip39 = { version = "3", features = ["zeroize"] }
-bitcoin = { version = "0.32", features = ["std"] }
+# `base64` writes the PSBT string that rgb-lib's fascia inspection parses.
+bitcoin = { version = "0.32", features = ["std", "base64"] }
 chacha20poly1305 = "0.11"
 enclave-proto = { path = "../enclave-proto" }
 getrandom = "0.4.2"
@@ -54,8 +55,9 @@ amplify = { version = "=4.8.1", optional = true }
 # RGB data (rgb-lib strips it from the PSBT). The version rgb-ops pins.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6", optional = true }
 # RGB-Tools rgb-lib 0.3.0-beta.8, without the wallet. It validates a consignment
-# and reads its flat summary (`inspect_consignment`).
-rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "567e5b8308f70a6242137475394be5a82fc15c95", default-features = false, optional = true }
+# and reads its flat summary (`inspect_consignment`), and it inspects the
+# fascia of a mint or refill transaction (`inspect_fascia`).
+rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "ea2b745b66b20fbaf3001e2121e1329c4695f647", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 

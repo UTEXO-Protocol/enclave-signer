@@ -9,7 +9,7 @@ use rgbstd::containers::Transfer;
 use rgbstd::contract::TransitionBuilder;
 use rgbstd::{ChainNet, ContractId, Operation, TypedAssigns};
 
-use super::super::scratch::with_scratch_file;
+use super::super::super::scratch::with_scratch_file;
 use super::super::transition::output_seal;
 use super::*;
 
@@ -351,7 +351,7 @@ fn reference_of(bytes: &[u8]) -> Summary {
 
 /// The summary validation reads: rgb-lib's inspection of the file.
 pub(super) fn inspected(bytes: &[u8]) -> Result<Summary> {
-    with_scratch_file(bytes, |path| {
+    with_scratch_file("consignment", bytes, |path| {
         extract_transition_summary(path.to_str().unwrap())
     })
 }

@@ -22,13 +22,13 @@ use rgb_lib::BitcoinNetwork;
 use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
 use rgbstd::validation::ResolveWitness;
 
+use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
 use super::cost::assert_bounded_for_rgb_lib;
 use super::indexer::RgbValidator;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
 use super::schema::{assert_bfa_genesis, reject_list};
-use super::scratch::with_scratch_file;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::witness::{OnChainResolver, WitnessCheck};
 use crate::error::{EnclaveError, Result};
@@ -120,7 +120,7 @@ impl RgbValidator {
             })?,
             offchain_txid: None,
         };
-        with_scratch_file(consignment_bytes, |path| {
+        with_scratch_file("consignment", consignment_bytes, |path| {
             let path = path.to_str().ok_or_else(|| {
                 EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
             })?;

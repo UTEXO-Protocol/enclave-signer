@@ -363,7 +363,8 @@ calldata. Section 8 lists the predicates. [burn-flow.md](burn-flow.md) gives
 the checks in order.
 
 **EVM -> RGB (mint signer).** The enclave reads the mint from the fascia that
-rgb-lib wrote for the PSBT's transaction, and it validates no consignment. It
+rgb-lib wrote for the PSBT's transaction, and it validates no consignment.
+rgb-lib's wallet-less fascia inspection proves the commitments. It
 proves that the transaction commits exactly one mint of the pinned asset, that
 the mint issues exactly the deposited amount less the commission, that the
 deposit names this mint and this transaction, and that the PSBT spends the
