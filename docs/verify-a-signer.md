@@ -75,8 +75,8 @@ The script sets `chain_id` (42161) and `bridge_contract` (your
   IAM role. You set no flag for it. `attest-verify` takes the expected value
   from the signed document, and refuses a burn signer whose PCR3 is missing
   or all zero.
-- This recipe accepts a `Production` policy only. A burn signer built without
-  `spv` attests `Development`, which commits no endpoint, and fails here.
+- This recipe accepts a `Production` policy only. A public-Signet image
+  attests `Development`, which commits no endpoint, and fails here.
 
 ## Run the check
 

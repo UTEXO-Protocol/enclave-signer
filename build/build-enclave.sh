@@ -102,15 +102,6 @@ fi
 # endpoints are launch inputs in every profile. Unset protocol values retain
 # each Dockerfile's production defaults.
 if declares_build_arg ENCLAVE_FEATURES; then
-    # Match Docker's effective defaults when an override is unset or empty.
-    build_features="${ENCLAVE_FEATURES:-$(sed -n 's/^ARG ENCLAVE_FEATURES=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
-    bitcoin_network="${BITCOIN_NETWORK:-$(sed -n 's/^ARG BITCOIN_NETWORK=//p' "$SCRIPT_DIR/$DOCKERFILE")}"
-    if [ "$bitcoin_network" != signet ] && \
-        ! grep -qE '(^|[[:space:],])spv([[:space:],]|$)' <<< "$build_features"; then
-        echo "Error: $DOCKERFILE requires the spv feature when BITCOIN_NETWORK=$bitcoin_network." >&2
-        echo "       Include spv in ENCLAVE_FEATURES; omitting it is supported only on signet." >&2
-        exit 1
-    fi
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
         EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT \
         GAS_TX_ALLOWED_TO GAS_TX_MAX_GAS_LIMIT GAS_TX_MAX_FEE_PER_GAS GAS_TX_MAX_VALUE_WEI \

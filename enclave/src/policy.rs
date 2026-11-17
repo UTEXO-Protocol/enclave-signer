@@ -3,9 +3,9 @@
 //! [`SecurityPolicy::resolve`] makes it from the build features and the
 //! [`BridgeConfig`]. It is:
 //!
-//!   * fail-closed: a release `spv` build without a valid
-//!     [`SecurityPolicy::Production`], or a no-SPV build without
-//!     `Development { IndexerTrusted }`, does not boot or launch
+//!   * fail-closed: a release bridge build boots and launches only on a valid
+//!     [`SecurityPolicy::Production`], or a public-Signet image on
+//!     `Development { PublicSignet }`
 //!     ([`SecurityPolicy::assert_valid_at_boot`], `assert_valid_for_build`);
 //!   * attested: the attestation `user_data` commits
 //!     [`SecurityPolicy::commitment_bytes`];
@@ -25,8 +25,6 @@ pub use attestation_verify::{
 /// production policy pinned to one of them must use Bitcoin mainnet.
 pub const MAINNET_EVM_CHAIN_IDS: [u64; 2] = [1, 42161];
 
-const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature = "spv")));
-
 /// The resolved security policy. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 // One instance per enclave, so the variant size difference is not important.
@@ -34,9 +32,9 @@ const INDEXER_TRUSTED: bool = cfg!(all(feature = "rgb-validation", not(feature =
 pub enum SecurityPolicy {
     /// A fully pinned, fail-closed bridge-signing enclave.
     Production(ProductionPolicy),
-    /// Not a production bridge signer: a debug build, a dev feature, a no-SPV
-    /// build, a non-bridge build or an unpinned config. The reason goes into
-    /// logs and the fail-closed panic.
+    /// Not a production bridge signer: a debug build, a dev feature, a
+    /// public-Signet image, a non-bridge build or an unpinned config. The
+    /// reason goes into logs and the fail-closed panic.
     Development { reason: DevReason },
 }
 
@@ -108,8 +106,11 @@ pub struct ProductionPolicy {
 /// Why the policy is [`SecurityPolicy::Development`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DevReason {
-    /// Bitcoin finality is trusted from the indexer.
-    IndexerTrusted,
+    /// A public-Signet image with BtcRelay off. Signet headers carry no checked
+    /// proof of work.
+    PublicSignet,
+    /// A public-Signet image without a bridge pin or a confirmation depth.
+    IncompletePublicSignet,
     /// Built with `debug_assertions` (or under `cfg(test)`).
     DebugBuild,
     /// `mock-attestation` feature: zero-PCR attestation documents.
@@ -159,9 +160,9 @@ impl SecurityPolicy {
     /// Resolve the policy from the build context, the [`BridgeConfig`] and the
     /// launch endpoints.
     ///
-    /// Only a release `spv` build with all three pins set gives
-    /// [`SecurityPolicy::Production`]. All other inputs give
-    /// [`SecurityPolicy::Development`].
+    /// Only a release bridge build with all three pins set gives
+    /// [`SecurityPolicy::Production`], unless it is a public-Signet image with
+    /// BtcRelay off. All other inputs give [`SecurityPolicy::Development`].
     pub fn resolve(
         ctx: &BuildContext,
         bridge: &BridgeConfig,
@@ -169,13 +170,6 @@ impl SecurityPolicy {
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         electrum_host: &str,
     ) -> Self {
-        if ctx.rgb_validation && INDEXER_TRUSTED {
-            return Self::dev(if bridge.validate_indexer_only().is_ok() {
-                DevReason::IndexerTrusted
-            } else {
-                DevReason::Unconfigured
-            });
-        }
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
         if ctx.mock_attestation {
@@ -190,6 +184,16 @@ impl SecurityPolicy {
         // Release build from here.
         if !ctx.rgb_validation {
             return Self::dev(DevReason::NonBridgeBuild);
+        }
+        // Never Production: Signet headers prove no work and BtcRelay is off.
+        if bridge.bitcoin_network == BitcoinNetwork::Signet
+            && bridge.btc_relay_mode == BtcRelayMode::None
+        {
+            return Self::dev(if bridge.validate_public_signet().is_ok() {
+                DevReason::PublicSignet
+            } else {
+                DevReason::IncompletePublicSignet
+            });
         }
         if !bridge.is_configured() {
             return Self::dev(DevReason::Unconfigured);
@@ -214,7 +218,6 @@ impl SecurityPolicy {
             evm_source,
             electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
-            // RGB builds without SPV returned the Development policy above.
             btc_source: BtcDataSource::SpvVerified,
             // The same pins that `validate_gas_tx_request` enforces, so the
             // attested and the enforced rules agree.
@@ -311,20 +314,23 @@ impl SecurityPolicy {
     /// Require a valid policy for this build before accepting `SetEndpoints`.
     /// [`Self::assert_valid_at_boot`] runs the checks that need no endpoints.
     pub fn assert_valid_for_build(&self, ctx: &BuildContext) -> Result<(), String> {
-        // resolve() produces IndexerTrusted only after checking network/pins.
-        if ctx.rgb_validation && INDEXER_TRUSTED {
-            return match self {
-                Self::Development {
-                    reason: DevReason::IndexerTrusted,
-                } => Ok(()),
-                _ => Err("RGB validation without SPV requires a valid public-signet policy".into()),
-            };
-        }
         if ctx.debug_or_test || !ctx.rgb_validation {
             return Ok(());
         }
         match self {
             Self::Production(p) => p.check_invariants(),
+            // resolve() gives it only after the public-Signet checks.
+            Self::Development {
+                reason: DevReason::PublicSignet,
+            } => Ok(()),
+            Self::Development {
+                reason: DevReason::IncompletePublicSignet,
+            } => Err("release public-Signet image (BITCOIN_NETWORK=signet, \
+                      BTC_RELAY_MODE=none) is missing a setting; refusing to boot. It \
+                      needs SPV_MIN_CONFIRMATIONS of at least 1, the EVM_CHAIN_ID, \
+                      EVM_PROXY_CONTRACT_ADDRESS and RGB_ASSET_ID pins, and a non-zero \
+                      FUNDS_IN_CONTRACT and TOKEN_CONTRACT."
+                .into()),
             Self::Development { reason } => Err(format!(
                 "release rgb-validation (bridge-signing) build resolved to a non-production \
                  security policy ({reason:?}); refusing to boot. A production bridge enclave must \
@@ -425,7 +431,7 @@ impl ProductionPolicy {
         if !self.btc_relay_required {
             return Err(format!(
                 "production policy must verify BtcRelay commitments on fundsOut: \
-                 {}=none is only for a local stand that has no BtcRelay",
+                 {}=none is only for a local stand or a public-Signet image",
                 crate::config::BTC_RELAY_MODE_ENV
             ));
         }

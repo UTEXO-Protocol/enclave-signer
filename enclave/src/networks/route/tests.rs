@@ -18,7 +18,6 @@ fn rgb_destination() -> DestinationNetwork {
         psbt_bytes: vec![0x70, 0x73, 0x62, 0x74, 0xff],
         asset_id: "rgb:test-asset".into(),
         fascia: vec![],
-        parent_fascia: vec![],
     })
 }
 

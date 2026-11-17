@@ -58,6 +58,6 @@ hand.
   names the setting or the constant.
 - **Current behavior only.** A document says what the code does now. It tells
   no history and no plan.
-- **Rule ids are stable.** The code cites ids such as `M6`, `PP1`, `RR10`
+- **Rule ids are stable.** The code cites ids such as `M6`, `F4`, `RR10`
   and `P6`. Keep an id with its rule when you edit a document. The code also
-  cites sections 5, 6, 8 and 11 of [mint-flow.md](mint-flow.md) by number.
+  cites sections 5, 6 and 8 of [mint-flow.md](mint-flow.md) by number.

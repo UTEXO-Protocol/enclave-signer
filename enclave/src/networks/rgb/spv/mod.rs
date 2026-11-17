@@ -11,7 +11,7 @@
 
 pub mod chain;
 pub mod checkpoint;
-// Merkle proofs anchor the witness txs of an `spv` burn (`spv_crosscheck`).
+// Merkle proofs anchor the witness txs of a burn (`spv_crosscheck`).
 pub mod merkle;
 pub mod types;
 pub mod validation;

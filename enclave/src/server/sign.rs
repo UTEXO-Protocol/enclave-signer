@@ -48,7 +48,7 @@ pub(super) fn handle_sign(
     #[cfg(evm_to_rgb)]
     precheck_operation(ctx, source_ref, destination_ref)?;
 
-    // Refuse an invalid deposit before RGB validation and fee/indexer I/O.
+    // Refuse an invalid deposit before RGB validation.
     #[cfg(evm_to_rgb)]
     verify_funds_in_deposit(ctx, req.amount, source_ref, destination_ref)?;
     #[cfg(evm_to_rgb)]
@@ -288,9 +288,6 @@ fn apply_funds_out_binding(
     // `BTC_RELAY_MODE` sets if the commitment words are compared to the
     // enclave-built relay records. Default is `required`, and production
     // accepts only `required`.
-    // Without SPV, both proof fields must be empty: the signer must not
-    // endorse host-supplied Bitcoin header claims that it cannot verify.
-    #[cfg(feature = "spv")]
     {
         // Fail on a poisoned lock, as `validate_source` does.
         // A poisoned header chain can be in the middle of a reorg.
@@ -307,20 +304,6 @@ fn apply_funds_out_binding(
             ctx.bridge_config.btc_relay_mode,
             ctx.bridge_config.spv_min_confirmations,
         )?;
-    }
-    #[cfg(not(feature = "spv"))]
-    {
-        let _ = (ctx, pins);
-        if !merkle_proofs.is_empty() {
-            return Err(EnclaveError::CrossCheck(
-                "fundsOut signing without SPV requires empty RGB merkle_proofs".into(),
-            ));
-        }
-        if !release.proof.is_empty() {
-            return Err(EnclaveError::CrossCheck(
-                "fundsOut signing without SPV requires an empty release proof".into(),
-            ));
-        }
     }
 
     // Consignment-bound release amount: the settling transition must be a Burn.
@@ -515,7 +498,7 @@ fn precheck_operation(
         if matches!(e, EnclaveError::NonceReplay) {
             EnclaveError::CrossCheck(
                 "duplicate bridge operation: refusing to sign a replay (soft in-memory guard; \
-                 Bitcoin lets only one tx spend the right)"
+                 M6 binds the deposit to one transaction)"
                     .into(),
             )
         } else {
@@ -551,7 +534,8 @@ fn reserve_operation<'ctx>(
                 Err(EnclaveError::CrossCheck(
                     "duplicate bridge operation: this (chain, contract, evm_tx_hash, \
                      funds_in_operation_id, rgb_asset_id) was already signed recently - refusing \
-                     to sign a replay (soft in-memory guard; Bitcoin lets only one tx spend the right)"
+                     to sign a replay (soft in-memory guard; M6 binds the deposit to one \
+                     transaction)"
                         .into(),
                 ))
             }
@@ -867,7 +851,7 @@ mod reject_list_wiring;
 mod request_memory;
 
 /// The `fundsOut` anchor depth comes from `BridgeConfig::spv_min_confirmations`.
-#[cfg(all(test, feature = "rgb-validation", rgb_to_evm, feature = "spv"))]
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm))]
 mod funds_out_depth {
     use super::*;
     use crate::config::{BridgeConfig, BtcRelayMode};
@@ -939,140 +923,6 @@ mod funds_out_depth {
     fn a_config_depth_above_the_anchor_refuses() {
         let err = bind_at(3);
         assert!(err.contains("insufficient confirmations"), "{err}");
-    }
-}
-
-/// Indexer validation preserves the burn authorization without header proofs.
-#[cfg(all(test, not(feature = "spv"), feature = "burn-signer"))]
-mod indexer_only_bindings {
-    use super::*;
-    use crate::config::{BridgeConfig, BtcRelayMode};
-    use crate::networks::evm::validation::ReleaseIdentity;
-    use crate::networks::rgb::spv_crosscheck::ChainPins;
-    use crate::networks::rgb::validation::{TransitionSummary, ValidatedConsignment, VerifiedLock};
-    use crate::state::EnclaveState;
-    use alloy_primitives::{B256, U256};
-    use alloy_sol_types::SolValue;
-
-    fn fixture() -> (ReleaseIdentity, ValidatedConsignment) {
-        let mut recipient = [0u8; 32];
-        recipient[12..].fill(0x42);
-        let lock = VerifiedLock {
-            lock_id: [0x61; 32],
-            minted: 1_000,
-            operation_id: [0xa1; 32],
-            net_amount: 1_000,
-        };
-        let release = ReleaseIdentity {
-            burn_id: U256::ZERO,
-            amount: U256::from(1_000),
-            source_chain_id: U256::from(crate::networks::evm::RGB_CHAIN_ID),
-            source_address: String::new(),
-            settlement_data: (vec![B256::from(lock.operation_id)],).abi_encode_params(),
-            source_burn_tx_id: [0x5a; 32],
-            recipient,
-            destination_chain_id: U256::from(11_155_111),
-            dst_eid: None,
-            proof: vec![],
-        };
-        let validated = ValidatedConsignment {
-            last_transition: Some(TransitionSummary {
-                op_id: hex::encode(release.source_burn_tx_id),
-                transition_type: crate::test_support::bfa_ids::TS_BURN,
-                burned_asset_amount: Some(1_000),
-                burn_reason: Some(recipient),
-                ..Default::default()
-            }),
-            last_transfer_op_id: Some(release.source_burn_tx_id),
-            mint_locks: vec![lock],
-            ..Default::default()
-        };
-        (release, validated)
-    }
-
-    fn bind(release: &ReleaseIdentity, validated: &ValidatedConsignment) -> Result<()> {
-        bind_with_proofs(release, validated, &[])
-    }
-
-    fn bind_with_proofs(
-        release: &ReleaseIdentity,
-        validated: &ValidatedConsignment,
-        merkle_proofs: &[crate::proto::MerkleProofEntry],
-    ) -> Result<()> {
-        let ctx = ServerContext::new(
-            EnclaveState::new(bitcoin::Network::Signet),
-            BridgeConfig {
-                bitcoin_network: crate::policy::BitcoinNetwork::Signet,
-                btc_relay_mode: BtcRelayMode::None,
-                ..Default::default()
-            },
-            crate::test_support::regtest_header_chain(),
-        );
-        apply_funds_out_binding(
-            &ctx,
-            release,
-            Some(validated),
-            merkle_proofs,
-            &ChainPins::new(),
-            None,
-        )
-    }
-
-    #[test]
-    fn accepts_a_bound_burn_without_headers_or_merkle_proofs() {
-        let (release, validated) = fixture();
-        bind(&release, &validated).unwrap();
-    }
-
-    #[test]
-    fn refuses_merkle_proofs_even_with_an_empty_release_proof() {
-        let (release, validated) = fixture();
-        let proofs = [crate::proto::MerkleProofEntry {
-            txid: vec![0x11; 32],
-            block_height: 100,
-            tx_position: 0,
-            merkle_path: vec![vec![0x22; 32]],
-        }];
-        let err = bind_with_proofs(&release, &validated, &proofs).unwrap_err();
-        assert_eq!(err.error_code(), 3);
-        assert_eq!(
-            err.to_string(),
-            "cross-check failed: fundsOut signing without SPV requires empty RGB merkle_proofs"
-        );
-        bind(&release, &validated).unwrap();
-    }
-
-    #[test]
-    fn refuses_a_release_proof_even_without_merkle_proofs() {
-        let (mut release, validated) = fixture();
-        release.proof = vec![0x33; 32];
-        let err = bind(&release, &validated).unwrap_err();
-        assert_eq!(err.error_code(), 3);
-        assert_eq!(
-            err.to_string(),
-            "cross-check failed: fundsOut signing without SPV requires an empty release proof"
-        );
-        release.proof.clear();
-        bind(&release, &validated).unwrap();
-    }
-
-    #[test]
-    fn still_refuses_unconfirmed_witnesses_and_changed_release_fields() {
-        let (release, validated) = fixture();
-        let mut unconfirmed = validated.clone();
-        unconfirmed.non_mined_witness_txids.push([0x11; 32]);
-        assert!(bind(&release, &unconfirmed).is_err());
-
-        for mutate in [
-            |r: &mut ReleaseIdentity| r.amount += U256::from(1),
-            |r: &mut ReleaseIdentity| r.source_burn_tx_id[0] ^= 1,
-            |r: &mut ReleaseIdentity| r.recipient[31] ^= 1,
-            |r: &mut ReleaseIdentity| r.settlement_data.clear(),
-        ] {
-            let mut altered = release.clone();
-            mutate(&mut altered);
-            assert!(bind(&altered, &validated).is_err());
-        }
     }
 }
 

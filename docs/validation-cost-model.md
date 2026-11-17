@@ -98,7 +98,7 @@ also check the chain from a genesis of 255 rights and the read of the last
 bundle of a wide burn. Run them in release mode:
 
 ```bash
-cargo test --release -p utexo-bridge-enclave --no-default-features --features spv,burn-signer --lib caps -- --ignored --nocapture --test-threads=1
+cargo test --release -p utexo-bridge-enclave --no-default-features --features burn-signer --lib caps -- --ignored --nocapture --test-threads=1
 ```
 
 Each `RGB_COST` line is a JSON record of one shape: the validation and

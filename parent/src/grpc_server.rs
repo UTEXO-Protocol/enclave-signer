@@ -523,7 +523,6 @@ impl ParentAdapterService {
                         psbt_bytes: payload.psbt_bytes,
                         asset_id: payload.rgb_asset_id,
                         fascia: payload.fascia,
-                        parent_fascia: payload.parent_fascia,
                     },
                 )
             }
@@ -544,8 +543,7 @@ impl ParentAdapterService {
         }
         let Some(sign_request::Data::RgbData(payload)) = req.data else {
             return Err(Status::invalid_argument(
-                "RGB_RIGHTS_REFILL sign requires RgbData with the PSBT, its fascia and its parent \
-                 fascia",
+                "RGB_RIGHTS_REFILL sign requires RgbData with the PSBT and its fascia",
             ));
         };
         Ok(EnclaveRequest {
@@ -554,7 +552,6 @@ impl ParentAdapterService {
                     psbt_bytes: payload.psbt_bytes,
                     asset_id: payload.rgb_asset_id,
                     fascia: payload.fascia,
-                    parent_fascia: payload.parent_fascia,
                 },
             )),
         })
@@ -994,8 +991,9 @@ impl ParentService for ParentAdapterService {
         }
     }
 
-    /// Read the tip of the enclave SPV header chain. A build without `spv`
-    /// refuses the request with code 1, and the parent returns it as INTERNAL.
+    /// Read the tip of the enclave SPV header chain. A build without a signer
+    /// role refuses the request with code 1, and the parent returns it as
+    /// INTERNAL.
     async fn get_last_saved_block(
         &self,
         _request: Request<GetLastSavedBlockRequest>,

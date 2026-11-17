@@ -173,9 +173,9 @@ jobs:
             exit 1
           fi
 
-  # The mint signer (EVM -> RGB, Dockerfile.enclave.mint), its build without
-  # SPV, and the release check and feature guards of both roles, which reuse
-  # its compiled dependencies. The test build adds mock attestation and seed
+  # The mint signer (EVM -> RGB, Dockerfile.enclave.mint), and the release
+  # check and feature guards of both roles, which reuse its compiled
+  # dependencies. The test build adds mock attestation and seed
   # import, which only a debug build allows.
   mint-signer:
     runs-on: ubuntu-latest
@@ -191,7 +191,7 @@ jobs:
 
       # The features of the shipped image. `cargo test` below builds the code.
       - name: Clippy (mint image)
-        run: cargo clippy $ENCLAVE --features vsock,spv,mint-signer --all-targets -- -D warnings
+        run: cargo clippy $ENCLAVE --features vsock,mint-signer --all-targets -- -D warnings
 
       # Every test of the mint build, including the role-independent modules
       # that the burn-signer job skips (build/ci-mint-only-tests.txt). Each of
@@ -199,7 +199,7 @@ jobs:
       - name: Test (mint signer)
         run: |
           set -o pipefail
-          cargo test $ENCLAVE --features spv,mint-signer,mock-attestation,allow-seed-import 2>&1 | tee test.log
+          cargo test $ENCLAVE --features mint-signer,mock-attestation,allow-seed-import 2>&1 | tee test.log
           sed 's/\x1b\[[0-9;]*m//g' test.log > test.txt
           for module in $(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' build/ci-mint-only-tests.txt); do
             grep -q "^test $module.* \.\.\. ok$" test.txt || { echo "::error::$module ran no test in the mint build"; exit 1; }
@@ -210,23 +210,19 @@ jobs:
       - name: Test (VSOCK forwarder and custody deadline)
         run: |
           set -o pipefail
-          cargo test --locked $ENCLAVE --features vsock,spv,mint-signer --lib -- \
+          cargo test --locked $ENCLAVE --features vsock,mint-signer --lib -- \
             vsock_forwarder:: vsock_connect_rejects_expired_deadline_before_opening_a_socket 2>&1 | tee test.log
           awk '/^test result:/ { n += $4 } END { if (n < 4) { print "::error::expected at least 4 VSOCK tests, ran " n; exit 1 } }' test.log
 
-      # The public-signet mint image without SPV. It boots on the indexer
-      # policy, so the server differs: run the indexer-only tests and the mint
-      # requests over the wire again.
-      - name: Clippy (mint without SPV)
-        run: cargo clippy $ENCLAVE --features vsock,mint-signer --lib --bins --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path -- -D warnings
-
-      - name: Test (mint without SPV)
+      # The mint build without `vsock` and without the test-only features: the
+      # public-Signet tests, and the mint requests over the wire in that build.
+      - name: Test (mint without test features)
         run: |
-          cargo test $ENCLAVE --features mint-signer --test test_indexer_only --test test_bfa_mint_over_the_wire
+          cargo test $ENCLAVE --features mint-signer --test test_public_signet --test test_bfa_mint_over_the_wire
           cargo test $ENCLAVE --features mint-signer --test test_signing test_sign_btc
 
       # Both roles here, so the release-mode dependencies compile once.
-      - name: Check release (without SPV, mint and burn)
+      - name: Check release (mint and burn)
         run: |
           for role in mint-signer burn-signer; do
             cargo check --release $ENCLAVE --features vsock,$role
@@ -248,25 +244,18 @@ jobs:
               exit 1
             fi
           }
-          for role in mint-signer burn-signer; do
-            for forbidden in allow-seed-import mock-attestation allow-debug-pcrs; do
-              expect_guard "$role,$forbidden" "rgb-validation without spv requires real attestation"
-            done
-          done
-          expect_guard rgb-validation "rgb-validation without spv requires mint-signer or burn-signer"
-          expect_guard spv,mint-signer,burn-signer "mint-signer and burn-signer are mutually exclusive"
-          expect_guard spv "an RGB build requires a signer role"
-          for features in kms-persistence burn-signer,kms-persistence spv,kms-persistence; do
+          expect_guard rgb-validation "an RGB build requires a signer role"
+          expect_guard mint-signer,burn-signer "mint-signer and burn-signer are mutually exclusive"
+          for features in kms-persistence burn-signer,kms-persistence rgb-validation,kms-persistence; do
             expect_guard "$features" "kms-persistence requires mint-signer"
           done
 
-  # The burn signer (RGB -> EVM, Dockerfile.enclave.burn) and its build without
-  # SPV.
+  # The burn signer (RGB -> EVM, Dockerfile.enclave.burn).
   burn-signer:
     runs-on: ubuntu-latest
     env:
       ENCLAVE: -p utexo-bridge-enclave --no-default-features
-      TEST_FEATURES: spv,burn-signer,mock-attestation,allow-seed-import
+      TEST_FEATURES: burn-signer,mock-attestation,allow-seed-import
     steps:
       - uses: actions/checkout@v4
       - name: Set up the Rust build
@@ -276,7 +265,7 @@ jobs:
           cache-name: burn-signer
 
       - name: Clippy (burn image)
-        run: cargo clippy $ENCLAVE --features vsock,spv,burn-signer --all-targets -- -D warnings
+        run: cargo clippy $ENCLAVE --features vsock,burn-signer --all-targets -- -D warnings
 
       # The modules in build/ci-mint-only-tests.txt run the same code in both
       # builds, so they ran in the mint-signer job.
@@ -300,18 +289,11 @@ jobs:
       - name: Test (RGB release stress, on request)
         if: github.event_name == 'workflow_dispatch' && inputs.run_stress
         timeout-minutes: 30
-        run: cargo test --locked --release $ENCLAVE --features spv,burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+        run: cargo test --locked --release $ENCLAVE --features burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
 
-      # The public-signet burn image trusts the indexer for witness status and
-      # depth. These tests compile only without SPV.
-      - name: Clippy (burn without SPV)
-        run: cargo clippy $ENCLAVE --features vsock,burn-signer --lib --bins --test test_indexer_only --test test_evm_rpc_tls --test test_rpc_path -- -D warnings
-
-      - name: Test (burn without SPV)
-        run: |
-          cargo test $ENCLAVE --features burn-signer --lib -- \
-            indexer_only_source:: indexer_only_bindings::
-          cargo test $ENCLAVE --features burn-signer --test test_indexer_only
+      # The burn build without `vsock` and without the test-only features.
+      - name: Test (burn without test features)
+        run: cargo test $ENCLAVE --features burn-signer --test test_public_signet
 
   # The one check name that branch protection watches. It passes only when
   # every job above passed, and it fails when one was skipped or cancelled.

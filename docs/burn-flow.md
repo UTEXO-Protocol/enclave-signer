@@ -1,7 +1,7 @@
 # Burn flow (RGB -> EVM)
 
 - **Signer image:** `burn-signer`
-  (`--no-default-features --features vsock,spv,burn-signer`).
+  (`--no-default-features --features vsock,burn-signer`).
 - **Checked against repository code:** 2026-11-10, rgb-lib-bfa 5010eefa
   (RGB-Tools bfa 66bae096). Deployment was not checked.
 
@@ -35,7 +35,7 @@ no split.
 |------|-------|-------------|-----|
 | User | Bitcoin | - | Burns RGB units. |
 | Backend and listener | Operator servers | Nothing | Build the `fundsOut` calldata. Send the request. |
-| Parent | EC2 host | Nothing | Moves bytes. Sends Bitcoin headers to the enclave. |
+| Parent | EC2 host | Nothing. On public Signet: its Bitcoin headers. | Moves bytes. Sends Bitcoin headers to the enclave. |
 | Burn signer | Nitro Enclave | Checks and keys | Checks the burn. Signs the release and the gas transaction. |
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
@@ -51,25 +51,9 @@ enclave's own header chain. An unmined witness anywhere in the history fails
 consensus. So two conflicting transfers of the same units cannot both back a
 burn: only one of them can be mined.
 
-**A build without `spv`.** The stage-signet profile builds the burn signer
-without `spv`. That build runs on public Signet only and attests
-`Development`. It takes the status and depth of each witness from the pinned
-indexer and trusts that answer. Stage 3 does not run, and B5.5 is reversed:
-the request must carry no Merkle proofs and an empty `proof`
+On public Signet the header chain checks no proof of work. There the parent's
+headers decide which witnesses count as mined, so the rule above does not hold
 ([known limits](tee-spec.md#10-known-limits)).
-
-In place of B2.9, rgb-lib uses its Electrum or Esplora resolver to check each
-witness, including the network and transaction ID. The enclave passes
-`safe_height = tip - SPV_MIN_CONFIRMATIONS + 1`, using one tip read per
-validation. rgb-lib warns about unmined or shallower witnesses; the enclave
-rejects every warning. If no positive safe height exists, validation fails.
-
-This path trusts the indexer for inclusion, height and time. Proofs embedded
-in the consignment cannot replace an indexer lookup. Independent Bitcoin
-verification requires an SPV build.
-
-See [configuration](configuration.md#launch-values) for server requirements
-and [operations](operations.md#indexer-errors) for lookup failures.
 
 ## 3. Sequence
 
@@ -317,7 +301,8 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
     checkpoint must carry its chainwork, each proof height must be at least
     10 blocks above the checkpoint, and its epoch start must not be below the
     checkpoint.
-  - With `BTC_RELAY_MODE=none` (a local stand only), both words must be zero.
+  - With `BTC_RELAY_MODE=none` (a local stand or a public-Signet image), both
+    words must be zero.
     A production policy does not boot in this mode.
 - **B5.6** Amount: `burnedAsset` must **equal** the calldata `amount`.
 - **B5.7** Burn id: `sourceBurnTxId` must not be zero. It must equal the
@@ -388,7 +373,7 @@ uses the gas key `m/44'/60'/0'/0/1`.
   ceiling refuses only a non-zero `value`.
 
 A `Production` policy attests the gas rule, so a verifier can check it. A
-build without `spv` only measures it. The limits apply to one transaction,
+public-Signet image only measures it. The limits apply to one transaction,
 not to a sum of transactions. A gas transaction is not linked to one checked
 release, and the LayerZero fee is not a field of `TeeLzFundsOut`. The enclave
 does not check who receives the fees.

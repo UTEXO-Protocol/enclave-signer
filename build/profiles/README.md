@@ -4,11 +4,12 @@ Choose `stage-signet` or `stage-mainnet` in **Build EIF**, or set
 `BUILD_PROFILE` with `build/build-enclave.sh`. Both profiles build Mint and Burn.
 Tag builds and the `default` profile use the recipe defaults.
 
-- `stage-signet`: public Bitcoin Signet, without SPV, relay disabled,
-  Development policy.
-- `stage-mainnet`: Bitcoin mainnet, with SPV, relay required,
-  Production policy. Stage names the deployment environment, not the Bitcoin
-  network. It does not enable debug attestation or relax mainnet checks.
+- `stage-signet`: public Bitcoin Signet, SPV without proof-of-work checks,
+  relay disabled, Development policy.
+- `stage-mainnet`: Bitcoin mainnet, SPV with proof-of-work checks, relay
+  required, Production policy. Stage names the deployment environment, not the
+  Bitcoin network. It does not enable debug attestation or relax mainnet
+  checks.
 
 Changes go through `dev` first, then are promoted to `stage`. A profile is not
 a Git branch. Build the approved source revision with the matching profile.
@@ -88,7 +89,7 @@ RUST_LOG=debug,alloy_transport_http=off
 ```
 
 `EVM_PROXY_CONTRACT_ADDRESS` and Burn's `GAS_TX_ALLOWED_TO` point to **Multisig**;
-`FUNDS_IN_CONTRACT` points to **BridgeProxy**. Both roles compile with `vsock,spv`
+`FUNDS_IN_CONTRACT` points to **BridgeProxy**. Both roles compile with `vsock`
 and exactly their own signer feature. Mint includes KMS persistence through
 `mint-signer`. The recipes fix `SPV_MIN_CONFIRMATIONS=3` and
 `EVM_FINALITY_TAG=finalized`. Debug logging does not enable dev features.
@@ -129,16 +130,21 @@ release inputs.
 
 The **Signet** profile sets `BITCOIN_NETWORK=signet`, `BTC_RELAY_MODE=none`,
 `EVM_CHAIN_ID=42161`, `RUST_LOG=debug,alloy_transport_http=off`, the stage
-contract addresses and the role-specific feature list without `spv`.
+contract addresses and the role-specific feature list.
 The log filter keeps debug logs but disables Alloy HTTP transport logs, which
 can include private RPC paths or response bodies. It does not enable Nitro
 debug mode, mock attestation or seed import.
 
+The header chain starts at the compiled public-Signet checkpoint, which must
+stay below the stage asset's first witness. Configure Parent header
+synchronization (`HEADER_ELECTRUM_URL`) with a public-Signet server.
+
 `EVM_CHAIN_ID=42161` is Arbitrum One mainnet, so the stage burn signers sign
-real mainnet releases. Without `spv` they trust the indexer, so a compromised
-stage host can report forged burns and release up to the stage Bridge's
-outflow limits. Keep the stage token without market value (see the "Builds
-without `spv`" limit in [tee-spec.md](../../docs/tee-spec.md#10-known-limits)).
+real mainnet releases. Signet headers carry no checked proof of work, so a
+compromised stage host can feed forged headers, report forged burns and
+release up to the stage Bridge's outflow limits. Keep the stage token without
+market value (see the "Public Signet" limit in
+[tee-spec.md](../../docs/tee-spec.md#10-known-limits)).
 
 Mint uses the recipe's `MINT_WITNESS_SAT=1500`; set the same value on the
 connector. The recipe's other limits remain in effect, including
@@ -170,10 +176,9 @@ Use [Publish EIF Release](../../docs/github-releases.md) with the same profile
 to publish the existing build and its PCRs.
 
 Neither build profile configures deployment or KMS policies. The mainnet
-profile uses the Production/SPV policy expected by `verify-launch`. The
-Signet profile uses IndexerTrusted validation and needs a launcher adapted
-for that policy.
-The no-SPV policy is Development: its real attestation identifies the
-image and key, but does not attest endpoint or KMS launch settings. Operators
+profile uses the Production policy expected by `verify-launch`. The Signet
+profile uses the public-Signet Development policy and needs a launcher adapted
+for that policy. Its real attestation identifies the image and key, but does
+not attest endpoint or KMS launch settings. Operators
 approve those settings externally. Runtime TLS authenticates the configured
 provider; it does not enforce that external approval or prove its answers.

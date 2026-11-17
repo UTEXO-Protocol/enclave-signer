@@ -67,8 +67,8 @@ Actions artifact from that run. It then checks the EIF/host checksum manifests,
 role/profile/commit/run metadata, nonzero SHA-384 PCR0/PCR1/PCR2, the selected
 Bitcoin network, Arbitrum settings, and the same RGB asset in both images.
 Mainnet bundles must also record `BTC_RELAY_MODE=required`,
-`SPV_MIN_CONFIRMATIONS=3` and `EVM_FINALITY_TAG=finalized`. The publisher trusts
-the approved build for the compiled SPV feature; it does not inspect EIF code.
+`SPV_MIN_CONFIRMATIONS=3` and `EVM_FINALITY_TAG=finalized`. The publisher does
+not inspect EIF code; it trusts the approved build.
 
 This comparison is required because the build's S3 path can be overwritten,
 including by a rerun with different repository variables. A missing, expired

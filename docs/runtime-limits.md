@@ -74,8 +74,8 @@ checks them at launch.
 | `total_request_timeout_secs` | 90 | 10 | 86400 | Socket deadline of a request, from accept. |
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
-| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. |
-| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. |
+| `electrum_timeout_secs` | 15 | 1 | 3600 | Time for one Electrum socket operation. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
+| `esplora_timeout_secs` | 30 | 1 | 3600 | Time for one Esplora call. No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
 | `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
 | `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
@@ -165,11 +165,11 @@ The mint signer refuses a second request for a deposit for `mint_replay_ttl_secs
 The PSBT is not part of the key. So the guard also refuses a mint that the listener
 builds again with other inputs or a higher fee.
 
-This guard is not the safety control of a mint. Each signature for one mint spends
-the same UTXO, so at most one can reach the chain
-([mint-flow.md](mint-flow.md), section 6). A restart clears the guard. So a change
-gives the host nothing that it does not have already. The guard reads the two limits
-at each call, so a change applies to the entries that it holds.
+This guard is not the safety control of a mint. Each signature for one deposit is
+for the one transaction that its lockId names (M6), so at most one can reach the
+chain ([mint-flow.md](mint-flow.md), section 6). A restart clears the guard. So a
+change gives the host nothing that it does not have already. The guard reads the two
+limits at each call, so a change applies to the entries that it holds.
 
 Keep `SIGNED_RESPONSE_TTL_SECS` on the parent at the same value or higher. If the
 parent drops a reply first, the enclave refuses the retry until the window ends.

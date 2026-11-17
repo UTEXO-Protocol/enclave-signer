@@ -1,5 +1,4 @@
-//! Witness source selection and the adapter for enclave-verified SPV positions.
-//! No-SPV validation uses the indexer resolver in `indexer.rs`.
+//! The adapter that feeds enclave-verified SPV positions to rgb-lib.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -26,14 +25,6 @@ impl ConfirmedWitnesses for BTreeMap<Txid, WitnessPos> {
                 .into()
         })
     }
-}
-
-/// Where consensus gets the on-chain status of the witnesses.
-pub enum WitnessCheck<'a> {
-    /// Positions whose inclusion and depth the enclave has verified.
-    Proven(&'a dyn ConfirmedWitnesses),
-    /// Trusted indexer results, with confirmation depth enforced by rgb-lib.
-    Indexer { min_confirmations: u32 },
 }
 
 type Answer = std::result::Result<WitnessPos, String>;

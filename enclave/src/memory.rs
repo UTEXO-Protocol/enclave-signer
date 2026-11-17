@@ -23,13 +23,12 @@
 //! - PSBTs, at most `max_psbt_bytes`: about 102 times for one input and
 //!   outputs that each carry two empty records. A request holds one parsed
 //!   PSBT at a time.
-//! - Fascias, under the same limit: a mint reads two of them, one at a time.
-//!   A parse alone stays within the factor, but the core of the mint signer
-//!   also runs rgb-lib's fascia inspection, which decodes a second copy and
-//!   builds a record for each assignment. It takes about 34 times the bytes
-//!   of the widest fascia measured, one propagate of 43 681 rights
-//!   (`rgb::psbt_commit`). The core drops its own fascia first, so only one
-//!   decoded fascia is live at a time.
+//! - A fascia, under the same limit. A parse alone stays within the factor,
+//!   but the core of the mint signer also runs rgb-lib's fascia inspection,
+//!   which decodes a second copy and builds a record for each assignment. It
+//!   takes about 34 times the bytes of the widest fascia measured, one
+//!   propagate of 43 681 rights (`rgb::psbt_commit`). The core drops its own
+//!   fascia first, so only one decoded fascia is live at a time.
 //! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`:
 //!   about 48 times for a document of CBOR nulls.
 //! - Consignments, at most `max_consignment_bytes`: about 53 times for
@@ -53,8 +52,8 @@
 //! itself, so `run-enclave --memory` must give at least
 //! [`RUN_ENCLAVE_MEMORY_MIB`].
 //!
-//! Responses from the pinned EVM RPC and the Bitcoin indexer are outside the
-//! model. TLS pins their senders, and the host cannot change them. The reject
+//! Responses from the pinned EVM RPC are outside the model. TLS pins their
+//! sender, and the host cannot change them. The reject
 //! list is the one exception, because the operator sets its length limit: each
 //! request can hold `max_reject_list_entries` entries, and `Limits::check`
 //! counts them in the heap of a burn.
@@ -117,8 +116,7 @@
 //! `max_psbt_bytes` for a fascia, and never more than the frame. The heap
 //! meter does not count it. The file exists while the enclave keeps its
 //! decoded copy and rgb-lib decodes a second one, so it adds to the request
-//! peak. A request holds one such file at a time: a mint inspects its fascia
-//! and then its parent fascia, each file removed before the next is written.
+//! peak. A request holds one such file at a time, removed when the read ends.
 //! The boot check does not count these files: they come from the memory that
 //! [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the minimum. A change of limits
 //! counts one file at the larger of the two limits: [`check_limits`] adds one

@@ -112,7 +112,6 @@ fn rgb_sign_request(psbt_bytes: Vec<u8>) -> SignRequest {
             psbt_bytes,
             rgb_asset_id: String::new(),
             fascia: vec![],
-            parent_fascia: vec![],
         })),
     }
 }

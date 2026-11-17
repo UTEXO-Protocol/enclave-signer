@@ -19,7 +19,7 @@ use bitcoin::Transaction;
 use rgb_lib::no_wallet::{inspect_fascia, RgbInspection};
 use rgb_lib::{BitcoinNetwork, CloseMethod};
 use rgbstd::containers::Fascia;
-use rgbstd::{ContractId, OpId, Operation, Opout, Transition, TransitionBundle};
+use rgbstd::{ContractId, OpId, Operation, Transition, TransitionBundle};
 use strict_encoding::StrictDeserialize;
 
 use super::validation::OutputSeal;
@@ -296,10 +296,10 @@ fn assert_inspects_as(
     Ok(())
 }
 
-/// The one input `transition` closes, which must be a `mintRight` (M2, RR7).
-pub fn single_right_input(transition: &Transition, what: &str) -> Result<Opout> {
+/// M2, RR7: `transition` closes exactly one input, a `mintRight`.
+pub fn assert_single_right_input(transition: &Transition, what: &str) -> Result<()> {
     match transition.inputs.iter().collect::<Vec<_>>().as_slice() {
-        [input] if input.ty == schemata::OS_MINT => Ok(**input),
+        [input] if input.ty == schemata::OS_MINT => Ok(()),
         inputs => Err(EnclaveError::CrossCheck(format!(
             "{what} must close exactly one mintRight - it closes {inputs:?}"
         ))),

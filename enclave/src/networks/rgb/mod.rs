@@ -5,10 +5,9 @@
 //! - `route.rs`: the entry points that `networks::route` calls.
 //! - `scratch.rs`: the file rgb-lib reads a consignment or a fascia from.
 //! - `validation/`: consignment parsing, rgb-lib validation, asset binding,
-//!   and the `RgbValidator` indexer client.
+//!   and the `RgbValidator` of one Bitcoin network.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
 //! - `psbt_commit.rs`: the mint signer's core: the transition a PSBT commits.
-//! - `parent_proof.rs`: pins the UTXO of the right a mint or refill spends.
 //! - `btc_crosscheck.rs`: the plain-BTC (`SignBtc`) authorization gate.
 //! - `btc_ownership.rs`: proves that the enclave controls an output or input script.
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.
@@ -25,8 +24,6 @@ pub mod btc_ownership;
 #[cfg(feature = "rgb-validation")]
 pub mod flow;
 // The mint signer reads mints and refills from their fascias, with no consignment.
-#[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-pub mod parent_proof;
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub mod psbt_commit;
 #[cfg(evm_to_rgb)]

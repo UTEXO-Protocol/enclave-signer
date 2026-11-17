@@ -344,9 +344,6 @@ pub struct RgbDestination {
     /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
     #[prost(bytes="vec", tag="9")]
     pub fascia: ::prost::alloc::vec::Vec<u8>,
-    /// Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
-    #[prost(bytes="vec", tag="10")]
-    pub parent_fascia: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MerkleProofEntry {
@@ -412,9 +409,6 @@ pub struct SignRightsRefillRequest {
     /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
     #[prost(bytes="vec", tag="6")]
     pub fascia: ::prost::alloc::vec::Vec<u8>,
-    /// Strict-encoded rgb-lib fascia of the tx that created the spent right; it pins that UTXO.
-    #[prost(bytes="vec", tag="7")]
-    pub parent_fascia: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRawMessageRequest {

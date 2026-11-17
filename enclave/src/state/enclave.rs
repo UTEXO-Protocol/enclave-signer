@@ -93,9 +93,8 @@ pub struct EnclaveState {
     /// when the cache reaches its capacity. Each key field is also checked
     /// by the request validators. A different cache key alone does not
     /// authorize a request. Durable uniqueness needs a separate control.
-    /// Safety does not rest on it: every signed mint spends the pinned right
-    /// output (mint-flow.md section 6). So the operator can set its time and
-    /// count limits (`mint_replay_ttl_secs`, `mint_replay_max_entries`).
+    /// Safety rests on M6, not on it (mint-flow.md section 6), so the operator
+    /// sets its limits (`mint_replay_ttl_secs`, `mint_replay_max_entries`).
     pub op_replay_guard: NonceReplayGuard,
 
     /// RR15: the rate limit on rights refills admitted past the cheap gate.

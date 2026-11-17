@@ -1,7 +1,7 @@
 # Mint flow (EVM -> RGB)
 
 - **Signer image:** `mint-signer`
-  (`--no-default-features --features vsock,spv,mint-signer`).
+  (`--no-default-features --features vsock,mint-signer`).
 - **Checked against repository code:** 2026-11-10, rgb-lib-bfa 5010eefa
   (RGB-Tools bfa 66bae096). Deployment was not checked.
 
@@ -21,10 +21,9 @@ contain an error.
    call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
    `FundsIn` names the mint's lockId.
-4. The backend sends the PSBT, the fascia that rgb-lib wrote for the mint
-   transaction, and the fascia of the transaction that made the right the
-   mint spends (the parent fascia).
-5. The mint signer checks the deposit, the mint, the PSBT and both fascias.
+4. The backend sends the PSBT and the fascia that rgb-lib wrote for the mint
+   transaction.
+5. The mint signer checks the deposit, the mint, the PSBT and the fascia.
 6. The mint signer signs the PSBT with its colored Taproot key.
 7. The backend finalizes and broadcasts the Bitcoin transaction.
 8. The recipient validates the RGB transfer and waits for the required
@@ -60,7 +59,7 @@ without a valid RGB transition destroys the units.
 |------|-------|-------------|-----|
 | User | EVM | - | Locks tokens. |
 | Bridge contract | EVM | Deposit records | Holds the tokens. Writes the deposit events. |
-| Backend and listener | Operator servers | Nothing | Build the PSBT and its fascia. Find the parent fascia. Send the request. |
+| Backend and listener | Operator servers | Nothing | Build the PSBT and its fascia. Send the request. |
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipts, canonical blocks and the selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
@@ -86,8 +85,8 @@ is enough.
 
 The mint image carries `SPV_MIN_CONFIRMATIONS` in its attested policy, but no
 mint check reads it. The connector should still mint only on a right whose
-send is that deep: a mint on a parent that leaves the chain is invalid until
-the parent is mined again.
+send is that deep: if that send leaves the chain, the mint is invalid until
+the send is mined again.
 
 ## 3. Sequence
 
@@ -100,14 +99,14 @@ sequenceDiagram
     participant E as Mint signer (enclave)
     participant R as EVM RPC (pinned TLS)
 
-    L->>L: mint_begin PSBT + its fascia, and the parent fascia of its right
+    L->>L: mint_begin PSBT + its fascia
     U->>C: lock tokens
     C-->>L: FundsIn + BridgeFundsIn events
-    L->>P: Sign(EvmSource -> RgbDestination with psbt, fascia, parent_fascia)
+    L->>P: Sign(EvmSource -> RgbDestination with psbt, fascia)
     P->>E: forward over vsock
     E->>E: Stage 1: replay precheck
     E->>R: Stage 2: this deposit's receipt
-    E->>E: Stages 3-5: core on the fascia, mint rule, parent proof, fee, M8 sats
+    E->>E: Stages 3-4: core on the fascia, mint rule, fee, M8 sats
     E->>R: Stage 6: chain id, FundsIn of this mint, finality
     E->>E: Stage 6: route amount, replay reserve
     E->>E: Stage 7: sign
@@ -116,30 +115,30 @@ sequenceDiagram
     L->>L: finalize and broadcast
 ```
 
-The RGB fields of a mint and a refill on each hop. Each fascia is the
+The RGB fields of a mint and a refill on each hop. The fascia is the
 strict-encoded file that rgb-lib writes, sent as raw bytes. The last column
-gives a reserved field number; do not reuse it. A request with a value at
-that number and no fascia fails F4.
+gives reserved field numbers; do not reuse them. A request with a value at
+one of them and no fascia fails F4.
 
-| Hop | Message | PSBT | Its fascia | Parent fascia | Reserved |
-|-----|---------|------|------------|---------------|----------|
-| Bridge to listener | `node.RgbSignData` | `psbt` 3 | `fascia` 6 | `parent_fascia` 7 | 5 |
-| Listener to parent | `parent.EnrichedRgbPayload` | `psbt_bytes` 2 | `fascia` 9 | `parent_fascia` 10 | 8 |
-| Parent to enclave, mint | `enclave.RgbDestination` | `psbt_bytes` 2 | `fascia` 9 | `parent_fascia` 10 | 8 |
-| Parent to enclave, refill | `enclave.SignRightsRefillRequest` | `psbt_bytes` 1 | `fascia` 6 | `parent_fascia` 7 | 5 |
+| Hop | Message | PSBT | Fascia | Reserved |
+|-----|---------|------|--------|----------|
+| Bridge to listener | `node.RgbSignData` | `psbt` 3 | `fascia` 6 | 5, 7 |
+| Listener to parent | `parent.EnrichedRgbPayload` | `psbt_bytes` 2 | `fascia` 9 | 8, 10 |
+| Parent to enclave, mint | `enclave.RgbDestination` | `psbt_bytes` 2 | `fascia` 9 | 8, 10 |
+| Parent to enclave, refill | `enclave.SignRightsRefillRequest` | `psbt_bytes` 1 | `fascia` 6 | 5, 7 |
 
 ## 4. Key values
 
 | Name | Value | Meaning |
 |------|-------|---------|
 | `TS_MINT` | 8013 | Mint transition. The only transition a mint may commit. |
-| `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition that may make a right a mint spends (PP4). |
+| `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition a refill may commit (RR6). |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). It holds no units. |
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. |
 | `MS_BEFORE_BLOCK` | 1003 | Mint metadata: the lock must be in an earlier EVM (L2) block. |
 | `RGB_CHAIN_ID` | 827166 | The bridge's id for the RGB network. Compiled in. |
-| `MINT_INPUTS` | 1 | A mint spends its right alone. |
+| `MINT_INPUTS` | 1 | Inputs of a mint (F7). |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
@@ -157,10 +156,11 @@ replay window named below are runtime limits
 If one check fails, the mint signer stops. It signs nothing. It returns an
 error.
 
-The stages group the checks by topic. The code order differs in places: F7
-and the fee check run after M1 - M5 and M7, and the fee check runs after the
-parent proof. Section 3 and [diagram 04](diagrams/04-seq-sign-psbt.md) show
-the code order.
+The stages group the checks by topic. The code order differs in places: F1
+runs before M0, and F7 and the fee check run after M1 - M5 and M7. Section 3
+and [diagram 04](diagrams/04-seq-sign-psbt.md) show the code order. The
+stage number 5 is not used: the mint signer does not read the transaction
+that made the spent right.
 
 ### Stage 0 - Can this enclave do this request?
 
@@ -211,9 +211,7 @@ host. TLS ends inside the enclave. Each call has the timeout
 The core. It reads the RGB data from the request's `fascia`, never from the
 PSBT: RGB keys left in a PSBT are ignored. rgb-lib's wallet-less fascia
 inspection (`inspect_fascia`) proves the commitments of F5 and F6; the rules
-around it are the enclave's. The core also runs on the parent fascia and the
-transaction that it carries (PP2), where M0, F1, F2 and F7 do not apply: the
-enclave does not sign the parent.
+around it are the enclave's.
 
 - **M0** The mint transaction has at most `mint_max_inputs` inputs and
   `mint_max_outputs` outputs. The enclave checks this before it decodes a
@@ -285,8 +283,8 @@ needs a new image.
   depositor's), or on a witness seal that is an output of this transaction (a
   witness invoice). A seal on an output of another transaction is refused:
   the enclave cannot see what that output pays.
-- **M8** The sats that the mint pays out. It runs on the PSBT after the
-  parent proof (Stage 5) and the fee check, and before M6 reads the deposit.
+- **M8** The sats that the mint pays out. It runs on the PSBT after the fee
+  check, and before M6 reads the deposit.
   - A blinded mint pays no sat out. Every output is a BIP-86 key-path output
     that the enclave derives at a wallet path (rule C of
     [section 7](#7-plain-btc-signbtc)), or carries 0 sat, as the `OP_RETURN`
@@ -301,28 +299,6 @@ needs a new image.
     refused here, after the user's lock. The attestation does not carry the
     value, so the deploy must compare the two before a release takes witness
     invoices.
-
-### Stage 5 - Does the mint spend the right its parent made?
-
-The parent fascia (`parent_fascia`) is the fascia that rgb-lib wrote for the
-transaction that made the spent right. It carries that transaction unsigned.
-The txid of a native SegWit transaction does not change when it is signed.
-
-- **PP1** `parent_fascia` must not be empty and must decode as in F4.
-- **PP2** The core (F3 - F6) runs on it and the transaction it carries, with
-  the same asset pin. It gives the parent's txid, OpId and transition. The
-  inspection reads that transaction as a PSBT, so it must be unsigned, as
-  rgb-lib writes it: a witness or a scriptSig on it is refused.
-- **PP3** The mint's one input must be an `OS_MINT` output of that
-  transition.
-- **PP4** The parent must be a `TS_PROPAGATE` that closes exactly one right.
-  A transfer, mint or genesis parent is refused.
-- **PP5** That right must sit on a witness seal: an output of the parent
-  transaction itself. The parent's id commits its seal, so the recompute in
-  PP2 authenticates the output number.
-- **PP6** No other revealed assignment of the parent sits on that output.
-- **PP7** Exactly one PSBT input spends that output. For a mint it is the
-  only input (F7).
 
 ### Stage 6 - Is the deposit this mint's, and the user the right one?
 
@@ -389,16 +365,11 @@ and replicas do not share it. It holds a key for `mint_replay_ttl_secs`, and
 keeps each reply and answers a retry of the same request from it, so a lost
 response does not strand a deposit for the window.
 
-The guard is not the safety control. The parent proof is: every signature
-for one mint transition spends the output that PP7 pins. Two signed
-transactions for one deposit that use the same parent spend the same output,
-and Bitcoin confirms at most one. The enclave does not compare parents across
-requests, and it does not check what a parent transaction spends (section
-8). A different parent transaction is valid for a receiver only if it spends
-the inputs of the real parent again, so it conflicts with the real parent on
-Bitcoin. The same transition committed again in a transaction that spends
-another Colored UTXO is refused (PP7). A new transition for the same deposit
-is refused too: the deposit names one lockId (M6).
+The guard is not the safety control. M6 is: the deposit names one lockId,
+and the lockId commits the mint's OpId and txid. So every signature for one
+deposit is for the same transaction, and Bitcoin confirms it at most once.
+The same transition in another transaction, or another transition, names
+another lockId, which M6 refuses.
 
 ## 7. Plain BTC (`SignBtc`)
 
@@ -451,7 +422,7 @@ shape only: every new right and every sat stays on the enclave's own outputs,
 and no units move.
 
 The parent maps `data_type` `RGB_RIGHTS_REFILL` to `SignRightsRefill`
-(`psbt_bytes`, `asset_id`, `fascia`, `parent_fascia`). It refuses a request
+(`psbt_bytes`, `asset_id`, `fascia`). It refuses a request
 with a source proof or without `RgbData`. The reply is `SignedPsbtResponse`.
 Like every signing request it waits for `SetEndpoints`, but it reads no
 network.
@@ -460,9 +431,9 @@ The cheap checks run first.
 
 **Gate** (PSBT and keys only):
 
-- **RR0** The PSBT has 1 or 2 inputs: the seal of the right and at most one
-  fee input (`MAX_REFILL_FEE_INPUTS`). Each extra input could destroy the
-  state it carries.
+- **RR0** The PSBT has 1 or 2 inputs: the right's UTXO and at most one fee
+  input (`MAX_REFILL_FEE_INPUTS`). This rule counts the inputs only. Each input
+  could destroy the state it carries.
 - **RR10** Every input is a Colored key-path input of the enclave (the
   custody check of S7.3).
 - **RR12** M8 of a blinded mint: no sat leaves. An output that repays an
@@ -484,8 +455,6 @@ The cheap checks run first.
 - **RR8** It makes 2 to 255 rights. Each is on a witness seal (an output of
   this transaction), never on a blinded seal or an output of another
   transaction, and no two share an output.
-- **RR11** PP1 - PP7 on the right it closes: exactly one input spends the
-  UTXO of the right. The other input, if any, is the fee input (RR0).
 
 **Keys:**
 
@@ -499,35 +468,29 @@ The cheap checks run first.
 
 The rule numbers RR1, RR2 and RR4 are not used: a refill carries no
 consignment, so no consignment size, hash, consensus or reject-list check
-runs on it.
+runs on it. RR11 is not used either: the mint signer does not read the
+transaction that made the right.
 
-**Where the fascias come from.** rgb-lib writes each fascia as the `fascia`
-file of the transfer directory. A mint's own fascia is that of its mint
-transfer. A refill's is the one its send returns. For a right that a refill
-made, the parent fascia is that refill's. For a right that the issuer seeded,
-the operator places the issuer's fascia once, at seeding. A fascia must be
-strict-encoded; PP1 refuses a JSON fascia.
+**Where the fascia comes from.** rgb-lib writes each fascia as the `fascia`
+file of the transfer directory. A mint's fascia is that of its mint
+transfer. A refill's is the one its send returns. A fascia must be
+strict-encoded; F4 refuses a JSON fascia.
 
 What a refill does not check, and why that is safe:
 
-- **No deposit and no replay key.** No units move, and Bitcoin stops a second
-  spend of the right: PP7 pins it.
-- **The fee input (accepted residual).** A hostile host can fund a junk
-  transaction that pays a Colored address of the enclave and commits a
-  well-formed but invalid propagate. The parent proof passes on it. A refill
-  then closes the "right" that this junk propagate made, and spends a real
-  right as its fee input, which destroys it: one right per refill. One junk
-  transaction is enough: the parent proof accepts any refill fascia, so each
-  junk refill is the parent of the next, and the fees come from the
+- **No deposit and no replay key.** No units move. The new rights are valid
+  only if the transaction spends the UTXO of the right that the transition
+  closes, and Bitcoin confirms one spend of that UTXO.
+- **Spent state (accepted residual).** The mint signer does not see which
+  RGB state an input holds. A hostile host can make it sign a refill whose
+  inputs are any Colored UTXOs of the enclave (RR0, RR10). The state on them
+  is lost: up to two UTXOs, such as rights, per refill, with fees from the
   enclave's Colored sats. The host cannot take a right: every new right is
   the enclave's (RR9) and every sat stays (RR12). RR15 is an in-memory rate
   per enclave process, not a total: at `MAX_REFILLS_PER_HOUR` the host can
-  destroy the rights of a full mint wallet in about a day, and faster after
-  a relaunch or with a second replica. Minting then stops until the issuer
-  sends new rights. With a real parent the count of rights never drops.
-- **Concealed assignments.** PP6 cannot see a concealed assignment of the
-  parent. The parent is an enclave refill (RR7 and RR8: rights only, all
-  revealed) or the issuer's send to witness invoices.
+  destroy the rights of a full mint wallet within a day, and faster after a
+  relaunch or with a second replica. Minting then stops until the issuer
+  sends new rights.
 - **Fees.** Each refill signature can burn at most the fee limits of Stage 3
   (RR13). RR15 bounds how many signatures an enclave makes in an hour.
 
@@ -541,8 +504,7 @@ The refill limits are compiled in, so PCR0 measures them.
 | `SignRawDigest` (gas transaction) | Refused: wrong signer role. |
 | `InitiateCloning`, `GetClone`, `SetClone` | Refused: the seed comes from KMS. |
 | `Sign` without `fascia` | Refused (F4). rgb-lib strips the PSBT, so there is nothing else to read. |
-| `Sign` without `parent_fascia` | Refused (PP1). |
-| `SignRightsRefill` without `fascia` or `parent_fascia` | Refused (F4, PP1). |
+| `SignRightsRefill` without `fascia` | Refused (F4). |
 | `SignRightsRefill` that breaks a rule of section 8 | Refused. Past the gate it still counts against the hourly limit. |
 | `SignRawMessage` | Refused in every build. |
 
@@ -602,13 +564,10 @@ missing check is a liveness limit only:
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,
-and it cannot move other state of the wallet: the parent proof pins the one
-UTXO that the mint spends.
-
-**A propagate parent keeps every mint out of a mint's history.** Rights
-reach the mint wallet only by issuer sends or refills, every refill passes
-PP4, and M3 stops a mint from passing a right on. The mint wallet must hold
-no right whose parent is a mint or the genesis.
+and it cannot move other state of the wallet: the transaction commits one
+transition (F2 - F6). It can destroy other state. The mint signer does not
+see which RGB state the spent UTXO holds, so a mint or a refill can spend a
+Colored UTXO that holds other state, and that state is lost (section 8).
 
 **A witness mint's output script is bound by the lockId.** A witness seal
 names an output number of the mint transaction, and the OpId commits that
@@ -635,5 +594,5 @@ mint pays a new output, which starts with no allocations, so these limits
 apply mainly to blinded mints.
 
 The fascia is read in the strict encoding of the pinned `rgb-ops`. A change
-of that encoding fails F4 and PP1: every mint and refill is refused until the
+of that encoding fails F4: every mint and refill is refused until the
 enclave moves with rgb-lib.

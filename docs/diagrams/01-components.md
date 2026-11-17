@@ -34,7 +34,7 @@ flowchart TB
 
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs + bootstrap.rs<br/>boot: a release spv build panics<br/>unless the boot policy is valid Production,<br/>a no-SPV build needs IndexerTrusted,<br/>then listener loop vsock / TCP]
+        EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production<br/>or public-Signet Development,<br/>then listener loop vsock / TCP]
         EConn[conn.rs<br/>DeadlineStream: io_idle_timeout_secs, total_request_timeout_secs<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
@@ -56,10 +56,10 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>indexer.rs no-SPV burn witness status,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs genesis gate]
+            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs decode, schema.rs genesis gate]
             NRSC[scratch.rs<br/>the file rgb-lib reads a consignment<br/>or a fascia from]
             NRF["flow.rs<br/>accepted transitions + amount rule"]
-            NRP["psbt_validation.rs<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs + parent_proof.rs<br/>mint signer: the transition a PSBT commits, its parent,<br/>by rgb-lib inspect_fascia"]
+            NRP["psbt_validation.rs<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs<br/>mint signer: the transition a PSBT commits,<br/>by rgb-lib inspect_fascia"]
             NRB[btc_crosscheck.rs<br/>plain-BTC sats gate<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budget]
             NRS[spv_crosscheck.rs<br/>coverage + depth ≥ SPV_MIN_CONFIRMATIONS<br/>+ chain_net + staleness]
             NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
@@ -124,7 +124,6 @@ flowchart TB
     KM --> NES
     KM --> NRSIG
 
-    NRV -->|"indexer, no-SPV burn only,<br/>per-call timeout, via loopback"| VFwd
     VFwd -->|"vsock CID 3:8001"| VP
     VP -->|"Electrum or Esplora, TLS"| Esp
 

@@ -153,8 +153,8 @@ pub struct BridgeConfig {
     pub bitcoin_network: BitcoinNetwork,
     /// If a `fundsOut` proof must carry BtcRelay commitments that the enclave
     /// checks against its own chain (`BTC_RELAY_MODE`). Default `required`.
-    /// `none` is for a local stand only; production does not boot on it
-    /// ([`crate::policy::ProductionPolicy::check_invariants`]).
+    /// `none` is for a local stand or a public-Signet image. Production does
+    /// not boot on it ([`crate::policy::ProductionPolicy::check_invariants`]).
     pub btc_relay_mode: BtcRelayMode,
     /// Image values of the RGB request size limits (`MAX_CONSIGNMENT_BYTES`,
     /// `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*`
@@ -261,26 +261,22 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
-    /// Required pins when Bitcoin finality is trusted from the indexer.
-    pub fn validate_indexer_only(&self) -> std::result::Result<(), String> {
+    /// Required settings of a public-Signet image with BtcRelay off.
+    pub fn validate_public_signet(&self) -> std::result::Result<(), String> {
         if self.bitcoin_network != BitcoinNetwork::Signet {
-            return Err(
-                "RGB validation without SPV requires BITCOIN_NETWORK=signet (public signet)".into(),
-            );
+            return Err("a public-Signet image requires BITCOIN_NETWORK=signet".into());
         }
         if self.btc_relay_mode != BtcRelayMode::None {
-            return Err("RGB validation without SPV requires BTC_RELAY_MODE=none".into());
+            return Err("a public-Signet image requires BTC_RELAY_MODE=none".into());
         }
         if self.spv_min_confirmations == 0 {
-            return Err(
-                "indexer-trusted validation requires at least one Bitcoin confirmation".into(),
-            );
+            return Err("a public-Signet image requires at least one Bitcoin confirmation".into());
         }
         if !self.is_configured()
             || self.funds_in_contract == [0; 20]
             || self.token_contract == [0; 20]
         {
-            return Err("RGB validation without SPV requires EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS, RGB_ASSET_ID, FUNDS_IN_CONTRACT and TOKEN_CONTRACT pins".into());
+            return Err("a public-Signet image requires the EVM_CHAIN_ID, EVM_PROXY_CONTRACT_ADDRESS and RGB_ASSET_ID pins and a non-zero FUNDS_IN_CONTRACT and TOKEN_CONTRACT".into());
         }
         Ok(())
     }
@@ -546,8 +542,9 @@ pub fn parse_mint_witness_sat(value: Option<&str>) -> std::result::Result<u64, S
     }
 }
 
-/// Unset means the Bridge contract. A set value that is not an address stops
-/// the boot: a typo must not move the FundsIn pin to the Bridge.
+/// Unset gives the proxy address (`EVM_PROXY_CONTRACT_ADDRESS`). A set value
+/// that is not an address stops the boot: a typo must not move the FundsIn pin
+/// to the proxy address.
 fn parse_funds_in_contract(
     raw: Option<&str>,
     bridge_contract: [u8; 20],
@@ -821,12 +818,7 @@ fn parse_electrum_url(url: &str) -> std::result::Result<(String, u16), String> {
 }
 
 /// Only test, debug, mock-attestation and seed-import builds allow plaintext.
-/// Release images refuse it with or without SPV, including IndexerTrusted
-/// builds whose attested policy is Development.
-///
-/// Over `tcp://` or `http://` the host reads and changes every indexer answer.
-/// A no-SPV burn signer trusts the indexer for witness status. TLS authenticates
-/// that endpoint; it does not prove Bitcoin consensus. The release TLS rule
+/// Release images refuse it, whatever policy they attest. The release TLS rule
 /// is enforced by code and measured into PCR0.
 #[cfg(feature = "rgb-validation")]
 fn plaintext_indexer_allowed() -> bool {

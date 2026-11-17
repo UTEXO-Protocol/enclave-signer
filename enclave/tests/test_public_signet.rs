@@ -1,5 +1,11 @@
-//! Public-signet builds preserve production mint KMS and burn cloning custody.
-#![cfg(all(feature = "rgb-validation", not(feature = "spv")))]
+//! A public-Signet image keeps production mint KMS and burn cloning custody.
+//! These tests need a signer build without the test-only features.
+#![cfg(all(
+    feature = "rgb-validation",
+    not(feature = "mock-attestation"),
+    not(feature = "allow-seed-import"),
+    not(feature = "allow-debug-pcrs")
+))]
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -34,13 +40,17 @@ fn start() -> u16 {
 }
 
 fn start_with_config(config: BridgeConfig) -> (u16, Arc<ServerContext>) {
+    start_with_build(config, BuildContext::current())
+}
+
+fn start_with_build(config: BridgeConfig, build: BuildContext) -> (u16, Arc<ServerContext>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let ctx = Arc::new(ServerContext::awaiting_launch(
         EnclaveState::new(bitcoin::Network::Signet),
         config,
         bootstrap::build_header_chain(Network::Signet),
-        BuildContext::current(),
+        build,
     ));
     let server_ctx = Arc::clone(&ctx);
     std::thread::spawn(move || {
@@ -107,7 +117,7 @@ fn health(port: u16) -> HealthResponse {
 
 #[test]
 #[cfg(feature = "burn-signer")]
-fn indexer_only_generates_distinct_keys_and_refuses_reinitialization() {
+fn public_signet_generates_distinct_keys_and_refuses_reinitialization() {
     let first = start();
     let a = initialize(first);
     let b = initialize(start());
@@ -129,7 +139,7 @@ fn indexer_only_generates_distinct_keys_and_refuses_reinitialization() {
 }
 
 #[test]
-fn indexer_only_refuses_imports_without_installing_keys() {
+fn public_signet_refuses_imports_without_installing_keys() {
     let port = start();
     for request in [
         Request::InitializeKey(InitializeKeyRequest {
@@ -150,38 +160,40 @@ fn indexer_only_refuses_imports_without_installing_keys() {
 
 #[test]
 #[cfg(feature = "burn-signer")]
-fn indexer_only_is_ready_without_headers_only_after_keys_and_endpoints() {
+fn public_signet_burn_syncs_headers_from_the_public_checkpoint() {
     let port = start();
-    assert!(!health(port).ready);
     initialize(port);
-    assert!(!health(port).ready);
     assert!(matches!(
         send(port, Request::SetEndpoints(endpoints())),
         Response::SetEndpoints(_)
     ));
-    let h = health(port);
-    assert!(h.ready && h.key_loaded && h.endpoints_set);
-    assert_eq!(
-        (
-            h.spv_tip_height,
-            h.spv_tip_time,
-            h.spv_tip_age_secs,
-            h.spv_max_tip_age_secs
-        ),
-        (0, 0, 0, 0)
-    );
-    for request in [
-        Request::SubmitHeaders(SubmitHeadersRequest::default()),
-        Request::GetLastSavedBlock(GetLastSavedBlockRequest {}),
-    ] {
-        assert!(matches!(send(port, request), Response::Error(_)));
+    // A burn signer is not ready before its header chain is fresh.
+    assert!(!health(port).ready);
+    let headers = include_str!("../src/networks/rgb/spv/chain/signet_320545_320556.hex")
+        .lines()
+        .map(|line| hex::decode(line.trim()).unwrap())
+        .collect();
+    match send(
+        port,
+        Request::SubmitHeaders(SubmitHeadersRequest {
+            start_height: 320_545,
+            headers,
+        }),
+    ) {
+        Response::SubmitHeaders(r) => {
+            assert_eq!((r.last_block_height, r.headers_accepted), (320_556, 12))
+        }
+        other => panic!("expected SubmitHeaders, got {other:?}"),
     }
-    assert!(health(port).ready);
+    let h = health(port);
+    assert_eq!(h.spv_tip_height, 320_556);
+    // The fixture headers are old, so the chain is still not fresh.
+    assert!(!h.ready);
 }
 
 #[test]
 #[cfg(feature = "burn-signer")]
-fn indexer_only_burn_refuses_kms_fields() {
+fn public_signet_burn_refuses_kms_fields() {
     assert!(Endpoints::parse(&endpoints(), &[], true)
         .unwrap()
         .kms
@@ -213,7 +225,7 @@ fn indexer_only_burn_refuses_kms_fields() {
 }
 
 #[test]
-fn indexer_only_cloning_entrypoints_match_production_custody() {
+fn public_signet_cloning_entrypoints_match_production_custody() {
     let port = start();
     for (request, _burn_error) in [
         (
@@ -246,7 +258,7 @@ fn indexer_only_cloning_entrypoints_match_production_custody() {
 }
 
 #[test]
-fn indexer_only_accepts_independent_runtime_endpoints_without_changing_the_build_config() {
+fn public_signet_accepts_independent_runtime_endpoints_without_changing_the_build_config() {
     let first = SetEndpointsRequest {
         evm_rpc_path: "/v2/member-one-key".into(),
         ..endpoints()
@@ -300,7 +312,7 @@ fn indexer_only_accepts_independent_runtime_endpoints_without_changing_the_build
 }
 
 #[test]
-fn indexer_only_rejects_malformed_endpoints_without_consuming_the_launch_slot() {
+fn public_signet_rejects_malformed_endpoints_without_consuming_the_launch_slot() {
     let (port, ctx) = start_with_config(config());
     type MalformedEndpoint = (fn(&mut SetEndpointsRequest), &'static str);
     let malformed: [MalformedEndpoint; 11] = [
@@ -367,7 +379,7 @@ fn indexer_only_rejects_malformed_endpoints_without_consuming_the_launch_slot() 
 
 #[test]
 #[cfg(feature = "burn-signer")]
-fn indexer_only_burn_installs_a_runtime_donor_secret() {
+fn public_signet_burn_installs_a_runtime_donor_secret() {
     let port = start();
     let keys = initialize(port);
     let Response::Error(error) = send(
@@ -388,7 +400,7 @@ fn indexer_only_burn_installs_a_runtime_donor_secret() {
 
 #[test]
 #[cfg(feature = "mint-signer")]
-fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
+fn public_signet_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
     let kms = Endpoints::parse(&endpoints(), &[], true)
         .unwrap()
         .kms
@@ -439,7 +451,7 @@ fn indexer_only_mint_requires_valid_kms_pins_and_accepts_an_address_pin() {
     feature = "mint-signer",
     not(all(feature = "vsock", target_os = "linux"))
 ))]
-fn indexer_only_mint_reaches_persistent_seed_and_never_falls_back_to_entropy() {
+fn public_signet_mint_reaches_persistent_seed_and_never_falls_back_to_entropy() {
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
     let listener = TcpListener::bind((
@@ -523,14 +535,47 @@ fn indexer_only_mint_reaches_persistent_seed_and_never_falls_back_to_entropy() {
 }
 
 #[test]
-fn indexer_only_release_policy_never_claims_production_spv() {
+fn public_signet_release_launches_on_its_policy() {
+    let mut build = BuildContext::current();
+    build.debug_or_test = false;
+    #[allow(unused_mut)]
+    let mut release = config();
+    #[cfg(feature = "mint-signer")]
+    {
+        release.kms_allowed_accounts = vec!["123456789012".into()];
+    }
+    let (port, ctx) = start_with_build(release.clone(), build);
+    assert!(matches!(
+        send(port, Request::SetEndpoints(endpoints())),
+        Response::SetEndpoints(_)
+    ));
+    assert_eq!(
+        ctx.launch().unwrap().policy,
+        SecurityPolicy::Development {
+            reason: DevReason::PublicSignet
+        }
+    );
+
+    // Without a pin, the launch names the settings a public-Signet image needs.
+    let mut incomplete = release;
+    incomplete.token_contract = [0; 20];
+    let (port, ctx) = start_with_build(incomplete, build);
+    match send(port, Request::SetEndpoints(endpoints())) {
+        Response::Error(error) => assert!(error.message.contains("TOKEN_CONTRACT"), "{error:?}"),
+        other => panic!("expected a refused launch, got {other:?}"),
+    }
+    assert!(ctx.launch.get().is_none());
+}
+
+#[test]
+fn public_signet_release_policy_is_development() {
     let mut build = BuildContext::current();
     build.debug_or_test = false;
     let policy = SecurityPolicy::resolve(&build, &config(), EvmDataSource::Disabled, None, "");
     assert!(matches!(
         policy,
         SecurityPolicy::Development {
-            reason: DevReason::IndexerTrusted
+            reason: DevReason::PublicSignet
         }
     ));
     assert_eq!(policy.attested(), AttestedPolicy::Development);
@@ -539,7 +584,7 @@ fn indexer_only_release_policy_never_claims_production_spv() {
 }
 
 #[test]
-fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
+fn public_signet_release_refuses_other_networks_and_missing_pins() {
     let mut invalid = Vec::new();
     for network in [
         BitcoinNetwork::Mainnet,
@@ -567,9 +612,10 @@ fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
     let mut cfg = config();
     cfg.spv_min_confirmations = 0;
     invalid.push(cfg);
+    let mut build = BuildContext::current();
+    build.debug_or_test = false;
     for cfg in invalid {
-        assert!(cfg.validate_indexer_only().is_err());
-        let build = BuildContext::current();
+        assert!(cfg.validate_public_signet().is_err());
         let policy = SecurityPolicy::resolve(&build, &cfg, EvmDataSource::Disabled, None, "");
         assert!(policy.assert_valid_at_boot(&build).is_err());
         assert!(policy.assert_valid_for_build(&build).is_err());
@@ -577,6 +623,6 @@ fn indexer_only_refuses_other_networks_and_missing_pins_even_in_debug() {
     for chain in [1, 10, 137, 8453, 42161, 31337, 11155111, 421614, 123456] {
         let mut cfg = config();
         cfg.chain_id = chain;
-        cfg.validate_indexer_only().unwrap();
+        cfg.validate_public_signet().unwrap();
     }
 }

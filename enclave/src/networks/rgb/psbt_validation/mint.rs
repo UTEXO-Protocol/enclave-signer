@@ -7,17 +7,17 @@ use std::collections::HashSet;
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::psbt::Psbt;
-use rgbstd::{BuilderSeal, Opout, Transition};
+use rgbstd::{BuilderSeal, Transition};
 
 use super::super::btc_ownership;
 use super::super::flow;
-use super::super::psbt_commit::{single_right_input, witness_vout, Committed};
+use super::super::psbt_commit::{assert_single_right_input, witness_vout, Committed};
 use super::super::validation::{lock_id, output_seal, single_global};
 use super::assert_keeps_all_sats;
 use crate::error::{EnclaveError, Result};
 use crate::keys::KeyManager;
 
-/// Inputs a mint spends: its right alone, whose UTXO's sats pay the fee.
+/// Inputs a mint spends (F7).
 pub const MINT_INPUTS: usize = 1;
 
 // The limits of the image, for the tests. `Limits` holds them and says why.
@@ -48,10 +48,9 @@ pub fn assert_mint_shape(psbt: &Psbt) -> Result<()> {
     Ok(())
 }
 
-/// What a mint commits to: the right it consumes and the deposit it needs.
+/// What a mint commits to: the deposit it needs and its recipient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintFacts {
-    pub right: Opout,
     pub opid: [u8; 32],
     /// `LockId(opid, txid)` of the PSBT's tx: the id its `FundsIn` lock must name.
     /// F2 fixes that txid, so any other tx of this mint names another lock.
@@ -84,7 +83,7 @@ pub type MintSatsCheck<'a> = &'a dyn Fn(&Psbt, &MintRecipient) -> Result<()>;
 pub fn mint_facts(committed: &Committed) -> Result<MintFacts> {
     let transition = &committed.transition;
     assert_mint_type(transition)?;
-    let right = single_right_input(transition, "a mint")?;
+    assert_single_right_input(transition, "a mint")?;
     assert_asset_assignments_only(transition)?;
     let (issued, before_block) = mint_globals(transition)?;
     let (units, recipient) = one_asset_leg(transition)?;
@@ -94,7 +93,6 @@ pub fn mint_facts(committed: &Committed) -> Result<MintFacts> {
         )));
     }
     Ok(MintFacts {
-        right,
         opid: committed.opid.to_byte_array(),
         lock_id: lock_id(committed.opid, committed.txid),
         issued,
