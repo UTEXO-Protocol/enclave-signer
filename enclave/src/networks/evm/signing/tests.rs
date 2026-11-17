@@ -151,6 +151,14 @@ fn test_digest_matches_alloy_eip712() {
         None,
     );
     assert_eq!(
+        hex::encode(alloy_domain.separator()),
+        "8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff"
+    );
+    assert_eq!(
+        hex::encode(typed.eip712_signing_hash(&alloy_domain)),
+        "8535655116c6f440c2f63e7cc8141e4ffd1cab3876164a2962ee127dcb57389f"
+    );
+    assert_eq!(
         funds_out_digest(&domain, &p, 3, 1_700_000_000).unwrap(),
         typed.eip712_signing_hash(&alloy_domain).0
     );
@@ -171,6 +179,135 @@ fn test_domain_separator_matches_reference_vector() {
     let expected =
         decode("8da42c1b5850d914ac94e640f4edd2030e2330b104f8448fdf3c6639cb0542ff").unwrap();
     assert_eq!(domain.separator_hash(), expected.as_slice());
+}
+
+#[test]
+#[cfg(feature = "rgb-validation")]
+fn shared_json_calculation_vectors() {
+    use crate::config::BridgeConfig;
+    use crate::networks::evm::crosscheck::validate_funds_out_settlement;
+    use crate::networks::evm::events::derived_lock;
+    use crate::networks::evm::validation::{expected_burn_id, ReleaseIdentity};
+    use crate::networks::rgb::validation::lock_id;
+    use alloy_primitives::U256;
+    use bitcoin::hashes::Hash as _;
+    use serde_json::Value;
+
+    fn bytes(value: &Value) -> Vec<u8> {
+        decode(value.as_str().unwrap().strip_prefix("0x").unwrap()).unwrap()
+    }
+    fn word(value: &Value) -> [u8; 32] {
+        bytes(value).try_into().unwrap()
+    }
+    fn uint(value: &Value) -> U256 {
+        U256::from_str_radix(value.as_str().unwrap(), 10).unwrap()
+    }
+
+    let vectors: Value =
+        serde_json::from_str(include_str!("../../../../../docs/burn-shared-vectors.json")).unwrap();
+    assert_eq!(vectors["rgbNetwork"].as_str(), Some("827166"));
+    let fields = &vectors["domain"];
+    let cfg = BridgeConfig {
+        chain_id: uint(&fields["chainId"]).try_into().unwrap(),
+        funds_in_contract: bytes(&vectors["bridge"]).try_into().unwrap(),
+        token_contract: bytes(&vectors["token"]).try_into().unwrap(),
+        ..Default::default()
+    };
+    let domain = build_evm_domain(&EvmDestination {
+        chain_id: cfg.chain_id,
+        proxy_contract: bytes(&fields["verifyingContract"]),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(domain.name, fields["name"].as_str().unwrap());
+    assert_eq!(domain.version, fields["version"].as_str().unwrap());
+    assert_eq!(domain.separator_hash(), word(&fields["separator"]));
+    let mints = vectors["mints"].as_array().unwrap();
+    assert_eq!(mints.len(), 2);
+    let locks: Vec<_> = mints
+        .iter()
+        .map(|mint| {
+            let witness = bitcoin::Txid::from_byte_array(word(&mint["witnessTxidInternal"]));
+            assert_eq!(
+                format!("0x{witness}"),
+                mint["witnessTxidDisplay"].as_str().unwrap()
+            );
+            let lock = lock_id(rgbstd::OpId::from(word(&mint["opId"])), witness);
+            assert_eq!(lock, word(&mint["lockId"]));
+            let verified =
+                derived_lock(&cfg, lock, uint(&mint["amount"]).try_into().unwrap()).unwrap();
+            assert_eq!(verified.operation_id, word(&mint["depositId"]));
+            verified
+        })
+        .collect();
+    let releases = vectors["releases"].as_array().unwrap();
+    assert_eq!(releases.len(), 2);
+    let burn_id = U256::from_be_bytes(word(&vectors["burn"]["id"]));
+    for (case, name) in releases.iter().zip(["direct", "layerzero"]) {
+        assert_eq!(case["name"].as_str(), Some(name));
+        assert_eq!(case["route"].as_str(), Some(name));
+        let expected_bytes = &case["expected"];
+        let expected = ReleaseIdentity {
+            burn_id: uint(&case["burnId"]),
+            amount: uint(&case["amount"]),
+            source_chain_id: uint(&case["sourceChainId"]),
+            source_address: case["sourceAddress"].as_str().unwrap().into(),
+            settlement_data: bytes(&case["settlementData"]),
+            source_burn_tx_id: word(&case["sourceBurnTxId"]),
+            recipient: U256::from_be_slice(&bytes(&case["recipient"])).to_be_bytes(),
+            destination_chain_id: uint(&case["destinationChainId"]),
+            dst_eid: case["dstEid"].as_str().map(|s| s.parse().unwrap()),
+            proof: bytes(&case["proof"]),
+        };
+        let calldata = bytes(&expected_bytes["calldata"]);
+        let nonce = uint(&case["nonce"]).try_into().unwrap();
+        let deadline = uint(&case["deadline"]).try_into().unwrap();
+        let (actual, digest, type_string) = match name {
+            "direct" => {
+                let params = decode_funds_out_params(&calldata).unwrap();
+                (
+                    ReleaseIdentity::from_funds_out(&params),
+                    funds_out_digest(&domain, &params, nonce, deadline).unwrap(),
+                    TEE_FUNDS_OUT_TYPE_HASH_STR,
+                )
+            }
+            "layerzero" => {
+                let params = decode_lz_funds_out_params(&calldata).unwrap();
+                assert_eq!(params.extraOptions.to_vec(), bytes(&case["extraOptions"]));
+                let lz = LzReleaseParams {
+                    dst_eid: uint(&case["dstEid"]).try_into().unwrap(),
+                    recipient: bytes(&case["recipient"]),
+                    min_amount_ld: uint(&case["minAmountLD"]).try_into().unwrap(),
+                };
+                (
+                    ReleaseIdentity::from_lz_funds_out(&params),
+                    lz_funds_out_digest(&domain, &calldata, &lz, nonce, deadline).unwrap(),
+                    TEE_LZ_FUNDS_OUT_TYPE_HASH_STR,
+                )
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(actual, expected, "{name}");
+        assert_eq!(actual.source_chain_id, U256::from(827166));
+        assert!(actual.source_address.is_empty());
+        assert_eq!(digest, word(&expected_bytes["digest"]));
+        assert_eq!(
+            Keccak256::digest(type_string).as_slice(),
+            word(&expected_bytes["typeHash"])
+        );
+        assert_eq!(
+            eip712_digest(&domain, &word(&expected_bytes["structHash"])),
+            digest
+        );
+        assert_eq!(expected_burn_id(&cfg, &actual), burn_id);
+        assert_eq!(actual.burn_id, burn_id);
+        assert_eq!(
+            actual.settlement_data,
+            bytes(&vectors["settlement"]["encoded"])
+        );
+        assert_eq!(actual.proof, bytes(&vectors["proof"]["encoded"]));
+        validate_funds_out_settlement(&actual, &locks).unwrap();
+    }
 }
 
 // --- LZ digest tests ---

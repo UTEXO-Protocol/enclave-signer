@@ -27,12 +27,51 @@ The selected contract-format sources are immutable references:
 - [MultisigProxy release types and domain](https://github.com/UTEXO-Protocol/bridge-smart-contracts/blob/d4bc2363a3c84433d59afd7386ba2eb6508757d8/ethereum/src/MultisigProxy.sol).
 - [StoredBlockHeaderTestnet record layout](https://github.com/UTEXO-Protocol/bridge-smart-contracts/blob/d4bc2363a3c84433d59afd7386ba2eb6508757d8/ethereum/src/btc_relay/structs/StoredBlockHeaderTestnet.sol).
 
-The references identify format definitions. They do not assert that the tests
-execute Solidity or read an approved deployment.
+The references pin format definitions. They do not identify an approved deployment.
+
+## Shared calculation inputs
+
+[burn-shared-vectors.json](burn-shared-vectors.json) fixes identical inputs for
+RGB network `827166`, witness-bound mint locks, deposit and burn ids, ids-only
+settlement, and direct and LayerZero release digests. Expected bytes stay fixed.
+The JSON pins the producer and contract revisions; their lockfiles fix dependencies.
+
+The enclave tests check these inputs with its real calculation functions.
+The [Go references](../build/interop/burn/producer/) call the producer's
+calculation helpers. The [Solidity reference](../build/interop/burn/contracts/SharedBurnVectors.t.sol)
+uses the contract repository's existing encoding helpers. These are calculation
+checks; they do not establish contract authorization, Bitcoin consensus or payout.
+
+Use disposable external checkouts at the JSON revisions, with contract submodules
+initialized. Go dependencies include the private proto module; repeating the
+producer check requires access or a populated dependency cache. Use Go `1.26.9`,
+Foundry `1.7.1` (`4072e48705af9d93e3c0f6e29e93b5e9a40caed8`) and solc `0.8.35`.
+Set the three paths below, then run from the enclave repository root:
+
+```sh
+BURN_VECTORS_FILE="$PWD/docs/burn-shared-vectors.json"
+PRODUCER_CHECKOUT=/path/to/bridge-utexo
+CONTRACTS_CHECKOUT=/path/to/bridge-smart-contracts
+SOLC=/path/to/solc-0.8.35
+cp build/interop/burn/producer/connector_vectors_test.go "$PRODUCER_CHECKOUT/connectors/evm/"
+cp build/interop/burn/producer/proxy_vectors_test.go "$PRODUCER_CHECKOUT/internal/contracts/evm/transactor/blsProxy/"
+(cd "$PRODUCER_CHECKOUT" && BURN_SHARED_VECTORS="$BURN_VECTORS_FILE" go test -mod=readonly ./connectors/evm ./internal/contracts/evm/transactor/blsProxy -run '^TestSharedBurnCalculationVectors$' -count=1 -v)
+mkdir -p "$CONTRACTS_CHECKOUT/ethereum/test/protocol"
+cp build/interop/burn/contracts/SharedBurnVectors.t.sol "$CONTRACTS_CHECKOUT/ethereum/test/protocol/"
+(cd "$CONTRACTS_CHECKOUT/ethereum" && BURN_SHARED_VECTORS_JSON="$(cat "$BURN_VECTORS_FILE")" forge test --offline --use "$SOLC" --match-path test/protocol/SharedBurnVectors.t.sol -vv)
+```
+
+The external references run explicitly. Enclave CI runs the Rust tests under its
+existing feature matrix. Record the fixture checksum, source revisions, tool
+versions and actual test counts with a verification result.
+
+Verified on 2026-11-17 with the revisions and tools above: 253 enclave EVM tests,
+both Go package tests and all three Solidity reference tests passed. Fixture SHA-256:
+`1f3fd3f3152a572e4bce208d5a475eb1d54a1a95b5ba6f74c2f81d4622a4fe90`.
 
 ## Input and execution scope
 
-The fixed deposit and burn cases use the enclave's RGB network. Contract
+The older fixed deposit and burn cases use the enclave's RGB network. Contract
 examples using network `96` and enclave examples using `827166` have different
 inputs and therefore different expected ids. They are not evidence that three
 implementations ran the same case. The reference calculation in each local
@@ -67,7 +106,7 @@ reference comparisons listed above:
 
 ```sh
 cargo test --locked -p utexo-bridge-enclave --no-default-features \
-  --features spv,burn-signer,mock-attestation,allow-seed-import \
+  --features burn-signer,mock-attestation,allow-seed-import \
   --lib networks::evm::
 ```
 
@@ -75,7 +114,7 @@ Run the upstream LockId cases separately:
 
 ```sh
 cargo test --locked -p utexo-bridge-enclave --no-default-features \
-  --features spv,burn-signer,mock-attestation,allow-seed-import \
+  --features burn-signer,mock-attestation,allow-seed-import \
   --lib -- --exact networks::rgb::validation::tests::lock_id_matches_the_upstream_vectors
 ```
 

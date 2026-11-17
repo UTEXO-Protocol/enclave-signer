@@ -1663,6 +1663,32 @@ mod btc_relay {
             lines += 1;
         }
         assert_eq!(lines, 5);
+        let shared: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../docs/burn-shared-vectors.json"))
+                .unwrap();
+        let calldata = hex::decode(
+            shared["releases"][0]["expected"]["calldata"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("0x")
+                .unwrap(),
+        )
+        .unwrap();
+        let (source, latest) = decode_funds_out_proof(&params_of(&calldata)).unwrap();
+        assert_eq!((source.height, latest.height), (11, 2017));
+        for (block, label) in [(source, "source"), (latest, "latest")] {
+            assert_eq!(
+                block.height.to_string(),
+                shared["proof"][format!("{label}Height")].as_str().unwrap()
+            );
+            assert_eq!(
+                format!("0x{}", hex::encode(block.commitment)),
+                shared["proof"][format!("{label}Commitment")]
+                    .as_str()
+                    .unwrap()
+            );
+            assert_eq!(block.commitment, relay_commit(&chain, block.height));
+        }
     }
 
     #[test]

@@ -799,7 +799,7 @@ fn burn_id_matches_the_shared_vector() {
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
 /// `sourceChainId` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
-fn burn_id_matches_the_contract_vector() {
+fn burn_id_matches_adapted_contract_inputs() {
     let cfg = BridgeConfig {
         chain_id: 42161,
         funds_in_contract: [0x11; ADDRESS_LEN],

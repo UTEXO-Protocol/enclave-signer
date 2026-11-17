@@ -1129,7 +1129,7 @@ fn rgb_mint_deposit_id_matches_the_shared_vector() {
 /// The BridgeProxy.t.sol vector inputs (bridge-smart-contracts), with
 /// `rgbNetwork` = `RGB_CHAIN_ID`. The contract test pins the 96 form.
 #[test]
-fn rgb_mint_deposit_id_matches_the_contract_vector() {
+fn rgb_mint_deposit_id_matches_adapted_contract_inputs() {
     let cfg = crate::config::BridgeConfig {
         funds_in_contract: [0x11; 20],
         token_contract: [0x22; 20],
