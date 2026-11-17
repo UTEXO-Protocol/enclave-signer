@@ -4668,7 +4668,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.8"
-source = "git+https://github.com/RGB-Tools/rgb-lib?rev=ea2b745b66b20fbaf3001e2121e1329c4695f647#ea2b745b66b20fbaf3001e2121e1329c4695f647"
+source = "git+https://github.com/RGB-Tools/rgb-lib?rev=6236d7e9#6236d7e941e6e653628abfb9e1e75edcd33f3aac"
 dependencies = [
  "amplify",
  "bitcoin",
@@ -6119,7 +6119,6 @@ dependencies = [
  "rgb-aluvm",
  "rgb-consensus",
  "rgb-consignment",
- "rgb-invoicing",
  "rgb-lib",
  "rgb-ops",
  "rgb-psbt-utils",
