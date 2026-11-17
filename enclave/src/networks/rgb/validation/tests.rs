@@ -699,7 +699,7 @@ fn validates_rgb_libs_split_burn_shape() {
         .last_transition
         .as_ref()
         .expect("the settling burn");
-    assert_eq!(last.transition_type, bfa_schema::TS_BURN);
+    assert_eq!(last.transition_type, TypeOfTransition::Burn);
     assert_eq!(last.op_id, burn.opid.to_string());
     assert_eq!(last.burned_asset_amount, Some(60_000));
     assert_eq!(last.burn_reason, Some(gen::burn_reason_for(PAYEE)));
@@ -710,8 +710,8 @@ fn validates_rgb_libs_split_burn_shape() {
     assert_eq!(last.asset_output_amount, 0);
 
     let group = validated.transitions_committed_by(burn.tx.compute_txid());
-    let types: Vec<u16> = group.iter().map(|t| t.transition_type).collect();
-    assert_eq!(types, [bfa_schema::TS_TRANSFER, bfa_schema::TS_BURN]);
+    let types: Vec<TypeOfTransition> = group.iter().map(|t| t.transition_type).collect();
+    assert_eq!(types, [TypeOfTransition::Transfer, TypeOfTransition::Burn]);
     let change = TransitionOutput {
         amount: 40_000,
         seal: OutputSeal::Revealed {
@@ -984,7 +984,7 @@ fn reads_a_mint_and_its_anchor() {
         }]
     );
     let last = validated.last_transition.unwrap();
-    assert!(is_mint_transition(last.transition_type));
+    assert_eq!(last.transition_type, TypeOfTransition::Mint);
     assert_eq!(last.asset_output_amount, MINTED);
     assert!(matches!(
         last.outputs[0].seal,
@@ -1304,10 +1304,9 @@ fn transition_summary_keeps_the_schema_transition_type() {
         bfa_schema::TS_TRANSFER_INFLATION,
         bfa_schema::TS_TRANSFER_LINK,
     ] {
-        let inspected = TypeOfTransition::try_from(rgbstd::TransitionType::with(ty)).unwrap();
-        let t = inspected_transition(inspected, vec![]);
+        let t = inspected_transition(bfa_schema::type_of(ty), vec![]);
         let summary = transition_summary(&t, WITNESS, "bcrt:").unwrap();
-        assert_eq!(summary.transition_type, ty, "{ty}");
+        assert_eq!(summary.transition_type, bfa_schema::type_of(ty), "{ty}");
     }
 }
 
@@ -1340,13 +1339,13 @@ fn transition_summary_refuses_a_seal_it_cannot_read_exactly() {
     assert!(err.contains("without a txid and vout"), "{err}");
 }
 
-/// A BFA `mint` is the only mint shape. It is a signing shape only in the
-/// mint/burn flow.
+/// A BFA `mint` is the only mint shape, and a signing shape only in the
+/// mint/burn flow. The ids are the schema's, which `bfa_schema::tests` pins.
 #[test]
 fn mint_transitions_are_the_only_mint_shape() {
-    assert!(is_mint_transition(8013));
-    assert!(!is_mint_transition(10000));
-    assert!(!is_mint_transition(8010));
+    assert_eq!(bfa_schema::type_of(8013), TypeOfTransition::Mint);
+    assert_eq!(bfa_schema::type_of(10000), TypeOfTransition::Transfer);
+    assert_eq!(bfa_schema::type_of(8010), TypeOfTransition::Burn);
     assert!(super::super::flow::is_signing_transition(
         rgb_lib::TypeOfTransition::Mint
     ));
@@ -1438,13 +1437,13 @@ fn the_settling_transition_is_the_last_burn_of_the_last_bundle() {
     use super::consensus::settling_summary;
     let inspected = summary::inspected(&burn_bytes()).unwrap();
     let settling = settling_summary(&inspected).unwrap().unwrap();
-    assert_eq!(settling.transition_type, bfa_schema::TS_BURN);
+    assert_eq!(settling.transition_type, TypeOfTransition::Burn);
     assert_eq!(settling.burned_asset_amount, Some(60_000));
 
     let mut two_burns = inspected.clone();
     let (_, summaries) = two_burns.last_mut().unwrap();
     for t in summaries.iter_mut() {
-        t.transition_type = bfa_schema::TS_BURN;
+        t.transition_type = TypeOfTransition::Burn;
     }
     let err = settling_summary(&two_burns).unwrap_err().to_string();
     assert!(err.contains("a release settles exactly one"), "{err}");

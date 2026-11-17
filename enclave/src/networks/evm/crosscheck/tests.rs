@@ -1,3 +1,5 @@
+use rgb_lib::TypeOfTransition;
+
 use super::*;
 
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
@@ -131,7 +133,6 @@ fn rejects_flat_encoding_zero_recipient() {
 mod source_burn {
     use super::*;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     /// OpId as the consignment parser yields it: 64 lowercase hex chars.
     const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -143,7 +144,7 @@ mod source_burn {
     fn settling_transition(op_id: &str) -> TransitionSummary {
         TransitionSummary {
             op_id: op_id.into(),
-            transition_type: bfa_ids::TS_TRANSFER,
+            transition_type: TypeOfTransition::Transfer,
             asset_output_amount: 1000,
             outputs: Vec::new(),
             burned_asset_amount: None,
@@ -238,17 +239,17 @@ mod burn {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     const RECIPIENT: [u8; 20] = [0x42; 20];
 
     fn burn_transition(burned: Option<u64>, reason: Option<[u8; 32]>) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
+            asset_output_amount: 0,
+            outputs: Vec::new(),
             burned_asset_amount: burned,
             burn_reason: reason,
-            ..Default::default()
         }
     }
 
@@ -361,14 +362,13 @@ mod burn {
 mod transfer {
     use super::*;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
             // The destroyed amount is the burnedAsset global, never the
             // outputs.
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(amount),
@@ -434,7 +434,7 @@ mod transfer {
     fn rejects_when_last_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);
         let mut t = source_transition(500);
-        t.transition_type = bfa_ids::TS_MINT;
+        t.transition_type = TypeOfTransition::Mint;
         let validated = validated_with_last(t);
         let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
         assert!(
@@ -626,7 +626,6 @@ mod lz_route {
     use crate::networks::evm::validation::{decode_lz_funds_out_params, lzFundsOutCall};
     use crate::networks::rgb::validation::TransitionSummary;
     use crate::networks::rgb::validation::VerifiedLock;
-    use crate::test_support::bfa_ids;
     use alloy_primitives::B256;
     use alloy_sol_types::SolValue;
 
@@ -657,7 +656,7 @@ mod lz_route {
     fn burn_with_reason(reason: [u8; 32]) -> ValidatedConsignment {
         validated_with_last(TransitionSummary {
             op_id: OP_ID_HEX.into(),
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(BURNED),

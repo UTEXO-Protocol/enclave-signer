@@ -29,8 +29,9 @@ use super::schema::reject_list;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
 use super::witness::{ConfirmedWitnesses, OnChainResolver};
+use rgb_lib::TypeOfTransition;
+
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::bfa_schema;
 
 impl RgbValidator {
     /// Validates raw consignment bytes and returns the extracted data.
@@ -274,7 +275,7 @@ pub(super) fn settling_summary(
     let Some((_, summaries)) = by_witness.last() else {
         return Ok(None);
     };
-    let is_burn = |t: &TransitionSummary| t.transition_type == bfa_schema::TS_BURN;
+    let is_burn = |t: &TransitionSummary| t.transition_type == TypeOfTransition::Burn;
     let burns = summaries.iter().filter(|t| is_burn(t)).count();
     if burns > 1 {
         return Err(EnclaveError::CrossCheck(format!(

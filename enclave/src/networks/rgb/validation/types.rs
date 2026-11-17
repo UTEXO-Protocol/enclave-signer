@@ -3,6 +3,8 @@
 //! All of it passed rgb-lib validation. The rest of the enclave reads these
 //! shapes and does not parse RGB again.
 
+use rgb_lib::TypeOfTransition;
+
 use super::bfa::VerifiedLock;
 
 /// Data extracted from a successfully validated RGB consignment.
@@ -78,15 +80,15 @@ impl ValidatedConsignment {
 
 /// Flat summary of one RGB state transition, read by rgb-lib's inspection
 /// (`rgb_lib::no_wallet::RgbTransitionInfo`). Local types keep it out of the public API.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSummary {
     /// Operation id: 64-char lowercase hex of the 32-byte RGB OpId, from
     /// rgb-lib. It must be hex, not baid64:
     /// `validation::bfa::decode_opid` decodes it to 32 bytes.
     pub op_id: String,
-    /// BFA transition-type id. Compare with `bfa_schema::TS_TRANSFER`,
-    /// `TS_BURN` or `TS_MINT` to classify the EVM action.
-    pub transition_type: u16,
+    /// The transition type rgb-lib read under the pinned BFA schema, which it
+    /// refuses to inspect for a type that schema does not define.
+    pub transition_type: TypeOfTransition,
     /// Sum of the fungible amounts on `OS_ASSET` output assignments, the one
     /// fungible type of BFA. For a Transfer, this is recipient plus change.
     /// For a mint, it is the minted value. For a Burn, it is 0: the schema

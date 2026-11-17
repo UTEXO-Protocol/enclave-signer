@@ -12,11 +12,10 @@ use rgb_lib::no_wallet::{
     inspect_consignment, BundleFilter, RgbInspection, RgbOutputInfo, RgbTransitionInfo,
     TransitionGlobal,
 };
-use rgb_lib::{Assignment, TypeOfTransition};
+use rgb_lib::Assignment;
 
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::bfa_schema;
 
 /// Index of the transition a witness settles: its last `TS_BURN`, or its last
 /// transition when it burns nothing. One tx can carry a burn and a plain transfer.
@@ -25,12 +24,6 @@ pub(super) fn settling_index<T>(transitions: &[T], is_burn: impl Fn(&T) -> bool)
         .iter()
         .rposition(is_burn)
         .or(transitions.len().checked_sub(1))
-}
-
-/// Returns true for a mint transition, which maps 1:1 to an EVM lock record.
-/// In BFA, only `TS_MINT` creates units.
-pub fn is_mint_transition(transition_type: u16) -> bool {
-    transition_type == bfa_schema::TS_MINT
 }
 
 /// The flat transition summary of a consignment that consensus validated:
@@ -108,7 +101,7 @@ pub(super) fn transition_summary(
     let (burned_asset_amount, burn_reason) = burn_globals(t)?;
     Ok(TransitionSummary {
         op_id: t.opid.clone(),
-        transition_type: transition_type_id(t.r#type),
+        transition_type: t.r#type,
         asset_output_amount: total,
         outputs,
         burned_asset_amount,
@@ -157,20 +150,6 @@ fn burn_globals(t: &RgbTransitionInfo) -> Result<(Option<u64>, Option<[u8; 32]>)
         }
     }
     Ok((burned, reason))
-}
-
-/// The BFA schema id of an inspected type: rgb-lib maps it from these ids.
-pub fn transition_type_id(ty: TypeOfTransition) -> u16 {
-    match ty {
-        TypeOfTransition::Transfer => bfa_schema::TS_TRANSFER,
-        TypeOfTransition::Inflate => bfa_schema::TS_INFLATION,
-        TypeOfTransition::Burn => bfa_schema::TS_BURN,
-        TypeOfTransition::Link => bfa_schema::TS_LINK,
-        TypeOfTransition::Mint => bfa_schema::TS_MINT,
-        TypeOfTransition::TransferInflation => bfa_schema::TS_TRANSFER_INFLATION,
-        TypeOfTransition::TransferLink => bfa_schema::TS_TRANSFER_LINK,
-        TypeOfTransition::Propagate => bfa_schema::TS_PROPAGATE,
-    }
 }
 
 /// The seal as rgbstd holds it: inspect names the witness of a witness seal,
