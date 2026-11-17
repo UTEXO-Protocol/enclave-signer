@@ -25,7 +25,7 @@ use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
 use super::cost::assert_bounded_for_rgb_lib;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
-use super::schema::{assert_bfa_genesis, reject_list};
+use super::schema::reject_list;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
 use super::witness::{ConfirmedWitnesses, OnChainResolver};
@@ -53,7 +53,7 @@ impl RgbValidator {
         let (transfer, list) = load_bounded(consignment_bytes, lists)?;
         let resolvers = Resolvers {
             witnesses: OnChainResolver::new(&transfer, self.chain_net, witnesses),
-            anchors: bind.map(|bind| BindingResolver::new(&transfer, bind)),
+            anchors: bind.map(BindingResolver::new),
             list: list
                 .zip(lists.read)
                 .map(|(l, read)| ListResolver::new(l, read)),
@@ -147,7 +147,10 @@ fn load_bounded(
     // validation peak (`memory.rs`).
     let transfer = decoded.clone();
     drop(decoded);
-    assert_bfa_genesis(&transfer.genesis)?;
+    // The asset pin runs before the reject-list location is read, because the
+    // enclave reaches that address over the network: a foreign genesis must
+    // not choose it. The pin admits one contract id, hence one genesis, hence
+    // one schema. Refusing here also spares rgb-lib the work.
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
     let list = reject_list(&transfer.genesis)?;
     assert_bounded_for_rgb_lib(&transfer, bytes.len(), list.is_some())?;

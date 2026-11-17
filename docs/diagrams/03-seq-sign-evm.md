@@ -35,10 +35,10 @@ sequenceDiagram
     Rgb->>Rgb: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
     Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
-    Bind->>Bind: bridgeLocation == pinned FUNDS_IN_CONTRACT on EVM_CHAIN_ID
+    Rgb->>Rgb: rgb-ops: genesis bridgeLocation chain == the resolver's EVM_CHAIN_ID
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units, no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Rgb: witness resolver: tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
+    Rgb->>Rgb: witness resolver: chain_net == enclave network, else REFUSE;<br/>tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
     opt genesis names a reject list
         Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
         Rgb->>Rgb: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
@@ -52,7 +52,6 @@ sequenceDiagram
     Note over Srv,Chain: SPV gate (inside validate_source)
     Srv->>Chain: lock chain
     Srv->>Spv: assert_chain_not_stale: tip<br/>≤ 2 h old, ≤ 2 h future
-    Srv->>Spv: assert_chain_net(consignment, enclave network)
     Srv->>Spv: validate_spv_proofs(witness_txids, proofs)
     Spv->>Spv: exact set-equality(expected txids, proofs)
     loop each MerkleProofEntry

@@ -20,6 +20,7 @@ use rgbstd::{
 use super::transition::{output_seal, single_global};
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::bfa_schema;
 
 /// Index of the transition a witness settles: its last `TS_BURN`, or its last
 /// transition when it burns nothing. One tx can carry a burn and a plain transfer.
@@ -33,7 +34,7 @@ pub(super) fn settling_index<T>(transitions: &[T], is_burn: impl Fn(&T) -> bool)
 /// Returns true for a mint transition, which maps 1:1 to an EVM lock record.
 /// In BFA, only `TS_MINT` creates units.
 pub fn is_mint_transition(transition_type: u16) -> bool {
-    TransitionType::with(transition_type) == schemata::TS_MINT
+    TransitionType::with(transition_type) == bfa_schema::TS_MINT
 }
 
 /// What the enclave binds about the last bundle, read from the validated
@@ -76,7 +77,7 @@ pub(super) fn read_last_bundle(transfer: &Transfer) -> Result<Option<LastBundle>
 /// The settling known transition, by [`settling_index`]. Two burns in one
 /// bundle are refused: only one of them could ever be released.
 fn settling_known_transition(known: &[KnownTransition]) -> Result<Option<&KnownTransition>> {
-    let is_burn = |k: &KnownTransition| k.transition.transition_type == schemata::TS_BURN;
+    let is_burn = |k: &KnownTransition| k.transition.transition_type == bfa_schema::TS_BURN;
     let burns = known.iter().filter(|k| is_burn(k)).count();
     if burns > 1 {
         return Err(EnclaveError::CrossCheck(format!(
@@ -89,12 +90,12 @@ fn settling_known_transition(known: &[KnownTransition]) -> Result<Option<&KnownT
 fn settling_facts(known: &KnownTransition) -> Result<SettlingFacts> {
     let transition = &known.transition;
     let globals = &transition.globals;
-    let burned_asset = single_global::<8>(globals, schemata::GS_BURNED_ASSET, "burnedAsset")?
+    let burned_asset = single_global::<8>(globals, bfa_schema::GS_BURNED_ASSET, "burnedAsset")?
         .map(u64::from_le_bytes);
-    let burn_reason = single_global::<32>(globals, schemata::GS_BURN_REASON, "burnReason")?;
+    let burn_reason = single_global::<32>(globals, bfa_schema::GS_BURN_REASON, "burnReason")?;
     let mint_rights = transition
         .assignments
-        .get(&schemata::OS_MINT)
+        .get(&bfa_schema::OS_MINT)
         .map(|typed| typed.seals().map(output_seal).collect())
         .unwrap_or_default();
     Ok(SettlingFacts {
@@ -272,14 +273,14 @@ pub(super) fn transition_summary(
 /// The BFA schema id of an inspected type: rgb-lib maps it from these ids.
 fn transition_type_id(ty: TypeOfTransition) -> u16 {
     let ty = match ty {
-        TypeOfTransition::Transfer => schemata::TS_TRANSFER,
-        TypeOfTransition::Inflate => schemata::TS_INFLATION,
-        TypeOfTransition::Burn => schemata::TS_BURN,
-        TypeOfTransition::Link => schemata::TS_LINK,
-        TypeOfTransition::Mint => schemata::TS_MINT,
-        TypeOfTransition::TransferInflation => schemata::TS_TRANSFER_INFLATION,
-        TypeOfTransition::TransferLink => schemata::TS_TRANSFER_LINK,
-        TypeOfTransition::Propagate => schemata::TS_PROPAGATE,
+        TypeOfTransition::Transfer => bfa_schema::TS_TRANSFER,
+        TypeOfTransition::Inflate => bfa_schema::TS_INFLATION,
+        TypeOfTransition::Burn => bfa_schema::TS_BURN,
+        TypeOfTransition::Link => bfa_schema::TS_LINK,
+        TypeOfTransition::Mint => bfa_schema::TS_MINT,
+        TypeOfTransition::TransferInflation => bfa_schema::TS_TRANSFER_INFLATION,
+        TypeOfTransition::TransferLink => bfa_schema::TS_TRANSFER_LINK,
+        TypeOfTransition::Propagate => bfa_schema::TS_PROPAGATE,
     };
     ty.to_inner()
 }

@@ -16,6 +16,7 @@ use rgbstd::{GraphSeal, OpId};
 use strict_encoding::StrictSerialize;
 
 use super::*;
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::btc_ownership::tests as fx;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
 
@@ -105,7 +106,10 @@ fn reads_the_one_propagate_a_rights_send_commits() {
     assert_eq!(committed.opid, sent.opid);
     assert_eq!(committed.txid, sent.tx.compute_txid());
     assert_eq!(committed.transition.id(), sent.opid);
-    assert_eq!(committed.transition.transition_type, schemata::TS_PROPAGATE);
+    assert_eq!(
+        committed.transition.transition_type,
+        bfa_schema::TS_PROPAGATE
+    );
 }
 
 /// rgb-lib strips every RGB key; the fascia alone carries the mint.
@@ -127,7 +131,7 @@ fn reads_a_mint_from_a_psbt_stripped_of_rgb_keys() {
     assert!(psbt.rgb_bundles().unwrap().is_empty());
     let committed = read(&psbt.unsigned_tx, &minted.fascia, history.contract_id).unwrap();
     assert_eq!(committed.opid, minted.opid);
-    assert_eq!(committed.transition.transition_type, schemata::TS_MINT);
+    assert_eq!(committed.transition.transition_type, bfa_schema::TS_MINT);
 }
 
 #[test]

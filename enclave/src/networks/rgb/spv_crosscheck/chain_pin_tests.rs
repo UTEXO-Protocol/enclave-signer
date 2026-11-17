@@ -1,5 +1,6 @@
 use super::*;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
+use crate::networks::rgb::spv::Network;
 use crate::test_support::ANY_HEADER_CLOCK;
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;

@@ -6383,7 +6383,6 @@ dependencies = [
  "rgb-invoicing",
  "rgb-lib",
  "rgb-ops",
- "rgb-schemas",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",

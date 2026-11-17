@@ -101,7 +101,7 @@ pub struct TransitionSummary {
     /// rgb-lib. It must be hex, not baid64:
     /// `validation::bfa::decode_opid` decodes it to 32 bytes.
     pub op_id: String,
-    /// BFA transition-type id. Compare with `schemata::TS_TRANSFER`,
+    /// BFA transition-type id. Compare with `bfa_schema::TS_TRANSFER`,
     /// `TS_BURN` or `TS_MINT` to classify the EVM action.
     pub transition_type: u16,
     /// Sum of the fungible amounts on `OS_ASSET` output assignments, the one

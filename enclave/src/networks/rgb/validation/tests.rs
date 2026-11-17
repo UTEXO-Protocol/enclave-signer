@@ -28,6 +28,7 @@ use super::validator::*;
 use super::witness::*;
 use crate::config::BridgeConfig;
 use crate::error::Result;
+use crate::networks::rgb::bfa_schema;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
 
 /// The Bridge the generated assets name, and its chain.
@@ -81,9 +82,9 @@ fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
 }
 
 /// Binds every anchor to a lock with its own `(lockId, amount)`.
-fn bind_all(bridge: &BfaBridge, anchors: &[MintAnchor]) -> Result<BoundAnchors> {
+fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
-        evm_chain_id: bridge.chain_id,
+        evm_chain_id: EVM_CHAIN_ID,
         locks: anchors.iter().map(lock_for).collect(),
     })
 }
@@ -174,15 +175,6 @@ fn rejects_other_containers() {
         let err = error_of(validate(&bytes));
         assert!(err.contains("deserialization failed"), "{err}");
     }
-}
-
-/// BFA is the only schema the enclave validates.
-#[test]
-fn rejects_a_non_bfa_schema() {
-    let mut transfer = issue().as_transfer();
-    transfer.genesis.schema_id = schemata::CFA_SCHEMA_ID;
-    let err = error_of(validate(&gen::save(&transfer)));
-    assert!(err.contains("validates only the bridged fungible"), "{err}");
 }
 
 // ===== reject list =====
@@ -343,14 +335,14 @@ fn split_change(history: &History) -> rgbstd::Opout {
     let outputs = split
         .transition
         .assignments
-        .get(&schemata::OS_ASSET)
+        .get(&bfa_schema::OS_ASSET)
         .unwrap()
         .as_fungible();
     let no = outputs
         .iter()
         .position(|a| a.as_state().as_u64() == MINTED - 60_000)
         .expect("the split's change");
-    rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap())
+    rgbstd::Opout::new(split.opid, bfa_schema::OS_ASSET, u16::try_from(no).unwrap())
 }
 
 /// A listed mint, then a transfer that splits the units into two halves on
@@ -393,7 +385,7 @@ fn a_rejected_line_in_a_companion_transfer_refuses_the_burn() {
 fn an_allowed_opout_shields_only_its_own_branch() {
     let (mut history, halves) = listed_halves();
     let units = history.bundles[0].bundle.known_transitions[0].opid;
-    let units = rgbstd::Opout::new(units, schemata::OS_ASSET, 0);
+    let units = rgbstd::Opout::new(units, bfa_schema::OS_ASSET, 0);
     let mut burn = history.transition("burn");
     for half in &halves {
         burn = burn
@@ -613,17 +605,19 @@ mod reject_list_rules {
     }
 }
 
-/// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib 567e5b8 `SCHEMA_ID_BFA`.
+/// The pinned asset admits one genesis, under the schema that `rgb-schemas`
+/// compiles. A rev bump that changes the schema id therefore changes the
+/// consensus rules the pinned asset validates under, which needs a reissue and
+/// a new PCR0. It must fail loudly here.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(
-        schemata::BFA_SCHEMA_ID.to_string(),
+        bfa_schema::BFA_SCHEMA_ID.to_string(),
         "rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album"
     );
     use rgbstd::contract::IssuerWrapper;
     let rules = schemata::BridgedFungibleAsset::schema_rules();
-    assert_eq!(rules.schema().schema_id(), schemata::BFA_SCHEMA_ID);
+    assert_eq!(rules.schema().schema_id(), bfa_schema::BFA_SCHEMA_ID);
 }
 
 // ===== a burn, end to end =====
@@ -658,7 +652,7 @@ fn validates_rgb_libs_split_burn_shape() {
         .expect("the settling burn");
     assert_eq!(
         rgbstd::TransitionType::with(last.transition_type),
-        schemata::TS_BURN
+        bfa_schema::TS_BURN
     );
     assert_eq!(last.op_id, burn.opid.to_string());
     assert_eq!(last.burned_asset_amount, Some(60_000));
@@ -673,7 +667,7 @@ fn validates_rgb_libs_split_burn_shape() {
     let types: Vec<u16> = group.iter().map(|t| t.transition_type).collect();
     assert_eq!(
         types,
-        [schemata::TS_TRANSFER, schemata::TS_BURN].map(|t| t.to_inner())
+        [bfa_schema::TS_TRANSFER, bfa_schema::TS_BURN].map(|t| t.to_inner())
     );
     let change = TransitionOutput {
         amount: 40_000,
@@ -805,7 +799,7 @@ fn split_in_halves(mut history: History, units: Utxo) -> (History, [Utxo; 2]) {
         vec![gen::dust(1), gen::dust(2)],
     );
     let half_at = |no: u16| Utxo {
-        opout: rgbstd::Opout::new(split_opid, schemata::OS_ASSET, no),
+        opout: rgbstd::Opout::new(split_opid, bfa_schema::OS_ASSET, no),
         outpoint: OutPoint::new(tx.compute_txid(), u32::from(no) + 1),
     };
     (history, [half_at(0), half_at(1)])
@@ -931,9 +925,9 @@ fn reads_a_mint_and_its_anchor() {
     let bytes = history.consignment();
 
     let seen = RefCell::new(Vec::new());
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let record = |anchors: &[MintAnchor]| {
         seen.borrow_mut().extend_from_slice(anchors);
-        bind_all(bridge, anchors)
+        bind_all(anchors)
     };
     let validated = validate_bound(&bytes, Some(&record)).expect("the mint is valid");
 
@@ -1000,25 +994,6 @@ fn a_mint_witness_tx_may_spend_any_fee_input() {
     }
 }
 
-/// The genesis names the bridge the binder checks.
-#[test]
-fn the_binder_sees_the_genesis_bridge() {
-    let bytes = burn_bytes();
-    let seen = RefCell::new(None);
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        *seen.borrow_mut() = Some(*bridge);
-        bind_all(bridge, anchors)
-    };
-    validate_bound(&bytes, Some(&record)).unwrap();
-    assert_eq!(
-        *seen.borrow(),
-        Some(BfaBridge {
-            chain_id: EVM_CHAIN_ID,
-            address: BRIDGE,
-        })
-    );
-}
-
 /// A build with no binder refuses any mint ancestry; it never confirms an
 /// anchor blind, and never panics in `finalize`.
 #[test]
@@ -1032,14 +1007,14 @@ fn refuses_mint_anchors_without_a_binder() {
 #[test]
 fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
     let bytes = burn_bytes();
-    let none = |bridge: &BfaBridge, _: &[MintAnchor]| {
+    let none = |_: &[MintAnchor]| {
         Ok(BoundAnchors {
-            evm_chain_id: bridge.chain_id,
+            evm_chain_id: EVM_CHAIN_ID,
             locks: vec![],
         })
     };
-    let extra = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        let mut bound = bind_all(bridge, anchors)?;
+    let extra = |anchors: &[MintAnchor]| {
+        let mut bound = bind_all(anchors)?;
         if let Some(anchor) = anchors.first() {
             bound.locks.push(VerifiedLock {
                 lock_id: [0x77; 32],
@@ -1048,8 +1023,8 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
         }
         Ok(bound)
     };
-    let other_amount = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        let mut bound = bind_all(bridge, anchors)?;
+    let other_amount = |anchors: &[MintAnchor]| {
+        let mut bound = bind_all(anchors)?;
         if let Some(lock) = bound.locks.first_mut() {
             lock.minted += 1;
         }
@@ -1065,9 +1040,9 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
 /// Binds every anchor to a lock keyed by `key` instead of its lockId.
 fn bind_keyed_by(
     key: impl Fn(&MintAnchor) -> [u8; 32],
-) -> impl Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors> {
-    move |bridge, anchors| {
-        let mut bound = bind_all(bridge, anchors)?;
+) -> impl Fn(&[MintAnchor]) -> Result<BoundAnchors> {
+    move |anchors| {
+        let mut bound = bind_all(anchors)?;
         for (lock, anchor) in bound.locks.iter_mut().zip(anchors) {
             lock.lock_id = key(anchor);
         }
@@ -1125,11 +1100,11 @@ fn lock_id_matches_the_upstream_vectors() {
 #[test]
 fn refuses_locks_bound_on_another_chain() {
     let asked = RefCell::new(0);
-    let other_chain = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let other_chain = |anchors: &[MintAnchor]| {
         *asked.borrow_mut() += anchors.len();
         Ok(BoundAnchors {
             evm_chain_id: 1,
-            ..bind_all(bridge, anchors)?
+            ..bind_all(anchors)?
         })
     };
     let err = error_of(validate_bound(&burn_bytes(), Some(&other_chain)));
@@ -1167,9 +1142,9 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
     history.commit(vec![burn], inputs, vec![gen::dust(4)]);
 
     let calls = RefCell::new(Vec::new());
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let record = |anchors: &[MintAnchor]| {
         calls.borrow_mut().push(anchors.to_vec());
-        bind_all(bridge, anchors)
+        bind_all(anchors)
     };
     let validated = validate_bound(&history.consignment(), Some(&record)).unwrap();
     let calls = calls.into_inner();
@@ -1281,14 +1256,14 @@ fn transition_summary_refuses_an_overflowing_total() {
 #[test]
 fn transition_summary_keeps_the_schema_transition_type() {
     for ty in [
-        schemata::TS_TRANSFER,
-        schemata::TS_INFLATION,
-        schemata::TS_BURN,
-        schemata::TS_LINK,
-        schemata::TS_MINT,
-        schemata::TS_PROPAGATE,
-        schemata::TS_TRANSFER_INFLATION,
-        schemata::TS_TRANSFER_LINK,
+        bfa_schema::TS_TRANSFER,
+        bfa_schema::TS_INFLATION,
+        bfa_schema::TS_BURN,
+        bfa_schema::TS_LINK,
+        bfa_schema::TS_MINT,
+        bfa_schema::TS_PROPAGATE,
+        bfa_schema::TS_TRANSFER_INFLATION,
+        bfa_schema::TS_TRANSFER_LINK,
     ] {
         let inspected = TypeOfTransition::try_from(ty).unwrap();
         let t = inspected_transition(inspected, vec![]);
@@ -1451,7 +1426,7 @@ fn a_settling_transition_the_inspection_types_otherwise_is_refused() {
     let (last, mut inspected) = settling_readings();
     let (_, summaries) = inspected.last_mut().unwrap();
     for t in summaries.iter_mut() {
-        t.transition_type = schemata::TS_TRANSFER.to_inner();
+        t.transition_type = bfa_schema::TS_TRANSFER.to_inner();
     }
     let err = settling_summary(&inspected, Some(&last))
         .unwrap_err()
@@ -1658,8 +1633,7 @@ fn a_failing_resolver_refuses_with_its_own_error() {
             Err("witness source down".into())
         }
     }
-    let binder =
-        |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
+    let binder = |_: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
     let reader = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("reader")) };
     let read_failing = ListAccess {
         bind_asset: &any_asset,
@@ -2160,7 +2134,7 @@ mod source_path {
     fn unrelated() -> rgbstd::Opout {
         rgbstd::Opout::new(
             rgbstd::OpId::copy_from_slice([0x99; 32]).unwrap(),
-            schemata::OS_ASSET,
+            bfa_schema::OS_ASSET,
             0,
         )
     }
@@ -2282,7 +2256,7 @@ fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64)
     let send = send.complete_transition().unwrap();
     let index = send
         .assignments
-        .get(&schemata::OS_MINT)
+        .get(&bfa_schema::OS_MINT)
         .unwrap()
         .seals()
         .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == 2))
@@ -2294,7 +2268,7 @@ fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64)
         vec![gen::dust(1), gen::dust(2)],
     );
     Utxo {
-        opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+        opout: rgbstd::Opout::new(opid, bfa_schema::OS_MINT, index),
         outpoint: OutPoint::new(tx.compute_txid(), 2),
     }
 }
@@ -2387,7 +2361,7 @@ fn dense_rights_burn(sends: u8, outputs: u16) -> History {
         let opid = opid_in(&mut send, 0xF0 - 13 * k..0xF0 - 13 * (k - 1));
         let index = send
             .assignments
-            .get(&schemata::OS_MINT)
+            .get(&bfa_schema::OS_MINT)
             .unwrap()
             .seals()
             .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == vout))
@@ -2399,7 +2373,7 @@ fn dense_rights_burn(sends: u8, outputs: u16) -> History {
             vec![gen::dust(1), gen::dust(2), gen::dust(3)],
         );
         right = Utxo {
-            opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+            opout: rgbstd::Opout::new(opid, bfa_schema::OS_MINT, index),
             outpoint: OutPoint::new(tx.compute_txid(), vout),
         };
     }

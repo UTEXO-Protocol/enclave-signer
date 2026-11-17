@@ -7,6 +7,8 @@
 //! and the PSBT mechanics in [`super::psbt_validation`].
 
 use crate::error::{EnclaveError, Result};
+#[cfg(rgb_to_evm)]
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::validation::is_mint_transition;
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::validation::TransitionSummary;
@@ -48,12 +50,12 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 /// destroys no asset units, so it cannot back a release.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if rgbstd::TransitionType::with(last.transition_type) != schemata::TS_BURN {
+    if rgbstd::TransitionType::with(last.transition_type) != bfa_schema::TS_BURN {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut requires a burn transition (last transition_type = {}, want {}) - \
              this enclave is built for the {FLOW_NAME} flow",
             last.transition_type,
-            schemata::TS_BURN
+            bfa_schema::TS_BURN
         )));
     }
     last.burned_asset_amount.ok_or_else(|| {
