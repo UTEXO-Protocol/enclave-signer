@@ -124,7 +124,7 @@ which the enclave and every verifier share. The response carries the bytes
 
 ```
 policy_commitment =
-    u8(POLICY_COMMITMENT_V2 = 2)                    // version tag
+    u8(POLICY_COMMITMENT_V1 = 1)                    // version tag
     // Production (release, fully pinned bridge signer):
     u8(0x01)                                        // production discriminant
     u8(allow_vanilla_psbt)                          // plain-BTC path on?

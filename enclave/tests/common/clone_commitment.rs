@@ -75,7 +75,7 @@ pub fn bundle_cases(keys: &PublicKeysResponse) -> Vec<(&'static str, PublicKeysR
 pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     let mut cases = vec![("variant", AttestedPolicy::Development.to_bytes())];
     // A peer must not attest these fields under a version other than
-    // `POLICY_COMMITMENT_V2`.
+    // `POLICY_COMMITMENT_V1`.
     let mut other_version = policy.to_bytes();
     other_version[0] = 8;
     cases.push(("version", other_version));
@@ -110,11 +110,11 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
     );
     // The Rust enum has only SpvVerified. A peer with another policy
     // vocabulary can still sign a byte encoding with a different source.
-    // Layout: [version, production, vanilla, role, attestation, evm, btc].
+    // V1 layout: [version, production, vanilla, role, attestation, evm, btc].
     let mut btc_source = policy.to_bytes();
     assert_eq!(
         &btc_source[..2],
-        &[attestation_verify::POLICY_COMMITMENT_V2, 1]
+        &[attestation_verify::POLICY_COMMITMENT_V1, 1]
     );
     btc_source[6] = 0;
     cases.push(("btc_source", btc_source));

@@ -151,18 +151,18 @@ fn base_with_gas(
 
 #[test]
 fn every_encoding_starts_with_the_version_tag() {
-    assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V2);
+    assert_eq!(base().to_bytes()[0], POLICY_COMMITMENT_V1);
     assert_eq!(
         AttestedPolicy::Development.to_bytes()[0],
-        POLICY_COMMITMENT_V2
+        POLICY_COMMITMENT_V1
     );
 }
 
 #[test]
-fn rejects_every_version_other_than_v2() {
+fn rejects_every_version_other_than_v1() {
     for policy in [base(), AttestedPolicy::Development] {
         let current = policy.to_bytes();
-        for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V2) {
+        for version in (0..=u8::MAX).filter(|v| *v != POLICY_COMMITMENT_V1) {
             let mut other = current.clone();
             other[0] = version;
             assert_eq!(
@@ -436,7 +436,7 @@ fn from_bytes_refuses_bad_input() {
     }
     let mut bad = vec![[&good[..], &[0]].concat()];
     let mut version = good.clone();
-    version[0] = 1;
+    version[0] = 2;
     bad.push(version);
     // The last byte is the PCR3 presence flag. Only 0 and 1 are valid.
     let mut flag = good.clone();
@@ -483,7 +483,7 @@ fn from_bytes_refuses_bad_input() {
 
 #[test]
 fn asset_length_prefix_matches_the_wire_contract() {
-    // Fixed offset from the documented layout: tags (7), chain (8),
+    // Fixed offset from the documented V1 layout: tags (7), chain (8),
     // network (1), bridge address (20). Do not discover it with to_bytes.
     const OFFSET: usize = 36;
     let policy = prod(false, EvmDataSource::Disabled, 1, 0x11, "ab");
@@ -544,7 +544,7 @@ fn selector_allowlist_is_order_and_dup_independent() {
 
 #[test]
 fn selector_count_prefix_matches_the_wire_contract() {
-    // Offset for base(): 9-byte asset, no TLS pin.
+    // V1 offset for base(): 9-byte asset, no TLS pin.
     const OFFSET: usize = 135;
     let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
     let two = base_with_gas(

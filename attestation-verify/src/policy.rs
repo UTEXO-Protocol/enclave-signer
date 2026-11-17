@@ -11,12 +11,17 @@
 //! mismatch gives a `user_data` hash mismatch.
 //!
 //! Wire contract: discriminants and field order are fixed. Do not renumber a
-//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V2`] instead.
+//! variant or reorder fields. Bump [`POLICY_COMMITMENT_V1`] instead.
 
-/// Version tag at the start of every policy commitment. A verifier refuses any
-/// other version. Bump it on every layout change or change to a fixed policy
-/// requirement.
-pub const POLICY_COMMITMENT_V2: u8 = 2;
+/// Version tag at the start of every policy commitment. A verifier rejects a
+/// different policy version instead of accepting different security semantics.
+/// Bump it on every layout change or change to a fixed policy requirement.
+/// V1 encodes the selected EVM RPC finality tag and the Bitcoin witness depth.
+/// Every accepted FundsIn receipt must belong to the canonical chain at or
+/// below that tagged head. The selected tag is attested so verifiers can
+/// reject a weaker policy, including `latest` when they require `safe`.
+/// It also commits the clone-peer PCR3 of a cloning role.
+pub const POLICY_COMMITMENT_V1: u8 = 1;
 
 /// Bridge directions that the image signs. It comes from build features, so
 /// PCR0 measures it and no host config can widen it.
@@ -192,7 +197,7 @@ pub enum AttestedPolicy {
         rgb_asset_id: String,
         /// Contract whose FundsIn events can authorize bridge signing.
         funds_in_contract: [u8; 20],
-        /// Required RPC head tag, selected at boot; a verifier can refuse a weaker one.
+        /// Required RPC head tag, selected at boot.
         evm_finality_tag: EvmFinalityTag,
         /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
         spv_min_confirmations: u32,
@@ -231,7 +236,7 @@ impl AttestedPolicy {
     /// Layout (see the wire contract in the module docs):
     ///
     /// ```text
-    /// [POLICY_COMMITMENT_V2]
+    /// [POLICY_COMMITMENT_V1]
     /// Production:  [0x01][allow_vanilla u8][signer_role u8][attestation u8]
     ///              [evm_source u8]
     ///              [btc_source u8][chain_id u64 BE][bitcoin_network u8]
@@ -254,7 +259,7 @@ impl AttestedPolicy {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(POLICY_COMMITMENT_V2);
+        out.push(POLICY_COMMITMENT_V1);
         match self {
             AttestedPolicy::Production {
                 allow_vanilla_psbt,
@@ -355,7 +360,7 @@ impl AttestedPolicy {
     /// UTF-8 and a selector list that is not sorted and unique.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PolicyDecodeError> {
         let mut r = Reader(bytes);
-        if r.u8()? != POLICY_COMMITMENT_V2 {
+        if r.u8()? != POLICY_COMMITMENT_V1 {
             return Err(PolicyDecodeError("unknown policy version"));
         }
         let policy = match r.u8()? {
