@@ -68,8 +68,6 @@ pub fn validate_source(
     let validated =
         validator.validate_consignment(&source.consignment, ctx.anchor_binder, &proven, &lists)?;
 
-    bind_asset(&validated.contract_id)?;
-
     {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(

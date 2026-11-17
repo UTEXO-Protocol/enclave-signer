@@ -145,12 +145,15 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 
 - **B2.1** The bytes must be a V1 transfer file. Its genesis is the one the
   `RGB_ASSET_ID` pin names (B2.7), so its schema is BFA.
-- **B2.2** Before rgb-lib runs, the contract id must pass the asset bind
-  (B2.7). So a foreign genesis never reaches rgb-lib, and it cannot choose
-  what the enclave reads. Then, if the genesis names a reject list
-  (`GS_REJECT_LIST`), it must be an EVM contract; a URL list is refused. Last,
-  the enclave bounds the work that rgb-lib would do on the transfer and
-  refuses one above a work cap ([section 10](#10-work-caps)).
+- **B2.2** The contract id must pass the asset bind (B2.7) before the enclave
+  reads where the genesis publishes its reject list (`GS_REJECT_LIST`), which
+  must be an EVM contract; a URL list is refused. The enclave reaches that
+  address over the network in Stage 3b, so a foreign genesis must not choose
+  it. The reject-list reader is an input to validation, so the bind runs
+  before rgb-lib; refusing a foreign asset there also spares rgb-lib the work,
+  which is all that ordering buys beyond the bind itself. Last, the enclave
+  bounds the work that rgb-lib would do on the transfer and refuses one above
+  a work cap ([section 10](#10-work-caps)).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules that rgb-lib's
   pinned `rgb-schemas` compiles. rgb-lib asks three resolvers of the enclave: for each

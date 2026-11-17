@@ -45,8 +45,7 @@ sequenceDiagram
     end
     Rgb->>Rgb: the bound locks are the anchors, one for one
     Rgb->>Rgb: rgb-lib inspect_consignment(All) on the same file:<br/>the flat summary of every transition
-    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId<br/>(the flat summary must agree)
-    Rgb->>Rgb: contract_id == declared asset_id, again
+    Rgb->>Rgb: settling transition (last burn of the last bundle):<br/>burnedAsset, burnReason, OpId
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source)
