@@ -395,6 +395,9 @@ message Limits {
   uint64 total_request_timeout_secs = 1;
   uint64 io_idle_timeout_secs = 2;
   uint64 first_bytes_timeout_secs = 3;
+  // 4 and 5 are reserved. Do not use them.
+  reserved 4, 5;
+  reserved "electrum_timeout_secs", "esplora_timeout_secs";
   uint64 max_rgb_lib_ms = 6;
   uint64 max_witness_check_cost = 7;
   uint64 max_bundle_id_cost = 8;
@@ -440,6 +443,9 @@ message LimitsResponse {
 // signs nothing and opens no chain connection. A build that does not use a
 // value requires it empty.
 message SetEndpointsRequest {
+  // 1 is reserved. Do not use it.
+  reserved 1;
+  reserved "electrum_url";
   string evm_rpc_host = 2; // TLS name of the EVM RPC. No scheme, path or port.
   bytes evm_rpc_ca_der = 3; // DER of the only CA the EVM RPC TLS trusts.
   uint32 evm_rpc_tls_port = 4; // TLS port of the EVM RPC, 1-65535.
