@@ -446,9 +446,7 @@ The mint signer checks no witness.
 7. **Freshness.** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old
    and at most `SPV_MAX_TIP_FUTURE_SECS` in the future (two hours each). This
    checks timestamps. It does not prove that the parent sent the network tip.
-8. **Network.** The consignment's `chain_net` must be the enclave's
-   `BITCOIN_NETWORK`.
-9. **Pins until the key is used.** The enclave records the hash and the
+8. **Pins until the key is used.** The enclave records the hash and the
    required depth of each block that a check used. It checks both again while
    it holds the lock of the header chain, and keeps the lock until it has
    signed. A changed hash, or a block shallower than its check required,

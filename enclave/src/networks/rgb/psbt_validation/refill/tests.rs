@@ -8,6 +8,7 @@ use rgbstd::{GlobalValues, GraphSeal, OpId, Operation, Opout, RevealedData, Reve
 
 use super::super::MAX_FEE_SATS;
 use super::*;
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::btc_ownership::tests as fx;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
 
@@ -336,7 +337,11 @@ fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
 /// Rights move only by propagate: TS_TRANSFER moves units only.
 #[test]
 fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
-    for transition_type in [schemata::TS_TRANSFER, schemata::TS_MINT, schemata::TS_BURN] {
+    for transition_type in [
+        bfa_schema::TS_TRANSFER,
+        bfa_schema::TS_MINT,
+        bfa_schema::TS_BURN,
+    ] {
         let mut send = rights_send(&[1, 2]);
         send.transition_type = transition_type;
         let err = refusal_of(send);
@@ -347,7 +352,7 @@ fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
 #[test]
 fn refuses_an_asset_input() {
     let (mut history, _) = issued(&[0xA0]);
-    let units = Opout::new(OpId::from([0x55; 32]), schemata::OS_ASSET, 0);
+    let units = Opout::new(OpId::from([0x55; 32]), bfa_schema::OS_ASSET, 0);
     let send = history
         .transition("propagate")
         .add_input(units, AllocatedState::from(RevealedValue::from(5u64)))
@@ -414,9 +419,9 @@ fn refuses_rights_that_carry_an_amount() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    let legs = send.assignments.remove(&schemata::OS_ASSET).unwrap();
+    let legs = send.assignments.remove(&bfa_schema::OS_ASSET).unwrap();
     send.assignments
-        .insert(schemata::OS_MINT, legs.unwrap())
+        .insert(bfa_schema::OS_MINT, legs.unwrap())
         .unwrap();
     let err = refusal_of(send);
     assert!(err.contains("carry state"), "{err}");
@@ -429,7 +434,7 @@ fn refuses_a_global_on_the_propagate() {
         amplify::confinement::SmallBlob::try_from(vec![0u8; 8]).unwrap(),
     ));
     send.globals
-        .insert(schemata::GS_BURNED_ASSET, value)
+        .insert(bfa_schema::GS_BURNED_ASSET, value)
         .unwrap();
     let err = refusal_of(send);
     assert!(err.contains("moves rights only"), "{err}");

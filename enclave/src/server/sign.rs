@@ -70,11 +70,9 @@ pub(super) fn handle_sign(
 
     // Binds each BFA mint claim of a consignment to the lock its lockId derives.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-    let anchor_binder =
-        |bridge: &crate::networks::rgb::validation::BfaBridge,
-         anchors: &[crate::networks::rgb::validation::MintAnchor]| {
-            super::bfa::derived_locks(ctx, bridge, anchors)
-        };
+    let anchor_binder = |anchors: &[crate::networks::rgb::validation::MintAnchor]| {
+        super::bfa::derived_locks(ctx, anchors)
+    };
 
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {

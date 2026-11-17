@@ -120,8 +120,8 @@ If one check fails, the burn signer stops. It signs nothing. It returns an
 error.
 
 The stages group the checks by topic, in code order with these exceptions.
-B3.4 and B3.5 also run before Stage 2, for every proof of the request. Stage
-3b runs inside rgb-lib, so before B3.1 to B3.3 and B3.6. The burn-type check
+B3.3 and B3.4 also run before Stage 2, for every proof of the request. Stage
+3b runs inside rgb-lib, so before B3.1, B3.2 and B3.5. The burn-type check
 of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 [sequence in code order](diagrams/03-seq-sign-evm.md) shows the exact order.
 
@@ -152,8 +152,8 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   the enclave bounds the work that rgb-lib would do on the transfer and
   refuses one above a work cap ([section 10](#10-work-caps)).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
-  RGB consensus over the whole history, under the BFA rules of the pinned
-  `rgb-schemas`. rgb-lib asks three resolvers of the enclave: for each
+  RGB consensus over the whole history, under the BFA rules that rgb-lib's
+  pinned `rgb-schemas` compiles. rgb-lib asks three resolvers of the enclave: for each
   witness (B2.9), for each mint (B2.4, B2.5) and for the reject list (Stage
   3b). A resolver error refuses the request, and so does any rgb-lib warning.
   rgb-lib must report the consignment that the enclave parsed.
@@ -162,10 +162,11 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
   EVM_CHAIN_ID, TOKEN_CONTRACT, RGB_CHAIN_ID, lockId, minted units))`. The
   lockId is `LockId(mint OpId, mint witness txid)`
-  ([mint-flow.md](mint-flow.md#the-lockid)). The genesis `bridgeLocation` must
-  name the pinned `FUNDS_IN_CONTRACT` on `EVM_CHAIN_ID`. `TOKEN_CONTRACT` and
+  ([mint-flow.md](mint-flow.md#the-lockid)). `TOKEN_CONTRACT` and
   `EVM_CHAIN_ID` must be set: without them the burn signer refuses a history
-  that has a mint. The burn signer reads nothing from the chain here.
+  that has a mint. The burn signer reads nothing from the chain here. It
+  reports `EVM_CHAIN_ID` as the chain its resolver is connected to, and rgb-ops
+  refuses the resolver unless the genesis `bridgeLocation` names that chain.
 - **B2.5** rgb-lib confirms each mint only against its derived deposit, one
   for one. The Bridge holds a record under that id only if a deposit of
   exactly the minted units was made for that mint, and
@@ -177,7 +178,11 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 - **B2.6** The result is the list of the deposit `operationId`s of the
   history. Stage 5 uses it.
 - **B2.7** The contract id must equal the declared `asset_id` and the pinned
-  `RGB_ASSET_ID`.
+  `RGB_ASSET_ID`. A contract id is the genesis commitment, so this pin admits
+  one genesis: its schema, its `chain_net` and its `bridgeLocation` need no
+  check of their own. The witness resolver refuses a `chain_net` other than
+  the enclave's before it resolves any witness, so a wrong-network consignment
+  fails consensus.
 - **B2.8** The settling transition must be a `TS_BURN`: the burn of the last
   witness bundle. Two burns there are refused. The amount comes from
   `burnedAsset`, never from the outputs or the host. The burn signer reads
@@ -187,7 +192,7 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   settling transition.
 - **B2.9** The witness resolver counts a witness transaction as mined only
   through the Merkle proof that the request carries for it. That proof must
-  pass B3.4 and B3.5 first. A witness with no such proof is unmined and fails
+  pass B3.3 and B3.4 first. A witness with no such proof is unmined and fails
   consensus. A proof inside the consignment is never used.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
@@ -198,17 +203,15 @@ gives the header rules and the limits of each network.
 
 - **B3.1** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old and at
   most `SPV_MAX_TIP_FUTURE_SECS` in the future.
-- **B3.2** The consignment's network (`chain_net`) must equal the enclave's
-  Bitcoin network.
-- **B3.3** The Merkle proofs must be exactly the set of witness transactions
+- **B3.2** The Merkle proofs must be exactly the set of witness transactions
   in the consignment. None missing. None extra. No duplicates.
-- **B3.4** Each Merkle path must be at most `MAX_MERKLE_PATH_DEPTH` levels.
+- **B3.3** Each Merkle path must be at most `MAX_MERKLE_PATH_DEPTH` levels.
   Each proof must verify against the header that the enclave stores at that
   height. The path must use up the transaction position, one bit per level.
   No node hashed on the path may be a 64-byte transaction (CVE-2017-12842).
-- **B3.5** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
+- **B3.4** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
   blocks deep.
-- **B3.6** The enclave records the heights, hashes and required depths that
+- **B3.5** The enclave records the heights, hashes and required depths that
   it used. Just before it uses the key, it checks that no hash changed and
   that no block is shallower than its check required.
 

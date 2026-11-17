@@ -14,11 +14,10 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use amplify::ByteArray;
-use rgbstd::containers::{ClaimResolverError, LockId, ResolveClaim, Transfer};
-use rgbstd::stl::{BridgeLocation, EvmContract};
+use rgbstd::containers::{ClaimResolverError, LockId, ResolveClaim};
+use rgbstd::stl::BridgeLocation;
 use rgbstd::validation::Claim;
-use rgbstd::{Genesis, OpId};
-use schemata::BridgedFungibleAsset;
+use rgbstd::OpId;
 
 use crate::error::{EnclaveError, Result};
 
@@ -50,26 +49,6 @@ pub struct MintAnchor {
     pub before_block: u64,
 }
 
-/// The bridge contract that a BFA genesis commits to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BfaBridge {
-    pub chain_id: u64,
-    pub address: [u8; 20],
-}
-
-impl BfaBridge {
-    /// Reads `bridgeLocation` from a genesis that phase 1 validated.
-    fn from_genesis(genesis: &Genesis) -> Result<Self> {
-        let location = BridgedFungibleAsset::bridge_location(genesis)
-            .map_err(|e| EnclaveError::CrossCheck(format!("BFA genesis bridge location: {e}")))?;
-        let BridgeLocation::Evm(EvmContract { chain_id, address }) = location;
-        Ok(Self {
-            chain_id,
-            address: address.to_byte_array(),
-        })
-    }
-}
-
 /// The locks a binder bound the anchors to, and the chain id its EVM source
 /// reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,8 +58,8 @@ pub struct BoundAnchors {
 }
 
 /// Binds mint anchors to locks, or refuses. An empty slice asks only for the
-/// pins check and the chain id.
-pub type AnchorBinder<'a> = &'a dyn Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors>;
+/// chain id.
+pub type AnchorBinder<'a> = &'a dyn Fn(&[MintAnchor]) -> Result<BoundAnchors>;
 
 /// `LockId(opid, witness_id)`, the word the bridge keys a mint's lock by.
 /// Its bytes are the `uint256` ABI word as is, with no byte reversal.
@@ -123,16 +102,14 @@ pub(super) fn check_bijection(anchors: &[MintAnchor], locks: &[VerifiedLock]) ->
 /// rgb-lib's claim resolver: it confirms each mint claim only against the
 /// lock the binder binds to it, with no RPC, and keeps the pairs.
 pub(super) struct BindingResolver<'a> {
-    genesis: &'a Genesis,
     bind: AnchorBinder<'a>,
     bound: RefCell<Vec<(MintAnchor, VerifiedLock)>>,
     failure: RefCell<Option<EnclaveError>>,
 }
 
 impl<'a> BindingResolver<'a> {
-    pub(super) fn new(transfer: &'a Transfer, bind: AnchorBinder<'a>) -> Self {
+    pub(super) fn new(bind: AnchorBinder<'a>) -> Self {
         Self {
-            genesis: &transfer.genesis,
             bind,
             bound: RefCell::new(Vec::new()),
             failure: RefCell::new(None),
@@ -157,19 +134,20 @@ impl<'a> BindingResolver<'a> {
         issue
     }
 
-    /// Asks the binder for `anchors`, from the genesis rgb-lib validated.
+    /// Asks the binder for `anchors`.
     fn bind(
         &self,
         anchors: &[MintAnchor],
     ) -> std::result::Result<BoundAnchors, ClaimResolverError> {
-        BfaBridge::from_genesis(self.genesis)
-            .and_then(|bridge| (self.bind)(&bridge, anchors))
-            .map_err(|e| self.fail(e))
+        (self.bind)(anchors).map_err(|e| self.fail(e))
     }
 }
 
 impl ResolveClaim for BindingResolver<'_> {
-    /// An empty bind checks the bridge pins and names the chain they are on.
+    /// The pinned chain. rgb-ops refuses the resolver unless the genesis
+    /// `bridgeLocation` names this chain, so the enclave reads no location of
+    /// its own: a contract id is the genesis commitment, and the
+    /// `RGB_ASSET_ID` pin admits one genesis.
     fn evm_chain_id(&self) -> std::result::Result<u64, ClaimResolverError> {
         self.bind(&[]).map(|bound| bound.evm_chain_id)
     }

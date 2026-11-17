@@ -25,6 +25,7 @@ use strict_encoding::StrictDeserialize;
 use super::validation::OutputSeal;
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
+use crate::networks::rgb::bfa_schema;
 
 /// The one transition of the pinned contract that a tx commits.
 #[derive(Debug, Clone)]
@@ -299,7 +300,7 @@ fn assert_inspects_as(
 /// M2, RR7: `transition` closes exactly one input, a `mintRight`.
 pub fn assert_single_right_input(transition: &Transition, what: &str) -> Result<()> {
     match transition.inputs.iter().collect::<Vec<_>>().as_slice() {
-        [input] if input.ty == schemata::OS_MINT => Ok(()),
+        [input] if input.ty == bfa_schema::OS_MINT => Ok(()),
         inputs => Err(EnclaveError::CrossCheck(format!(
             "{what} must close exactly one mintRight - it closes {inputs:?}"
         ))),

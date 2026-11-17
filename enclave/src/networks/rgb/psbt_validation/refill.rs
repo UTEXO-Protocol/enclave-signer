@@ -16,6 +16,7 @@ use super::super::validation::{output_seal, OutputSeal};
 use super::{assert_keeps_all_sats, assert_only_colored_inputs, fee_key_path_inputs_of};
 use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
+use crate::networks::rgb::bfa_schema;
 
 /// Most fee inputs a refill may spend beside its right (RR0). Each input can
 /// destroy the state it carries (`docs/mint-flow.md`, section 8).
@@ -66,7 +67,7 @@ pub fn refill_rights(committed: &Committed) -> Result<Vec<u32>> {
     assert_rights_only(transition)?;
     let seals: Vec<OutputSeal> = transition
         .assignments
-        .get(&schemata::OS_MINT)
+        .get(&bfa_schema::OS_MINT)
         .map(|typed| typed.seals().map(output_seal).collect())
         .unwrap_or_default();
     assert_refill_rights(&seals)
@@ -74,11 +75,11 @@ pub fn refill_rights(committed: &Committed) -> Result<Vec<u32>> {
 
 /// RR6: rights move only by propagate; a transfer, a burn or a mint is not a refill.
 fn assert_propagate(transition: &Transition) -> Result<()> {
-    if transition.transition_type != schemata::TS_PROPAGATE {
+    if transition.transition_type != bfa_schema::TS_PROPAGATE {
         return Err(EnclaveError::CrossCheck(format!(
             "rights refill requires a propagate transition (transition_type = {}, want {})",
             transition.transition_type,
-            schemata::TS_PROPAGATE
+            bfa_schema::TS_PROPAGATE
         )));
     }
     Ok(())
@@ -88,7 +89,7 @@ fn assert_propagate(transition: &Transition) -> Result<()> {
 fn assert_rights_only(transition: &Transition) -> Result<()> {
     let types: Vec<_> = transition.assignments.keys().collect();
     let empty = transition.globals.is_empty() && transition.metadata.is_empty();
-    if types != [&schemata::OS_MINT] || !empty {
+    if types != [&bfa_schema::OS_MINT] || !empty {
         return Err(EnclaveError::CrossCheck(format!(
             "rights refill assigns types {types:?} with {} global(s) and {} metadata - a refill \
              moves rights only",
@@ -97,7 +98,8 @@ fn assert_rights_only(transition: &Transition) -> Result<()> {
         )));
     }
     // Consensus refuses a right with state, so the spent right would be lost.
-    let Some(TypedAssigns::Declarative(_)) = transition.assignments.get(&schemata::OS_MINT) else {
+    let Some(TypedAssigns::Declarative(_)) = transition.assignments.get(&bfa_schema::OS_MINT)
+    else {
         return Err(EnclaveError::CrossCheck(
             "rights refill makes mintRights that carry state - a right carries none".into(),
         ));

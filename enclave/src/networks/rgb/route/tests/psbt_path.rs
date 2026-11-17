@@ -18,6 +18,7 @@ use rgbstd::{
 use super::*;
 use crate::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
 use crate::keys::{AccountType, KeyManager};
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::btc_ownership::tests as fx;
 use crate::networks::rgb::psbt_validation::{
     assert_mint_sats, fee_key_path_inputs_scoped, MintFacts, MintRecipient,
@@ -26,6 +27,9 @@ use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::proto::SignRightsRefillRequest;
 use crate::test_support::bfa_consignment::{self as gen, Committed as Made, History, Issue, Utxo};
 
+/// The EVM chain the fixture genesis names in its `bridgeLocation`. The anchor
+/// binder must report it: rgb-ops refuses a claim resolver on another chain.
+const GENESIS_CHAIN_ID: u64 = 42161;
 const MINTED: u64 = 100_000;
 const BEFORE_BLOCK: u64 = 110;
 /// Sats on each right's UTXO; they pay the mint's fee.
@@ -49,7 +53,11 @@ fn ours(keys: &KeyManager, index: u32, sats: u64) -> TxOut {
 /// vouts 1 and 2 (keys `[0, 1]`, `[0, 2]`). Returns the seed's rights.
 fn seeded(keys: &KeyManager) -> (History, Vec<Utxo>) {
     let genesis_right = gen::outpoint(0xA0, 0);
-    let mut history = History::issue(Issue::new(42161, [0xB1; 20], vec![genesis_right]));
+    let mut history = History::issue(Issue::new(
+        GENESIS_CHAIN_ID,
+        [0xB1; 20],
+        vec![genesis_right],
+    ));
     let right = history.genesis_right(0, genesis_right);
     let outputs = vec![ours(keys, 1, RIGHT_SATS), ours(keys, 2, RIGHT_SATS)];
     let seed = history.send_rights(right, &[1, 2], vec![], outputs);
@@ -377,7 +385,7 @@ fn refuses_extra_global() {
     let err = edited_mint_refusal(|mint| {
         let value = GlobalValues::with(RevealedData::new(blob(&[0; 8])));
         mint.globals
-            .insert(schemata::GS_BURNED_ASSET, value)
+            .insert(bfa_schema::GS_BURNED_ASSET, value)
             .unwrap();
     });
     assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
@@ -403,7 +411,7 @@ fn refuses_issued_supply_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         let value = GlobalValues::with(RevealedData::new(blob(&[0xa0, 0x86, 0x01, 0, 0, 0, 0])));
         mint.globals
-            .insert(schemata::GS_ISSUED_SUPPLY, value)
+            .insert(bfa_schema::GS_ISSUED_SUPPLY, value)
             .unwrap();
     });
     assert!(err.contains("invalid issuedSupply global"), "{err}");
@@ -427,7 +435,7 @@ fn refuses_before_block_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         mint.metadata
             .insert(
-                schemata::MS_BEFORE_BLOCK,
+                bfa_schema::MS_BEFORE_BLOCK,
                 MetaValue::from(blob(&[90, 0, 0, 0])),
             )
             .unwrap();
@@ -794,7 +802,7 @@ fn refuses_a_refill_of_another_asset() {
 /// A second asset, so its contract id differs.
 fn seeded_other() -> (History, Utxo) {
     let right = gen::outpoint(0xA9, 0);
-    let history = History::issue(Issue::new(42161, [0xB9; 20], vec![right]));
+    let history = History::issue(Issue::new(GENESIS_CHAIN_ID, [0xB9; 20], vec![right]));
     let utxo = history.genesis_right(0, right);
     (history, utxo)
 }
@@ -837,10 +845,10 @@ fn consensus(
         })
         .collect();
     let anchors = RefCell::new(Vec::new());
-    let bind = |bridge: &validation::BfaBridge, seen: &[validation::MintAnchor]| {
+    let bind = |seen: &[validation::MintAnchor]| {
         anchors.borrow_mut().extend_from_slice(seen);
         Ok(validation::BoundAnchors {
-            evm_chain_id: bridge.chain_id,
+            evm_chain_id: GENESIS_CHAIN_ID,
             locks: seen
                 .iter()
                 .map(|a| validation::VerifiedLock {

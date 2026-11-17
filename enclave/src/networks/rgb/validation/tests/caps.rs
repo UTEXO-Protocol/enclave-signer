@@ -28,6 +28,7 @@ use super::super::cost::{
     MAX_BUNDLE_ID_COST, MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
 };
 use super::*;
+use crate::networks::rgb::bfa_schema;
 
 mod timings;
 
@@ -59,7 +60,7 @@ fn burn_rights_of(history: &mut History, right: Utxo, n: u16, d: u32) {
     let (rights, at) = propagate_rights(history, right, n);
     let mut burn = history.transition("burn");
     for no in 0..n {
-        let right = Opout::new(rights, schemata::OS_MINT, no);
+        let right = Opout::new(rights, bfa_schema::OS_MINT, no);
         burn = burn.add_input(right, AllocatedState::Void).unwrap();
     }
     let burn = burn.complete_transition().unwrap();
@@ -112,7 +113,7 @@ fn propagate_chain(mut history: History, n: u16, links: u16) -> Vec<u8> {
     let mut right = history.genesis_right(0, right_utxo());
     for _ in 0..links {
         let (rights, outpoint) = propagate_rights(&mut history, right, n);
-        let opout = Opout::new(rights, schemata::OS_MINT, 0);
+        let opout = Opout::new(rights, bfa_schema::OS_MINT, 0);
         right = Utxo { opout, outpoint };
     }
     history.consignment()
@@ -175,7 +176,7 @@ fn commit_many_burns(history: &mut History, t: u16, d: u32) {
     let (rights, at) = propagate_rights(history, right, t);
     let burns = (0..t)
         .map(|no| {
-            let right = Opout::new(rights, schemata::OS_MINT, no);
+            let right = Opout::new(rights, bfa_schema::OS_MINT, no);
             let burn = history.transition("burn");
             let burn = burn.add_input(right, AllocatedState::Void).unwrap();
             burn.complete_transition().unwrap()
@@ -196,7 +197,7 @@ fn wide_transfer(mut history: History, k: u16) -> Vec<u8> {
     let (spread, spread_tx) = fan_out(&mut history, units, k, 0x4000);
     let mut wide = history.transition("transfer");
     for no in 0..k {
-        let unit = Opout::new(spread, schemata::OS_ASSET, no);
+        let unit = Opout::new(spread, bfa_schema::OS_ASSET, no);
         let seal = GraphSeal::with_blinded_vout(1u32, 0x3000 + u64::from(no));
         wide = wide
             .add_input(unit, AllocatedState::from(RevealedValue::from(1u64)))
@@ -276,7 +277,7 @@ fn merged_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
     let spread_id = spread.id();
     let spread_out = spread
         .assignments
-        .get(&schemata::OS_ASSET)
+        .get(&bfa_schema::OS_ASSET)
         .unwrap()
         .as_fungible()
         .to_vec();
@@ -289,7 +290,7 @@ fn merged_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
                 .position(|a| a.revealed_seal() == Some(*seal));
             let opout = Opout::new(
                 spread_id,
-                schemata::OS_ASSET,
+                bfa_schema::OS_ASSET,
                 u16::try_from(no.unwrap()).unwrap(),
             );
             let outpoint = OutPoint::new(tx.compute_txid(), vout);
@@ -444,7 +445,7 @@ fn a_bundle_that_repeats_a_transition_is_refused_by_rgb_lib() {
     let burn = history
         .transition("burn")
         .add_input(
-            Opout::new(rights, schemata::OS_MINT, 0),
+            Opout::new(rights, bfa_schema::OS_MINT, 0),
             AllocatedState::Void,
         )
         .unwrap()
@@ -693,7 +694,7 @@ fn time_rgb_lib(
 ) -> (Option<String>, Duration) {
     let transfer = load(bytes);
     let witnesses = OnChainResolver::new(&transfer, ChainNet::BitcoinRegtest, chain);
-    let anchors = BindingResolver::new(&transfer, &bind_all);
+    let anchors = BindingResolver::new(&bind_all);
     let list = reject_list(&transfer.genesis)
         .unwrap()
         .map(|list| ListResolver::new(list, &reads_unrelated));

@@ -20,8 +20,6 @@ fn main() {
     utexo_bridge_enclave::clocksync::spawn();
 
     let network = bootstrap::resolve_network(&bootstrap::bitcoin_network_str());
-    #[cfg(feature = "rgb-validation")]
-    bootstrap::load_schema_rules();
     let state = EnclaveState::new(network.bitcoin_network());
 
     // Pinned bridge config. Committed in attestation `user_data` and checked on

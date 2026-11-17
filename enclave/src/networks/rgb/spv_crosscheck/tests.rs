@@ -1,6 +1,6 @@
 use super::*;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
-use crate::networks::rgb::spv::HeaderChain;
+use crate::networks::rgb::spv::{HeaderChain, Network};
 use crate::proto::MerkleProofEntry;
 use crate::test_support::ANY_HEADER_CLOCK;
 use bitcoin::block::{Header, Version};
@@ -391,24 +391,6 @@ fn rejects_overdeep_merkle_path() {
     assert!(err.to_string().contains("too deep"), "got: {err}");
 }
 
-#[test]
-fn assert_chain_net_accepts_matching_pair() {
-    // Literal prefixes, not `ChainNet::prefix()`: if an rgb-core upgrade
-    // changes the notation, this test must fail.
-    assert_chain_net("bc", Network::Mainnet).unwrap();
-    assert_chain_net("sb", Network::Signet).unwrap();
-    assert_chain_net("tb3", Network::Testnet3).unwrap();
-    assert_chain_net("tb4", Network::Testnet4).unwrap();
-    assert_chain_net("sbc", Network::SignetCustom).unwrap();
-    assert_chain_net("bcrt", Network::Regtest).unwrap();
-}
-
-#[test]
-fn assert_chain_net_tells_the_custom_signet_apart() {
-    assert!(assert_chain_net("sb", Network::SignetCustom).is_err());
-    assert!(assert_chain_net("sbc", Network::Signet).is_err());
-}
-
 /// Real testnet4 headers 155_233..=155_262 on the compiled checkpoint.
 fn testnet4_chain() -> HeaderChain {
     let raws: Vec<Vec<u8>> = include_str!("../spv/chain/testnet4_155233_155262.hex")
@@ -450,20 +432,6 @@ fn min_confirmations_is_a_parameter() {
     validate_spv_proofs(&chain, &[txid], std::slice::from_ref(&proof), 1).unwrap();
     let err = validate_spv_proofs(&chain, &[txid], &[proof], 2).unwrap_err();
     assert!(err.to_string().contains("(1 < 2)"), "got: {err}");
-}
-
-#[test]
-fn assert_chain_net_rejects_mismatch() {
-    let err = assert_chain_net("bcrt", Network::Mainnet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
-
-    let err = assert_chain_net("bc", Network::Signet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
-
-    // Consignments carry `"sb"` (`genesis.chain_net.prefix()`), not
-    // "bc:signet"-style notation.
-    let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
 }
 
 // ===== Staleness tests =====

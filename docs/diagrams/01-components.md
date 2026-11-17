@@ -61,7 +61,7 @@ flowchart TB
             NRF["flow.rs<br/>accepted transitions + amount rule"]
             NRP["psbt_validation.rs<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs<br/>mint signer: the transition a PSBT commits,<br/>by rgb-lib inspect_fascia"]
             NRB[btc_crosscheck.rs<br/>plain-BTC sats gate<br/>btc_ownership.rs custody rule<br/>+ total-sats cap + unowned budget]
-            NRS[spv_crosscheck.rs<br/>coverage + depth ≥ SPV_MIN_CONFIRMATIONS<br/>+ chain_net + staleness]
+            NRS[spv_crosscheck.rs<br/>coverage + depth ≥ SPV_MIN_CONFIRMATIONS<br/>+ staleness]
             NRSIG[signing/<br/>taproot.rs BIP-341 Schnorr<br/>key path only]
             subgraph SPVMOD [spv/]
                 SCh[chain.rs — HeaderChain<br/>full retention, 1M cap,<br/>bounded reorg ≤ 100]

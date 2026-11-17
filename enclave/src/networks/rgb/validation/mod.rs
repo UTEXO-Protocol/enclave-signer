@@ -12,7 +12,7 @@
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
 //! - `bfa.rs`: the BFA mint claims and their binding to EVM locks by lockId.
-//! - `schema.rs`: the genesis gate and its reject list.
+//! - `schema.rs`: the reject list the genesis names.
 //! - `reject_list.rs`: the issuer's reject list decisions.
 //!
 //! The enclave does not trust the listener `consignment_valid` boolean.
@@ -34,7 +34,7 @@ mod witness;
 mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
-pub use bfa::{lock_id, AnchorBinder, BfaBridge, BoundAnchors, MintAnchor, VerifiedLock};
+pub use bfa::{lock_id, AnchorBinder, BoundAnchors, MintAnchor, VerifiedLock};
 pub use consignment::is_mint_transition;
 pub use reject_list::{
     decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,

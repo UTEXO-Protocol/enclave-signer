@@ -16,6 +16,7 @@ use super::super::validation::{lock_id, output_seal, single_global};
 use super::assert_keeps_all_sats;
 use crate::error::{EnclaveError, Result};
 use crate::keys::KeyManager;
+use crate::networks::rgb::bfa_schema;
 
 /// Inputs a mint spends (F7).
 pub const MINT_INPUTS: usize = 1;
@@ -179,7 +180,7 @@ fn assert_mint_type(transition: &Transition) -> Result<()> {
     if !flow::is_signing_transition(ty.to_inner()) {
         return Err(EnclaveError::CrossCheck(format!(
             "mint-RGB PSBT commits transition type {ty}, not a mint ({})",
-            schemata::TS_MINT
+            bfa_schema::TS_MINT
         )));
     }
     Ok(())
@@ -188,7 +189,7 @@ fn assert_mint_type(transition: &Transition) -> Result<()> {
 /// M3: no `mintRight` passed on and no link. A right passed on could go to a
 /// seal the host holds, and would put this mint in a later mint's history.
 fn assert_asset_assignments_only(transition: &Transition) -> Result<()> {
-    if let Some(rights) = transition.assignments.get(&schemata::OS_MINT) {
+    if let Some(rights) = transition.assignments.get(&bfa_schema::OS_MINT) {
         return Err(EnclaveError::CrossCheck(format!(
             "mint passes {} mintRight output(s) on - the mint signer signs only a mint that \
              consumes its right",
@@ -196,7 +197,7 @@ fn assert_asset_assignments_only(transition: &Transition) -> Result<()> {
         )));
     }
     let types: Vec<_> = transition.assignments.keys().collect();
-    if types != [&schemata::OS_ASSET] {
+    if types != [&bfa_schema::OS_ASSET] {
         return Err(EnclaveError::CrossCheck(format!(
             "mint assigns types {types:?} - a mint assigns asset units only"
         )));
@@ -209,7 +210,7 @@ fn assert_asset_assignments_only(transition: &Transition) -> Result<()> {
 fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
     let globals: Vec<_> = transition.globals.keys().collect();
     let metadata: Vec<_> = transition.metadata.keys().collect();
-    if globals != [&schemata::GS_ISSUED_SUPPLY] || metadata != [&schemata::MS_BEFORE_BLOCK] {
+    if globals != [&bfa_schema::GS_ISSUED_SUPPLY] || metadata != [&bfa_schema::MS_BEFORE_BLOCK] {
         return Err(EnclaveError::CrossCheck(format!(
             "mint carries globals {globals:?} and metadata {metadata:?} - a mint carries \
              issuedSupply and beforeBlock only"
@@ -217,7 +218,7 @@ fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
     }
     let issued = single_global::<8>(
         &transition.globals,
-        schemata::GS_ISSUED_SUPPLY,
+        bfa_schema::GS_ISSUED_SUPPLY,
         "issuedSupply",
     )?
     .map(u64::from_le_bytes)
@@ -233,7 +234,7 @@ fn mint_globals(transition: &Transition) -> Result<(u64, u64)> {
 fn before_block(transition: &Transition) -> Result<u64> {
     let value = transition
         .metadata
-        .get(&schemata::MS_BEFORE_BLOCK)
+        .get(&bfa_schema::MS_BEFORE_BLOCK)
         .map(|value| value.as_slice())
         .unwrap_or_default();
     let bytes: [u8; 8] = value.try_into().map_err(|_| {
@@ -250,7 +251,7 @@ fn before_block(transition: &Transition) -> Result<u64> {
 fn one_asset_leg(transition: &Transition) -> Result<(u64, MintRecipient)> {
     let legs = transition
         .assignments
-        .get(&schemata::OS_ASSET)
+        .get(&bfa_schema::OS_ASSET)
         .map(|typed| typed.as_fungible())
         .unwrap_or_default();
     let [leg] = legs else {

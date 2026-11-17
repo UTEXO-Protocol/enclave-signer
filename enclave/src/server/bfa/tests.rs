@@ -50,12 +50,7 @@ impl EvmReceiptProvider for NoRpc {
 #[cfg(rgb_to_evm)]
 mod burn {
     use super::*;
-    use crate::networks::rgb::validation::{BfaBridge, MintAnchor};
-
-    const PINNED: BfaBridge = BfaBridge {
-        chain_id: CHAIN_ID,
-        address: BRIDGE,
-    };
+    use crate::networks::rgb::validation::MintAnchor;
 
     fn anchor(tag: u8, amount: u64) -> MintAnchor {
         MintAnchor {
@@ -72,7 +67,7 @@ mod burn {
         let ctx = context(config(), Box::new(NoRpc));
         let anchors = [anchor(1, 100_000), anchor(2, 5)];
 
-        let bound = derived_locks(&ctx, &PINNED, &anchors).unwrap();
+        let bound = derived_locks(&ctx, &anchors).unwrap();
         assert_eq!(bound.evm_chain_id, CHAIN_ID);
         assert_eq!(bound.locks.len(), 2);
         for (lock, a) in bound.locks.iter().zip(&anchors) {
@@ -98,26 +93,8 @@ mod burn {
             ..config()
         };
         let ctx = context(cfg, Box::new(NoRpc));
-        let err = derived_locks(&ctx, &PINNED, &[anchor(1, 1)]).unwrap_err();
+        let err = derived_locks(&ctx, &[anchor(1, 1)]).unwrap_err();
         assert!(err.to_string().contains("TOKEN_CONTRACT"), "{err}");
-    }
-
-    #[test]
-    fn refuses_an_asset_of_another_bridge_or_chain() {
-        let ctx = context(config(), Box::new(NoRpc));
-        for bridge in [
-            BfaBridge {
-                address: [0x51; 20],
-                ..PINNED
-            },
-            BfaBridge {
-                chain_id: 1,
-                ..PINNED
-            },
-        ] {
-            let err = derived_locks(&ctx, &bridge, &[anchor(1, 1)]).unwrap_err();
-            assert!(err.to_string().contains("is not the pinned"), "{err}");
-        }
     }
 }
 

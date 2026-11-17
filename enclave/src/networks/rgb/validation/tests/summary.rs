@@ -12,6 +12,7 @@ use rgbstd::{ChainNet, ContractId, Operation, TypedAssigns};
 use super::super::super::scratch::with_scratch_file;
 use super::super::transition::output_seal;
 use super::*;
+use crate::networks::rgb::bfa_schema;
 
 type Summary = Vec<(bitcoin::Txid, Vec<TransitionSummary>)>;
 
@@ -37,7 +38,7 @@ fn reference_transition(t: &rgbstd::Transition, opid: rgbstd::OpId) -> Transitio
     let outputs: Vec<TransitionOutput> = t
         .assignments
         .iter()
-        .filter(|(ty, _)| **ty == schemata::OS_ASSET)
+        .filter(|(ty, _)| **ty == bfa_schema::OS_ASSET)
         .flat_map(|(_, assigns)| match assigns {
             TypedAssigns::Fungible(vec) => vec.iter().map(reference_output).collect(),
             _ => Vec::new(),
@@ -141,7 +142,7 @@ fn burn_with_hidden_transition() -> History {
     let (mut history, units) = minted();
     let burn = history.burn_transition(units, MINTED, Some(MINTED), None);
     let mut bundle = gen::bundle_of(vec![burn]);
-    let hidden = rgbstd::Opout::new(rgbstd::OpId::from([0x99; 32]), schemata::OS_MINT, 0);
+    let hidden = rgbstd::Opout::new(rgbstd::OpId::from([0x99; 32]), bfa_schema::OS_MINT, 0);
     bundle
         .input_map
         .insert(hidden, rgbstd::OpId::from([0x98; 32]))
@@ -373,7 +374,7 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                     let outputs: Vec<TransitionOutput> = t
                         .fungible_allocations
                         .iter()
-                        .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner())
+                        .filter(|a| a.assignment_type == bfa_schema::OS_ASSET.to_inner())
                         .flat_map(|a| a.entries.iter())
                         .map(|e| TransitionOutput {
                             amount: e.amount,

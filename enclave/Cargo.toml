@@ -41,9 +41,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature). The
 # versions are the crates.io ones the pinned rgb-lib takes: another version can
-# change the BFA schema id. Exact pins keep a newer prerelease out.
+# change the RGB consensus code the enclave runs. Exact pins keep a newer
+# prerelease out.
 rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-rgb-schemas = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Not used directly: pins the consensus, VM and invoicing crates that rgb-ops
 # pulls with a caret requirement.
 rgb-consensus = { version = "=0.11.2-rc.2", default-features = false, optional = true }
@@ -142,7 +142,7 @@ allow-seed-import = []
 #
 # Every witness txid is checked against the enclave's SPV header chain before
 # EVM signing. Builds without RGB validation refuse RGB sources.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
@@ -166,6 +166,9 @@ burn-signer = ["rgb-validation"]
 
 [dev-dependencies]
 rand = "0.10.0"
+# Pins the BFA ids of `networks/rgb/bfa_schema.rs` to the compiled schema, and
+# builds its rules, which panic if the schema definition is inconsistent.
+rgb-schemas = { version = "=0.11.2-rc.2", default-features = false }
 # Canned KMS HTTP exchanges for the `kms` unit tests.
 aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-aws-lc", "test-util"] }
 http = "1"
