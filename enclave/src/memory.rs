@@ -22,8 +22,13 @@
 //!
 //! - PSBTs, at most `max_psbt_bytes`: about 102 times for one input and
 //!   outputs that each carry two empty records. A request holds one parsed
-//!   PSBT at a time. A mint or a refill also parses its fascia, under the
-//!   same limit, and the parse stays within the factor.
+//!   PSBT at a time.
+//! - A fascia, under the same limit. A parse alone stays within the factor,
+//!   but the core of the mint signer also runs rgb-lib's fascia inspection,
+//!   which decodes a second copy and builds a record for each assignment. It
+//!   takes about 34 times the bytes of the widest fascia measured, one
+//!   propagate of 43 681 rights (`rgb::psbt_commit`). The core drops its own
+//!   fascia first, so only one decoded fascia is live at a time.
 //! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`:
 //!   about 48 times for a document of CBOR nulls.
 //! - Consignments, at most `max_consignment_bytes`: about 53 times for
@@ -84,7 +89,9 @@
 //! it wrote on each thread.
 //!
 //! The tests measure the frame, consignment, PSBT, fascia, gas transaction
-//! and attestation document parsers on the densest shapes measured. The other
+//! and attestation document parsers on the densest shapes measured. The
+//! fascia is measured twice: its parse against the factor, and the whole core
+//! against the request bound of a frame at the PSBT limit. The other
 //! parsers have small size limits and refusal tests. The frame, PSBT,
 //! attestation document and gas transaction tests run at the limits. The
 //! consignment tests run histories of 2 000 and 10 000 transfers, and four
@@ -102,16 +109,18 @@
 //! Connections waiting in the queue hold no heap: a worker reads the frame
 //! only when it starts the request.
 //!
-//! Consignment validation also uses RAM outside the heap. rgb-lib reads a
-//! consignment only from a file, so validation writes the bytes to a scratch
+//! Reading a consignment or a fascia also uses RAM outside the heap. rgb-lib
+//! takes each only from a file, so the enclave writes the bytes to a scratch
 //! file in `std::env::temp_dir()`. In the enclave, `/tmp` is a tmpfs, so the
-//! file takes up to `max_consignment_bytes` of RAM for each request, and never
-//! more than the frame. The heap meter does not count it. The file exists
-//! while the enclave keeps its decoded copy and rgb-lib decodes a second one,
-//! so it adds to the request peak. The boot check does not count these files:
-//! they come from the memory that [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the
-//! minimum. A change of limits counts them: [`check_limits`] adds one file for
-//! each worker. So a change needs usable memory for these files above the
+//! file takes up to `max_consignment_bytes` of RAM for a consignment and up to
+//! `max_psbt_bytes` for a fascia, and never more than the frame. The heap
+//! meter does not count it. The file exists while the enclave keeps its
+//! decoded copy and rgb-lib decodes a second one, so it adds to the request
+//! peak. A request holds one such file at a time, removed when the read ends.
+//! The boot check does not count these files: they come from the memory that
+//! [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the minimum. A change of limits
+//! counts one file at the larger of the two limits: [`check_limits`] adds one
+//! for each worker. So a change needs usable memory for these files above the
 //! minimum, even at the image values.
 
 use crate::conn::WORKER_THREADS;
@@ -123,7 +132,8 @@ use crate::policy::BuildContext;
 /// for most parsers that grow with their input. Reading a frame takes 3 times
 /// the frame. Consignment validation of a long history takes about 21 times
 /// the consignment, because rgb-lib decodes a second copy while the enclave
-/// keeps its own. A fascia of many rights takes about 11 times its bytes. The
+/// keeps its own. A fascia of many rights parses at about 11 times its bytes,
+/// and the mint signer's whole fascia core at about 34 times. The
 /// gas transaction parser stays under 0.1, and a PSBT whose bytes sit in
 /// large records about 1.5. A whole burn request through `dispatch` holds the
 /// decoded request during validation. It peaks at about 20 times its frame
@@ -251,8 +261,8 @@ fn check(total: Option<usize>, ctx: &BuildContext) -> Result<(), String> {
 
 /// Refuses limits whose requests do not fit the usable memory: the check of
 /// [`check_at_boot`], for a change at run time ([`crate::limits`]), with the
-/// consignment scratch file of each worker (module docs). So a change cannot
-/// make a request that ends the enclave. A debug build only logs a warning.
+/// scratch file of each worker (module docs). So a change cannot make a
+/// request that ends the enclave. A debug build only logs a warning.
 pub fn check_limits(limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
     check_limits_against(limits, total_memory_bytes(), ctx)
 }
@@ -269,7 +279,7 @@ fn check_limits_against(
         Some(total) if total >= needed => return Ok(()),
         Some(total) => format!(
             "these limits need {needed_mib} MiB of usable memory for {WORKER_THREADS} requests, \
-             their consignment scratch files and the baseline, and the enclave has {} MiB",
+             their scratch files and the baseline, and the enclave has {} MiB",
             total / (1024 * 1024)
         ),
         None => format!("total memory unknown, and these limits need {needed_mib} MiB"),
@@ -477,10 +487,11 @@ mod tests {
         assert!(check_limits_against(&larger, Some(1), &build(true)).is_ok());
     }
 
-    /// Each worker can hold a scratch file of `max_consignment_bytes` beside
-    /// its heap, and never more than its frame. The boot check leaves the
-    /// files of the image values to the launch margin, so a change needs
-    /// memory for them above the minimum.
+    /// Each worker can hold a scratch file of `max_consignment_bytes` or of
+    /// `max_psbt_bytes`, whichever is larger, beside its heap, and never more
+    /// than its frame. The boot check leaves the files of the image values to
+    /// the launch margin, so a change needs memory for them above the
+    /// minimum.
     #[test]
     fn a_change_of_limits_counts_a_scratch_file_for_each_worker() {
         const MIB: usize = 1024 * 1024;
@@ -490,7 +501,7 @@ mod tests {
         let fits = MIN_ENCLAVE_MEMORY_BYTES + image_scratch_files();
         let err = check_limits_against(&image, Some(fits - 1), &release).unwrap_err();
         assert!(err.contains("need 3112 MiB"), "{err}");
-        assert!(err.contains("consignment scratch files"), "{err}");
+        assert!(err.contains("their scratch files"), "{err}");
 
         // One MiB more of consignment takes one MiB more on each worker.
         let larger = Limits {
@@ -501,16 +512,31 @@ mod tests {
         assert!(check_limits_against(&larger, Some(needed - 1), &release).is_err());
         assert!(check_limits_against(&larger, Some(needed), &release).is_ok());
 
+        // A fascia file over the consignment limit sets the bound instead.
+        let wide_psbt = Limits {
+            max_psbt_bytes: image.max_consignment_bytes + MIB as u64,
+            ..image
+        };
+        assert!(check_limits_against(&wide_psbt, Some(needed - 1), &release).is_err());
+        assert!(check_limits_against(&wide_psbt, Some(needed), &release).is_ok());
+
         // A frame cannot carry a larger file.
         let frame = image.max_message_bytes;
         let needed = MIN_ENCLAVE_MEMORY_BYTES + WORKER_THREADS * frame as usize;
-        for consignment in [frame, 2 * frame, 1 << 32] {
-            let limits = Limits {
-                max_consignment_bytes: consignment,
-                ..image
-            };
-            assert!(check_limits_against(&limits, Some(needed - 1), &release).is_err());
-            assert!(check_limits_against(&limits, Some(needed), &release).is_ok());
+        for bytes in [frame, 2 * frame, 1 << 32] {
+            for limits in [
+                Limits {
+                    max_consignment_bytes: bytes,
+                    ..image
+                },
+                Limits {
+                    max_psbt_bytes: bytes,
+                    ..image
+                },
+            ] {
+                assert!(check_limits_against(&limits, Some(needed - 1), &release).is_err());
+                assert!(check_limits_against(&limits, Some(needed), &release).is_ok());
+            }
         }
     }
 

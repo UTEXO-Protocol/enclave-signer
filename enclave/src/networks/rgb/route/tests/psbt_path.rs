@@ -371,8 +371,9 @@ fn refuses_mint_with_link_output() {
     assert!(err.contains("assigns asset units only"), "{err}");
 }
 
+/// A global the BFA schema defines but a mint must not carry: M4 refuses it.
 #[test]
-fn refuses_extra_global_or_metadata() {
+fn refuses_extra_global() {
     let err = edited_mint_refusal(|mint| {
         let value = GlobalValues::with(RevealedData::new(blob(&[0; 8])));
         mint.globals
@@ -380,15 +381,23 @@ fn refuses_extra_global_or_metadata() {
             .unwrap();
     });
     assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
+}
+
+/// A metadata type of no schema: rgb-lib's fascia inspection cannot name it,
+/// so it refuses before M4 reads the transition.
+#[test]
+fn refuses_unknown_metadata() {
     let err = edited_mint_refusal(|mint| {
         let extra = rgbstd::MetaType::with(9_999);
         mint.metadata
             .insert(extra, MetaValue::from(blob(&[1])))
             .unwrap();
     });
-    assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
+    assert!(err.contains("unknown metadata type"), "{err}");
 }
 
+/// An amount is 8 bytes. rgb-lib's fascia inspection decodes the global, so
+/// it refuses a short one before M4 reads it.
 #[test]
 fn refuses_issued_supply_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
@@ -397,7 +406,7 @@ fn refuses_issued_supply_not_8_bytes() {
             .insert(schemata::GS_ISSUED_SUPPLY, value)
             .unwrap();
     });
-    assert!(err.contains("issuedSupply is 7 bytes"), "{err}");
+    assert!(err.contains("invalid issuedSupply global"), "{err}");
 }
 
 #[test]
@@ -412,6 +421,7 @@ fn refuses_zero_issued_supply() {
     assert!(err.contains("issuedSupply is 0"), "{err}");
 }
 
+/// A block number is 8 bytes, and rgb-lib's inspection decodes it too.
 #[test]
 fn refuses_before_block_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
@@ -422,7 +432,7 @@ fn refuses_before_block_not_8_bytes() {
             )
             .unwrap();
     });
-    assert!(err.contains("beforeBlock is 4 bytes"), "{err}");
+    assert!(err.contains("invalid beforeBlock metadata"), "{err}");
 }
 
 #[test]
@@ -911,8 +921,16 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let (mut history, rights) = seeded(&keys);
     let (refill, request) = refill_request(&mut history, rights[0]);
     let vouts = run_refill(&refill, &request, &history).unwrap();
-    let committed =
-        psbt_commit::committed_transition(&refill.tx, &refill.fascia, history.contract_id).unwrap();
+    let bytes = refill.fascia_bytes();
+    let fascia = psbt_commit::parse_fascia(&bytes, "fascia").unwrap();
+    let committed = psbt_commit::committed_transition(
+        &refill.psbt,
+        fascia,
+        &bytes,
+        "fascia",
+        psbt_commit::Pin::for_test(history.contract_id),
+    )
+    .unwrap();
 
     let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());

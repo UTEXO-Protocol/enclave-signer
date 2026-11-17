@@ -34,7 +34,7 @@ fn measure(name: &str, bytes: Vec<u8>, confirmed: bool, expected_gate: bool) {
     // Refused shapes are deliberately inspected too, to measure the work the
     // production gate prevents. Production inspects only after validation.
     let start = Instant::now();
-    with_scratch_file(&bytes, |path| {
+    with_scratch_file("consignment", &bytes, |path| {
         inspect_consignment(path.to_str().unwrap().to_owned(), BundleFilter::All)
             .map(drop)
             .map_err(|e| crate::error::EnclaveError::CrossCheck(e.to_string()))

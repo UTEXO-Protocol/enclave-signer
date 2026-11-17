@@ -3,6 +3,7 @@
 //! This module only wires the submodules. Each check lives in a submodule:
 //!
 //! - `route.rs`: the entry points that `networks::route` calls.
+//! - `scratch.rs`: the file rgb-lib reads a consignment or a fascia from.
 //! - `validation/`: consignment parsing, rgb-lib validation, asset binding,
 //!   and the `RgbValidator` of one Bitcoin network.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
@@ -30,6 +31,8 @@ mod psbt_fee_size;
 #[cfg(evm_to_rgb)]
 pub mod psbt_validation;
 mod route;
+#[cfg(feature = "rgb-validation")]
+mod scratch;
 pub mod signing;
 pub mod spv;
 #[cfg(feature = "rgb-validation")]

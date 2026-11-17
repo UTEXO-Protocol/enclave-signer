@@ -14,9 +14,9 @@ contain an error.
 
 1. The backend makes an RGB mint (a BFA `mint` transition) with rgb-lib's
    `mint_begin`, and a Bitcoin PSBT that anchors it. It gets the mint's lockId
-   and `settlementData = abi.encode(uint256 lockId, uint64 beforeBlock)`. The
-   mint commits to `beforeBlock`: its EVM lock must be in an earlier (L2)
-   block.
+   and `settlementData`: `abi.encode(uint256 lockId, uint64 beforeBlock)` and
+   then one fee-type byte (0 = BASE, 1 = WITNESS), 65 bytes. The mint commits
+   to `beforeBlock`: its EVM lock must be in an earlier (L2) block.
 2. The user locks ERC-20 tokens in the Bridge contract on EVM. The `fundsIn`
    call carries that `settlementData`.
 3. The Bridge contract writes a `FundsIn` event and a `BridgeFundsIn` event.
@@ -142,7 +142,7 @@ one of them and no fascia fails F4.
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| MPC tree depth | 3 | The depth that rgb-lib commits with. F5 rebuilds the tree at it. |
+| MPC tree depth | 3 | The depth that rgb-lib commits with, and rebuilds the tree at in F5. |
 | Colored account | `m/86'/827166'/0'` on mainnet | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
 
@@ -209,7 +209,9 @@ host. TLS ends inside the enclave. Each call has the timeout
 ### Stage 3 - Does the PSBT commit exactly one transition of the asset?
 
 The core. It reads the RGB data from the request's `fascia`, never from the
-PSBT: RGB keys left in a PSBT are ignored.
+PSBT: RGB keys left in a PSBT are ignored. rgb-lib's wallet-less fascia
+inspection (`inspect_fascia`) proves the commitments of F5 and F6; the rules
+around it are the enclave's.
 
 - **M0** The mint transaction has at most `mint_max_inputs` inputs and
   `mint_max_outputs` outputs. The enclave checks this before it decodes a
@@ -221,25 +223,34 @@ PSBT: RGB keys left in a PSBT are ignored.
 - **F3** The first output that is an `OP_RETURN` or a P2TR must be an
   `OP_RETURN`. RGB consensus reads the commitment from that output. A P2TR
   first would make it a tapret host that the opret check never sees. P2A is
-  not P2TR.
+  not P2TR. rgb-lib verifies the commitment with the DBC proof that the
+  fascia carries, so the inspection must report the opret close method: a
+  tapret proof commits in a P2TR output, which this rule does not read.
 - **F4** `fascia` must not be empty and must decode as rgb-lib reads its
   fascia file: strict encoding, nothing after it, at most `max_psbt_bytes`.
-  Its witness txid must be the PSBT's unsigned txid. It discloses exactly one
-  bundle, of the contract that `RGB_ASSET_ID` names. The request's `asset_id`
-  must name it too.
+  Its witness txid must be the PSBT's unsigned txid, which rgb-lib's
+  inspection binds. It discloses exactly one bundle, of the contract that
+  `RGB_ASSET_ID` names. The request's `asset_id` must name it too.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
-  commitment. A fascia without the entropy is refused. So the fascia shows
-  exactly the bundles that the transaction commits: a hidden, extra or
-  swapped bundle changes the commitment. The enclave does not read the DBC
-  proof of the fascia: it checks its own opret proof, and F3 rules out a
-  tapret.
+  commitment. The enclave passes no entropy of its own, so rgb-lib takes the
+  one the fascia's MPC commitment carries, and refuses a concealed commitment
+  that carries none. So the fascia shows exactly the bundles that the
+  transaction commits: a hidden, extra or swapped bundle changes the
+  commitment.
 - **F6** The bundle holds exactly one transition of the pinned contract,
-  stored under its own id, which the enclave recomputes. The input map must
-  close exactly the inputs of that transition. rgb-lib moves any other
-  allocation of the spent UTXO by a transition of its own in the same
+  stored under its own id, which rgb-lib recomputes. The input map must close
+  exactly the inputs of that transition: rgb-lib binds each input of the
+  transition to that id, and the inspected counts of transitions and of
+  closed seals in the input map must be one and the transition's own input
+  count, so the map names no transition the fascia hides. The two readings
+  must name the same transaction, asset and transition. rgb-lib moves any
+  other allocation of the spent UTXO by a transition of its own in the same
   bundle. So a link right must not share a UTXO with mint rights: F6 refuses
   that mint or refill.
+  The inspection also decodes every global and metadata entry of the
+  transition, so one that no schema defines, or a value of the wrong length,
+  is refused here, before M4 reads it.
 - **F7** The PSBT spends exactly one input (`MINT_INPUTS`), a Colored
   key-path input of the enclave. So the UTXO of the right must pay the fee
   and, for a witness mint, `MINT_WITNESS_SAT`. If that UTXO is too small for
@@ -514,12 +525,13 @@ transition is a commitment:
    keep the txid fixed (F2).
 2. The fascia is of that transaction: its witness txid is the PSBT's txid
    (F4).
-3. The first `OP_RETURN` or P2TR output is an `OP_RETURN` (F3). RGB consensus
-   reads the commitment from that output.
-4. The enclave rebuilds the MPC tree from every bundle that the fascia
-   discloses and checks it against that `OP_RETURN` (F5).
+3. The first `OP_RETURN` or P2TR output is an `OP_RETURN` (F3), and the
+   fascia commits with the opret method. RGB consensus reads the commitment
+   from that output.
+4. rgb-lib rebuilds the MPC tree from every bundle that the fascia discloses
+   and checks it against that `OP_RETURN` (F5).
 5. The bundle id commits the input map. Each entry must name the one
-   disclosed transition, whose id the enclave recomputes (F6).
+   disclosed transition, whose id rgb-lib recomputes (F6).
 
 **The amount is checked three times**, from the fascia and the deposit:
 

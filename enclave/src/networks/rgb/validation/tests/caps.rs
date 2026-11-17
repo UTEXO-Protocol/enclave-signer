@@ -21,12 +21,12 @@ use rgbstd::tapret::{TapretNodePartner, TapretPathProof, TapretProof};
 use rgbstd::validation::DbcProof;
 use rgbstd::{ChainNet, Operation, Opout};
 
+use super::super::super::scratch::with_scratch_file;
 use super::super::cost::{
     assert_bounded_for_rgb_lib, bundle_id_cost, genesis_hash_cost, inspection_ns, opout_count,
     reject_walk_cost, rgb_lib_ns, uncapped_costs, validation_ns, witness_check_cost,
     MAX_BUNDLE_ID_COST, MAX_REJECT_WALK_COST, MAX_RGB_LIB_NS, MAX_WITNESS_CHECK_COST,
 };
-use super::super::scratch::with_scratch_file;
 use super::*;
 
 mod timings;
@@ -702,7 +702,7 @@ fn time_rgb_lib(
         offchain_txid: None,
     };
     let start = Instant::now();
-    let result = with_scratch_file(bytes, |path| {
+    let result = with_scratch_file("consignment", bytes, |path| {
         validate_consignment_with_resolver(
             path.to_str().unwrap(),
             &witnesses,

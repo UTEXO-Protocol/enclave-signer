@@ -19,14 +19,14 @@ pub(crate) fn abi_word(value: u64) -> [u8; 32] {
     w
 }
 
-/// `BridgeFundsIn` log `data` in the real ABI shape: senderNonce, gross, net,
+/// `BridgeFundsIn` log `data` in the real ABI shape: authorizationNonce, gross, net,
 /// commission, nativeCommission, sourceChainId, destinationChainId, then the
 /// `destinationAddress` tail offset, length word and padded bytes.
 /// `operationId` is not here - it is an indexed topic.
 #[cfg(feature = "rgb-validation")]
 pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: &str) -> Vec<u8> {
     let mut d = Vec::new();
-    d.extend_from_slice(&abi_word(0)); // senderNonce
+    d.extend_from_slice(&abi_word(0)); // authorizationNonce
     d.extend_from_slice(&abi_word(gross));
     d.extend_from_slice(&abi_word(net));
     d.extend_from_slice(&abi_word(commission));

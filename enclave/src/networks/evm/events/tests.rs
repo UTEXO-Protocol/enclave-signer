@@ -140,7 +140,7 @@ fn extract_uint256_rejects_overflow() {
 fn topic0_vectors_are_pinned() {
     assert_eq!(
         hex::encode(event_topic0(BRIDGE_FUNDS_IN_SIG)),
-        "f15e44b33fca27f251e63583a6666ef06fc5993fbabb58356f27d07cee2811ab",
+        "8497efd852062fbc7ad2949701967a7d4a67517fef6675a4ee6dfccf2e1a4d88",
         "BridgeFundsIn topic0 drifted"
     );
     assert_eq!(

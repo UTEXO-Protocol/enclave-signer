@@ -146,11 +146,11 @@ fn pinned_commitment(
     asset_id: &str,
     cfg: &BridgeConfig,
 ) -> Result<psbt_commit::Committed> {
-    let pin = psbt_commit::pinned_contract(cfg)?;
-    let fascia = psbt_commit::parse_fascia(fascia, "fascia")?;
-    let committed = psbt_commit::committed_transition(&psbt.unsigned_tx, &fascia, pin)?;
+    let pin = psbt_commit::Pin::of(cfg)?;
+    let parsed = psbt_commit::parse_fascia(fascia, "fascia")?;
+    let committed = psbt_commit::committed_transition(psbt, parsed, fascia, "fascia", pin)?;
     validation::assert_asset_binding(
-        &pin.to_string(),
+        &pin.contract.to_string(),
         asset_id,
         cfg,
         validation::AssetBindMode::Destination,

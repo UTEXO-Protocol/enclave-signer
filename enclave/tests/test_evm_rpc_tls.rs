@@ -32,7 +32,7 @@ use utexo_bridge_enclave::state::EnclaveState;
 sol! {
     event BridgeFundsIn(
         bytes32 indexed operationId, bytes32 indexed sourceSender, address indexed sender,
-        uint256 senderNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
+        bytes32 authorizationNonce, uint256 amount, uint256 netAmount, uint256 tokenCommission,
         uint256 nativeCommission, uint256 sourceChainId, uint256 destinationChainId,
         string destinationAddress, bytes settlementData
     );
@@ -89,7 +89,7 @@ fn forged_receipt() -> String {
         operationId: OP_ID.into(),
         sourceSender: [0x5c; 32].into(),
         sender: [0xde; 20].into(),
-        senderNonce: U256::ZERO,
+        authorizationNonce: [0u8; 32].into(),
         amount: U256::from(1000),
         netAmount: U256::from(950),
         tokenCommission: U256::from(50),
