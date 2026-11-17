@@ -75,7 +75,8 @@ pub fn read_request(stream: &mut impl Read) -> Result<EnclaveRequest> {
 /// consignment and never reads it as protobuf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Schema {
-    /// `EnclaveRequest`: field 3 is `sign`, field 11 is `submit_headers`.
+    /// `EnclaveRequest`: field 3 is `sign`, field 11 is `submit_headers`, field 17 is
+    /// `set_endpoints`.
     Request,
     /// `SignRequest`: field 3 is `rgb_source`.
     Sign,
@@ -85,6 +86,9 @@ enum Schema {
     MerkleProofEntry,
     /// `SubmitHeadersRequest`: field 1 is the repeated `headers`.
     SubmitHeaders,
+    /// `SetEndpointsRequest`: field 10 is the repeated `lz_routes`. A route
+    /// has scalar fields only.
+    SetEndpoints,
     /// A message with no repeated fields and no nested messages, or a
     /// scalar, string or bytes field. Not entered.
     Leaf,
@@ -95,6 +99,7 @@ impl Schema {
         match (self, tag) {
             (Schema::Request, 3) => Schema::Sign,
             (Schema::Request, 11) => Schema::SubmitHeaders,
+            (Schema::Request, 17) => Schema::SetEndpoints,
             (Schema::Sign, 3) => Schema::RgbSource,
             (Schema::RgbSource, 6) => Schema::MerkleProofEntry,
             _ => Schema::Leaf,

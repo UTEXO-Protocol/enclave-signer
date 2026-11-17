@@ -13,6 +13,23 @@ use sha2::{Digest, Sha256};
 use crate::attest_verify::{refuse_mock_production, VerifyMode};
 use crate::enclave_proto::{GetAttestedPublicKeyResponse, SetEndpointsRequest};
 
+/// Parses one `CHAIN_ID:EID` route, as `--lz-route` takes it. Both numbers must be above 0.
+pub fn parse_lz_route(value: &str) -> Result<(u64, u32), String> {
+    let (chain, eid) = value
+        .split_once(':')
+        .ok_or_else(|| format!("route {value:?} is not CHAIN_ID:EID"))?;
+    let chain_id: u64 = chain
+        .parse()
+        .map_err(|_| format!("route {value:?}: chain ID is not a number"))?;
+    let eid: u32 = eid
+        .parse()
+        .map_err(|_| format!("route {value:?}: EID is not a number"))?;
+    if chain_id == 0 || eid == 0 {
+        return Err(format!("route {value:?}: chain ID and EID must be above 0"));
+    }
+    Ok((chain_id, eid))
+}
+
 /// The policy that a production enclave of `role` must attest after
 /// `endpoints` is set. `image_env` is the `Config.Env` JSON list of the
 /// measured image. The deploy inputs do not give the clone-peer PCR3, so it is

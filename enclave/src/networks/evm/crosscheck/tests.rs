@@ -738,6 +738,52 @@ mod lz_route {
         assert!(err.to_string().contains("dstEid mismatch"), "{err}");
     }
 
+    fn lz_route(chain_id: u64, eid: u32) -> crate::config::LzRoute {
+        crate::config::LzRoute { chain_id, eid }
+    }
+
+    /// The pair of the burn record is on the launch list.
+    #[test]
+    fn passes_an_lz_pair_on_the_launch_list() {
+        let r = release(honest());
+        validate_lz_route(&r, &[lz_route(1, 30101), lz_route(DST_CHAIN, DST_EID)])
+            .expect("a listed pair passes");
+    }
+
+    /// The burner picked a valid chain and a valid EID of another network.
+    /// Each value is on the list, but not as a pair.
+    #[test]
+    fn rejects_an_lz_chain_and_eid_of_different_networks() {
+        let r = release(honest());
+        let err =
+            validate_lz_route(&r, &[lz_route(DST_CHAIN, 30101), lz_route(1, DST_EID)]).unwrap_err();
+        assert!(err.to_string().contains("route not allowed"), "{err}");
+    }
+
+    /// An empty list refuses every LayerZero release.
+    #[test]
+    fn rejects_an_lz_release_when_no_route_is_set() {
+        assert!(validate_lz_route(&release(honest()), &[]).is_err());
+    }
+
+    /// A chain ID above u64 is on no list.
+    #[test]
+    fn rejects_an_lz_chain_id_above_u64() {
+        let r = release(lzFundsOutCall {
+            destinationChainId: U256::from(u64::MAX) + U256::from(1u64),
+            ..honest()
+        });
+        assert!(validate_lz_route(&r, &[lz_route(DST_CHAIN, DST_EID)]).is_err());
+    }
+
+    /// A direct release has no EID and needs no pair.
+    #[test]
+    fn a_direct_release_needs_no_lz_route() {
+        let mut r = release(honest());
+        r.dst_eid = None;
+        validate_lz_route(&r, &[]).expect("a direct release passes");
+    }
+
     #[test]
     fn rejects_an_lz_release_without_the_record() {
         let r = release(honest());

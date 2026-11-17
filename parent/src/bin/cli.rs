@@ -264,6 +264,16 @@ struct EndpointArgs {
     /// EVM address the seed must give.
     #[arg(long, env = "KMS_EXPECTED_EVM_ADDRESS")]
     kms_expected_evm_address: Option<String>,
+    /// A destination `CHAIN_ID:EID` pair that a LayerZero release may name.
+    /// Repeat the flag, or separate the pairs with commas in the variable.
+    /// Without a pair the enclave refuses every LayerZero release.
+    #[arg(
+        long = "lz-route",
+        env = "LZ_ROUTES",
+        value_delimiter = ',',
+        value_parser = utexo_bridge_parent::launch_check::parse_lz_route
+    )]
+    lz_routes: Vec<(u64, u32)>,
 }
 
 fn fail(msg: String) -> ! {
@@ -301,6 +311,11 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         kms_seed_id: args.kms_seed_id.unwrap_or_default(),
         kms_expected_evm_address: args.kms_expected_evm_address.unwrap_or_default(),
         evm_rpc_path,
+        lz_routes: args
+            .lz_routes
+            .iter()
+            .map(|&(chain_id, eid)| utexo_bridge_parent::enclave_proto::LzRoute { chain_id, eid })
+            .collect(),
     }
 }
 
@@ -1119,6 +1134,7 @@ mod tests {
                     kms_seed_id: "member-seed".into(),
                     kms_expected_evm_address: "0x1122334455667788990011223344556677889900".into(),
                     evm_rpc_path: rpc_path.into(),
+                    lz_routes: vec![],
                 }
             );
         }

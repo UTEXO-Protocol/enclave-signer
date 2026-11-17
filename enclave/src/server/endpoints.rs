@@ -35,6 +35,14 @@ pub(super) fn handle_set_endpoints(
     let kms_accounts: &[String] = &[];
     let endpoints = Endpoints::parse(&req, kms_accounts, ctx.build_ctx.debug_or_test)
         .map_err(EnclaveError::InvalidRequest)?;
+    // A mint signer signs no release, so a route list there is a mistake.
+    if ctx.build_ctx.signer_role == crate::policy::SignerRole::Mint
+        && !endpoints.lz_routes.is_empty()
+    {
+        return Err(EnclaveError::InvalidRequest(
+            "lz_routes must be empty on a mint signer".into(),
+        ));
+    }
     #[cfg(feature = "rgb-validation")]
     let tls = endpoints
         .evm_rpc_tls

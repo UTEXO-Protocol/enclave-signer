@@ -10,7 +10,10 @@
 //! tonic decode the message.
 //!
 //! The layer also limits the `Sign` requests at once. Only `Sign` can carry
-//! a large body, so each `Sign` request holds a permit until it ends. A
+//! a large body, so each `Sign` request holds a permit until it ends. The
+//! permit also stays with each blocking enclave exchange that the request
+//! starts (see [`SIGN_PERMIT`]), so a cancelled or timed-out call does not
+//! free its permit while its exchange still holds the decoded request. A
 //! `Sign` request above the permits gets `UNAVAILABLE` at once. Every other
 //! request needs no permit, and its body can have at most
 //! [`MAX_OTHER_MESSAGE_SIZE`] bytes. So a health probe, such as the
@@ -35,7 +38,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use http_body_util::BodyExt;
 use prost::encoding::{decode_key, decode_varint, skip_field, DecodeContext, WireType};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{body::Body, server::NamedService, Status};
 use tower::{Layer, Service};
 
@@ -132,6 +135,19 @@ fn walk(mut buf: &[u8], schema: Schema, left: &mut usize) -> Result<(), Status> 
     Ok(())
 }
 
+tokio::task_local! {
+    /// The `Sign` permit of the request that runs in this task. A blocking
+    /// exchange clones it, see [`current_sign_permit`].
+    static SIGN_PERMIT: Arc<OwnedSemaphorePermit>;
+}
+
+/// The permit of the current `Sign` request, or `None` outside one. The
+/// caller moves it into the blocking worker, so the permit lasts until the
+/// worker ends, even when the waiting RPC future is gone.
+pub(crate) fn current_sign_permit() -> Option<Arc<OwnedSemaphorePermit>> {
+    SIGN_PERMIT.try_with(Arc::clone).ok()
+}
+
 /// Reads the whole body of each request and checks its shape before tonic
 /// decodes it. Each `Sign` request also holds one of `max_sign` permits until
 /// it ends, and a `Sign` request above them gets `UNAVAILABLE` before its
@@ -204,14 +220,17 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
-            let _permit = permit;
+            let permit = permit.map(Arc::new);
             let (parts, body) = req.into_parts();
             let bytes = match checked_body(&method, body).await {
                 Ok(bytes) => bytes,
                 Err(status) => return Ok(status.into_http()),
             };
             let req = http::Request::from_parts(parts, Body::new(http_body_util::Full::new(bytes)));
-            inner.call(req).await
+            match permit {
+                Some(permit) => SIGN_PERMIT.scope(permit, inner.call(req)).await,
+                None => inner.call(req).await,
+            }
         })
     }
 }
@@ -395,5 +414,82 @@ mod tests {
     fn other_methods_count_only_the_top_level() {
         let bytes = [0x12, 0x02, 0xff, 0xff];
         assert_eq!(count_request_elements("Clone", &bytes).unwrap(), 1);
+    }
+
+    /// Holds the permit of its request in a worker thread, as an enclave
+    /// exchange does, and then never answers.
+    #[derive(Clone)]
+    struct HoldingService {
+        release: Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Service<http::Request<Body>> for HoldingService {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Request<Body>) -> Self::Future {
+            let release = self.release.lock().unwrap().take().unwrap();
+            let started = self.started.clone();
+            // As in a tonic handler, the work runs when the future is polled,
+            // inside the permit scope.
+            Box::pin(async move {
+                let permit = current_sign_permit().expect("a Sign request has a permit");
+                std::thread::spawn(move || {
+                    let _permit = permit;
+                    let _ = release.recv();
+                });
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+
+    fn sign_http_request() -> http::Request<Body> {
+        let service = <ParentServiceServer<ParentAdapterService> as NamedService>::NAME;
+        http::Request::builder()
+            .uri(format!("/{service}/Sign"))
+            .body(Body::new(http_body_util::Full::new(Bytes::from_static(&[
+                0, 0, 0, 0, 0,
+            ]))))
+            .unwrap()
+    }
+
+    /// A cancelled Sign call does not free its permit while its worker holds
+    /// the request. The permit comes back when the worker ends.
+    #[tokio::test]
+    async fn a_cancelled_sign_keeps_its_permit_until_the_worker_ends() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let layer = ShapeLayer::new(1);
+        let mut svc = layer.layer(HoldingService {
+            release: Arc::new(std::sync::Mutex::new(Some(wait))),
+            started: started.clone(),
+        });
+        let call = svc.call(sign_http_request());
+        let task = tokio::spawn(call);
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+
+        let refused = svc.call(sign_http_request()).await.unwrap();
+        assert_eq!(
+            refused.headers().get("grpc-status").unwrap(),
+            &(tonic::Code::Unavailable as i32).to_string()
+        );
+
+        release.send(()).unwrap();
+        for _ in 0..100 {
+            if layer.sign_permits.available_permits() == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the permit was not released after the worker ended");
     }
 }

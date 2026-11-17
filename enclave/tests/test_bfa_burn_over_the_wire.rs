@@ -39,6 +39,34 @@ fn signs_real_burn_and_verifies_layerzero_eip712_signature() {
     Fixture::new(Route::LayerZero).control();
 }
 
+/// The burn and the release agree, and the signature would verify, but the
+/// operator did not approve the pair of the burn. Nothing is signed.
+#[test]
+fn refuses_a_layerzero_pair_that_the_launch_did_not_list() {
+    let mut fixture = Fixture::new(Route::LayerZero);
+    fixture.control();
+    for routes in [
+        Vec::new(),
+        // Each value is listed, but they are not a pair.
+        vec![
+            utexo_bridge_enclave::config::LzRoute {
+                chain_id: 137,
+                eid: 30101,
+            },
+            utexo_bridge_enclave::config::LzRoute {
+                chain_id: 1,
+                eid: 30109,
+            },
+        ],
+    ] {
+        fixture.ctx.launch.get_mut().unwrap().endpoints.lz_routes = routes;
+        assert_refusal(
+            exchange(&fixture.ctx, fixture.request(fixture.params.clone())),
+            "LayerZero route not allowed",
+        );
+    }
+}
+
 #[test]
 fn refuses_settlement_ids_derived_from_the_bare_opid_or_another_mint_transaction() {
     for route in [Route::Direct, Route::LayerZero] {

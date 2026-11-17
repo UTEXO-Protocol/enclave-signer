@@ -18,6 +18,9 @@
 # KMS values, set on each enclave at start. A mint enclave requires the first three:
 #   KMS_KEY_ARN=<key ARN>  KMS_REGION=<region>  KMS_SEED_ID=<seed id>
 #   KMS_EXPECTED_EVM_ADDRESS=<0x address, optional>
+# LayerZero routes, set on each burn enclave at start (docs/configuration.md):
+#   LZ_ROUTES=<CHAIN_ID:EID,CHAIN_ID:EID,...>
+# Without it the enclave refuses every LayerZero release.
 # ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
 # (docs/runtime-limits.md). The script writes it into enclave-<CID>.env. It stops
 # before it changes anything when that file exists and ubuntu cannot read it.
@@ -83,6 +86,11 @@ EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
 EVM_RPC_PATH_FILE="${EVM_RPC_PATH_FILE:-}"
 if [ -n "$EVM_RPC_PATH_FILE" ] && [ ! -s "$EVM_RPC_PATH_FILE" ]; then
   echo "EVM_RPC_PATH_FILE must name a file that is not empty" >&2
+  exit 1
+fi
+LZ_ROUTES="${LZ_ROUTES:-}"
+if [ -n "$LZ_ROUTES" ] && ! [[ "$LZ_ROUTES" =~ ^[1-9][0-9]*:[1-9][0-9]*(,[1-9][0-9]*:[1-9][0-9]*)*$ ]]; then
+  echo "LZ_ROUTES must be CHAIN_ID:EID pairs separated by commas" >&2
   exit 1
 fi
 KMS_KEY_ARN="${KMS_KEY_ARN:-}"
@@ -651,6 +659,7 @@ KMS_KEY_ARN=$KMS_KEY_ARN
 KMS_REGION=$KMS_REGION
 KMS_SEED_ID=$KMS_SEED_ID
 KMS_EXPECTED_EVM_ADDRESS=$KMS_EXPECTED_EVM_ADDRESS
+LZ_ROUTES=$LZ_ROUTES
 EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF

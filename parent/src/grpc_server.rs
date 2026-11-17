@@ -97,7 +97,13 @@ async fn send_within(
     lead: Option<Lead>,
 ) -> Result<EnclaveResponse, Status> {
     let deadline = Instant::now() + timeout;
-    let worker = tokio::task::spawn_blocking(move || exchange(&target, &req, deadline, lead));
+    // The worker owns the Sign permit until it ends. The deadline below only
+    // stops the wait, not the worker.
+    let permit = crate::request_shape::current_sign_permit();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        exchange(&target, &req, deadline, lead)
+    });
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker).await {
         Ok(join_result) => {
             join_result.map_err(|e| Status::internal(format!("spawn_blocking join failed: {e}")))?

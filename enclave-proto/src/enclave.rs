@@ -662,7 +662,7 @@ pub struct LimitsResponse {
 /// after launch. The enclave refuses a second set. Until the set, the enclave
 /// signs nothing and opens no chain connection. A build that does not use a
 /// value requires it empty.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetEndpointsRequest {
     /// TLS name of the EVM RPC. No scheme, path or port.
     #[prost(string, tag="2")]
@@ -689,6 +689,21 @@ pub struct SetEndpointsRequest {
     /// query, fragment, escape or dot segment. May contain credentials: it is not logged or attested.
     #[prost(string, tag="9")]
     pub evm_rpc_path: ::prost::alloc::string::String,
+    /// The only (destination chain ID, LayerZero endpoint ID) pairs that a release may name. A
+    /// LayerZero release whose pair is not listed is refused. Empty refuses every LayerZero release.
+    /// At most 64 pairs, without a repeat of a chain ID or an EID.
+    #[prost(message, repeated, tag="10")]
+    pub lz_routes: ::prost::alloc::vec::Vec<LzRoute>,
+}
+/// One destination network of a LayerZero release.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LzRoute {
+    /// The destinationChainId of the burn record. Above 0.
+    #[prost(uint64, tag="1")]
+    pub chain_id: u64,
+    /// The LayerZero endpoint ID (dstEid) of that chain. Above 0.
+    #[prost(uint32, tag="2")]
+    pub eid: u32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsResponse {
