@@ -42,7 +42,7 @@ use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError};
 #[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
 #[cfg(rgb_to_evm)]
-use rgbstd::vm::WitnessPos;
+use rgb_lib::WitnessPos;
 
 #[cfg(rgb_to_evm)]
 use super::validation::ValidatedConsignment;

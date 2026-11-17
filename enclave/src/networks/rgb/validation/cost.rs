@@ -12,10 +12,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rgbstd::containers::Transfer;
+use rgb_lib::{OpId, Opout, RgbTransfer as Transfer};
+// rgb-lib re-exports no anchor or proof type, so these four come from rgb-ops.
 use rgbstd::tapret::TapretNodePartner;
 use rgbstd::validation::DbcProof;
-use rgbstd::{Anchor, KnownTransition, OpId, Opout};
+use rgbstd::{Anchor, KnownTransition};
 
 use crate::error::{EnclaveError, Result};
 use crate::limits::Limits;

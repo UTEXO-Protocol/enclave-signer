@@ -14,10 +14,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use amplify::ByteArray;
-use rgbstd::containers::{ClaimResolverError, LockId, ResolveClaim};
-use rgbstd::stl::BridgeLocation;
-use rgbstd::validation::Claim;
-use rgbstd::OpId;
+use rgb_lib::{BridgeLocation, Claim, ClaimResolverError, LockId, OpId, ResolveClaim};
 
 use crate::error::{EnclaveError, Result};
 

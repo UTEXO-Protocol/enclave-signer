@@ -18,7 +18,7 @@ use rgb_lib::no_wallet::{
     ValidationOptions, WitnessValidationStatus,
 };
 use rgb_lib::BitcoinNetwork;
-use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
+use rgb_lib::{ConsignmentExt, FileContent, ResolveClaim, RgbTransfer as Transfer};
 
 use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
