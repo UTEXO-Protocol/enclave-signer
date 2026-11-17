@@ -28,7 +28,7 @@ use crate::state::ReplayReservation;
 /// build without `rgb-validation` returns it for `SubmitHeaders` and
 /// `GetLastSavedBlock`, so callers see a refusal, not a silent no-op.
 /// `features` names the build features that add the network.
-#[allow(dead_code)]
+#[cfg_attr(feature = "rgb-validation", allow(dead_code))]
 pub(super) fn unsupported_build(network: &str, features: &str) -> EnclaveError {
     EnclaveError::InvalidRequest(format!(
         "enclave was not built with {network} support: this binary does not handle {network} \

@@ -130,7 +130,10 @@ pub(super) fn handle_set_endpoints(
 /// Each forwarder sends on only TLS ([`crate::egress`]).
 #[cfg(any(test, all(feature = "vsock", target_os = "linux")))]
 fn forwarder_plan(endpoints: &Endpoints) -> Vec<(SocketAddrV4, u32)> {
-    #[allow(unused_mut)]
+    #[cfg_attr(
+        not(any(feature = "rgb-validation", feature = "kms-persistence")),
+        allow(unused_mut)
+    )]
     let mut plan = Vec::new();
     #[cfg(feature = "rgb-validation")]
     if let Some(tls) = &endpoints.evm_rpc_tls {
