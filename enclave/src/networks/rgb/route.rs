@@ -147,8 +147,7 @@ fn pinned_commitment(
     cfg: &BridgeConfig,
 ) -> Result<psbt_commit::Committed> {
     let pin = psbt_commit::Pin::of(cfg)?;
-    let parsed = psbt_commit::parse_fascia(fascia, "fascia")?;
-    let committed = psbt_commit::committed_transition(psbt, parsed, fascia, "fascia", pin)?;
+    let committed = psbt_commit::committed_transition(psbt, fascia, "fascia", pin)?;
     validation::assert_asset_binding(
         &pin.contract.to_string(),
         asset_id,

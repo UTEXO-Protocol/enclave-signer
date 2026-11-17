@@ -1308,7 +1308,12 @@ fn mint_transitions_are_the_only_mint_shape() {
     assert!(is_mint_transition(8013));
     assert!(!is_mint_transition(10000));
     assert!(!is_mint_transition(8010));
-    assert!(super::super::flow::is_signing_transition(8013));
+    assert!(super::super::flow::is_signing_transition(
+        rgb_lib::TypeOfTransition::Mint
+    ));
+    assert!(!super::super::flow::is_signing_transition(
+        rgb_lib::TypeOfTransition::Propagate
+    ));
 }
 
 // ===== the validator =====

@@ -47,9 +47,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
-# Decodes the fascia rgb-lib writes for a mint or refill tx, which carries its
-# RGB data (rgb-lib strips it from the PSBT). The version rgb-ops pins.
-strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6", optional = true }
 # RGB-Tools rgb-lib 0.3.0-beta.8, without the wallet. It validates a consignment
 # and reads its flat summary (`inspect_consignment`), and it inspects the
 # fascia of a mint or refill transaction (`inspect_fascia`).
@@ -155,8 +152,8 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # `build.rs` turns the role into the `evm_to_rgb` / `rgb_to_evm` cfgs.
 #
 # `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo). It
-# reads each mint and refill from its fascia, so it needs `strict_encoding`.
-mint-signer = ["rgb-validation", "kms-persistence", "dep:strict_encoding"]
+# reads each mint and refill from rgb-lib's inspection of its fascia.
+mint-signer = ["rgb-validation", "kms-persistence"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
 burn-signer = ["rgb-validation"]
 
@@ -173,7 +170,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 # Reads the shared vectors `docs/burn-destination-vectors.json`. Already in the lock.
 serde_json = "1"
 # The in-process BFA consignment generator (`src/test_support/bfa_consignment.rs`)
-# builds strict types. Already in the lock.
+# builds strict types and writes the fascia bytes a request carries.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6" }
 # The generator commits its PSBTs with psbtu's `rgb_commit` and strips their
 # RGB keys, as rgb-lib does.
