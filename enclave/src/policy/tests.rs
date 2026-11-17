@@ -38,7 +38,6 @@ fn release_bridge_with_full_pins_is_production() {
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
-        "e.test",
     ));
     match &p {
         SecurityPolicy::Production(pp) => {
@@ -75,7 +74,6 @@ fn configured_finality_tag_is_attested() {
             &config,
             EvmDataSource::PinnedTlsRpc,
             a_tls_pin(),
-            "e.test",
         ));
         assert_eq!(
             policy.assert_valid_for_build(&release_bridge_ctx()).is_ok(),
@@ -119,7 +117,6 @@ fn signer_role_is_attested() {
             &pinned_config(),
             EvmDataSource::Disabled,
             None,
-            "e.test",
         )
     };
     let mint = resolve(SignerRole::Mint);
@@ -150,7 +147,6 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
         &config,
         EvmDataSource::Disabled,
         None,
-        "e.test",
     ) {
         SecurityPolicy::Production(p) => p,
         other => panic!("expected Production, got {other:?}"),
@@ -189,13 +185,7 @@ fn production_accepts_an_authenticated_evm_source_and_attests_it() {
         (EvmDataSource::Disabled, None),
         (EvmDataSource::PinnedTlsRpc, a_tls_pin()),
     ] {
-        let p = with_role(SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            source,
-            pin,
-            "e.test",
-        ));
+        let p = with_role(SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin));
         match &p {
             SecurityPolicy::Production(pp) => assert_eq!(pp.evm_source, source),
             other => panic!("expected Production for {source:?}, got {other:?}"),
@@ -216,7 +206,6 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     let launch = |host: &str, ca_der: Vec<u8>| {
         let e = crate::config::Endpoints::parse(
             &crate::proto::SetEndpointsRequest {
-                electrum_url: "ssl://electrum.test:50002".into(),
                 evm_rpc_host: host.into(),
                 evm_rpc_ca_der: ca_der,
                 evm_rpc_tls_port: 443,
@@ -228,13 +217,7 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
         let tls = e.evm_rpc_tls.as_ref().unwrap();
         let (source, pin) = crate::bootstrap::resolve_evm_data_source(tls);
         let ctx = release_bridge_ctx();
-        let p = with_role(SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            source,
-            pin,
-            &e.electrum_host,
-        ));
+        let p = with_role(SecurityPolicy::resolve(&ctx, &pinned_config(), source, pin));
         p.assert_valid_for_build(&ctx).map(|()| p)
     };
     assert!(launch("", ca.clone()).is_err());
@@ -243,7 +226,6 @@ fn production_launches_only_with_a_pinned_tls_evm_rpc() {
     let Ok(SecurityPolicy::Production(p)) = launch("rpc.test", ca) else {
         panic!("a valid host and CA must launch");
     };
-    assert_eq!(p.electrum_host, "electrum.test");
     assert_eq!(p.evm_source, EvmDataSource::PinnedTlsRpc);
     let pin = p.evm_rpc_tls.unwrap();
     assert_eq!(pin.host, "rpc.test");
@@ -262,14 +244,8 @@ fn evm_rpc_tls_pin_is_carried_into_the_commitment() {
             host: host.into(),
             ca_sha256,
         });
-        SecurityPolicy::resolve(
-            &ctx,
-            &pinned_config(),
-            EvmDataSource::PinnedTlsRpc,
-            pin,
-            "e.test",
-        )
-        .commitment_bytes()
+        SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::PinnedTlsRpc, pin)
+            .commitment_bytes()
     };
     let base = commit("rpc.test", [0x0d; 32]);
     assert_ne!(base, commit("other.test", [0x0d; 32]));
@@ -279,10 +255,15 @@ fn evm_rpc_tls_pin_is_carried_into_the_commitment() {
 #[test]
 fn production_boots_without_endpoints_and_launches_only_with_them() {
     let ctx = release_bridge_ctx();
-    let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None, "");
+    let p = with_role(SecurityPolicy::resolve(
+        &ctx,
+        &pinned_config(),
+        EvmDataSource::PinnedTlsRpc,
+        None,
+    ));
     assert!(p.assert_valid_at_boot(&ctx).is_ok());
     let err = p.assert_valid_for_build(&ctx).unwrap_err();
-    assert!(err.contains("Electrum host"), "got: {err}");
+    assert!(err.contains("without a valid pin"), "got: {err}");
 }
 
 #[test]
@@ -292,7 +273,7 @@ fn production_refuses_the_latest_finality_tag_at_boot() {
         evm_finality_tag: EvmFinalityTag::Latest,
         ..pinned_config()
     };
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
     assert!(err.contains("EVM_FINALITY_TAG=latest"), "got: {err}");
 }
@@ -305,7 +286,7 @@ fn production_boots_with_the_safe_and_finalized_tags() {
             evm_finality_tag: tag,
             ..pinned_config()
         };
-        let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+        let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
         assert!(policy.assert_valid_at_boot(&ctx).is_ok(), "{tag}");
     }
 }
@@ -315,7 +296,7 @@ fn production_rejects_a_zero_spv_confirmation_rule() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.spv_min_confirmations = 0;
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     let err = policy.assert_valid_at_boot(&ctx).unwrap_err();
     assert!(err.contains("SPV_MIN_CONFIRMATIONS"), "got: {err}");
 }
@@ -326,8 +307,7 @@ fn spv_min_confirmations_is_attested() {
     let commit = |depth: u32| {
         let mut cfg = pinned_config();
         cfg.spv_min_confirmations = depth;
-        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes()
+        SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None).commitment_bytes()
     };
     assert_ne!(commit(6), commit(7));
 }
@@ -338,7 +318,7 @@ fn production_rejects_an_unpinned_token_contract() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.token_contract = [0u8; 20];
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("TOKEN_CONTRACT"), "got: {err}");
 }
@@ -349,7 +329,7 @@ fn production_rejects_btc_relay_mode_none() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     cfg.btc_relay_mode = BtcRelayMode::None;
-    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let policy = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     let err = policy.assert_valid_for_build(&ctx).unwrap_err();
     assert!(err.contains("BTC_RELAY_MODE=none"), "got: {err}");
 }
@@ -363,7 +343,6 @@ fn production_defaults_to_btc_relay_required() {
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
-        "e.test",
     ));
     match &policy {
         SecurityPolicy::Production(p) => assert!(p.btc_relay_required),
@@ -379,10 +358,8 @@ fn token_contract_is_carried_into_the_commitment() {
     let mut other = base.clone();
     other.token_contract = [0x44; 20];
     assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &other, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None).commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &other, EvmDataSource::Disabled, None).commitment_bytes(),
         "re-pinning TOKEN_CONTRACT must change the attested commitment"
     );
 }
@@ -393,14 +370,9 @@ fn deposit_authorization_rule_is_carried_into_the_commitment() {
     let base = pinned_config();
     let mut other_emitter = base.clone();
     other_emitter.funds_in_contract = [0x33; 20];
-    let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test");
-    let changed_emitter = SecurityPolicy::resolve(
-        &ctx,
-        &other_emitter,
-        EvmDataSource::Disabled,
-        None,
-        "e.test",
-    );
+    let expected = SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None);
+    let changed_emitter =
+        SecurityPolicy::resolve(&ctx, &other_emitter, EvmDataSource::Disabled, None);
 
     assert_ne!(
         expected.commitment_bytes(),
@@ -416,7 +388,6 @@ fn release_bridge_unconfigured_is_rejected_at_boot() {
         &BridgeConfig::default(),
         EvmDataSource::Disabled,
         None,
-        "e.test",
     );
     assert_eq!(
         p,
@@ -436,7 +407,7 @@ fn release_bridge_partially_pinned_is_rejected_at_boot() {
         chain_id: 1,
         ..Default::default()
     };
-    let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::Disabled, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &partial, EvmDataSource::Disabled, None);
     assert!(matches!(p, SecurityPolicy::Development { .. }));
     assert!(p.assert_valid_for_build(&ctx).is_err());
 }
@@ -466,7 +437,6 @@ fn each_dev_feature_forces_development_even_when_fully_pinned() {
             &pinned_config(),
             EvmDataSource::PinnedTlsRpc,
             a_tls_pin(),
-            "e.test",
         );
         assert_eq!(p, SecurityPolicy::Development { reason });
         // Fully pinned, a dev feature in a release rgb build still does not boot.
@@ -480,13 +450,7 @@ fn debug_build_is_development_and_exempt_from_the_boot_gate() {
         debug_or_test: true,
         ..release_bridge_ctx()
     };
-    let p = SecurityPolicy::resolve(
-        &ctx,
-        &pinned_config(),
-        EvmDataSource::Disabled,
-        None,
-        "e.test",
-    );
+    let p = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None);
     assert_eq!(
         p,
         SecurityPolicy::Development {
@@ -507,7 +471,6 @@ fn minimal_non_bridge_release_is_exempt() {
         &BridgeConfig::default(),
         EvmDataSource::Disabled,
         None,
-        "e.test",
     );
     assert_eq!(
         p,
@@ -524,7 +487,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     let ctx = release_bridge_ctx();
     let mut cfg = pinned_config();
     // Unset BTC pins: vanilla is off.
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -534,7 +497,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
     ));
     // With the cap set, vanilla is on and attested.
     cfg.btc_max_total_sats = 100_000;
-    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let p = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
     assert!(matches!(
         p,
         SecurityPolicy::Production(ProductionPolicy {
@@ -548,13 +511,7 @@ fn allow_vanilla_psbt_tracks_the_btc_pins() {
 fn gas_tx_rule_is_carried_into_the_commitment() {
     // The gas-tx pins change the commitment.
     let ctx = release_bridge_ctx();
-    let unpinned = SecurityPolicy::resolve(
-        &ctx,
-        &pinned_config(),
-        EvmDataSource::Disabled,
-        None,
-        "e.test",
-    );
+    let unpinned = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None);
 
     let mut cfg = pinned_config();
     cfg.gas_tx_allowed_to = Some([0x77; 20]);
@@ -562,7 +519,7 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     cfg.gas_tx_max_fee_per_gas = 5_000;
     cfg.gas_tx_max_value_wei = Some(9_000);
     cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-    let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None, "e.test");
+    let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
 
     assert_ne!(
         unpinned.commitment_bytes(),
@@ -595,10 +552,8 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
     raised.gas_tx_max_value_wei = Some(1);
 
     assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None).commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::Disabled, None).commitment_bytes(),
         "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
     );
 }
@@ -613,10 +568,8 @@ fn unset_gas_tx_value_ceiling_commits_as_zero() {
     zero.gas_tx_max_value_wei = Some(0);
 
     assert_eq!(
-        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::Disabled, None, "e.test")
-            .commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::Disabled, None).commitment_bytes(),
+        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::Disabled, None).commitment_bytes(),
     );
 }
 
@@ -628,15 +581,8 @@ fn evm_source_is_carried_into_the_commitment() {
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
-        "e.test",
     );
-    let disabled = SecurityPolicy::resolve(
-        &ctx,
-        &pinned_config(),
-        EvmDataSource::Disabled,
-        None,
-        "e.test",
-    );
+    let disabled = SecurityPolicy::resolve(&ctx, &pinned_config(), EvmDataSource::Disabled, None);
     assert_ne!(pinned.commitment_bytes(), disabled.commitment_bytes());
 }
 
@@ -657,7 +603,6 @@ fn development_commitment_is_stable_and_distinct() {
             &pinned_config(),
             EvmDataSource::Disabled,
             None,
-            "e.test",
         )
         .commitment_bytes()
     );
@@ -677,7 +622,6 @@ fn with_kms_is_committed_in_production_only() {
         &pinned_config(),
         EvmDataSource::Disabled,
         None,
-        "e.test",
     );
     let pinned = prod.clone().with_kms(pin.clone());
     assert_ne!(prod.commitment_bytes(), pinned.commitment_bytes());
@@ -703,7 +647,6 @@ fn a_cloning_role_needs_a_non_zero_pcr3_to_launch() {
                 &pinned_config(),
                 EvmDataSource::PinnedTlsRpc,
                 a_tls_pin(),
-                "e.test",
             )
         };
         let unread = resolve();
@@ -735,7 +678,6 @@ fn a_failed_pcr3_read_refuses_the_launch() {
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
-        "e.test",
     );
     assert!(p
         .with_clone_peer_pcr3(|| Err(crate::error::EnclaveError::Attestation("nsm".into())))
@@ -755,7 +697,6 @@ fn the_mint_signer_does_not_read_pcr3() {
         &pinned_config(),
         EvmDataSource::PinnedTlsRpc,
         a_tls_pin(),
-        "e.test",
     )
     .with_clone_peer_pcr3(|| panic!("the mint signer must not read PCR3"))
     .unwrap();
@@ -780,7 +721,6 @@ fn the_clone_peer_pcr3_is_attested() {
             &pinned_config(),
             EvmDataSource::PinnedTlsRpc,
             a_tls_pin(),
-            "e.test",
         )
         .with_clone_peer_pcr3(|| Ok(pcr3))
         .unwrap()
@@ -807,7 +747,6 @@ fn boot_policy(chain_id: u64, network: BitcoinNetwork) -> SecurityPolicy {
         },
         EvmDataSource::Disabled,
         None,
-        "",
     )
 }
 

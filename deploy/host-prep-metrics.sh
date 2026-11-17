@@ -86,9 +86,9 @@ for CID in "${CIDS[@]}"; do
   METRICS+=( "MetricName=EnclaveResponsive,${D},Value=${RESP},Unit=Count" )
 done
 
-# vsock-proxy liveness (egress: electrs 8001, evm-rpc 8002). vsock ports are NOT
-# TCP so `ss -ltn` can't see them — use systemctl. Dimension Proxy=electrs|evmrpc.
-declare -A PROXY=([electrs]=vsock-proxy-electrs [evmrpc]=vsock-proxy-evmrpc)
+# vsock-proxy liveness (egress: evm-rpc 8002). vsock ports are NOT
+# TCP so `ss -ltn` can't see them — use systemctl. Dimension Proxy=evmrpc.
+declare -A PROXY=([evmrpc]=vsock-proxy-evmrpc)
 for PNAME in "${!PROXY[@]}"; do
   if systemctl is-active --quiet "${PROXY[$PNAME]}"; then UP=1; else UP=0; fi
   DP="Dimensions=[{Name=Host,Value=${IID}},{Name=Proxy,Value=${PNAME}}]"

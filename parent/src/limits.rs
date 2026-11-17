@@ -24,8 +24,6 @@ limit_fields! {
     total_request_timeout_secs,
     io_idle_timeout_secs,
     first_bytes_timeout_secs,
-    electrum_timeout_secs,
-    esplora_timeout_secs,
     evm_rpc_timeout_secs,
     max_rgb_lib_ms,
     max_witness_check_cost,

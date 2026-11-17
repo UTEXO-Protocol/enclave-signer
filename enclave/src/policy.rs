@@ -73,8 +73,6 @@ pub struct ProductionPolicy {
     pub attestation: AttestationMode,
     /// EVM `FundsIn` verification source (pinned TLS or disabled). Attested.
     pub evm_source: EvmDataSource,
-    /// Host of the Electrum server set at launch.
-    pub electrum_host: String,
     /// The EVM RPC TLS host and CA hash. Required when `evm_source` is
     /// [`EvmDataSource::PinnedTlsRpc`].
     pub evm_rpc_tls: Option<EvmRpcTlsPin>,
@@ -168,7 +166,6 @@ impl SecurityPolicy {
         bridge: &BridgeConfig,
         evm_source: EvmDataSource,
         evm_rpc_tls: Option<EvmRpcTlsPin>,
-        electrum_host: &str,
     ) -> Self {
         // Dev features are a release `compile_error!` (lib.rs). These checks
         // keep dev and test builds correct.
@@ -216,7 +213,6 @@ impl SecurityPolicy {
             signer_role: ctx.signer_role,
             attestation: AttestationMode::Real,
             evm_source,
-            electrum_host: electrum_host.to_string(),
             evm_rpc_tls,
             btc_source: BtcDataSource::SpvVerified,
             // The same pins that `validate_gas_tx_request` enforces, so the
@@ -289,7 +285,6 @@ impl SecurityPolicy {
                 evm_finality_tag: p.evm_finality_tag,
                 token_contract: p.token_contract,
                 spv_min_confirmations: p.spv_min_confirmations,
-                electrum_host: p.electrum_host.clone(),
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // Unset commits as all-zero, which the gas path never accepts.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
@@ -357,9 +352,6 @@ impl ProductionPolicy {
     /// anchors are SPV-verified and the EVM RPC is authenticated.
     pub fn check_invariants(&self) -> Result<(), String> {
         self.check_build_invariants()?;
-        if self.electrum_host.is_empty() {
-            return Err("production policy has no Electrum host. Set it at launch.".into());
-        }
         if self.evm_source == EvmDataSource::PinnedTlsRpc && self.evm_rpc_tls.is_none() {
             return Err(
                 "production policy uses the pinned TLS EVM source without a valid pin. Set \

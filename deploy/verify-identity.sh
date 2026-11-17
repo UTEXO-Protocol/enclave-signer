@@ -19,7 +19,7 @@
 # For SIGNER_ROLE=mint or ENCLAVE_DEBUG_MODE=1 (zero PCRs) step 3 reads get-keys:
 # a fast STRUCTURAL check, NOT an attestation.
 #
-# Launch values (PCR_FILE, IMAGE_ENV, SIGNER_ROLE, ELECTRUM_URL, ...) come from
+# Launch values (PCR_FILE, IMAGE_ENV, SIGNER_ROLE, EVM_RPC_HOST, ...) come from
 # ENCLAVE_ENV and /etc/nitro_enclaves/vsock-proxy-evmrpc.env, as
 # utexo-enclave-ctl.sh reads them. deploy-host.sh writes one env per CID
 # (/etc/utexo/enclave-<CID>.env), so check one CID per run.

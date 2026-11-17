@@ -33,8 +33,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `8d5705f5e7d8f99c69d4b3df52a966f012e2416c` (branch `chore/reserve-parent-fascia`, "Reserve parent_fascia") |
-| Commit date | 2026-11-16T19:10:48Z |
+| Commit | `c938b595b14f445e7fa0560a64d095069b762a68` (branch `chore/reserve-electrum-url`, "Reserve the Electrum URL and its timeouts") |
+| Commit date | 2026-11-17T10:11:14Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -48,7 +48,7 @@ crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=8d5705f5e7d8f99c69d4b3df52a966f012e2416c
+REV=c938b595b14f445e7fa0560a64d095069b762a68
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -63,8 +63,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `25999906949bc4383d976c9c9e6bd2be0996b47c` |
-| `proto/enclave/enclave.proto` | `4a1c00e6094a6547a564a5bbbc698c6f96e23131` |
+| `rust-gen/src/enclave/enclave.rs` | `95d6eea1d6be52c2fb173b081898f86770f9f945` |
+| `proto/enclave/enclave.proto` | `75fe0b8fbd548a14729f28e77ffb8a3da56d3ecd` |
 
 ## Why only `prost`
 

@@ -177,7 +177,6 @@ async fn e2e_attest_verify_refuses_mock_with_production() {
             allow_vanilla_psbt: false,
             signer_role: attestation_verify::SignerRole::Mint,
             evm_source: EvmDataSource::Disabled,
-            electrum_host: "electrum.test".into(),
             evm_rpc_tls: None,
             expected_chain_id: None,
             bitcoin_network: attestation_verify::BitcoinNetwork::Mainnet,
@@ -209,10 +208,10 @@ async fn e2e_attest_verify_refuses_mock_with_production() {
 /// enclave attests nothing and opens no chain connection.
 #[tokio::test]
 async fn e2e_endpoints_are_set_once_at_launch() {
-    // Fake Electrum. Nothing must connect to it.
-    let electrum = TcpListener::bind("127.0.0.1:0").unwrap();
-    electrum.set_nonblocking(true).unwrap();
-    let electrum_port = electrum.local_addr().unwrap().port();
+    // Fake EVM RPC. Nothing must connect to it.
+    let rpc = TcpListener::bind("127.0.0.1:0").unwrap();
+    rpc.set_nonblocking(true).unwrap();
+    let rpc_port = rpc.local_addr().unwrap().port();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let enclave_port = listener.local_addr().unwrap().port();
@@ -255,10 +254,9 @@ async fn e2e_endpoints_are_set_once_at_launch() {
         .der()
         .to_vec();
     let set = |host: &str| SetEndpointsRequest {
-        electrum_url: format!("tcp://{host}:{electrum_port}"),
         evm_rpc_host: host.to_string(),
         evm_rpc_ca_der: ca_der.clone(),
-        evm_rpc_tls_port: 443,
+        evm_rpc_tls_port: rpc_port.into(),
         ..Default::default()
     };
 
@@ -274,8 +272,9 @@ async fn e2e_endpoints_are_set_once_at_launch() {
         matches!(&err, ParentError::EnclaveError { message, .. } if message.contains("already set")),
         "{err:?}"
     );
-    assert_eq!(ctx.launch().unwrap().endpoints.electrum_host, "localhost");
-    assert!(electrum.accept().is_err(), "a chain connection opened");
+    let installed = ctx.launch().unwrap().endpoints.evm_rpc_tls.clone().unwrap();
+    assert_eq!(installed.host, "localhost");
+    assert!(rpc.accept().is_err(), "a chain connection opened");
 }
 
 /// A fresh directory under the cargo target directory.

@@ -63,7 +63,6 @@ without a valid RGB transition destroys the units.
 | Parent | EC2 host | Nothing | Moves bytes. Relays KMS and S3 traffic for the seed. |
 | Mint signer | Nitro Enclave | Checks and keys | Checks the deposit and the mint. Signs the PSBT. |
 | EVM RPC | Pinned TLS host | Receipts, canonical blocks and the selected finality head | Gives the deposit receipts and the data for the finality and block-hash checks. |
-| Bitcoin indexer | Pinned URL | Nothing | Not read by a mint or a refill. The launch still pins its URL. |
 
 The mint signer ignores the `event_valid` and `event_finalized` flags of the
 listener. It checks the deposit itself through the pinned EVM RPC. It trusts

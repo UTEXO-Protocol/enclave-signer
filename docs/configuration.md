@@ -66,7 +66,6 @@ See the
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ESPLORA_VSOCK_PORT` | `8001` | Host `vsock-proxy` port for the Bitcoin indexer. |
 | `EVM_RPC_VSOCK_PORT` | `8002` | Host `vsock-proxy` port for the EVM RPC. |
 | `KMS_VSOCK_PORT` | `8003` | Mint signer: host `vsock-proxy` port for AWS KMS. |
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, on a build without `vsock` only. |
@@ -83,17 +82,16 @@ See the
 The operator sends these once after launch, with
 `utexo-bridge-parent-cli set-endpoints` (`SetEndpoints`). A build requires
 the values that it uses and refuses the others. `deploy-host.sh` reads
-`ELECTRUM_URL`, `EVM_RPC_TLS_CA_DER_FILE`, `EVM_RPC_PATH_FILE` and the KMS
-values from its environment and writes them to `/etc/utexo/enclave-<CID>.env`.
+`EVM_RPC_TLS_CA_DER_FILE`, `EVM_RPC_PATH_FILE` and the KMS values from its
+environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 `EVM_RPC_HOST` and `EVM_RPC_TLS_PORT` come from
 `/etc/nitro_enclaves/vsock-proxy-evmrpc.env`, which
 `deploy/host-prep-evmrpc.sh` writes.
 
 | CLI flag / variable | Build | Description |
 |---------------------|-------|-------------|
-| `--electrum-url` / `ELECTRUM_URL` | mint, burn | `ssl://host:port` (Electrum) or `https://host[:port]` (Esplora). No client in the enclave uses it ([outbound connections](tee-spec.md#outbound-connections)). A `Production` policy commits the host. Plaintext `tcp://` and `http://` URLs are allowed only in test, debug or dev-feature builds. |
 | `--evm-rpc-host` / `EVM_RPC_HOST` | mint, burn | TLS host name of the EVM RPC. No scheme, path, port or IP literal. |
-| `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | mint, burn | TLS port, 1 to 65535, not the indexer port. |
+| `--evm-rpc-tls-port` / `EVM_RPC_TLS_PORT` | mint, burn | TLS port, 1 to 65535. |
 | `--evm-rpc-ca-der-file` / `EVM_RPC_TLS_CA_DER_FILE` | mint, burn | DER of the only CA that the EVM RPC connection trusts. |
 | `--evm-rpc-path-file` / `EVM_RPC_PATH_FILE` | mint, burn, optional | A restricted file with the absolute RPC path, such as `/v2/<key>`. Without it the path is `/`. |
 | `--kms-key-arn` / `KMS_KEY_ARN` | mint | Full ARN of the symmetric KMS key. An alias is refused. |
@@ -101,11 +99,11 @@ values from its environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 | `--kms-seed-id` / `KMS_SEED_ID` | mint | Stable signer id, used in the KMS encryption context and sent in each storage request. It must equal the `KMS_SEED_ID` of the parent. |
 | `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | mint, optional | The identity pin: 40 hex digits, `0x` optional. Empty for the first bootstrap only ([kms-persistence.md](kms-persistence.md)). |
 
-**What is attested.** A `Production` policy commits the indexer host, the EVM
-RPC host, the SHA-256 of the CA and the four KMS values. It does not commit
-the ports, the scheme or the RPC path. A `Development` policy commits none of
-these. A verifier compares the committed values with independently approved
-ones ([pubkey-attestation.md](pubkey-attestation.md)).
+**What is attested.** A `Production` policy commits the EVM RPC host, the
+SHA-256 of the CA and the four KMS values. It does not commit the port or the
+RPC path. A `Development` policy commits none of these. A verifier compares
+the committed values with independently approved ones
+([pubkey-attestation.md](pubkey-attestation.md)).
 
 **One image, many members.** The launch values are not build inputs. Members
 with the same role, release and build profile run the same EIF with their own
@@ -169,7 +167,7 @@ The TLS and ACL settings are in
 | `SIGNED_RESPONSE_TTL_SECS` | `3600` | How long the parent keeps the reply of an EVM -> RGB sign and answers a retry of the same request from it. Keep it at or above the enclave's `mint_replay_ttl_secs`. The parent logs a warning when it is below the value in force. With `0`, no retry gets a kept reply. |
 | `SIGNED_RESPONSE_MAX_ENTRIES` | `1024` | Count limit of kept replies. `0` still keeps one reply. |
 | `SIGNED_RESPONSE_MAX_BYTES` | `16777216` | Byte limit over all kept replies. The parent does not keep a larger reply. `0` keeps none. |
-| `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked, so no private or self-signed certificate), or `tcp://` to a loopback IP. The header sync of the parent reads Bitcoin headers here. Unset or malformed: the parent still serves, and `header_sync.state` is `unconfigured`. The deploy passes it through; it does not copy `ELECTRUM_URL`. |
+| `HEADER_ELECTRUM_URL` | unset | `ssl://host:port` (WebPKI roots, host name checked, so no private or self-signed certificate), or `tcp://` to a loopback IP. The header sync of the parent reads Bitcoin headers here. Unset or malformed: the parent still serves, and `header_sync.state` is `unconfigured`. The deploy passes it through. |
 | `HEADER_SYNC_INTERVAL_SECS` | `10` | Seconds between header sync steps, 1 to 600. A malformed value stops the parent at boot. |
 | `HEALTH_HOST` | `127.0.0.1` | Bind host of `GET /health`. Keep it on loopback. |
 | `HEALTH_PORT` | `5001` | Port of `GET /health`. |

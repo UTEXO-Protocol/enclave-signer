@@ -68,7 +68,7 @@ fn burn_bytes() -> Vec<u8> {
 }
 
 fn validator() -> RgbValidator {
-    RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap()
+    RgbValidator::new("regtest").unwrap()
 }
 
 fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
@@ -1340,7 +1340,7 @@ fn mint_transitions_are_the_only_mint_shape() {
 
 #[test]
 fn rejects_unknown_network() {
-    let err = RgbValidator::new("tcp://localhost:1".to_string(), "foonet").unwrap_err();
+    let err = RgbValidator::new("foonet").unwrap_err();
     assert!(err.to_string().contains("unknown bitcoin network"));
 }
 
@@ -1353,50 +1353,9 @@ fn maps_each_network_to_its_rgb_chain_net() {
         ("signetcustom", "sbc"),
         ("regtest", "bcrt"),
     ] {
-        let v = RgbValidator::new("tcp://localhost:1".to_string(), network).unwrap();
+        let v = RgbValidator::new(network).unwrap();
         assert_eq!(v.chain_net.prefix(), prefix, "{network}");
     }
-}
-
-#[test]
-fn rejects_an_unknown_indexer_scheme() {
-    for url in ["ftp://localhost:1", "ws://localhost:1", "localhost:1"] {
-        let err = RgbValidator::new(url.to_string(), "regtest").unwrap_err();
-        assert!(
-            err.to_string().contains("not ssl:// or tcp://"),
-            "{url}: {err}"
-        );
-    }
-}
-
-/// A host that accepts the connection and never answers costs at most the
-/// socket timeout.
-fn stalled_host() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stalled stub");
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        // Keep each connection open with no data. An early RST would fail
-        // fast for the wrong reason.
-        let mut held = Vec::new();
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { break };
-            held.push(stream);
-        }
-    });
-    addr
-}
-
-/// The burn path reads witness status from its SPV proofs, never the indexer.
-#[test]
-fn burn_path_validation_makes_no_indexer_call() {
-    let validator = RgbValidator::new(format!("tcp://{}", stalled_host()), "regtest").unwrap();
-    let bytes = burn_bytes();
-    let chain = mined(&witness_ids(&bytes));
-    let start = std::time::Instant::now();
-    validator
-        .validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists())
-        .unwrap();
-    assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
 
 /// The rgb-lib report of the transfer we parsed, as it gives it for `bytes`.

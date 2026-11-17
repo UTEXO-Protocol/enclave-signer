@@ -752,8 +752,7 @@ mod key_not_ready {
         let mut ctx = ServerContext::new(state, cfg, crate::test_support::regtest_header_chain());
         let rpc_calls = Arc::new(AtomicUsize::new(0));
         let launch = ctx.launch.get_mut().unwrap();
-        launch.rgb_validator =
-            Some(RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap());
+        launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap());
         launch.evm_rpc_client = Some(Box::new(CountingEvmRpc(Arc::clone(&rpc_calls))));
 
         let request = EnclaveRequest {

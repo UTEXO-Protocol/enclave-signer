@@ -37,7 +37,6 @@ fn main() {
         &bridge_config,
         utexo_bridge_enclave::policy::EvmDataSource::Disabled,
         None,
-        "",
     );
     if let Err(msg) = policy.assert_valid_at_boot(&build_ctx) {
         panic!("{msg}");

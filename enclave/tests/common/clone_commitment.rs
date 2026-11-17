@@ -152,7 +152,6 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x[0] ^= 1;
         x
     });
-    alter!(electrum_host, format!("{electrum_host}x"));
     alter!(
         evm_rpc_tls,
         Some(attestation_verify::EvmRpcTlsPin {

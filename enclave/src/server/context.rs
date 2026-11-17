@@ -116,7 +116,6 @@ impl ServerContext {
             &self.bridge_config,
             crate::policy::EvmDataSource::Disabled,
             None,
-            "",
         );
         let _ = self.launch.set(Launch {
             endpoints: Endpoints::default(),

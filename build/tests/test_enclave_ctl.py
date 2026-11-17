@@ -508,15 +508,13 @@ if 'limits' in sys.argv and {refuse!r}:
 
     def test_check_reads_the_file_that_deploy_host_writes(self):
         # bash expands the heredoc of deploy-host.sh as on a host. The values
-        # are paths, a URL, an ARN, an address and numbers. Some are empty.
+        # are paths, an ARN, an address and numbers. Some are empty.
         heredoc = re.search(r'cat > "/etc/utexo/enclave-\$ENCLAVE_CID\.env" <<EOF\n(.*?\nEOF\n)',
                             HOST.read_text(), re.S)
         self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
         self.write_pool(24576)
         self.write_pages(gib=24)
         optional = dict(
-            ELECTRUM_URL='https://user%40example.org:p%3Aw@esplora.example.org:8443'
-                         '/api?network=bitcoin&limit=25',
             EVM_RPC_TLS_CA_DER_FILE='',
             EVM_RPC_PATH_FILE='/etc/utexo/evm-rpc-path',
             KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/'

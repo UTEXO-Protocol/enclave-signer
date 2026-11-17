@@ -819,8 +819,7 @@ fn consensus(
     validation::ValidatedConsignment,
     Vec<validation::MintAnchor>,
 ) {
-    let validator =
-        validation::RgbValidator::new("tcp://indexer.invalid:1".into(), "regtest").unwrap();
+    let validator = validation::RgbValidator::new("regtest").unwrap();
     let transfer = <rgbstd::containers::Transfer as rgbstd::containers::FileContent>::load(
         std::io::Cursor::new(bytes),
     )

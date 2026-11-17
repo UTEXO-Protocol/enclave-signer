@@ -158,7 +158,7 @@ pub struct KmsPin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BtcDataSource {
     /// Witness txids are checked against the enclave's SPV header chain, not
-    /// the host-controlled indexer.
+    /// against an indexer.
     SpvVerified = 1,
 }
 
@@ -201,8 +201,6 @@ pub enum AttestedPolicy {
         evm_finality_tag: EvmFinalityTag,
         /// Minimum depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`).
         spv_min_confirmations: u32,
-        /// Host of the Electrum server the operator set at launch.
-        electrum_host: String,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
         /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the gas and
@@ -246,7 +244,6 @@ impl AttestedPolicy {
     ///              [len(asset) u32 BE][asset bytes][funds_in_contract 20]
     ///              [evm_finality_tag u8: 0 latest | 1 safe | 2 finalized]
     ///              [spv_min_confirmations u32 BE]
-    ///              [len(electrum_host) u32 BE][electrum_host bytes]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
     ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
@@ -277,7 +274,6 @@ impl AttestedPolicy {
                 funds_in_contract,
                 evm_finality_tag,
                 spv_min_confirmations,
-                electrum_host,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
                 gas_tx_max_gas_limit,
@@ -302,8 +298,6 @@ impl AttestedPolicy {
                 out.extend_from_slice(funds_in_contract);
                 out.push(*evm_finality_tag as u8);
                 out.extend_from_slice(&spv_min_confirmations.to_be_bytes());
-                out.extend_from_slice(&(electrum_host.len() as u32).to_be_bytes());
-                out.extend_from_slice(electrum_host.as_bytes());
                 match evm_rpc_tls {
                     Some(pin) => {
                         out.push(0x01);
@@ -413,7 +407,6 @@ impl AttestedPolicy {
                     _ => return Err(PolicyDecodeError("unknown EVM finality tag")),
                 };
                 let spv_min_confirmations = u32::from_be_bytes(r.array()?);
-                let electrum_host = r.string()?;
                 let evm_rpc_tls = r
                     .flag()?
                     .then(|| -> Result<_, PolicyDecodeError> {
@@ -462,7 +455,6 @@ impl AttestedPolicy {
                     funds_in_contract,
                     evm_finality_tag,
                     spv_min_confirmations,
-                    electrum_host,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
                     gas_tx_max_gas_limit,

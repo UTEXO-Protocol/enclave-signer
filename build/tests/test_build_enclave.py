@@ -26,7 +26,7 @@ MEASURED_PINS = dict(
     FUNDS_IN_CONTRACT='0x' + '22' * 20, TOKEN_CONTRACT='0x' + '33' * 20,
 )
 MEMBER_INPUT_NAMES = (
-    'ENDPOINTS_SHA256', 'ELECTRUM_URL', 'EVM_RPC_HOST', 'EVM_RPC_TLS_PORT',
+    'ENDPOINTS_SHA256', 'EVM_RPC_HOST', 'EVM_RPC_TLS_PORT',
     'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_TLS_CA_DER_HEX', 'EVM_RPC_URL',
     'EVM_RPC_PATH', 'EVM_RPC_PATH_FILE', 'EVM_RPC_API_KEY',
     'KMS_KEY_ARN', 'KMS_REGION', 'KMS_SEED_ID', 'KMS_EXPECTED_EVM_ADDRESS',
@@ -132,7 +132,6 @@ class BuildArgumentsTests(unittest.TestCase):
         for recipe in RGB_RECIPES:
             with self.subTest(recipe=recipe):
                 result = self.invoke(recipe, RGB_ASSET_ID='rgb:test-bfa-asset',
-                                     ELECTRUM_URL='ssl://electrum.test:50002',
                                      EVM_RPC_HOST='rpc.test', EVM_RPC_TLS_CA_DER_HEX='ab',
                                      **KMS_PINS)
                 self.assertEqual(result.returncode, 42, result.stderr)
@@ -179,7 +178,6 @@ class BuildArgumentsTests(unittest.TestCase):
                         # credentials nor an endpoint digest may enter a measured build.
                         settings = dict(
                             ENDPOINTS_SHA256=('12' if member == 'a' else '34') * 32,
-                            ELECTRUM_URL=f'ssl://electrum-{member}.test:50002',
                             EVM_RPC_HOST=f'rpc-{member}.test',
                             EVM_RPC_TLS_PORT='443' if member == 'a' else '8443',
                             EVM_RPC_TLS_CA_DER_FILE=f'/member-{member}/ca.der',
@@ -470,8 +468,7 @@ class ImageInputsTests(unittest.TestCase):
                         continue
                     with self.subTest(recipe=recipe, name=name):
                         self.assertNotEqual(name, 'ENDPOINTS_SHA256')
-                        self.assertFalse(name.startswith(('ELECTRUM_', 'ESPLORA_',
-                                                          'EVM_RPC_', 'KMS_')))
+                        self.assertFalse(name.startswith(('EVM_RPC_', 'KMS_')))
 
 
 if __name__ == '__main__':

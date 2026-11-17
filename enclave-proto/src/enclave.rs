@@ -590,10 +590,6 @@ pub struct Limits {
     pub io_idle_timeout_secs: u64,
     #[prost(uint64, tag="3")]
     pub first_bytes_timeout_secs: u64,
-    #[prost(uint64, tag="4")]
-    pub electrum_timeout_secs: u64,
-    #[prost(uint64, tag="5")]
-    pub esplora_timeout_secs: u64,
     #[prost(uint64, tag="6")]
     pub max_rgb_lib_ms: u64,
     #[prost(uint64, tag="7")]
@@ -668,9 +664,6 @@ pub struct LimitsResponse {
 /// value requires it empty.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetEndpointsRequest {
-    /// ssl://host:port (Electrum) or <https://host\[:port\]> (Esplora). A release image refuses tcp:// and <http://.>
-    #[prost(string, tag="1")]
-    pub electrum_url: ::prost::alloc::string::String,
     /// TLS name of the EVM RPC. No scheme, path or port.
     #[prost(string, tag="2")]
     pub evm_rpc_host: ::prost::alloc::string::String,

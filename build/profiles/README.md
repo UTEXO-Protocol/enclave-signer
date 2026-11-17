@@ -103,8 +103,8 @@ The asset's reject list is encoded in its RGB contract, not a separate EIF input
 Mint retains `MINT_WITNESS_SAT=1500`, `BTC_MAX_TOTAL_SATS=1000000` and the other
 recipe limits. Burn pins its gas destination to Multisig and caps gas at
 3000000, fees at 1000000000 wei/gas and native value at 5000000000000000 wei.
-Use a mainnet indexer at launch and configure Parent header synchronization
-(`HEADER_ELECTRUM_URL`), mTLS and Mint KMS/storage before taking traffic; see
+Configure Parent header synchronization (`HEADER_ELECTRUM_URL`) with a mainnet
+server, mTLS and Mint KMS/storage before taking traffic; see
 [operations](../../docs/operations.md) and
 [KMS persistence](../../docs/kms-persistence.md).
 

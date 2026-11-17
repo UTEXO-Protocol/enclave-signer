@@ -111,8 +111,6 @@ fn set_timeout(limits: &mut Limits, name: &str, secs: u64) {
     let field = match name {
         "io_idle_timeout_secs" => &mut limits.io_idle_timeout_secs,
         "first_bytes_timeout_secs" => &mut limits.first_bytes_timeout_secs,
-        "electrum_timeout_secs" => &mut limits.electrum_timeout_secs,
-        "esplora_timeout_secs" => &mut limits.esplora_timeout_secs,
         "evm_rpc_timeout_secs" => &mut limits.evm_rpc_timeout_secs,
         _ => panic!("{name} is not a per-call timeout"),
     };
@@ -129,8 +127,6 @@ fn each_per_call_timeout_must_fit_the_request_deadline() {
     for name in [
         "io_idle_timeout_secs",
         "first_bytes_timeout_secs",
-        "electrum_timeout_secs",
-        "esplora_timeout_secs",
         "evm_rpc_timeout_secs",
     ] {
         apply_to_defaults(|l| set_timeout(l, name, deadline)).unwrap();
@@ -154,21 +150,21 @@ fn each_per_call_timeout_must_fit_the_request_deadline() {
 }
 
 /// The image timeouts also hold the deadline up: below the image value of
-/// `esplora_timeout_secs`, a shorter deadline needs a shorter timeout.
+/// `evm_rpc_timeout_secs`, a shorter deadline needs a shorter timeout.
 #[test]
 fn a_shorter_deadline_needs_shorter_per_call_timeouts() {
-    let esplora = Limits::DEFAULTS.esplora_timeout_secs;
+    let evm_rpc = Limits::DEFAULTS.evm_rpc_timeout_secs;
     // The rgb-lib budget must fit the shorter deadline too.
-    apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
-    apply_to_defaults(|l| l.total_request_timeout_secs = esplora).unwrap();
-    let err = apply_to_defaults(|l| l.total_request_timeout_secs = esplora - 1).unwrap_err();
+    apply_to_defaults(|l| l.max_rgb_lib_ms = 10_000).unwrap();
+    apply_to_defaults(|l| l.total_request_timeout_secs = evm_rpc).unwrap();
+    let err = apply_to_defaults(|l| l.total_request_timeout_secs = evm_rpc - 1).unwrap_err();
     assert!(
-        err.contains(&format!("esplora_timeout_secs is {esplora}")),
+        err.contains(&format!("evm_rpc_timeout_secs is {evm_rpc}")),
         "{err}"
     );
     apply_to_defaults(|l| {
-        l.total_request_timeout_secs = esplora - 1;
-        l.esplora_timeout_secs = esplora - 1;
+        l.total_request_timeout_secs = evm_rpc - 1;
+        l.evm_rpc_timeout_secs = evm_rpc - 1;
     })
     .unwrap();
 }
@@ -244,8 +240,6 @@ fn the_lowest_values_keep_the_enclave_reachable() {
         l.total_request_timeout_secs = 10;
         l.io_idle_timeout_secs = 2;
         l.first_bytes_timeout_secs = 1;
-        l.electrum_timeout_secs = 1;
-        l.esplora_timeout_secs = 1;
         l.evm_rpc_timeout_secs = 1;
         l.max_rgb_lib_ms = 1_000;
         l.max_consignment_bytes = KIB;

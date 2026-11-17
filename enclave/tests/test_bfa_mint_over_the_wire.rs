@@ -428,7 +428,6 @@ fn context(bridge_config: BridgeConfig, chain: DepositChain) -> ServerContext {
         &bridge_config,
         EvmDataSource::Disabled,
         None,
-        "",
     );
     let mut ctx = ServerContext::new(
         state,
@@ -440,7 +439,7 @@ fn context(bridge_config: BridgeConfig, chain: DepositChain) -> ServerContext {
     );
     let launch = ctx.launch.get_mut().unwrap();
     launch.policy = policy;
-    // No indexer: the mint signer reads no consignment.
+    // No RGB validator: the mint signer reads no consignment.
     launch.evm_rpc_client = Some(Box::new(chain));
     ctx
 }

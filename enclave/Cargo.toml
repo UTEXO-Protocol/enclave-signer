@@ -42,7 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # RGB consignment validation (optional, behind rgb-validation feature). The
 # versions are the crates.io ones the pinned rgb-lib takes: another version can
 # change the BFA schema id. Exact pins keep a newer prerelease out.
-rgb-ops = { version = "=0.11.2-rc.2", default-features = false, features = ["esplora_blocking", "electrum_blocking"], optional = true }
+rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 rgb-schemas = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Not used directly: pins the consensus, VM and invoicing crates that rgb-ops
 # pulls with a caret requirement.
@@ -82,6 +82,9 @@ tokio = { version = "1.52.3", default-features = false, features = ["rt", "rt-mu
 # already in the lock under reqwest.
 rustls-pki-types = { version = "1.15", optional = true }
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, optional = true }
+# The EVM RPC TLS (reqwest) offers the hybrid post-quantum key exchange first
+# and logs its TLS events. Already in the lock under reqwest.
+rustls = { version = "0.23", default-features = false, features = ["logging", "prefer-post-quantum"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
@@ -139,7 +142,7 @@ allow-seed-import = []
 #
 # Every witness txid is checked against the enclave's SPV header chain before
 # EVM signing. Builds without RGB validation refuse RGB sources.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls-pki-types", "dep:webpki"]
+rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
