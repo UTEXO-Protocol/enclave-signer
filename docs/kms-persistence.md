@@ -131,10 +131,14 @@ second listener on 8003 or 8004.
 
 `deploy/deploy-host.sh` writes the KMS values of its environment to
 `/etc/utexo/enclave-<CID>.env`, and the launch sends them in `set-endpoints`. A
-mint enclave refuses blank KMS values and is then terminated, so you cannot
-add them by hand after the deploy. `release-eif.yml` passes no KMS value.
-No deployment script sets up the KMS proxy, the storage settings of the
-broker or the AWS policies.
+mint deployment refuses missing custody settings before changing services.
+`release-eif.yml` selects a root-owned per-CID JSON via `deployment_config`;
+the host loads its KMS launch and Parent storage values. Recovery is the default
+and requires the approved address pin and a readable existing seed object.
+`deploy/host-prep-kms.sh` provisions the KMS proxy separately. Operators must
+provision IAM/key/bucket policies before deployment; the workflow never grants
+permissions or creates/decrypts a seed. See [Mint release](mint-release.md) for
+configuration, first bootstrap, recovery and isolated validation.
 
 ## AWS permissions
 
