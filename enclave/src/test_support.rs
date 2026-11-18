@@ -265,17 +265,15 @@ pub(crate) fn regtest_header_chain() -> std::sync::Mutex<crate::networks::rgb::s
     ))
 }
 
-/// A fresh regtest chain: one single-tx block per witness (display order)
-/// from height 1, then `depth_above` empty blocks, submitted in batches of
-/// the per-submit limit. Returns the chain and a Merkle proof per witness.
+/// A fresh regtest chain: one single-tx block per witness, in the sorted
+/// order of the display txids whatever order they come in, from height 1, then `depth_above` empty blocks, submitted in batches of
+/// the per-submit limit. `bfa_consignment::prove_witnesses` proves the
+/// witnesses of a consignment in these blocks.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
 pub(crate) fn chain_with_witnesses(
     witness_txids: &[[u8; 32]],
     depth_above: u32,
-) -> (
-    std::sync::Mutex<crate::networks::rgb::spv::HeaderChain>,
-    Vec<crate::proto::MerkleProofEntry>,
-) {
+) -> std::sync::Mutex<crate::networks::rgb::spv::HeaderChain> {
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -300,6 +298,9 @@ pub(crate) fn chain_with_witnesses(
         },
     );
 
+    let mut witness_txids = witness_txids.to_vec();
+    witness_txids.sort_unstable();
+    witness_txids.dedup();
     let empty = [0u8; 32];
     let roots = witness_txids
         .iter()
@@ -333,15 +334,67 @@ pub(crate) fn chain_with_witnesses(
             .unwrap();
     }
 
-    let proofs = witness_txids
-        .iter()
-        .zip(1..)
-        .map(|(txid, block_height)| crate::proto::MerkleProofEntry {
-            txid: txid.to_vec(),
-            block_height,
-            tx_position: 0,
-            merkle_path: vec![],
+    std::sync::Mutex::new(chain)
+}
+
+/// Single-transaction blocks from height 1, one per txid in display order, all
+/// buried: the chain `bfa_consignment::prove_witnesses` proves against, for
+/// tests that need no `HeaderChain`.
+#[cfg(feature = "rgb-validation")]
+pub(crate) struct MinedBlocks {
+    pub(crate) headers: std::collections::BTreeMap<u32, bitcoin::block::Header>,
+}
+
+#[cfg(feature = "rgb-validation")]
+impl MinedBlocks {
+    pub(crate) fn of(txids: &[bitcoin::Txid]) -> Self {
+        use bitcoin::hashes::Hash;
+
+        let mut display: Vec<[u8; 32]> = txids
+            .iter()
+            .map(|txid| {
+                let mut bytes = txid.to_byte_array();
+                bytes.reverse();
+                bytes
+            })
+            .collect();
+        display.sort_unstable();
+        display.dedup();
+        let headers = display
+            .into_iter()
+            .zip(1u32..)
+            .map(|(mut root, height)| {
+                root.reverse();
+                let header = bitcoin::block::Header {
+                    version: bitcoin::block::Version::ONE,
+                    prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                    merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
+                    time: 1_700_000_000 + height,
+                    bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+                    nonce: 0,
+                };
+                (height, header)
+            })
+            .collect();
+        Self { headers }
+    }
+}
+
+#[cfg(feature = "rgb-validation")]
+impl crate::networks::rgb::validation::BuriedHeaders for MinedBlocks {
+    fn buried_header(&self, height: u32) -> crate::error::Result<bitcoin::block::Header> {
+        self.headers.get(&height).copied().ok_or_else(|| {
+            crate::error::EnclaveError::Spv(format!(
+                "witness proof: no header at height {height} (chain tip = {})",
+                self.headers.keys().next_back().copied().unwrap_or(0)
+            ))
         })
-        .collect();
-    (std::sync::Mutex::new(chain), proofs)
+    }
+
+    fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+        self.headers
+            .keys()
+            .next_back()
+            .and_then(|height| std::num::NonZeroU32::new(*height))
+    }
 }

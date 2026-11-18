@@ -18,7 +18,7 @@ sequenceDiagram
 
     Note over Orc,Listener: Intent
     Orc->>Listener: signing intent (op, calldata)
-    Listener->>Listener: enrich (chain_id, proxy_contract, consignment, merkle_proofs)
+    Listener->>Listener: enrich (chain_id, proxy_contract, consignment with its SPV proofs)
     Listener->>Parent: gRPC ParentService.Sign(TRANSACTION, enriched payload)
 
     Note over Parent,Srv: Translate gRPC → enclave wire
@@ -28,7 +28,6 @@ sequenceDiagram
     Note over Srv,Bind: 1 - validate_source (RGB), no network call but the reject list
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
-    Rgb->>Spv: proven_witnesses(merkle_proofs) under the chain lock:<br/>inclusion vs stored header, depth ≥ SPV_MIN_CONFIRMATIONS<br/>→ txid → (height, block time)
     Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb->>Rgb: reject list, if the genesis names one, must be an EVM contract
@@ -38,7 +37,7 @@ sequenceDiagram
     Rgb->>Rgb: rgb-ops: genesis bridgeLocation chain == the resolver's EVM_CHAIN_ID
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units, no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Rgb: witness resolver: chain_net == enclave network, else REFUSE;<br/>tx from the consignment, Mined(height)<br/>only from a proven SPV proof (OnChainResolver), else REFUSE
+    Rgb->>Spv: witness resolver: chain_net == enclave network, else REFUSE;<br/>buried_header(height) under a short chain lock,<br/>only at depth ≥ SPV_MIN_CONFIRMATIONS, else REFUSE;<br/>no transaction lookup: a witness is Mined(height) only when<br/>the SPV proof in the consignment holds against that header
     opt genesis names a reject list
         Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
         Rgb->>Rgb: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
@@ -51,15 +50,11 @@ sequenceDiagram
     Note over Srv,Chain: SPV gate (inside validate_source)
     Srv->>Chain: lock chain
     Srv->>Spv: assert_chain_not_stale: tip<br/>≤ 2 h old, ≤ 2 h future
-    Srv->>Spv: validate_spv_proofs(witness_txids, proofs)
-    Spv->>Spv: exact set-equality(expected txids, proofs)
-    loop each MerkleProofEntry
-        Spv->>Spv: merkle path depth ≤ 32, position consumed, no 64-byte-tx node
-        Spv->>Chain: header_at(block_height)
+    loop each witness block of the validated consignment
+        Spv->>Chain: header_at(height): the header the proof was checked against
         Spv->>Spv: depth ≥ SPV_MIN_CONFIRMATIONS (attested)
-        Spv->>Spv: verify_merkle_proof(txid, position, path, root)
     end
-    Spv->>Chain: pin each proof block (ChainPins)
+    Spv->>Chain: pin each witness block (ChainPins)
     Spv-->>Srv: Ok / Spv err
     Srv->>Srv: source amount := TS_BURN burnedAsset<br/>(other settling transition => REFUSE, host rgb_amount NOT used)
 
@@ -84,7 +79,7 @@ sequenceDiagram
     Note over Srv,Cx: 4 — apply_funds_out_binding (both routes: fundsOut and lzFundsOut)
     Srv->>Cx: require validated consignment for any fundsOut
     Srv->>Cx: assert_witnesses_confirmed (no unmined witness tx)
-    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= MAX_RELAY_TIP_LAG_BLOCKS,<br/>sourceHeight == block anchoring the settling burn's witness tx<br/>(re-derived from the consignment + SPV proof under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand or public-Signet image, never production): both words must be zero
+    Srv->>Cx: verify_btc_relay_agreement (proof REQUIRED, empty => REFUSE):<br/>decode (sourceHeight, sourceCommit, latestHeight, latestCommit),<br/>latestHeight ≥ sourceHeight,<br/>enclave holds header at latestHeight,<br/>tip - latestHeight <= MAX_RELAY_TIP_LAG_BLOCKS,<br/>sourceHeight == block anchoring the settling burn's witness tx<br/>(the block validation placed it in, confirmed under one lock),<br/>BTC_RELAY_MODE=required: sourceCommit, latestCommit == keccak256 of the relay record the enclave rebuilds (zero word => REFUSE),<br/>BTC_RELAY_MODE=none (local stand or public-Signet image, never production): both words must be zero
     Srv->>Cx: validate_funds_out_amount:<br/>settling transition == TS_BURN AND<br/>burned amount == calldata amount
     Srv->>Cx: validate_funds_out_source_burn_tx_id:<br/>calldata sourceBurnTxId == settling transition OpId (non-zero)
     Srv->>Cx: validate_funds_out_burn_recipient:<br/>burn_destination::resolve(burnReason, record)<br/>V0: burnReason[12..] == calldata recipient, direct only<br/>V1: hash_v1(record) == burnReason, then<br/>destinationChainId, dstEid, recipient == record

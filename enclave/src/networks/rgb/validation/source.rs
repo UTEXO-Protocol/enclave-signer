@@ -7,9 +7,13 @@ use super::asset_bind::{assert_asset_binding, AssetBindMode};
 use super::reject_list::ListAccess;
 #[cfg(rgb_to_evm)]
 use super::types::ValidatedConsignment;
+#[cfg(rgb_to_evm)]
+use super::witness::BuriedHeaders;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
+#[cfg(rgb_to_evm)]
+use crate::networks::rgb::spv::HeaderChain;
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::spv_crosscheck;
 #[cfg(rgb_to_evm)]
@@ -23,9 +27,10 @@ use std::time::SystemTime;
 
 /// Validates the source payload, asset binding, mint backing and RGB history.
 ///
-/// Every witness needs a proof at `SPV_MIN_CONFIRMATIONS` depth in the
-/// enclave's header chain, with those blocks pinned until signing. An unmined
-/// or shallow witness rejects the history.
+/// Every witness needs an SPV proof in the consignment that holds against a
+/// header `SPV_MIN_CONFIRMATIONS` deep in the enclave's chain, with those
+/// blocks pinned until signing. An unproven or shallow witness rejects the
+/// history. The request's `merkle_proofs` are not read.
 ///
 /// The asset is bound before external reads. For listed assets, rgb-lib also
 /// checks the burn and companion transfers for rejected ancestry.
@@ -43,13 +48,9 @@ pub fn validate_source(
         )
     })?;
 
-    let proven = {
-        let chain = lock_chain(ctx)?;
-        spv_crosscheck::proven_witnesses(
-            &chain,
-            &source.merkle_proofs,
-            ctx.bridge_config.spv_min_confirmations,
-        )?
+    let headers = EnclaveChain {
+        chain: ctx.header_chain,
+        min_confirmations: ctx.bridge_config.spv_min_confirmations,
     };
     let bind_asset = |contract_id: &str| {
         assert_asset_binding(
@@ -66,14 +67,13 @@ pub fn validate_source(
     // A burn consignment contains its full mint ancestry. Each mint leaves an
     // anchor that only a bound lock confirms.
     let validated =
-        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &proven, &lists)?;
+        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &headers, &lists)?;
 
     {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(
             &chain,
             Some(&validated),
-            &source.merkle_proofs,
             SystemTime::now(),
             ctx.chain_pins,
             ctx.bridge_config.spv_min_confirmations,
@@ -86,10 +86,34 @@ pub fn validate_source(
 #[cfg(rgb_to_evm)]
 fn lock_chain<'a>(
     ctx: &'a ValidationContext<'_>,
-) -> Result<std::sync::MutexGuard<'a, crate::networks::rgb::spv::HeaderChain>> {
-    ctx.header_chain
+) -> Result<std::sync::MutexGuard<'a, HeaderChain>> {
+    lock(ctx.header_chain)
+}
+
+#[cfg(rgb_to_evm)]
+fn lock(chain: &std::sync::Mutex<HeaderChain>) -> Result<std::sync::MutexGuard<'_, HeaderChain>> {
+    chain
         .lock()
         .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))
+}
+
+/// The enclave chain behind short locks, so header submits go on while
+/// rgb-lib validates. `validate_source_chain` then confirms one view.
+#[cfg(rgb_to_evm)]
+struct EnclaveChain<'a> {
+    chain: &'a std::sync::Mutex<HeaderChain>,
+    min_confirmations: u32,
+}
+
+#[cfg(rgb_to_evm)]
+impl BuriedHeaders for EnclaveChain<'_> {
+    fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+        spv_crosscheck::buried_header(&*lock(self.chain)?, height, self.min_confirmations)
+    }
+
+    fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+        spv_crosscheck::safe_height(&*lock(self.chain).ok()?, self.min_confirmations)
+    }
 }
 
 /// Total size cap (`MAX_CONSIGNMENT_BYTES`, set by the operator). It runs

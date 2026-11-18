@@ -1,51 +1,36 @@
 //! SPV cross-check: the witness Bitcoin transactions of the consignment must
 //! be in the in-enclave header chain with enough confirmations.
 //!
-//! Before it signs an EVM unlock, this gate requires:
+//! The consignment carries an SPV proof for each witness tx. rgb-lib checks
+//! each proof against a header this module serves from the enclave chain, so
+//! nothing here verifies a Merkle path. Before it signs an EVM unlock, this
+//! gate requires:
 //!
-//! 1. **Coverage**: each witness txid of the consignment has a
-//!    `MerkleProofEntry` in the request, and no extra proofs exist (set
-//!    equality, both directions).
-//! 2. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
-//!    header at `block_height`. The path has at most `MAX_MERKLE_PATH_DEPTH`
-//!    siblings, `tx_position` is consumed by it, and no node on it is a
-//!    64-byte transaction (see `spv::merkle`).
-//! 3. **Confirmation depth**: every witness tx (not only the burn) is at least
-//!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
-//!    Spec P8 requires this depth of each anchoring
-//!    transaction. On the testnets, min-difficulty blocks count too: testnets
-//!    carry no production value. [`ChainPins`] holds the hash and the depth of
-//!    every block a check used. The signer checks both again under the chain
-//!    lock before it uses the key.
-//!
-//! Consensus runs first, over [`proven_witnesses`]: the same inclusion and depth
-//! checks, so RGB validation sees a witness mined only if its proof holds.
-//!
-//! Byte order: `MerkleProofEntry.txid` and `.merkle_path` are in display
-//! (big-endian) order. `spv::merkle` uses internal (little-endian) order.
-//! `verify_one_proof` converts each hash once. The coverage check uses display
-//! order on both sides.
+//! 1. **Depth at the source**: [`buried_header`] serves a header only when it
+//!    is `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`),
+//!    for every witness tx, not only the burn. Spec P8 requires this depth of
+//!    each anchoring transaction. On the testnets, min-difficulty blocks
+//!    count too: testnets carry no production value.
+//! 2. **One chain**: validation reads headers under short locks. Afterwards
+//!    [`validate_source_chain`] confirms, under one lock, that every header a
+//!    proof was checked against is still in the chain and deep enough.
+//!    [`ChainPins`] holds the hash and the depth of every block a check used.
+//!    The signer checks both again under the chain lock before it uses the key.
 
-#[cfg(rgb_to_evm)]
-use std::collections::{BTreeMap, BTreeSet};
 #[cfg(rgb_to_evm)]
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(rgb_to_evm)]
+use bitcoin::block::Header;
+#[cfg(rgb_to_evm)]
 use bitcoin::hashes::Hash;
 
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::spv::HeaderChain;
-#[cfg(rgb_to_evm)]
-use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError};
-#[cfg(rgb_to_evm)]
-use crate::proto::MerkleProofEntry;
-#[cfg(rgb_to_evm)]
-use rgb_lib::WitnessPos;
 
 #[cfg(rgb_to_evm)]
-use super::validation::ValidatedConsignment;
+use super::validation::{ValidatedConsignment, WitnessBlock};
 
 /// Maximum age of the chain tip `time`, in seconds. With an older tip the
 /// enclave does not sign. This stops a host that sends real but old headers
@@ -61,18 +46,14 @@ pub const SPV_MAX_TIP_AGE_SECS: u64 = 2 * 60 * 60;
 /// `time = far_future` would defeat the staleness check.
 pub const SPV_MAX_TIP_FUTURE_SECS: u64 = 2 * 60 * 60;
 
-#[cfg(rgb_to_evm)]
-pub use crate::networks::rgb::spv::MAX_MERKLE_PATH_DEPTH;
-
 /// Validates the Bitcoin anchoring of the RGB source before signing.
 ///
-/// Takes the validated consignment and the request Merkle proofs. Checks chain
-/// freshness, network binding, inclusion, and confirmation depth.
+/// Takes the validated consignment. Checks chain freshness, and that every block validation placed a witness in is still in the chain
+/// at the required depth.
 #[cfg(rgb_to_evm)]
 pub fn validate_source_chain(
     chain: &HeaderChain,
     validated_consignment: Option<&ValidatedConsignment>,
-    merkle_proofs: &[MerkleProofEntry],
     now: SystemTime,
     pins: &ChainPins,
     min_confirmations: u32,
@@ -87,23 +68,16 @@ pub fn validate_source_chain(
     })?;
 
     assert_chain_fresh(chain, now)?;
-    validate_spv_proofs(
-        chain,
-        &validated.witness_txids,
-        merkle_proofs,
-        min_confirmations,
-    )?;
 
-    // Pin every block this check used, with the depth it required, under the
-    // caller's lock guard. The guard ends at return, so
-    // `ChainPins::assert_unchanged` checks the blocks again
-    // at signing time.
-    for proof in merkle_proofs {
-        pins.pin(chain, proof.block_height, min_confirmations)?;
+    // Pin every block under this lock guard. The guard ends at return, so
+    // `ChainPins::assert_unchanged` checks the blocks again at signing time.
+    for block in &validated.witness_blocks {
+        confirm_witness_block(chain, block, min_confirmations)?;
+        pins.pin(chain, block.height, min_confirmations)?;
     }
 
     tracing::info!(
-        proofs_count = merkle_proofs.len(),
+        witnesses = validated.witness_blocks.len(),
         pinned_blocks = pins.pinned_count(),
         "SPV verification passed"
     );
@@ -111,117 +85,61 @@ pub fn validate_source_chain(
     Ok(())
 }
 
-/// Verifies a full set of SPV proofs against the chain.
-///
-/// `expected_txids` is the witness-txid set of the validated RGB consignment,
-/// in **display byte order** (the wire format of `MerkleProofEntry.txid`).
-/// `proofs` are the entries from the request.
+/// The header at `height`, if it is `min_confirmations` deep. rgb-lib checks
+/// the SPV proofs of the consignment against the headers this serves.
 #[cfg(rgb_to_evm)]
-pub fn validate_spv_proofs(
-    chain: &HeaderChain,
-    expected_txids: &[[u8; 32]],
-    proofs: &[MerkleProofEntry],
-    min_confirmations: u32,
-) -> Result<()> {
-    // 1. Coverage: sets in display order, compared both ways.
-    let expected_set: BTreeSet<[u8; 32]> = expected_txids.iter().copied().collect();
-    let mut proof_set: BTreeSet<[u8; 32]> = BTreeSet::new();
-
-    for (i, proof) in proofs.iter().enumerate() {
-        let txid = proof_txid(i, proof)?;
-        if !proof_set.insert(txid) {
-            return Err(EnclaveError::Spv(format!(
-                "duplicate merkle proof for txid {}",
-                hex::encode(txid)
-            )));
-        }
-        if !expected_set.contains(&txid) {
-            return Err(EnclaveError::Spv(format!(
-                "merkle proof for txid {} does not match any consignment witness txid",
-                hex::encode(txid)
-            )));
-        }
-    }
-
-    if proof_set.len() != expected_set.len() {
-        // proof_set is a strict subset of expected_set (extras failed above).
-        // List the missing txids in the error.
-        let missing: Vec<String> = expected_set
-            .difference(&proof_set)
-            .map(hex::encode)
-            .collect();
-        return Err(EnclaveError::Spv(format!(
-            "missing merkle proofs for {} witness txid(s): {}",
-            missing.len(),
-            missing.join(", ")
-        )));
-    }
-
-    // 2. Per-proof: header lookup, confirmation depth, Merkle inclusion.
-    let tip = chain.tip_height();
-    for (i, proof) in proofs.iter().enumerate() {
-        verify_one_proof(chain, tip, min_confirmations, i, proof)?;
-    }
-
-    Ok(())
-}
-
-/// Each proof's tx position, after the inclusion and depth checks. Consensus
-/// reads it; [`validate_source_chain`] then checks freshness and coverage.
-#[cfg(rgb_to_evm)]
-pub fn proven_witnesses(
-    chain: &HeaderChain,
-    proofs: &[MerkleProofEntry],
-    min_confirmations: u32,
-) -> Result<BTreeMap<bitcoin::Txid, WitnessPos>> {
-    let tip = chain.tip_height();
-    let mut proven = BTreeMap::new();
-    for (i, proof) in proofs.iter().enumerate() {
-        let mut txid = proof_txid(i, proof)?;
-        verify_one_proof(chain, tip, min_confirmations, i, proof)?;
-        let pos = chain
-            .header_at(proof.block_height)
-            .zip(NonZeroU32::new(proof.block_height))
-            .and_then(|(header, height)| WitnessPos::bitcoin(height, i64::from(header.time)))
-            .ok_or_else(|| {
-                EnclaveError::Spv(format!(
-                    "merkle_proofs[{i}]: block {} has no valid witness position",
-                    proof.block_height
-                ))
-            })?;
-        txid.reverse();
-        if proven
-            .insert(bitcoin::Txid::from_byte_array(txid), pos)
-            .is_some()
-        {
-            return Err(EnclaveError::Spv(format!(
-                "duplicate merkle proof for txid {}",
-                hex::encode(proof.txid.as_slice())
-            )));
-        }
-    }
-    Ok(proven)
-}
-
-/// The proof's txid in display order, once its shape is in bounds.
-#[cfg(rgb_to_evm)]
-fn proof_txid(index: usize, proof: &MerkleProofEntry) -> Result<[u8; 32]> {
-    let txid: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
+pub fn buried_header(chain: &HeaderChain, height: u32, min_confirmations: u32) -> Result<Header> {
+    // `header_at` returns None at or below the checkpoint and above the tip.
+    // Both cases fail.
+    let header = chain.header_at(height).ok_or_else(|| {
         EnclaveError::Spv(format!(
-            "merkle_proofs[{index}].txid must be 32 bytes, got {}",
-            proof.txid.len()
+            "witness proof: no header at height {height} (chain tip = {})",
+            chain.tip_height()
         ))
     })?;
-    // Bound per-proof hashing before it starts. A path deeper than any real
-    // block is a bug or a work-amplification attack.
-    if proof.merkle_path.len() > MAX_MERKLE_PATH_DEPTH {
+
+    // Blocks that prove work, from the proof block to the tip.
+    let confs = chain.confirmations(height, min_confirmations);
+    if confs < min_confirmations {
         return Err(EnclaveError::Spv(format!(
-            "merkle_proofs[{index}].merkle_path too deep: {} siblings (max {})",
-            proof.merkle_path.len(),
-            MAX_MERKLE_PATH_DEPTH
+            "witness proof: insufficient confirmations for block_height {height} \
+             ({confs} < {min_confirmations})"
         )));
     }
-    Ok(txid)
+
+    Ok(*header)
+}
+
+/// The highest block that is `min_confirmations` deep, if the chain has one.
+#[cfg(rgb_to_evm)]
+pub fn safe_height(chain: &HeaderChain, min_confirmations: u32) -> Option<NonZeroU32> {
+    let height = (chain.tip_height() + 1).checked_sub(min_confirmations)?;
+    chain.header_at(height)?;
+    NonZeroU32::new(height)
+}
+
+/// Confirms, in this view of the chain, the block validation placed a witness
+/// in: the header its SPV proof was checked against, at the required depth.
+#[cfg(rgb_to_evm)]
+pub fn confirm_witness_block(
+    chain: &HeaderChain,
+    block: &WitnessBlock,
+    min_confirmations: u32,
+) -> Result<()> {
+    let header = buried_header(chain, block.height, min_confirmations)?;
+    let hash = header.block_hash().to_byte_array();
+    if hash != block.hash {
+        return Err(EnclaveError::Spv(format!(
+            "witness proof: witness tx {} was proven in block {} at height {}, but the enclave \
+             chain now holds {} there - the header chain changed during validation, refusing \
+             to sign",
+            hex::encode(block.txid),
+            hex::encode(block.hash),
+            block.height,
+            hex::encode(hash)
+        )));
+    }
+    Ok(())
 }
 
 /// Chain-freshness part of the signing precondition, with this module's
@@ -239,7 +157,7 @@ pub fn assert_chain_fresh(chain: &HeaderChain, now: SystemTime) -> Result<()> {
 /// Full signing precondition on the chain only: fresh, and at least
 /// `min_confirmations` blocks past the checkpoint.
 ///
-/// `validate_spv_proofs` rejects shallower proofs. A chain one block past the
+/// `buried_header` serves no shallower header. A chain one block past the
 /// checkpoint is fresh but cannot confirm anything. A freshness-only probe
 /// would then report ready while every signing request fails.
 pub fn assert_chain_ready(
@@ -301,93 +219,6 @@ pub fn assert_chain_not_stale(
             max_age.as_secs()
         )));
     }
-
-    Ok(())
-}
-
-#[cfg(rgb_to_evm)]
-fn verify_one_proof(
-    chain: &HeaderChain,
-    tip: u32,
-    min_confirmations: u32,
-    index: usize,
-    proof: &MerkleProofEntry,
-) -> Result<()> {
-    // `header_at` returns None at or below the checkpoint and above the tip.
-    // Both cases fail.
-    let header = chain.header_at(proof.block_height).ok_or_else(|| {
-        EnclaveError::Spv(format!(
-            "merkle_proofs[{index}]: no header at height {} (chain tip = {})",
-            proof.block_height, tip
-        ))
-    })?;
-
-    // Blocks that prove work, from the proof block to the tip. `header_at`
-    // above already refused a height beyond the tip.
-    let confs = chain.confirmations(proof.block_height, min_confirmations);
-    if confs < min_confirmations {
-        return Err(EnclaveError::Spv(format!(
-            "merkle_proofs[{index}]: insufficient confirmations for block_height {} \
-             ({confs} < {min_confirmations})",
-            proof.block_height
-        )));
-    }
-
-    // Display order -> internal order for the Merkle verifier.
-    let mut txid_internal: [u8; 32] = proof.txid.as_slice().try_into().map_err(|_| {
-        EnclaveError::Spv(format!(
-            "merkle_proofs[{index}].txid must be 32 bytes (already validated above; defensive)"
-        ))
-    })?;
-    txid_internal.reverse();
-
-    let mut path_internal: Vec<[u8; 32]> = Vec::with_capacity(proof.merkle_path.len());
-    for (j, sib) in proof.merkle_path.iter().enumerate() {
-        let mut s: [u8; 32] = sib.as_slice().try_into().map_err(|_| {
-            EnclaveError::Spv(format!(
-                "merkle_proofs[{index}].merkle_path[{j}] must be 32 bytes, got {}",
-                sib.len()
-            ))
-        })?;
-        s.reverse();
-        path_internal.push(s);
-    }
-
-    // TxMerkleNode bytes are in internal order, as verify_merkle_proof needs.
-    let merkle_root_internal: [u8; 32] = header.merkle_root.to_byte_array();
-
-    verify_merkle_proof(
-        &txid_internal,
-        proof.tx_position,
-        &path_internal,
-        &merkle_root_internal,
-    )
-    .map_err(|e| match e {
-        MerkleError::RootMismatch { computed, expected } => {
-            // Display-order hex, for readable diagnostics only.
-            let mut c = computed;
-            c.reverse();
-            let mut x = expected;
-            x.reverse();
-            EnclaveError::Spv(format!(
-                "merkle_proofs[{index}]: proof for txid {} failed: \
-                 computed root {} != header root {} at block_height {}",
-                hex::encode(proof.txid.as_slice()),
-                hex::encode(c),
-                hex::encode(x),
-                proof.block_height,
-            ))
-        }
-        MerkleError::PositionOutOfRange { position, depth } => EnclaveError::Spv(format!(
-            "merkle_proofs[{index}]: tx_position {position} is out of reach of a \
-             {depth}-sibling merkle_path"
-        )),
-        MerkleError::TransactionShapedNode { level } => EnclaveError::Spv(format!(
-            "merkle_proofs[{index}]: the merkle node at level {level} is a 64-byte \
-             transaction, not a pair of hashes (txid {})",
-            hex::encode(proof.txid.as_slice())
-        )),
-    })?;
 
     Ok(())
 }

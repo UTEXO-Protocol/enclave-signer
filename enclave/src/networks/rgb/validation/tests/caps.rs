@@ -310,10 +310,10 @@ fn merged_chain(mut history: History, k: u16, l: usize) -> Vec<u8> {
     history.consignment()
 }
 
-/// Validates `bytes` with nothing mined. Returns the refusal and how many
-/// witnesses rgb-lib asked about: none when the caps refuse first.
+/// Validates `bytes` against a chain with no block. Returns the refusal and
+/// how many headers rgb-lib asked for: none when the caps refuse first.
 fn validate_unmined(bytes: &[u8]) -> (String, usize) {
-    let chain = BTreeMap::new();
+    let chain = MinedBlocks::of(&[]);
     let source = Recording {
         chain: &chain,
         asked: RefCell::new(Vec::new()),
@@ -395,7 +395,7 @@ fn a_burn_of_8193_rights_passes_the_gate_and_reaches_rgb_lib() {
     let bytes = rights_burn(issue(), 8_193);
     gate(&bytes, false).unwrap();
     let (err, asked) = validate_unmined(&bytes);
-    assert!(err.contains("not proven on chain"), "{err}");
+    assert!(err.contains("no header at height"), "{err}");
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
@@ -431,7 +431,7 @@ fn a_bundle_of_many_transitions_with_a_wide_anchor_is_refused_before_rgb_lib() {
     assert!(cost > MAX_WITNESS_CHECK_COST, "{cost}");
     assert_capped(&over, "witness txs");
     let (err, asked) = validate_unmined(&many_tapret_burns(issue(), 2, 64));
-    assert!(err.contains("not proven on chain"), "{err}");
+    assert!(err.contains("no header at height"), "{err}");
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
@@ -488,7 +488,7 @@ fn a_listed_asset_caps_the_reject_walk_and_an_unlisted_one_does_not() {
     let unlisted = wide_transfer(issue(), k + 1);
     assert!(walk_cost(&unlisted) > MAX_REJECT_WALK_COST);
     let (err, asked) = validate_unmined(&unlisted);
-    assert!(err.contains("not proven on chain"), "{err}");
+    assert!(err.contains("no header at height"), "{err}");
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
@@ -679,14 +679,11 @@ fn reads_unrelated(_: &RejectListContract) -> Result<Decisions> {
     ))
 }
 
-/// rgb-lib past our caps, with the witnesses of `chain` mined and an
-/// unrelated list. Returns its error, if any, and its time.
-fn time_rgb_lib(
-    bytes: &[u8],
-    chain: &BTreeMap<bitcoin::Txid, WitnessPos>,
-) -> (Option<String>, Duration) {
+/// rgb-lib past our caps, against the blocks of `chain` and an unrelated
+/// list. Returns its error, if any, and its time.
+fn time_rgb_lib(bytes: &[u8], chain: &MinedBlocks) -> (Option<String>, Duration) {
     let transfer = load(bytes);
-    let witnesses = OnChainResolver::new(&transfer, ChainNet::BitcoinRegtest, chain);
+    let witnesses = HeadersOnlyResolver::new(ChainNet::BitcoinRegtest, chain);
     let anchors = BindingResolver::new(&bind_all);
     let list = reject_list(&transfer.genesis)
         .unwrap()
@@ -713,7 +710,7 @@ fn time_rgb_lib(
 /// A forged shape with nothing mined reached phase 2: phase 1 ran in full.
 fn assert_reached_the_witnesses(err: Option<String>) {
     let err = err.expect("nothing is mined");
-    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains("no header at height"), "{err}");
 }
 
 /// The model holds rgb-lib's time on 2000 one-right propagates from a
@@ -722,7 +719,7 @@ fn assert_reached_the_witnesses(err: Option<String>) {
 #[ignore = "release-mode timing; run on request"]
 fn a_chain_from_a_255_right_genesis_is_modeled_at_or_above_its_time() {
     let bytes = propagate_chain(issue_of(255, false), 1, 2_000);
-    let (err, took) = time_rgb_lib(&bytes, &BTreeMap::new());
+    let (err, took) = time_rgb_lib(&bytes, &MinedBlocks::of(&[]));
     assert_reached_the_witnesses(err);
     let transfer = load(&bytes);
     let costs = [witness_check_cost(&transfer), bundle_id_cost(&transfer), 0];

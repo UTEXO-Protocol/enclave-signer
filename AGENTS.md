@@ -319,10 +319,12 @@ report that conflict and keep it visible until the implementation is fixed.
   caps, sighash rules or output-key checks.
   Keep market-fee selection separate from deterministic signing limits. Do
   not use live fee estimates: they can strand an already funded request.
-- Verify Merkle inclusion and position of every witness, enforce path-depth
-  limits and refuse a path node that is a 64-byte transaction. Check header
-  ancestry, network rules, difficulty, chainwork, timestamps, confirmations and
-  freshness as required by that network. Test reorgs and boundary cases.
+- Place every witness only from the SPV proof its consignment carries,
+  checked by rgb-lib against a header of the enclave's own chain. Look no
+  transaction up, and serve no header short of the confirmation depth. Check
+  header ancestry, network rules, difficulty, chainwork, timestamps,
+  confirmations and freshness as required by that network. Test reorgs and
+  boundary cases.
 - The SPV checkpoint is a trust anchor. A release build uses only the
   compiled-in value. The parent and the operator must not be able to set it.
 - Preserve the validated chain view until key use, or revalidate under the
