@@ -17,7 +17,7 @@ fn validated_consignment(
         contract_id: "rgb:test-asset".into(),
         chain_net: "bc:regtest".into(),
         witness_txids: vec![],
-        last_transition: Some(TransitionSummary {
+        settling_transition: Some(TransitionSummary {
             op_id: op_id.into(),
             transition_type,
             asset_output_amount,
@@ -25,8 +25,8 @@ fn validated_consignment(
             burned_asset_amount,
             burn_reason: None,
         }),
-        last_witness_txid: None,
-        last_transfer_op_id: None,
+        settling_witness_txid: None,
+        settling_op_id: None,
         non_mined_witness_txids: vec![],
         // These cases do not reach the PSBT bind.
         transitions_by_witness: vec![],

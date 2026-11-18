@@ -956,11 +956,11 @@ fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
     let [anchor] = anchors.as_slice() else {
         panic!("one mint anchor, got {anchors:?}");
     };
-    assert_eq!(validated.last_transfer_op_id, Some(from_fascia.opid));
+    assert_eq!(validated.settling_op_id, Some(from_fascia.opid));
     assert_eq!(anchor.opid, from_fascia.opid);
     assert_eq!(anchor.amount, from_fascia.issued);
     assert_eq!(anchor.before_block, from_fascia.before_block);
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
     assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
@@ -983,7 +983,7 @@ fn a_witness_mint_reads_the_same_from_the_fascia_as_from_consensus() {
         panic!("one mint anchor, got {anchors:?}");
     };
     assert_eq!(anchor.opid, from_fascia.opid);
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
     assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
@@ -1014,11 +1014,11 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());
     assert_eq!(
-        validated.last_transfer_op_id,
+        validated.settling_op_id,
         Some(gen::opid_bytes(committed.opid))
     );
     assert_eq!(
-        validated.last_transition.map(|t| t.transition_type),
+        validated.settling_transition.map(|t| t.transition_type),
         Some(rgb_lib::TypeOfTransition::Propagate)
     );
     // The rights themselves are the mint signer's rule (RR8, RR9): a refill

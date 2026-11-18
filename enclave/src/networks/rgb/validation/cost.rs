@@ -5,10 +5,14 @@
 //! operation. For a listed asset it walks the operations DAG, once for a history
 //! its origins share.
 //! Once validation passed, its inspection reads the summary from the same file:
-//! it hashes each operation id three times more and each witness tx once per
-//! transition. Each superlinear part has its cap, the walk has a cap on a
-//! per-origin count of it, and all of them with the file, its opouts,
-//! operations and genesis hashes have one time budget.
+//! it decodes the file again, hashes each operation id to index the history it
+//! resolves inputs from, and for the terminal bundles alone rebuilds the
+//! commitment their witness tx carries and resolves each input of their
+//! transitions. The model counts that bundle work for every bundle, so it
+//! bounds more inspection than the burn signer asks for. Each superlinear part
+//! has its cap, the walk has a cap on a per-origin count of it, and all of them
+//! with the file, its opouts, operations and genesis hashes have one time
+//! budget.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

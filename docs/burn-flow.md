@@ -186,16 +186,28 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   check of their own. The witness resolver refuses a `chain_net` other than
   the enclave's before it resolves any witness, so a wrong-network consignment
   fails consensus.
-- **B2.8** The settling transition must be a `TS_BURN`: the burn of the last
-  witness bundle. Two burns there are refused. The amount comes from
-  `burnedAsset`, never from the outputs or the host. The burn signer reads
-  every transition, with its `burnedAsset`, `burnReason` and OpId, from
-  rgb-lib's `inspect_consignment` over every bundle of the file that
-  validation accepted. That inspection reverifies each witness commitment,
-  resolves every transition input to the outpoint its witness spends, and
-  refuses an input it cannot resolve, a transition stored under an id that is
-  not its own commitment, a transition in two bundles, and any type the
-  pinned BFA schema does not define.
+- **B2.8** The settling transition must be a `TS_BURN`, and the consignment
+  must hold one. Two burns are refused, in one bundle or in two: only one of
+  them could ever be released, and the order of their bundles must not decide
+  which. The amount comes from `burnedAsset`, never from the outputs or the
+  host. The release binds the witness tx of the burn's own bundle, which need
+  not be the last bundle of the file.
+- **B2.8a** The burn signer reads each transition, with its `burnedAsset`,
+  `burnReason` and OpId, from rgb-lib's `inspect_consignment`, over the bundles
+  that hold a terminal operation: one that nothing in the consignment builds
+  on. A burn has no assignments, so nothing can spend its state and it is
+  always terminal, which is what makes this selection sound here - the settling
+  burn is always read, wherever its bundle sits. An ancestor is not terminal,
+  since the operation spending its state is in the same file, so its bundle is
+  skipped: validation, not this inspection, is what checks it. An export can
+  end in more than one terminal operation, such as a burn and a later transfer
+  of what it left, and then both bundles are read. The inspection indexes every
+  transition of the file to resolve inputs from, and refuses a transition that
+  two bundles commit. For each bundle it reads, it reverifies the witness
+  commitment, resolves every transition input to the outpoint its witness
+  spends, and refuses an input it cannot resolve, a transition the bundle does
+  not commit under its own id, and any type the pinned BFA schema does not
+  define.
 - **B2.9a** A bundle discloses the transitions the history needs and conceals
   the rest: the export builds each one with
   `TransitionBundle::to_concealed_except`, then reveals each further transition
@@ -311,7 +323,8 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
   `burnId`, whatever the route.
 - **B5.5** The calldata BtcRelay `proof` is
   `(sourceHeight, sourceCommit, latestHeight, latestCommit)`, 128 bytes.
-  - `sourceHeight` must be the block that holds the last witness transaction.
+  - `sourceHeight` must be the block that holds the witness transaction of
+    the settling burn (B2.8).
   - `latestHeight` must not be below `sourceHeight`.
   - The enclave must have a header at `latestHeight`, at most
     `MAX_RELAY_TIP_LAG_BLOCKS` below its tip.

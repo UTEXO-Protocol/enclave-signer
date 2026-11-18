@@ -38,7 +38,10 @@ Why each term is there:
 - **Inspection.** rgb-lib's validation returns no amounts. The burn signer
   reads them with `inspect_consignment`, which decodes the file again and
   hashes each operation id again. It costs about as much per output as
-  validation.
+  validation. The burn signer asks only for the bundles of the terminal
+  operations, so rgb-lib rebuilds the commitment and resolves the inputs of
+  those alone. The model counts that work for every bundle, which makes its
+  inspection term an upper bound of the inspection a burn now runs.
 - **Walk.** The count walks each origin on its own. rgb-lib shares one walk
   across origins. So the count is a model of rgb-lib's steps: it counts a
   shared history once per origin, and where nothing is shared it can fall
@@ -51,7 +54,9 @@ hosts), 2026-11-11, two runs of each shape. Source `7363f141780c`, rgb-lib
 `2f7b21d8637b`, rgb-consensus `d4bbbce212e4`, Rust 1.96.1. One test thread
 on the two threads of one core, scratch files in RAM, no other load on the
 host. The honest burns use the pinned genesis of 10 mint rights, and the
-forged histories a genesis of 1 right, unless the row names more.
+forged histories a genesis of 1 right, unless the row names more. The
+inspection column is the whole file, every bundle rebuilt and resolved. A
+burn inspects the terminal bundles alone, so it stays at or under this column.
 
 | Consignment | Size | Outputs | Model (s) | Validation (s) | Inspection (s) | Largest total / model | Allowance (s) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -135,7 +140,8 @@ The operator can raise each limit on a running enclave.
 ## When to measure again
 
 Measure again when the rgb-lib or rgb-consensus pin changes, or when
-`cost.rs` changes. Use the pinned dependencies and compiler, the release
+`cost.rs` changes. Keep measuring every bundle: the figures then bound any
+narrower inspection the burn signer asks rgb-lib for. Use the pinned dependencies and compiler, the release
 profile, and the CPU used by the burn enclaves. Run the command above at
 least twice with one test thread and no concurrent build or benchmark.
 Keep scratch files in RAM, as they are in the enclave. Record the source

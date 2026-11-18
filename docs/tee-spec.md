@@ -485,7 +485,7 @@ decisions.
 | # | Required | Enforcement |
 |---|----------|-------------|
 | P1 | Valid RGB consignment | Full RGB consensus validation by rgb-lib, under the pinned schema. |
-| P2 | Expected transition | The settling transition must be a `TS_BURN`: the one burn of the last witness bundle. Two burns there are refused. |
+| P2 | Expected transition | The settling transition must be a `TS_BURN`: the one burn of the bundles the inspection reads. Two burns are refused. |
 | P3 | Exact amount | `burnedAsset` must equal the calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | An allowed selector, a size limit, canonical ABI encoding, the destination-chain rule of the route, and a bounded deadline. |
 | P5 | Correct destination | The pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`). |
