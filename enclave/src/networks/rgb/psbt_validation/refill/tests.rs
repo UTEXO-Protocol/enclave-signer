@@ -261,6 +261,7 @@ fn committed(history: &mut History, transition: Transition) -> Result<Committed>
         &sent.fascia_bytes(),
         "fascia",
         crate::networks::rgb::psbt_commit::Pin::for_test(history.contract_id),
+        &|_, _| false,
     )
 }
 

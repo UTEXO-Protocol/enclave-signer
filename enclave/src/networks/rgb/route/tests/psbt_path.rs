@@ -14,6 +14,7 @@ use rgbstd::contract::{AllocatedState, TransitionBuilder};
 use rgbstd::{
     BuilderSeal, GlobalValues, GraphSeal, MetaValue, RevealedData, SecretSeal, Transition,
 };
+use rgbstd::{Operation, RevealedValue};
 
 use super::*;
 use crate::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
@@ -161,6 +162,14 @@ fn route_mint(
             AccountType::Colored,
         ))
     };
+    let own_vout = |psbt: &Psbt, vout: u32| {
+        crate::networks::rgb::btc_ownership::output_is_self_derived(
+            psbt,
+            vout as usize,
+            &keys,
+            Some(AccountType::Colored),
+        )
+    };
     let sats = |psbt: &Psbt, recipient: &MintRecipient| {
         assert_mint_sats(psbt, &keys, recipient, cfg.mint_witness_sat)
     };
@@ -175,6 +184,7 @@ fn route_mint(
         psbt_fee_key_paths: Some(&key_paths),
         mint_binder: Some(&binder),
         mint_sats: Some(&sats),
+        own_colored_vout: Some(&own_vout),
     };
     edit(&mut ctx);
     let result = validate_destination_anchor(destination, MINTED, commission, &ctx);
@@ -216,6 +226,34 @@ fn committed_bundle(history: &mut History, transitions: Vec<Transition>, right: 
     our_input(&mut made.psbt, &keys, 1);
     claim_change(&mut made.psbt, &keys, 1);
     made
+}
+
+/// A transfer of `amount` units, held on a seal of the outpoint the tx
+/// spends, to the blinded vout `to`: the shape rgb-lib gives the other
+/// allocations of a spent UTXO.
+fn sibling_transfer(history: &mut History, right: Utxo, amount: u64, to: u32) -> Transition {
+    let held = GraphSeal::with_blinding(right.outpoint.txid, right.outpoint.vout, 0x7700);
+    let units = history
+        .transition("transfer")
+        .add_input(right.opout, AllocatedState::Void)
+        .unwrap()
+        .add_fungible_state("assetOwner", held, amount)
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let opout = rgbstd::Opout::new(units.id(), bfa_schema::OS_ASSET, 0);
+    history
+        .transition("transfer")
+        .add_input(opout, AllocatedState::from(RevealedValue::from(amount)))
+        .unwrap()
+        .add_fungible_state(
+            "assetOwner",
+            GraphSeal::with_blinded_vout(to, 0x7701),
+            amount,
+        )
+        .unwrap()
+        .complete_transition()
+        .unwrap()
 }
 
 /// A mint transition on `right` of `issued`, open for edits.
@@ -312,8 +350,40 @@ fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
     assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
-/// rgb-lib moves a second right of the spent UTXO by a propagate in the mint's
-/// bundle. F6 signs one transition only.
+/// rgb-lib moves the other allocations of a spent UTXO by a transition of its
+/// own in the same bundle. A mint may come beside such a transfer when it pays
+/// this enclave's own output: the signer reads the mint and lets the transfer
+/// be.
+#[test]
+fn accepts_a_mint_beside_a_transfer_of_our_own_units() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |m| m);
+    // vout 1 is the change `committed_bundle` claims at `[0, 99]`.
+    let ours = sibling_transfer(&mut history, rights[1], 5_000, 1);
+    let made = committed_bundle(&mut history, vec![ours, mint], rights[0]);
+    let (_, bound) = run_mint(&destination(&history, &made), &pinned(&history));
+    let mint = bound.expect("the mint is read beside our own transfer");
+    assert_eq!(mint.issued, MINTED);
+}
+
+/// The same bundle, with the transfer paying an output this enclave does not
+/// derive. The signer then has two transitions it must read and refuses.
+#[test]
+fn refuses_a_mint_beside_a_transfer_of_units_to_anyone_else() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |m| m);
+    // vout 2 is no output of this enclave: `committed_bundle` claims vout 1.
+    let theirs = sibling_transfer(&mut history, rights[1], 5_000, 2);
+    let made = committed_bundle(&mut history, vec![theirs, mint], rights[0]);
+    let err = mint_refusal(&destination(&history, &made), &history);
+    assert!(
+        err.contains("more than one transition that is not a transfer"),
+        "{err}"
+    );
+}
+
 #[test]
 fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     let keys = fx::km();
@@ -322,7 +392,10 @@ fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     let side = history.rights_transition(rights[1], &[1]);
     let mint = committed_bundle(&mut history, vec![mint, side], rights[0]);
     let err = mint_refusal(&destination(&history, &mint), &history);
-    assert!(err.contains("input map that names 2 transitions"), "{err}");
+    assert!(
+        err.contains("more than one transition that is not a transfer"),
+        "{err}"
+    );
 }
 
 /// The mint's transition in another tx, which spends another of our Colored
@@ -761,7 +834,7 @@ fn run_refill(
     request: &SignRightsRefillRequest,
     history: &History,
 ) -> Result<Vec<u32>> {
-    validate_rights_refill(request, &refill.psbt, &pinned(history))
+    validate_rights_refill(request, &refill.psbt, &pinned(history), &|_, _| false)
 }
 
 #[test]
@@ -794,7 +867,8 @@ fn refuses_a_refill_of_another_asset() {
     let (mut history, rights) = seeded(&keys);
     let (refill, request) = refill_request(&mut history, rights[0]);
     let (other, ..) = seeded_other();
-    let err = validate_rights_refill(&request, &refill.psbt, &pinned(&other)).unwrap_err();
+    let err =
+        validate_rights_refill(&request, &refill.psbt, &pinned(&other), &|_, _| false).unwrap_err();
     assert!(
         err.to_string().contains("not of the pinned RGB_ASSET_ID"),
         "{err}"
@@ -933,6 +1007,7 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
         &bytes,
         "fascia",
         psbt_commit::Pin::for_test(history.contract_id),
+        &|_, _| false,
     )
     .unwrap();
 

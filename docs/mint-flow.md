@@ -205,7 +205,7 @@ host. TLS ends inside the enclave. Each call has the timeout
   above the head, or missing tag data, refuses signing. A pending deposit can
   be retried once the head covers it.
 
-### Stage 3 - Does the PSBT commit exactly one transition of the asset?
+### Stage 3 - Which transition of the asset does the PSBT commit?
 
 The core. It reads the RGB data from the request's `fascia`, never from the
 PSBT: RGB keys left in a PSBT are ignored. rgb-lib's wallet-less fascia
@@ -243,16 +243,24 @@ rules around it are the enclave's.
   that carries none. So the fascia shows exactly the bundles that the
   transaction commits: a hidden, extra or swapped bundle changes the
   commitment.
-- **F6** The bundle holds exactly one transition of the pinned contract,
-  stored under its own id, which rgb-lib recomputes, and of a contract that
-  rgb-lib refuses to inspect under any other id. The input map must close
-  exactly the inputs of that transition: rgb-lib binds each input of the
-  transition to that id, and the inspected counts of transitions and of
-  closed seals in the input map must be one and that transition's own input
-  count, so the map names no transition the inspection hides. rgb-lib moves
-  any other allocation of the spent UTXO by a transition of its own in the
-  same bundle. So a link right must not share a UTXO with mint rights: F6
-  refuses that mint or refill.
+- **F6** The bundle discloses every transition it commits
+  (`RgbOperationInfo::has_concealed_transitions`), each stored under its own
+  id, which rgb-lib recomputes, and of a contract that rgb-lib refuses to
+  inspect under any other id. The input map must close exactly the inputs of
+  the transitions it discloses, so it names none the inspection hides. A
+  fascia is the RGB data of the transaction being built, so it carries
+  everything its bundle commits; a consignment is the opposite, and
+  [burn-flow.md](burn-flow.md) says so at B2.9a.
+  The bundle may hold more than one transition. rgb-lib moves any other
+  allocation of a spent UTXO by a transition of its own in the same bundle, so
+  a mint or a refill can come beside a transfer of the wallet's other units
+  back to itself. Such a transfer is let be: it must be a `TS_TRANSFER` whose
+  every output is fungible and revealed on a vout of this transaction that the
+  enclave derives on its Colored account, so it moves no right and pays nobody
+  else. Every other transition is one the signer must read, and it reads
+  exactly one. A right that shares the UTXO, a mint right or a link right,
+  still refuses the mint or refill: rgb-lib moves rights by a `TS_PROPAGATE`,
+  which is no transfer of units, and a right is no fungible output.
   The inspection also decodes every transition type, assignment type, global
   and metadata entry against the types rgb-lib itself knows, so an unknown
   one, or a global or metadata value of the wrong length, is refused there,
@@ -463,7 +471,7 @@ The cheap checks run first.
 - **RR5** F2, F3 and F5. F3 matters most here: RR12 admits 0-sat outputs, and
   a 0-sat P2TR before the `OP_RETURN` would switch the commitment method.
 - **RR3** F4 and F6: the refill's own fascia, of the pinned asset.
-- **RR6** The one transition is a `TS_PROPAGATE`.
+- **RR6** The one transition the signer reads is a `TS_PROPAGATE`.
 - **RR7** It closes exactly one input, an `OS_MINT`. It assigns `OS_MINT`
   only, each right with no state, and has no globals and no metadata. A right
   that carries state is not an `OS_MINT` assignment rgb-lib can represent, so
@@ -582,10 +590,14 @@ missing check is a liveness limit only:
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,
-and it cannot move other state of the wallet: the transaction commits one
-transition (F2 - F6). It can destroy other state. The mint signer does not
-see which RGB state the spent UTXO holds, so a mint or a refill can spend a
-Colored UTXO that holds other state, and that state is lost (section 8).
+and it cannot move other state of the wallet away: besides the mint, the
+transaction may commit only a transfer of the wallet's own units back to
+outputs that the enclave derives (F2 - F6). Such a transfer is no more
+validated than the mint, so a malformed one makes the whole bundle invalid:
+again a mint that no receiver accepts, and no unbacked units. It can destroy
+other state. The mint signer does not see which RGB state the spent UTXO
+holds, so a mint or a refill can spend a Colored UTXO that holds other state,
+and that state is lost (section 8).
 
 **A witness mint's output script is bound by the lockId.** A witness seal
 names an output number of the mint transaction, and the OpId commits that
