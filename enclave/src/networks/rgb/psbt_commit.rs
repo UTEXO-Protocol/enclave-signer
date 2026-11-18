@@ -182,6 +182,12 @@ fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspec
 /// consensus reads. F5 and F6: the counts bind the whole input map, which
 /// rgb-lib checks only for the transitions it inspects, so a bundle that
 /// closes a seal for a transition the inspection does not report is refused.
+///
+/// A fascia is the RGB data of the transaction being built, so it discloses
+/// every transition its bundle commits and F6 requires exactly one. A
+/// consignment is the opposite: its export conceals the history a later
+/// holder does not need, so [`super::validation`] requires no such count of
+/// one of those.
 fn pinned_transition(
     inspection: &RgbInspection,
     field: &str,

@@ -495,6 +495,32 @@ fn refuses_an_input_map_that_names_a_hidden_transition() {
     assert!(err.contains("input map that names 2 transitions"), "{err}");
 }
 
+/// A fascia must disclose every transition its bundle commits, unlike a
+/// consignment, whose export conceals the history a later holder does not
+/// need. It cannot do otherwise: `rgb_commit` builds the bundle from the input
+/// map, so a transition the map does not name is not in the bundle at all.
+/// Pushing one the map omits leaves the seals of F6 to refuse the fascia.
+#[test]
+fn refuses_a_fascia_whose_map_does_not_name_every_transition_pushed() {
+    let (mut history, rights) = issued(0xB1, &[0xA0, 0xA1]);
+    let first = send_of(&mut history, rights[0]);
+    let second = history.rights_transition(rights[1], &[1, 2]);
+    let cid = history.contract_id;
+    let (tx, fascia) = crafted(vec![rights[0].outpoint, rights[1].outpoint], |psbt| {
+        let only = first.id();
+        psbt.push_rgb_transition(first).unwrap();
+        psbt.push_rgb_transition(second).unwrap();
+        // Both seals filed under the first transition, so the map names one.
+        let map = BTreeMap::from([(rights[0].opout, only), (rights[1].opout, only)]);
+        psbt.proprietary.insert(
+            ProprietaryKey::rgb_consumed_by(cid),
+            OpoutAndOpids::new(map).serialize(),
+        );
+    });
+    let err = refusal(&tx, &fascia, cid);
+    assert!(err.contains("closes 2 seal(s)"), "{err}");
+}
+
 /// Another contract's transition filed under the pinned contract's bundle.
 #[test]
 fn refuses_transition_of_other_contract() {

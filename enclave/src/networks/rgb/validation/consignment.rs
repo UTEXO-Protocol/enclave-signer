@@ -52,6 +52,14 @@ pub(super) fn extract_transition_summary(
         .collect()
 }
 
+/// No rule here counts the transitions a bundle discloses against the ones it
+/// commits. The export builds each bundle with `to_concealed_except` and
+/// reveals only what the history needs, so a bundle that commits more than it
+/// carries is the normal shape, at any point of a history and in the bundle of
+/// the burn itself. Consensus refuses a consignment that conceals a transition
+/// the burned units descend from, so what a bundle may conceal is a transition
+/// no release pays for. The fascia of the mint signer is the other way round:
+/// see [`super::super::psbt_commit`].
 fn witness_summary(
     witness: &RgbInspection,
     recipient_prefix: &str,
