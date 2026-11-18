@@ -176,3 +176,68 @@ async fn a_public_key_call_gets_an_answer_while_the_sign_limit_is_full() {
     let again = client.sign(burn()).await.unwrap_err();
     assert_eq!(again.message(), "released by the test enclave", "{again}");
 }
+
+/// A caller that cancels its `Sign` call does not free the permit while the
+/// enclave still holds the request. The next `Sign` gets `UNAVAILABLE` and
+/// sends no frame to the enclave. The permits return when the enclave answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_sign_keeps_its_permit_while_the_enclave_holds_the_request() {
+    let max_sign = Config::from_env().grpc_max_concurrent_sign;
+    let held = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let addr = server(holding_enclave(held.clone(), release.clone())).await;
+    let channel: Channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .timeout(Duration::from_secs(60))
+        .connect()
+        .await
+        .unwrap();
+
+    let mut running = tokio::task::JoinSet::new();
+    for _ in 0..max_sign {
+        let mut client = ParentServiceClient::new(channel.clone());
+        running.spawn(async move { client.sign(burn()).await });
+    }
+    let start = Instant::now();
+    while held.load(SeqCst) < max_sign {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the Sign requests did not arrive"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The callers cancel. The server drops the waiting futures, and the
+    // enclave still holds every request.
+    running.abort_all();
+    while running.join_next().await.is_some() {}
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut client = ParentServiceClient::new(channel.clone());
+    let refused = tokio::time::timeout(Duration::from_secs(5), client.sign(burn()))
+        .await
+        .expect("a Sign above the limit must get an answer at once")
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable, "{refused}");
+    assert_eq!(
+        held.load(SeqCst),
+        max_sign,
+        "no new frame reached the enclave"
+    );
+
+    // The enclave answers the held requests, and the permits return.
+    release.store(true, SeqCst);
+    let start = Instant::now();
+    loop {
+        let again = client.sign(burn()).await.unwrap_err();
+        if again.message() == "released by the test enclave" {
+            break;
+        }
+        assert_eq!(again.code(), Code::Unavailable, "{again}");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the permits did not return"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

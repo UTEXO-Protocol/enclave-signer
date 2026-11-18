@@ -268,7 +268,7 @@ struct EndpointArgs {
     /// Repeat the flag, or separate the pairs with commas in the variable.
     /// Without a pair the enclave refuses every LayerZero release.
     #[arg(
-        long = "lz-route",
+        long = "lz-routes",
         env = "LZ_ROUTES",
         value_delimiter = ',',
         value_parser = utexo_bridge_parent::launch_check::parse_lz_route
