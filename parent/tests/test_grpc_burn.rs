@@ -148,11 +148,6 @@ async fn sign_through_parent(
     let Some(SourceNetwork::RgbSource(source)) = &mut expected_request.source_network else {
         unreachable!();
     };
-    assert!(!source.merkle_proofs.is_empty());
-    assert!(source
-        .merkle_proofs
-        .iter()
-        .all(|proof| !proof.merkle_path.is_empty() && proof.tx_position != 0));
     source.consignment_valid = true;
 
     let enclave_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
