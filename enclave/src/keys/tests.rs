@@ -142,42 +142,74 @@ fn seed_preserved_for_cloning() {
     assert_eq!(km.expose_seed(), &original_seed);
 }
 
-#[test]
-fn test_sign_evm_recoverable() {
+/// Asserts low S, the raw recovery ID and the signer. A high S recovers the
+/// same signer, but OpenZeppelin `ECDSA` and Ethereum (EIP-2) refuse it.
+fn assert_evm_signature(
+    sig_bytes: &[u8; 65],
+    hash: &[u8; 32],
+    expected_recovery_id: u8,
+    signer: &[u8; 20],
+) {
     use alloy_primitives::U256;
     use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 
+    let half_order = U256::from_str_radix(
+        "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
+        16,
+    )
+    .unwrap();
+    let s = U256::from_be_slice(&sig_bytes[32..64]);
+    assert!(s > U256::ZERO && s <= half_order, "signature must be low-S");
+    assert_eq!(sig_bytes[64], expected_recovery_id);
+
+    let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
+    let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
+    let recovered_key = VerifyingKey::recover_from_prehash(hash, &signature, recovery_id).unwrap();
+
+    let pubkey_bytes = recovered_key.to_sec1_point(false);
+    let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
+    let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
+
+    assert_eq!(&recovered_address, signer);
+}
+
+#[test]
+fn test_sign_evm_recoverable() {
     let seed = [0x42u8; 64];
     let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
     assert_eq!(
         hex::encode(km.evm_address()),
         "68bbc0fe8ecab9603a2dc725bd7f0003597cd0fa"
     );
-    let half_order = U256::from_str_radix(
-        "7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
-        16,
-    )
-    .unwrap();
 
     // geth v1.17.3 independently calculates the address and both recovery IDs.
     // The submitter adds 27 to the enclave's recovery ID before calling the contract.
+    // [0x01; 32] has a high raw S; k256 makes it low and flips the recovery ID.
     for (hash, expected_recovery_id) in [([0xABu8; 32], 0), ([0x01u8; 32], 1)] {
         let sig_bytes = km.sign_evm(&hash).unwrap();
-        assert_eq!(sig_bytes.len(), 65);
-        assert_eq!(sig_bytes[64], expected_recovery_id);
-        let s = U256::from_be_slice(&sig_bytes[32..64]);
-        assert!(s > U256::ZERO && s <= half_order, "signature must be low-S");
+        assert_evm_signature(&sig_bytes, &hash, expected_recovery_id, km.evm_address());
+    }
+}
 
-        let signature = K256Signature::from_slice(&sig_bytes[..64]).unwrap();
-        let recovery_id = RecoveryId::from_byte(sig_bytes[64]).unwrap();
-        let recovered_key =
-            VerifyingKey::recover_from_prehash(&hash, &signature, recovery_id).unwrap();
+#[test]
+fn test_sign_evm_gas_tx_recoverable() {
+    let seed = [0x42u8; 64];
+    let km = KeyManager::from_seed(seed, Network::Bitcoin).unwrap();
+    assert_eq!(
+        hex::encode(km.evm_gas_tx_address()),
+        "092afc6837a72efefae68d31704f6b207ab87f03"
+    );
 
-        let pubkey_bytes = recovered_key.to_sec1_point(false);
-        let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
-        let recovered_address: [u8; 20] = pubkey_hash[12..].try_into().unwrap();
-
-        assert_eq!(&recovered_address, km.evm_address());
+    // Both digests have a high raw S. Foundry `cast wallet sign --no-hash`
+    // gives the same address and recovery IDs.
+    for (hash, expected_recovery_id) in [([0x02u8; 32], 0), ([0x03u8; 32], 1)] {
+        let sig_bytes = km.sign_evm_gas_tx(&hash).unwrap();
+        assert_evm_signature(
+            &sig_bytes,
+            &hash,
+            expected_recovery_id,
+            km.evm_gas_tx_address(),
+        );
     }
 }
 
