@@ -54,10 +54,17 @@ fn rights_send() -> (History, gen::Committed) {
 /// The core on `tx` and `fascia`, with the fascia sent over the wire as
 /// rgb-lib writes it. The fixtures build unsigned transactions, as rgb-lib
 /// commits one.
+/// No output of these fixtures is this enclave's: they carry no key origins,
+/// so a transfer beside the signing transition is never its own change here.
+/// [`super::super::route::tests`] covers the fascia with one.
+fn not_ours(_: &Psbt, _: u32) -> bool {
+    false
+}
+
 fn read(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> Result<Committed> {
     let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
     let bytes = gen::fascia_bytes(fascia);
-    committed_transition(&psbt, &bytes, "fascia", Pin::for_test(pin))
+    committed_transition(&psbt, &bytes, "fascia", Pin::for_test(pin), &not_ours)
 }
 
 fn refusal(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> String {
@@ -67,7 +74,7 @@ fn refusal(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> String {
 /// The core on `tx` and raw `bytes`, for the fascia bytes no fixture builds.
 fn read_bytes(tx: &Transaction, bytes: &[u8], pin: ContractId) -> Result<Committed> {
     let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
-    committed_transition(&psbt, bytes, "fascia", Pin::for_test(pin))
+    committed_transition(&psbt, bytes, "fascia", Pin::for_test(pin), &not_ours)
 }
 
 /// A PSBT that spends `inputs`, with RGB data `craft` writes, then committed
@@ -399,7 +406,10 @@ fn refuses_two_known_transitions() {
         psbt.push_rgb_transition(b).unwrap();
     });
     let err = refusal(&tx, &fascia, history.contract_id);
-    assert!(err.contains("input map that names 2 transitions"), "{err}");
+    assert!(
+        err.contains("more than one transition that is not a transfer"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -437,7 +447,7 @@ fn refuses_input_map_extra_key() {
     });
     let err = refusal(&tx, &fascia, cid);
     assert!(
-        err.contains("input map that closes 2 seal(s), but its transition"),
+        err.contains("closes 2 seal(s), but the transitions it discloses spend 1"),
         "{err}"
     );
 }
@@ -492,7 +502,10 @@ fn refuses_an_input_map_that_names_a_hidden_transition() {
             .unwrap();
     });
     let err = refusal(&tx, &fascia, cid);
-    assert!(err.contains("input map that names 2 transitions"), "{err}");
+    assert!(
+        err.contains("commits 2 transitions and discloses 1"),
+        "{err}"
+    );
 }
 
 /// A fascia must disclose every transition its bundle commits, unlike a
@@ -552,7 +565,22 @@ fn inspected(sent: &gen::Committed, pin: ContractId) -> (RgbInspection, Committe
 }
 
 fn agrees(inspection: &RgbInspection, committed: &Committed, pin: ContractId) -> Result<()> {
-    pinned_transition(inspection, "fascia", Pin::for_test(pin), committed.txid).map(|_| ())
+    let psbt = Psbt::from_unsigned_tx(bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    })
+    .unwrap();
+    pinned_transition(
+        inspection,
+        "fascia",
+        Pin::for_test(pin),
+        committed.txid,
+        &psbt,
+        &not_ours,
+    )
+    .map(|_| ())
 }
 
 /// rgb-lib verifies the commitment with the DBC proof the fascia carries. A
@@ -625,7 +653,13 @@ fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
         || sent.fascia_bytes(),
         |bytes| {
             let psbt = Psbt::from_unsigned_tx(sent.tx.clone()).unwrap();
-            committed_transition(&psbt, bytes, "fascia", Pin::for_test(history.contract_id))
+            committed_transition(
+                &psbt,
+                bytes,
+                "fascia",
+                Pin::for_test(history.contract_id),
+                &not_ours,
+            )
         },
     );
     assert!(bytes.len() > 600_000, "the fascia is not wide");

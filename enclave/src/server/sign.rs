@@ -74,6 +74,20 @@ pub(super) fn handle_sign(
         super::bfa::derived_locks(ctx, anchors)
     };
 
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    let own_colored_vout = |psbt: &bitcoin::psbt::Psbt, vout: u32| {
+        ctx.state
+            .with_keys(|keys| {
+                Ok(crate::networks::rgb::btc_ownership::output_is_self_derived(
+                    psbt,
+                    vout as usize,
+                    keys,
+                    Some(crate::keys::AccountType::Colored),
+                ))
+            })
+            .unwrap_or(false)
+    };
+
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
         super::reject_list::read_decisions(ctx, list, deadline)
@@ -120,6 +134,8 @@ pub(super) fn handle_sign(
         mint_binder: Some(&mint_binder),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_sats: Some(&mint_sats),
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        own_colored_vout: Some(&own_colored_vout),
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
