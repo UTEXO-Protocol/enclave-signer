@@ -32,7 +32,9 @@ fn measure(name: &str, bytes: Vec<u8>, confirmed: bool, expected_gate: bool) {
         assert_reached_the_witnesses(err);
     }
     // Refused shapes are deliberately inspected too, to measure the work the
-    // production gate prevents. Production inspects only after validation.
+    // production gate prevents. Production inspects only after validation, and
+    // only the terminal bundles: every bundle is measured because the model
+    // counts every bundle, so the figure bounds what a burn asks for.
     let start = Instant::now();
     with_scratch_file("consignment", &bytes, |path| {
         inspect_consignment(path.to_str().unwrap().to_owned(), BundleFilter::All)

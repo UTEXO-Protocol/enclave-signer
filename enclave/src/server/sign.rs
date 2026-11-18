@@ -915,7 +915,7 @@ mod funds_out_depth {
         internal.reverse();
         let validated = ValidatedConsignment {
             witness_txids: vec![WITNESS],
-            last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+            settling_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
             ..Default::default()
         };
         apply_funds_out_binding(

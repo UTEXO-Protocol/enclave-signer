@@ -96,7 +96,7 @@ fn accepts_a_burn_of_the_change_an_earlier_split_left() {
     conceal_except(&mut history, first.tx.compute_txid(), change.opout.op);
 
     let validated = validate(&history.consignment()).expect("the second burn is valid");
-    let last = validated.last_transition.expect("the settling burn");
+    let last = validated.settling_transition.expect("the settling burn");
     assert_eq!(last.burned_asset_amount, Some(rest));
     assert_eq!(last.burn_reason, Some(reason));
 }
@@ -689,14 +689,14 @@ fn validates_rgb_libs_split_burn_shape() {
     assert_eq!(validated.contract_id, history.contract_id.to_string());
     assert_eq!(validated.chain_net, "bcrt");
     assert_eq!(validated.witness_txids.len(), 2);
+    assert_eq!(validated.settling_op_id, Some(gen::opid_bytes(burn.opid)));
     assert_eq!(
-        validated.last_transfer_op_id,
-        Some(gen::opid_bytes(burn.opid))
+        validated.settling_witness_txid,
+        Some(burn.tx.compute_txid())
     );
-    assert_eq!(validated.last_witness_txid, Some(burn.tx.compute_txid()));
 
     let last = validated
-        .last_transition
+        .settling_transition
         .as_ref()
         .expect("the settling burn");
     assert_eq!(last.transition_type, TypeOfTransition::Burn);
@@ -758,13 +758,81 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
     assert_eq!(locked, vec![history.mints[0].lock_id()]);
 }
 
+/// rgb-lib inspects the bundles holding a terminal operation. The rights send
+/// and the mint are spent by what follows them, so only the burn's bundle is
+/// read. Validation is what covers the two it skips.
+#[test]
+fn inspects_the_terminal_bundle_alone() {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let rights = history.duplicate_right(right, 3);
+    let units = history.mint_owned(rights[2], MINTED, 90);
+    let burn = history.burn(
+        units,
+        MINTED,
+        Some(MINTED),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    let validated = validate(&history.consignment()).expect("the burn is valid");
+
+    assert_eq!(
+        validated.witness_txids.len(),
+        3,
+        "the rights send, the mint and the burn"
+    );
+    let inspected: Vec<bitcoin::Txid> = validated
+        .transitions_by_witness
+        .iter()
+        .map(|(txid, _)| *txid)
+        .collect();
+    assert_eq!(inspected, vec![burn.tx.compute_txid()]);
+    assert!(
+        validated
+            .transitions_committed_by(history.mints[0].witness_id)
+            .is_empty(),
+        "the mint's bundle is not inspected"
+    );
+    assert_eq!(
+        validated.settling_transition.map(|t| t.op_id),
+        Some(burn.opid.to_string()),
+        "the settling burn comes from the one inspected bundle"
+    );
+}
+
+/// A burn and a later transfer of what it left are both terminal, so both
+/// bundles are inspected. The burn settles, with its own witness: the order of
+/// the bundles does not decide it.
+#[test]
+fn settles_the_burn_before_a_terminal_transfer() {
+    let (mut history, [burned, kept]) = minted_in_halves();
+    let half = MINTED / 2;
+    let burn = history.burn(burned, half, Some(half), Some(gen::burn_reason_for(PAYEE)));
+    let sent = history.transfer(kept, half);
+    assert_ne!(sent.outpoint.txid, burn.tx.compute_txid());
+
+    let validated = validate(&history.consignment()).expect("the burn is valid");
+    assert_eq!(
+        validated.transitions_by_witness.len(),
+        2,
+        "the burn and the transfer are both terminal"
+    );
+    assert_eq!(
+        validated.settling_witness_txid,
+        Some(burn.tx.compute_txid())
+    );
+    let settling = validated.settling_transition.expect("the settling burn");
+    assert_eq!(settling.transition_type, TypeOfTransition::Burn);
+    assert_eq!(settling.burned_asset_amount, Some(half));
+    assert_eq!(settling.op_id, burn.opid.to_string());
+}
+
 /// The enclave and consignment-utils (which the bridge uses) read the same
 /// burn facts from the same bytes.
 #[test]
 fn burn_facts_agree_with_the_bridge_parser() {
     let bytes = burn_bytes();
     let validated = validate(&bytes).unwrap();
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
 
     let rgb_consignment::ConsignmentInfo::Transfer(info) = rgb_consignment::parse(&bytes).unwrap()
     else {
@@ -775,7 +843,7 @@ fn burn_facts_agree_with_the_bridge_parser() {
     assert_eq!(burn.op_id, last.op_id);
     assert_eq!(
         Some(anchor.txid.parse::<bitcoin::Txid>().unwrap()),
-        validated.last_witness_txid
+        validated.settling_witness_txid
     );
     let global = |ty: u16| {
         let entry = burn.globals.iter().find(|g| g.global_type == ty).unwrap();
@@ -793,7 +861,7 @@ fn a_burn_without_burn_reason_validates_with_no_reason() {
     let (history, _) = burn_history(Some(MINTED), None);
     let last = validate(&history.consignment())
         .unwrap()
-        .last_transition
+        .settling_transition
         .unwrap();
     assert_eq!(last.burn_reason, None);
     assert_eq!(last.burned_asset_amount, Some(MINTED));
@@ -848,9 +916,9 @@ fn split_in_halves(mut history: History, units: Utxo) -> (History, [Utxo; 2]) {
     (history, [half_at(0), half_at(1)])
 }
 
-/// Two burns in the settling bundle: only one could ever be released.
+/// Two burns in one bundle: only one could ever be released.
 #[test]
-fn refuses_two_burns_in_the_last_bundle() {
+fn refuses_two_burns_of_one_consignment() {
     let (mut history, halves) = minted_in_halves();
     let half = MINTED / 2;
     let burns = halves
@@ -894,7 +962,7 @@ fn settles_the_burn_beside_a_companion_transfer_in_either_order() {
 
         let validated = validate(&history.consignment()).expect("burn and transfer");
         let last = validated
-            .last_transition
+            .settling_transition
             .clone()
             .expect("the settling burn");
         assert_eq!(
@@ -904,10 +972,7 @@ fn settles_the_burn_beside_a_companion_transfer_in_either_order() {
         );
         assert_eq!(last.burned_asset_amount, Some(half));
         assert_eq!(last.burn_reason, Some(gen::burn_reason_for(PAYEE)));
-        assert_eq!(
-            validated.last_transfer_op_id,
-            Some(gen::opid_bytes(burn_opid))
-        );
+        assert_eq!(validated.settling_op_id, Some(gen::opid_bytes(burn_opid)));
         assert_eq!(
             validated.transitions_committed_by(tx.compute_txid()).len(),
             2
@@ -983,7 +1048,7 @@ fn reads_a_mint_and_its_anchor() {
             before_block: 90,
         }]
     );
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
     assert_eq!(last.transition_type, TypeOfTransition::Mint);
     assert_eq!(last.asset_output_amount, MINTED);
     assert!(matches!(
@@ -1227,13 +1292,48 @@ fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
 
 // ===== the flat summary =====
 
+/// The settling transition is the one burn the terminal bundles hold, with the
+/// witness of its own bundle, whichever bundle that is. Two burns are refused,
+/// and without a burn the last transition read settles, which the flow check
+/// then refuses.
 #[test]
-fn settling_index_takes_the_burn_beside_a_transfer() {
-    let burn = |t: &u16| *t == 8010;
-    assert_eq!(settling_index(&[8010u16, 10000], burn), Some(0));
-    assert_eq!(settling_index(&[10000u16, 8010], burn), Some(1));
-    assert_eq!(settling_index(&[10000u16, 8013], burn), Some(1));
-    assert_eq!(settling_index::<u16>(&[], burn), None);
+fn settling_summary_takes_the_one_burn_of_the_terminal_bundles() {
+    use super::consensus::settling_summary;
+    let txid = |b: u8| bitcoin::Txid::from_byte_array([b; 32]);
+    let of = |ty| transition_summary(&inspected_transition(ty, vec![]), WITNESS, "bcrt:").unwrap();
+    let transfer = of(TypeOfTransition::Transfer);
+    let burn = of(TypeOfTransition::Burn);
+
+    assert!(settling_summary(&[]).unwrap().is_none());
+
+    for burn_first in [true, false] {
+        let groups = if burn_first {
+            vec![
+                (txid(1), vec![burn.clone()]),
+                (txid(2), vec![transfer.clone()]),
+            ]
+        } else {
+            vec![
+                (txid(1), vec![transfer.clone()]),
+                (txid(2), vec![burn.clone()]),
+            ]
+        };
+        let (witness, settling) = settling_summary(&groups).unwrap().unwrap();
+        assert_eq!(settling.transition_type, TypeOfTransition::Burn);
+        assert_eq!(witness, txid(if burn_first { 1 } else { 2 }));
+    }
+
+    let two_burns = vec![(txid(1), vec![burn.clone()]), (txid(2), vec![burn.clone()])];
+    let err = settling_summary(&two_burns).unwrap_err().to_string();
+    assert!(err.contains("2 burns"), "{err}");
+
+    let no_burn = vec![
+        (txid(1), vec![transfer.clone()]),
+        (txid(2), vec![transfer.clone(), transfer.clone()]),
+    ];
+    let (witness, settling) = settling_summary(&no_burn).unwrap().unwrap();
+    assert_eq!(settling.transition_type, TypeOfTransition::Transfer);
+    assert_eq!(witness, txid(2));
 }
 
 /// The display-order txid of the witness the inspected transitions sit in.
@@ -1430,23 +1530,16 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     }
 }
 
-/// The settling transition is the last burn of the last inspected bundle.
-/// Two burns there are refused: only one of them could ever be released.
+/// The split-burn shape has one terminal bundle, and its burn settles.
 #[test]
-fn the_settling_transition_is_the_last_burn_of_the_last_bundle() {
+fn the_settling_transition_is_the_burn_of_the_terminal_bundle() {
     use super::consensus::settling_summary;
-    let inspected = summary::inspected(&burn_bytes()).unwrap();
-    let settling = settling_summary(&inspected).unwrap().unwrap();
+    let inspected = summary::terminal_bundles(&burn_bytes()).unwrap();
+    assert_eq!(inspected.len(), 1, "the burn is the one terminal operation");
+    let (witness, settling) = settling_summary(&inspected).unwrap().unwrap();
     assert_eq!(settling.transition_type, TypeOfTransition::Burn);
     assert_eq!(settling.burned_asset_amount, Some(60_000));
-
-    let mut two_burns = inspected.clone();
-    let (_, summaries) = two_burns.last_mut().unwrap();
-    for t in summaries.iter_mut() {
-        t.transition_type = TypeOfTransition::Burn;
-    }
-    let err = settling_summary(&two_burns).unwrap_err().to_string();
-    assert!(err.contains("a release settles exactly one"), "{err}");
+    assert_eq!(witness, inspected[0].0);
 }
 
 /// The rgb-lib refusals no resolver of ours can raise still read as what they
@@ -1597,7 +1690,7 @@ fn accepts_a_mint_on_a_right_from_a_rights_send() {
 
 /// The burn itself needs its proof too: the burn path allows no unmined tx.
 #[test]
-fn burn_path_refuses_an_unmined_last_witness() {
+fn burn_path_refuses_an_unmined_burn_witness() {
     let bytes = burn_bytes();
     let burn = *witness_ids(&bytes).last().unwrap();
     let err = error_of(validate_without(&bytes, burn));

@@ -380,7 +380,16 @@ fn reference_of(bytes: &[u8]) -> Summary {
 }
 
 /// The summary validation reads: rgb-lib's inspection of the file.
+/// Every bundle, so the comparisons below cover each one. Production reads the
+/// terminal bundles alone, by [`super::super::consignment`].
 pub(super) fn inspected(bytes: &[u8]) -> Result<Summary> {
+    with_scratch_file("consignment", bytes, |path| {
+        summary_of_every_bundle(path.to_str().unwrap())
+    })
+}
+
+/// The summary production reads: the terminal bundles of the file.
+pub(super) fn terminal_bundles(bytes: &[u8]) -> Result<Summary> {
     with_scratch_file("consignment", bytes, |path| {
         extract_transition_summary(path.to_str().unwrap())
     })

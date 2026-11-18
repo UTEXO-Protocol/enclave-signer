@@ -1,11 +1,13 @@
 //! Reads rgb-lib's inspection of the consignment file that validation accepted.
 //!
-//! The inspection is the only reading. Over every bundle it reverifies each
-//! witness commitment, resolves every transition input to the outpoint its
-//! witness spends, and refuses an input it cannot resolve, a transition stored
-//! under an id that is not its own, a transition in two bundles, and any type
-//! the pinned BFA schema does not define. It becomes the shapes in
-//! [`super::types`], failing closed on data that cannot be read exactly.
+//! The inspection is the only reading. It indexes every transition of the file
+//! to resolve inputs from, and refuses a transition that two bundles commit.
+//! For each bundle it is asked for it reverifies the witness commitment,
+//! resolves every transition input to the outpoint its witness spends, and
+//! refuses an input it cannot resolve, a transition the bundle does not commit
+//! under its own id, and any type the pinned BFA schema does not define. It
+//! becomes the shapes in [`super::types`], failing closed on data that cannot
+//! be read exactly.
 
 use bitcoin::hashes::Hash;
 use rgb_lib::no_wallet::{
@@ -17,23 +19,35 @@ use rgb_lib::Assignment;
 use super::types::{OutputSeal, TransitionOutput, TransitionSummary};
 use crate::error::{EnclaveError, Result};
 
-/// Index of the transition a witness settles: its last `TS_BURN`, or its last
-/// transition when it burns nothing. One tx can carry a burn and a plain transfer.
-pub(super) fn settling_index<T>(transitions: &[T], is_burn: impl Fn(&T) -> bool) -> Option<usize> {
-    transitions
-        .iter()
-        .rposition(is_burn)
-        .or(transitions.len().checked_sub(1))
-}
-
-/// The flat transition summary of a consignment that consensus validated:
-/// all transitions grouped by witness tx, from rgb-lib's inspection of the
-/// file it validated at `path`.
+/// The flat transition summary of a consignment that consensus validated: the
+/// transitions of its terminal bundles, grouped by witness tx, from rgb-lib's
+/// inspection of the file it validated at `path`.
+///
+/// A terminal operation is one that nothing in the consignment builds on:
+/// rgb-lib selects the bundles holding one, and skips the rest. A burn has no
+/// assignments, so nothing can spend its state and it is always terminal, which
+/// is what makes this filter sound for the burn path: the settling burn is
+/// always read, wherever its bundle sits. The history behind it is what
+/// validation covers, and reading it again here would prove nothing. An
+/// ancestor is not terminal, since the operation that spends its state is in
+/// the same file.
+///
+/// An export may end in more than one terminal operation, so this can select
+/// several bundles; `super::consensus::settling_summary` is what requires one
+/// burn among them. The group of a terminal bundle holds every transition the
+/// bundle discloses, terminal or not.
 pub(super) fn extract_transition_summary(
     path: &str,
 ) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
-    // Every bundle: `Terminals` would skip a history burn, and its checks.
-    let inspection = inspect_consignment(path.to_string(), BundleFilter::All).map_err(|e| {
+    inspect_filtered(path, BundleFilter::Terminals)
+}
+
+/// The summary of the bundles `filter` selects.
+fn inspect_filtered(
+    path: &str,
+    filter: BundleFilter,
+) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
+    let inspection = inspect_consignment(path.to_string(), filter).map_err(|e| {
         EnclaveError::CrossCheck(format!("rgb-lib inspect_consignment failed: {e}"))
     })?;
     if !inspection.is_transfer {
@@ -50,6 +64,16 @@ pub(super) fn extract_transition_summary(
         .iter()
         .map(|w| witness_summary(w, &recipient_prefix))
         .collect()
+}
+
+/// Every bundle's summary, for the tests that compare each one with their own
+/// reading of the rgbstd types and of the bridge's parser. Production reads
+/// the terminal bundles alone.
+#[cfg(test)]
+pub(super) fn summary_of_every_bundle(
+    path: &str,
+) -> Result<Vec<(bitcoin::Txid, Vec<TransitionSummary>)>> {
+    inspect_filtered(path, BundleFilter::All)
 }
 
 /// No rule here counts the transitions a bundle discloses against the ones it

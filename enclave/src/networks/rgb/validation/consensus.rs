@@ -223,21 +223,23 @@ fn summarize(
         .into_iter()
         .collect();
 
-    let last_transition = settling_summary(&transitions_by_witness)?;
-    let last_transfer_op_id = last_transition
+    let settling = settling_summary(&transitions_by_witness)?;
+    let settling_op_id = settling
         .as_ref()
-        .map(|t| bfa::decode_opid(&t.op_id))
+        .map(|(_, t)| bfa::decode_opid(&t.op_id))
         .transpose()?;
+    let (settling_witness_txid, settling_transition) = match settling {
+        Some((txid, transition)) => (Some(txid), Some(transition)),
+        None => (None, None),
+    };
 
     Ok(ValidatedConsignment {
         contract_id: transfer.contract_id().to_string(),
         chain_net: transfer.genesis.chain_net.prefix().to_string(),
         witness_txids,
-        last_witness_txid: last_transition
-            .as_ref()
-            .and(transitions_by_witness.last().map(|(txid, _)| *txid)),
-        last_transition,
-        last_transfer_op_id,
+        settling_witness_txid,
+        settling_transition,
+        settling_op_id,
         non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
@@ -266,23 +268,35 @@ fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32
     Ok(txids.into_iter().collect())
 }
 
-/// The settling transition of the last bundle: its last burn, or its last
-/// transition when it burns nothing. Two burns in one bundle are refused,
-/// since only one of them could ever be released.
+/// The settling transition and the witness tx that anchors it: the one burn of
+/// the inspected bundles.
+///
+/// The inspection reads the terminal bundles, and a burn is always terminal, so
+/// a burn anywhere in the consignment is here. Two of them are refused, since
+/// only one could ever be released, and the file order of their bundles must
+/// not decide which. Without a burn this settles on the last transition read,
+/// which every caller of the result refuses: the flow check states that a
+/// release needs a burn.
 pub(super) fn settling_summary(
     by_witness: &[(bitcoin::Txid, Vec<TransitionSummary>)],
-) -> Result<Option<TransitionSummary>> {
-    let Some((_, summaries)) = by_witness.last() else {
-        return Ok(None);
+) -> Result<Option<(bitcoin::Txid, TransitionSummary)>> {
+    let read = || {
+        by_witness
+            .iter()
+            .flat_map(|(txid, summaries)| summaries.iter().map(move |t| (*txid, t)))
     };
-    let is_burn = |t: &TransitionSummary| t.transition_type == TypeOfTransition::Burn;
-    let burns = summaries.iter().filter(|t| is_burn(t)).count();
-    if burns > 1 {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the last bundle carries {burns} burns - a release settles exactly one"
-        )));
+    let mut burns = read().filter(|(_, t)| t.transition_type == TypeOfTransition::Burn);
+    let first = burns.next();
+    let count = 1 + burns.count();
+    match first {
+        Some(burn) if count > 1 => Err(EnclaveError::CrossCheck(format!(
+            "the terminal operations carry {count} burns - a release settles exactly one, and \
+             {} is one of them",
+            burn.1.op_id
+        ))),
+        Some((txid, burn)) => Ok(Some((txid, burn.clone()))),
+        None => Ok(read().last().map(|(txid, t)| (txid, t.clone()))),
     }
-    Ok(super::consignment::settling_index(summaries, is_burn).map(|i| summaries[i].clone()))
 }
 
 /// rgb-lib's refusal, with what it means for this enclave.

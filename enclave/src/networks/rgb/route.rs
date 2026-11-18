@@ -65,7 +65,7 @@ fn route_proof_from_validated_consignment(
 ) -> Result<RouteProof> {
     use crate::error::EnclaveError;
 
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    let last = validated.settling_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "RGB source requires a consignment with at least one transition".into(),
         )

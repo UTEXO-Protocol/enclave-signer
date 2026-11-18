@@ -51,7 +51,8 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
     if last.transition_type != TypeOfTransition::Burn {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut requires a burn transition (last transition is a {:?}) - this enclave is \
+            "fundsOut requires a burn transition (the settling transition is a {:?}) - this \
+             enclave is \
              built for the {FLOW_NAME} flow",
             last.transition_type
         )));

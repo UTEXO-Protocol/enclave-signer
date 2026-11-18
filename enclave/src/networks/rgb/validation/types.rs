@@ -21,12 +21,13 @@ pub struct ValidatedConsignment {
     /// (big-endian) byte order**, as `MerkleProofEntry.txid` on the wire.
     /// Deduplicated and sorted, so set comparisons are stable.
     pub witness_txids: Vec<[u8; 32]>,
-    /// The settling transition: the last burn of the last witness, or its last
-    /// transition. `None` only for a transfer with no bundles, which rgbstd
-    /// rejects.
-    pub last_transition: Option<TransitionSummary>,
-    /// Bitcoin txid of the witness tx that anchors the last transition, for
-    /// all transition types (burn included).
+    /// The settling transition: the one burn the inspected bundles hold, or the
+    /// last transition read when none burns. `None` only for a transfer with no
+    /// bundles, which rgbstd rejects.
+    pub settling_transition: Option<TransitionSummary>,
+    /// Bitcoin txid of the witness tx that anchors [`Self::settling_transition`],
+    /// for all transition types (burn included). The bundle of the settling
+    /// burn, which need not be the last bundle of the file.
     ///
     /// No PSBT check reads it: the mint signer runs no consensus and reads its
     /// tx from the PSBT and the fascia (`rgb::route`). The RGB->EVM `fundsOut`
@@ -35,7 +36,7 @@ pub struct ValidatedConsignment {
     ///
     /// A `bitcoin::Txid`, not display-order bytes, to prevent byte-order
     /// errors. `None` only for a consignment with no bundles.
-    pub last_witness_txid: Option<bitcoin::Txid>,
+    pub settling_witness_txid: Option<bitcoin::Txid>,
     /// OpId (32-byte commitment hash) of the settling transition, decoded
     /// from the inspection's hex id. rgb-lib refuses to inspect a transition
     /// stored under an id that is not its own commitment.
@@ -44,19 +45,21 @@ pub struct ValidatedConsignment {
     /// release names is the burn that consensus validated. `Some` for a
     /// settling transition of any type: the flow check refuses one that is not a burn.
     /// `None` only for a consignment with no bundles.
-    pub last_transfer_op_id: Option<[u8; 32]>,
+    pub settling_op_id: Option<[u8; 32]>,
     /// Witness txids that are **not mined**, in **display (big-endian) byte
     /// order**, as [`Self::witness_txids`].
     ///
     /// Empty after a passing validation: consensus refuses every unmined
     /// witness. `fundsOut` checks that again before it signs.
     pub non_mined_witness_txids: Vec<[u8; 32]>,
-    /// Every transition in the consignment, grouped by the witness tx that
-    /// commits it.
+    /// The transitions of the terminal bundles, grouped by the witness tx that
+    /// commits each one.
     ///
     /// One Bitcoin tx commits a bundle, which can hold many transitions. The
-    /// burn path reads [`Self::last_transition`], and the mint signer reads
-    /// the fascia. Only tests read this field.
+    /// inspection reads the bundles holding a terminal operation and skips the
+    /// ancestors, so this usually holds one group: the burn's. The burn path
+    /// reads [`Self::settling_transition`], and the mint signer reads the fascia.
+    /// Only tests read this field.
     pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
