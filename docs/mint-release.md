@@ -58,7 +58,6 @@ key, bucket, seed id and local paths with approved inputs:
     "KMS_S3_BUCKET": "example-mint-seeds",
     "KMS_S3_KEY": "mint/signer-1/seed.kms",
     "KMS_EXPECTED_EVM_ADDRESS": "",
-    "ELECTRUM_URL": "ssl://approved-electrum.example:60602",
     "EVM_RPC_TLS_CA_DER_FILE": "/etc/utexo/rpc-ca.der",
     "EVM_RPC_PATH_FILE": "/etc/utexo/private-rpc-path"
   }

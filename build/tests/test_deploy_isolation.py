@@ -412,6 +412,13 @@ elif name == 'ss':
             if mutation == 'duplicate': cfg.write_text('{"signer_role":"mint","signer_role":"burn"}')
             self.assert_mint_rejected_without_mutation('', DEPLOY_CONFIG_FILE=str(cfg))
 
+    def test_each_config_setting_is_read_and_the_doc_sample_passes(self):
+        script = HOST.read_text()
+        allowed = set(re.findall(r"'([A-Z0-9_]+)'", re.search(r'allowed = \{(.*?)\}', script, re.S)[1]))
+        self.assertEqual(sorted(n for n in allowed if not re.search(rf'\$\{{?{n}\b', script)), [])
+        sample = re.search(r'```json\n(.*?)\n```', (ROOT / 'docs/mint-release.md').read_text(), re.S)[1]
+        self.assertEqual(sorted(set(json.loads(sample)['settings']) - allowed), [])
+
     def test_installed_units_and_wrappers_match_the_standalone_files(self):
         for service in ('enclave', 'parent'):
             for path, standalone in (
