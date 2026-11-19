@@ -446,9 +446,7 @@ The mint signer checks no witness.
 7. **Freshness.** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old
    and at most `SPV_MAX_TIP_FUTURE_SECS` in the future (two hours each). This
    checks timestamps. It does not prove that the parent sent the network tip.
-8. **Network.** The consignment's `chain_net` must be the enclave's
-   `BITCOIN_NETWORK`.
-9. **Pins until the key is used.** The enclave records the hash and the
+8. **Pins until the key is used.** The enclave records the hash and the
    required depth of each block that a check used. It checks both again while
    it holds the lock of the header chain, and keeps the lock until it has
    signed. A changed hash, or a block shallower than its check required,
@@ -487,7 +485,7 @@ decisions.
 | # | Required | Enforcement |
 |---|----------|-------------|
 | P1 | Valid RGB consignment | Full RGB consensus validation by rgb-lib, under the pinned schema. |
-| P2 | Expected transition | The settling transition must be a `TS_BURN`: the one burn of the last witness bundle. Two burns there are refused. |
+| P2 | Expected transition | The settling transition must be a `TS_BURN`: the one burn of the bundles the inspection reads. Two burns are refused. |
 | P3 | Exact amount | `burnedAsset` must equal the calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | An allowed selector, a size limit, canonical ABI encoding, the destination-chain rule of the route, and a bounded deadline. |
 | P5 | Correct destination | The pinned chain and contract. The payee, `destinationChainId` and LayerZero `dstEid` must match the burn destination (`burnReason`). |

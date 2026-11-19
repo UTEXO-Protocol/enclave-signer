@@ -55,8 +55,8 @@ impl Network {
 
     /// The RGB chain-network a consignment of this network commits to.
     #[cfg(feature = "rgb-validation")]
-    pub fn chain_net(self) -> rgbstd::ChainNet {
-        use rgbstd::ChainNet;
+    pub fn chain_net(self) -> rgb_lib::ChainNet {
+        use rgb_lib::ChainNet;
         match self {
             Self::Mainnet => ChainNet::BitcoinMainnet,
             Self::Signet => ChainNet::BitcoinSignet,

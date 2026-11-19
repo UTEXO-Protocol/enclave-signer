@@ -1,12 +1,14 @@
+#[cfg(rgb_to_evm)]
+use rgb_lib::TypeOfTransition;
+
 use super::*;
 #[cfg(rgb_to_evm)]
-use crate::test_support::bfa_ids;
 #[cfg(rgb_to_evm)]
 use validation::{TransitionSummary, ValidatedConsignment};
 
 #[cfg(rgb_to_evm)]
 fn validated_consignment(
-    transition_type: u16,
+    transition_type: TypeOfTransition,
     asset_output_amount: u64,
     burned_asset_amount: Option<u64>,
     op_id: &str,
@@ -15,7 +17,7 @@ fn validated_consignment(
         contract_id: "rgb:test-asset".into(),
         chain_net: "bc:regtest".into(),
         witness_txids: vec![],
-        last_transition: Some(TransitionSummary {
+        settling_transition: Some(TransitionSummary {
             op_id: op_id.into(),
             transition_type,
             asset_output_amount,
@@ -23,9 +25,8 @@ fn validated_consignment(
             burned_asset_amount,
             burn_reason: None,
         }),
-        last_witness_txid: None,
-        last_transfer_witness_prevouts: vec![],
-        last_transfer_op_id: None,
+        settling_witness_txid: None,
+        settling_op_id: None,
         non_mined_witness_txids: vec![],
         // These cases do not reach the PSBT bind.
         transitions_by_witness: vec![],
@@ -38,7 +39,7 @@ fn validated_consignment(
 fn route_proof_uses_burn_metadata_amount() {
     let op_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let proof = route_proof_from_validated_consignment(&validated_consignment(
-        bfa_ids::TS_BURN,
+        TypeOfTransition::Burn,
         0,
         Some(700),
         op_id,
@@ -52,7 +53,7 @@ fn route_proof_uses_burn_metadata_amount() {
 #[test]
 fn route_proof_rejects_burn_without_burned_amount() {
     let err = route_proof_from_validated_consignment(&validated_consignment(
-        bfa_ids::TS_BURN,
+        TypeOfTransition::Burn,
         0,
         None,
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -67,7 +68,7 @@ fn route_proof_rejects_burn_without_burned_amount() {
 #[test]
 fn route_proof_rejects_a_transfer() {
     let op_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    let wrong = validated_consignment(bfa_ids::TS_TRANSFER, 700, None, op_id);
+    let wrong = validated_consignment(TypeOfTransition::Transfer, 700, None, op_id);
 
     let err = route_proof_from_validated_consignment(&wrong).unwrap_err();
     assert!(

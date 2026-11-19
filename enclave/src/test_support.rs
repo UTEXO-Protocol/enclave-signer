@@ -3,14 +3,6 @@
 #[cfg(feature = "rgb-validation")]
 pub(crate) mod bfa_consignment;
 
-/// BFA transition ids as the flat summary carries them. Only burn tests use them.
-#[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-pub(crate) mod bfa_ids {
-    pub const TS_TRANSFER: u16 = 10000;
-    pub const TS_BURN: u16 = 8010;
-    pub const TS_MINT: u16 = 8013;
-}
-
 /// A `uint256` ABI word holding `value`.
 #[cfg(feature = "rgb-validation")]
 pub(crate) fn abi_word(value: u64) -> [u8; 32] {

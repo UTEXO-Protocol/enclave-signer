@@ -6,13 +6,11 @@
 //! 1. **Coverage**: each witness txid of the consignment has a
 //!    `MerkleProofEntry` in the request, and no extra proofs exist (set
 //!    equality, both directions).
-//! 2. **Cross-network**: the consignment `chain_net` matches the compiled
-//!    network. This stops a regtest consignment on a mainnet enclave.
-//! 3. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
+//! 2. **Inclusion**: each Merkle proof gives the `merkle_root` of our stored
 //!    header at `block_height`. The path has at most `MAX_MERKLE_PATH_DEPTH`
 //!    siblings, `tx_position` is consumed by it, and no node on it is a
 //!    64-byte transaction (see `spv::merkle`).
-//! 4. **Confirmation depth**: every witness tx (not only the burn) is at least
+//! 3. **Confirmation depth**: every witness tx (not only the burn) is at least
 //!    `SPV_MIN_CONFIRMATIONS` deep (`BridgeConfig::spv_min_confirmations`).
 //!    Spec P8 requires this depth of each anchoring
 //!    transaction. On the testnets, min-difficulty blocks count too: testnets
@@ -40,11 +38,11 @@ use bitcoin::hashes::Hash;
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::spv::HeaderChain;
 #[cfg(rgb_to_evm)]
-use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError, Network};
+use crate::networks::rgb::spv::{verify_merkle_proof, MerkleError};
 #[cfg(rgb_to_evm)]
 use crate::proto::MerkleProofEntry;
 #[cfg(rgb_to_evm)]
-use rgbstd::vm::WitnessPos;
+use rgb_lib::WitnessPos;
 
 #[cfg(rgb_to_evm)]
 use super::validation::ValidatedConsignment;
@@ -89,7 +87,6 @@ pub fn validate_source_chain(
     })?;
 
     assert_chain_fresh(chain, now)?;
-    assert_chain_net(&validated.chain_net, chain.network())?;
     validate_spv_proofs(
         chain,
         &validated.witness_txids,
@@ -305,30 +302,6 @@ pub fn assert_chain_not_stale(
         )));
     }
 
-    Ok(())
-}
-
-/// Cross-network replay defense: the consignment `chain_net` prefix (for
-/// example `"sb"` for signet) must match the compiled network.
-///
-/// The expected value comes from `ChainNet::prefix()`, the same rgb-core
-/// code that makes the consignment string in `validation::consensus`
-/// (`transfer.genesis.chain_net.prefix()`). Thus the two sides use the same
-/// notation.
-///
-/// rgb-lib validation also checks this when `rgb-validation` is on. This SPV
-/// check stays, so a later change that loosens rgb-lib validation cannot let a
-/// wrong-network consignment reach signing.
-#[cfg(rgb_to_evm)]
-pub fn assert_chain_net(consignment_chain_net: &str, enclave_network: Network) -> Result<()> {
-    let chain_net = enclave_network.chain_net();
-    let expected = chain_net.prefix();
-    if consignment_chain_net != expected {
-        return Err(EnclaveError::Spv(format!(
-            "consignment chain_net {consignment_chain_net:?} does not match \
-             enclave network {enclave_network:?} (expected {expected:?})"
-        )));
-    }
     Ok(())
 }
 

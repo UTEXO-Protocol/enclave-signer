@@ -18,17 +18,19 @@ use rgb_lib::no_wallet::{
     ValidationOptions, WitnessValidationStatus,
 };
 use rgb_lib::BitcoinNetwork;
-use rgbstd::containers::{ConsignmentExt, FileContent, ResolveClaim, Transfer};
+use rgb_lib::{ConsignmentExt, FileContent, ResolveClaim, RgbTransfer as Transfer};
 
 use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
-use super::consignment::{extract_transition_summary, read_last_bundle, LastBundle};
+use super::consignment::extract_transition_summary;
 use super::cost::assert_bounded_for_rgb_lib;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
-use super::schema::{assert_bfa_genesis, reject_list};
+use super::schema::reject_list;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
 use super::witness::{ConfirmedWitnesses, OnChainResolver};
+use rgb_lib::TypeOfTransition;
+
 use crate::error::{EnclaveError, Result};
 
 impl RgbValidator {
@@ -53,7 +55,7 @@ impl RgbValidator {
         let (transfer, list) = load_bounded(consignment_bytes, lists)?;
         let resolvers = Resolvers {
             witnesses: OnChainResolver::new(&transfer, self.chain_net, witnesses),
-            anchors: bind.map(|bind| BindingResolver::new(&transfer, bind)),
+            anchors: bind.map(BindingResolver::new),
             list: list
                 .zip(lists.read)
                 .map(|(l, read)| ListResolver::new(l, read)),
@@ -147,7 +149,10 @@ fn load_bounded(
     // validation peak (`memory.rs`).
     let transfer = decoded.clone();
     drop(decoded);
-    assert_bfa_genesis(&transfer.genesis)?;
+    // The asset pin runs before the reject-list location is read, because the
+    // enclave reaches that address over the network: a foreign genesis must
+    // not choose it. The pin admits one contract id, hence one genesis, hence
+    // one schema. Refusing here also spares rgb-lib the work.
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
     let list = reject_list(&transfer.genesis)?;
     assert_bounded_for_rgb_lib(&transfer, bytes.len(), list.is_some())?;
@@ -218,29 +223,23 @@ fn summarize(
         .into_iter()
         .collect();
 
-    let last = read_last_bundle(transfer)?;
-    let last_transition = settling_summary(&transitions_by_witness, last.as_ref())?;
+    let settling = settling_summary(&transitions_by_witness)?;
+    let settling_op_id = settling
+        .as_ref()
+        .map(|(_, t)| bfa::decode_opid(&t.op_id))
+        .transpose()?;
+    let (settling_witness_txid, settling_transition) = match settling {
+        Some((txid, transition)) => (Some(txid), Some(transition)),
+        None => (None, None),
+    };
 
     Ok(ValidatedConsignment {
         contract_id: transfer.contract_id().to_string(),
         chain_net: transfer.genesis.chain_net.prefix().to_string(),
         witness_txids,
-        last_transition,
-        last_witness_txid: last.as_ref().map(|l| l.witness_txid),
-        last_transfer_witness_prevouts: last
-            .as_ref()
-            .map(|l| l.prevouts.clone())
-            .unwrap_or_default(),
-        last_closed_seals: last
-            .as_ref()
-            .map(|l| l.closed_seals.clone())
-            .unwrap_or_default(),
-        last_bundle_fully_disclosed: last.as_ref().is_some_and(|l| l.fully_disclosed),
-        last_mint_rights: last
-            .as_ref()
-            .map(|l| l.settling.mint_rights.clone())
-            .unwrap_or_default(),
-        last_transfer_op_id: last.as_ref().map(|l| l.settling.opid),
+        settling_witness_txid,
+        settling_transition,
+        settling_op_id,
         non_mined_witness_txids,
         transitions_by_witness,
         mint_locks,
@@ -269,42 +268,35 @@ fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32
     Ok(txids.into_iter().collect())
 }
 
-/// The flat summary of the settling transition, with the burn facts of the
-/// validated one. The two walks must name the same transition: a mismatch is
-/// an rgb-lib change or a bug, so no bind may mix the fields of two transitions.
+/// The settling transition and the witness tx that anchors it: the one burn of
+/// the inspected bundles.
+///
+/// The inspection reads the terminal bundles, and a burn is always terminal, so
+/// a burn anywhere in the consignment is here. Two of them are refused, since
+/// only one could ever be released, and the file order of their bundles must
+/// not decide which. Without a burn this settles on the last transition read,
+/// which every caller of the result refuses: the flow check states that a
+/// release needs a burn.
 pub(super) fn settling_summary(
     by_witness: &[(bitcoin::Txid, Vec<TransitionSummary>)],
-    last: Option<&LastBundle>,
-) -> Result<Option<TransitionSummary>> {
-    let Some(last) = last else {
-        return Ok(None);
+) -> Result<Option<(bitcoin::Txid, TransitionSummary)>> {
+    let read = || {
+        by_witness
+            .iter()
+            .flat_map(|(txid, summaries)| summaries.iter().map(move |t| (*txid, t)))
     };
-    let flat = by_witness
-        .last()
-        .filter(|(txid, _)| *txid == last.witness_txid)
-        .and_then(|(_, summaries)| {
-            summaries
-                .iter()
-                .find(|t| bfa::decode_opid(&t.op_id).is_ok_and(|id| id == last.settling.opid))
-        })
-        .ok_or_else(|| {
-            EnclaveError::CrossCheck(format!(
-                "consignment settling transition 0x{} is missing from the inspected last bundle \
-                 - refusing to sign",
-                hex::encode(last.settling.opid)
-            ))
-        })?;
-    if flat.transition_type != last.settling.transition_type {
-        return Err(EnclaveError::CrossCheck(format!(
-            "consignment settling transition type {} disagrees with the inspected type {}",
-            last.settling.transition_type, flat.transition_type
-        )));
+    let mut burns = read().filter(|(_, t)| t.transition_type == TypeOfTransition::Burn);
+    let first = burns.next();
+    let count = 1 + burns.count();
+    match first {
+        Some(burn) if count > 1 => Err(EnclaveError::CrossCheck(format!(
+            "the terminal operations carry {count} burns - a release settles exactly one, and \
+             {} is one of them",
+            burn.1.op_id
+        ))),
+        Some((txid, burn)) => Ok(Some((txid, burn.clone()))),
+        None => Ok(read().last().map(|(txid, t)| (txid, t.clone()))),
     }
-    Ok(Some(TransitionSummary {
-        burned_asset_amount: last.settling.burned_asset,
-        burn_reason: last.settling.burn_reason,
-        ..flat.clone()
-    }))
 }
 
 /// rgb-lib's refusal, with what it means for this enclave.

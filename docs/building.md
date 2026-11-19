@@ -115,9 +115,10 @@ ARN: a rebuild reproduces PCR0 without knowing them.
 
 **The asset and its schema.** The BFA schema id is
 `rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album`. The
-enclave refuses any other schema, so an asset issued on another schema does
-not validate. Use the id of a BFA contract issued on this schema, for the
-mint image and the burn image.
+enclave validates under those rules only. A contract id is the genesis
+commitment, so the `RGB_ASSET_ID` pin fixes the schema of the asset: an id of
+a contract on another schema does not validate. Use the id of a BFA contract
+issued on this schema, for the mint image and the burn image.
 
 **Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles for public
 Signet, with relay checks off. `BUILD_PROFILE=stage-mainnet` builds both roles
