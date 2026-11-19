@@ -442,7 +442,12 @@ The mint signer checks no witness.
    proof against the header the enclave serves from this chain: the path has
    at most 32 levels and uses up the transaction position, one bit per level.
    The enclave serves a header only when its block is at least
-   `SPV_MIN_CONFIRMATIONS` deep, and looks no transaction up. rgb-lib does not
+   `SPV_MIN_CONFIRMATIONS` deep, and looks no transaction up. One validation
+   reads one view of the chain: the enclave serves no header above the height
+   that was that deep when the validation began, which is also the safe height
+   rgb-lib checks each witness against, and it serves one header for a height.
+   A block that gets that deep, or a header that changes, while the validation
+   runs refuses it; the caller sends the request again. rgb-lib does not
    yet refuse a path on which a hashed node is a 64-byte transaction
    (CVE-2017-12842); that guard comes with the next rgb-ops release.
 7. **Freshness.** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old

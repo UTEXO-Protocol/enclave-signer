@@ -213,6 +213,52 @@ fn min_confirmations_is_a_parameter() {
     assert!(err.to_string().contains("(1 < 2)"), "got: {err}");
 }
 
+/// A block arrives while a validation runs and buries one more block. rgb-lib
+/// still checks witnesses against the safe height read at the start, so that
+/// block is not served: the headers and the safe height are one view.
+#[test]
+fn a_block_buried_after_the_validation_began_is_not_served() {
+    let headers = synth_headers(7);
+    let at_start = regtest_chain_with(headers[..6].to_vec());
+    let safe = safe_height(&at_start, MIN_CONFIRMATIONS);
+    assert_eq!(safe, NonZeroU32::new(1));
+    let now = regtest_chain_with(headers.clone());
+    assert_eq!(
+        buried_header(&now, 2, MIN_CONFIRMATIONS).unwrap(),
+        headers[1]
+    );
+
+    let err = buried_header_within(&now, 2, safe, MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("when this validation began"), "{err}");
+    assert_eq!(
+        buried_header_within(&now, 1, safe, MIN_CONFIRMATIONS).unwrap(),
+        headers[0]
+    );
+}
+
+#[test]
+fn nothing_is_served_when_no_block_was_buried_at_the_start() {
+    let now = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header_within(&now, 1, None, MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("when this validation began"), "{err}");
+}
+
+/// A block that is still shallow keeps its own reason, which names the depth.
+#[test]
+fn a_block_still_shallow_keeps_its_own_reason() {
+    let now = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header_within(&now, 3, NonZeroU32::new(2), MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("insufficient confirmations"), "{err}");
+}
+
 #[test]
 fn the_safe_height_is_the_highest_block_at_the_depth() {
     let chain = regtest_chain_with(synth_headers(10));

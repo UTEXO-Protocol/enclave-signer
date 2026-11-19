@@ -110,6 +110,26 @@ pub fn buried_header(chain: &HeaderChain, height: u32, min_confirmations: u32) -
     Ok(*header)
 }
 
+/// The header at `height`, if it is buried now and was when the validation
+/// began: at or below `safe`, the safe height read then. rgb-lib refuses a
+/// witness above that height, so no header above it is served either.
+#[cfg(rgb_to_evm)]
+pub fn buried_header_within(
+    chain: &HeaderChain,
+    height: u32,
+    safe: Option<NonZeroU32>,
+    min_confirmations: u32,
+) -> Result<Header> {
+    let header = buried_header(chain, height, min_confirmations)?;
+    if safe.is_none_or(|safe| height > safe.get()) {
+        return Err(EnclaveError::Spv(format!(
+            "witness proof: block_height {height} was not {min_confirmations} blocks deep when \
+             this validation began - retry"
+        )));
+    }
+    Ok(header)
+}
+
 /// The highest block that is `min_confirmations` deep, if the chain has one.
 #[cfg(rgb_to_evm)]
 pub fn safe_height(chain: &HeaderChain, min_confirmations: u32) -> Option<NonZeroU32> {

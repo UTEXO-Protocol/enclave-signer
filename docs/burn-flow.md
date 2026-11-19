@@ -221,8 +221,10 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   chain and looks no transaction up. rgb-lib counts a witness transaction as
   mined only when the SPV proof the consignment carries for it leads to the
   Merkle root of the header at its height (B3.3), and the enclave serves a
-  header only at the required depth (B3.4). A witness with no proof, or with
-  a proof that does not hold, is unmined and fails consensus.
+  header only at the required depth (B3.4), from one view of the chain for
+  the whole validation ([specification](tee-spec.md#7-bitcoin-header-chain-spv)).
+  A witness with no proof, or with a proof that does not hold, is unmined and
+  fails consensus.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 

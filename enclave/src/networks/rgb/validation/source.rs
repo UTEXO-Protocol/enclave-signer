@@ -48,9 +48,11 @@ pub fn validate_source(
         )
     })?;
 
+    let min_confirmations = ctx.bridge_config.spv_min_confirmations;
     let headers = EnclaveChain {
         chain: ctx.header_chain,
-        min_confirmations: ctx.bridge_config.spv_min_confirmations,
+        min_confirmations,
+        safe: spv_crosscheck::safe_height(&*lock_chain(ctx)?, min_confirmations),
     };
     let bind_asset = |contract_id: &str| {
         assert_asset_binding(
@@ -103,16 +105,20 @@ fn lock(chain: &std::sync::Mutex<HeaderChain>) -> Result<std::sync::MutexGuard<'
 struct EnclaveChain<'a> {
     chain: &'a std::sync::Mutex<HeaderChain>,
     min_confirmations: u32,
+    /// The safe height when the validation began. Headers are served up to it,
+    /// so they and the height rgb-lib checks witnesses against are one view.
+    safe: Option<std::num::NonZeroU32>,
 }
 
 #[cfg(rgb_to_evm)]
 impl BuriedHeaders for EnclaveChain<'_> {
     fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
-        spv_crosscheck::buried_header(&*lock(self.chain)?, height, self.min_confirmations)
+        let chain = lock(self.chain)?;
+        spv_crosscheck::buried_header_within(&chain, height, self.safe, self.min_confirmations)
     }
 
     fn safe_height(&self) -> Option<std::num::NonZeroU32> {
-        spv_crosscheck::safe_height(&*lock(self.chain).ok()?, self.min_confirmations)
+        self.safe
     }
 }
 

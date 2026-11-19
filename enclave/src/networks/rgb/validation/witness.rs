@@ -14,11 +14,12 @@ use crate::error::{EnclaveError, Result};
 
 /// The enclave's header chain, as consignment validation reads it.
 pub trait BuriedHeaders {
-    /// The header at `height`, if it is buried at the required depth.
-    /// `Err` says why not: no header there, or too shallow.
+    /// The header at `height`, if it is buried at the required depth and at or
+    /// below the safe height. `Err` says why not.
     fn buried_header(&self, height: u32) -> Result<Header>;
 
-    /// The highest block buried at the required depth, if any is.
+    /// The highest block buried at the required depth when the validation
+    /// began, if any was. It does not move while the validation runs.
     fn safe_height(&self) -> Option<NonZeroU32>;
 }
 
@@ -84,9 +85,20 @@ impl ResolveWitness for HeadersOnlyResolver<'_> {
             .headers
             .buried_header(height.get())
             .map_err(|failure| WitnessResolverError::ResolverIssue(None, self.refuse(failure)))?;
-        self.served
-            .borrow_mut()
-            .insert(height.get(), header.block_hash().to_byte_array());
+        // Each proof is checked against the header served here, so a height has one header
+        // for the whole validation.
+        let hash = header.block_hash().to_byte_array();
+        let first = *self.served.borrow_mut().entry(height.get()).or_insert(hash);
+        if first != hash {
+            let reason = self.refuse(EnclaveError::Spv(format!(
+                "witness proof: the enclave chain held block {} at height {height} earlier in \
+                 this validation and holds {} there now - the header chain changed during \
+                 validation, refusing to sign",
+                hex::encode(first),
+                hex::encode(hash)
+            )));
+            return Err(WitnessResolverError::ResolverIssue(None, reason));
+        }
         Ok(header)
     }
 
@@ -100,3 +112,6 @@ impl ResolveWitness for HeadersOnlyResolver<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
