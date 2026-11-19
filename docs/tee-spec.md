@@ -406,6 +406,7 @@ so a gRPC caller identifies the finality wait by its fixed prefix.
 | 6 | `GetClone`: replayed attestation nonce | `ALREADY_EXISTS` |
 | 7 | `GetClone`: seed-export cap reached | `RESOURCE_EXHAUSTED` |
 | 8 | The deposit receipt is above the `safe` or `finalized` head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
+| 9 | The header chain has not reached a block that a proof names, or has not buried it at the required depth. The caller waits for the signer's headers and retries. The message ends with `[needs tip N, has tip M]`: the tip height the enclave needs, a lower bound, and the one it has. A block at or below the checkpoint is code 3, since no header comes for it. | `FAILED_PRECONDITION`, with the fixed prefix `bitcoin headers pending:` |
 
 ## 7. Bitcoin header chain (SPV)
 
@@ -437,12 +438,19 @@ The mint signer checks no witness.
 5. **Rate.** At most `max_headers_per_submit` headers per call and
    `max_headers_per_minute` per fixed 60-second window. Submitted headers
    count before validation, invalid ones included.
-6. **Inclusion.** A request carries one Merkle proof for each witness
-   transaction of its consignment: none missing, none extra, no duplicate.
-   The path has at most `MAX_MERKLE_PATH_DEPTH` (32) levels and uses up the
-   transaction position, one bit per level. A path on which a hashed node is
-   a 64-byte transaction is refused (CVE-2017-12842). The block must be at
-   least `SPV_MIN_CONFIRMATIONS` deep.
+6. **Inclusion.** A consignment carries one SPV proof for each of its witness
+   transactions, and a witness without one is refused. rgb-lib checks each
+   proof against the header the enclave serves from this chain: the path has
+   at most 32 levels and uses up the transaction position, one bit per level.
+   The enclave serves a header only when its block is at least
+   `SPV_MIN_CONFIRMATIONS` deep, and looks no transaction up. One validation
+   reads one view of the chain: the enclave serves no header above the height
+   that was that deep when the validation began, which is also the safe height
+   rgb-lib checks each witness against, and it serves one header for a height.
+   A block that gets that deep, or a header that changes, while the validation
+   runs refuses it; the caller sends the request again. rgb-lib does not
+   yet refuse a path on which a hashed node is a 64-byte transaction
+   (CVE-2017-12842); that guard comes with the next rgb-ops release.
 7. **Freshness.** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old
    and at most `SPV_MAX_TIP_FUTURE_SECS` in the future (two hours each). This
    checks timestamps. It does not prove that the parent sent the network tip.

@@ -45,9 +45,9 @@ behind the burn from the mints in the history. It reads no Bitcoin indexer.
 It reads the EVM RPC only for an asset whose genesis names a reject list
 (Stage 3b).
 
-RGB consensus counts a witness transaction as mined only when a Merkle proof
-of the request places it at least `SPV_MIN_CONFIRMATIONS` deep in the
-enclave's own header chain. An unmined witness anywhere in the history fails
+RGB consensus counts a witness transaction as mined only when the SPV proof
+the consignment carries for it places it at least `SPV_MIN_CONFIRMATIONS`
+deep in the enclave's own header chain. An unmined witness anywhere in the history fails
 consensus. So two conflicting transfers of the same units cannot both back a
 burn: only one of them can be mined.
 
@@ -136,9 +136,7 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 ### Stage 1 - Is the request within the limits?
 
 - **B1.1** The consignment must be at most `max_consignment_bytes`.
-- **B1.2** The request must carry at most `max_merkle_proofs` proofs, of at
-  most `max_total_proof_bytes` together.
-- **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check
+- **B1.2** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
@@ -219,10 +217,14 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   found. What a bundle may conceal is therefore a transition the release does
   not pay for, and a concealed burn beside the settling one gets no release of
   its own.
-- **B2.9** The witness resolver counts a witness transaction as mined only
-  through the Merkle proof that the request carries for it. That proof must
-  pass B3.3 and B3.4 first. A witness with no such proof is unmined and fails
-  consensus. A proof inside the consignment is never used.
+- **B2.9** The witness resolver serves block headers of the enclave's own
+  chain and looks no transaction up. rgb-lib counts a witness transaction as
+  mined only when the SPV proof the consignment carries for it leads to the
+  Merkle root of the header at its height (B3.3), and the enclave serves a
+  header only at the required depth (B3.4), from one view of the chain for
+  the whole validation ([specification](tee-spec.md#7-bitcoin-header-chain-spv)).
+  A witness with no proof, or with a proof that does not hold, is unmined and
+  fails consensus.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 
@@ -232,14 +234,21 @@ gives the header rules and the limits of each network.
 
 - **B3.1** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old and at
   most `SPV_MAX_TIP_FUTURE_SECS` in the future.
-- **B3.2** The Merkle proofs must be exactly the set of witness transactions
-  in the consignment. None missing. None extra. No duplicates.
-- **B3.3** Each Merkle path must be at most `MAX_MERKLE_PATH_DEPTH` levels.
-  Each proof must verify against the header that the enclave stores at that
-  height. The path must use up the transaction position, one bit per level.
-  No node hashed on the path may be a 64-byte transaction (CVE-2017-12842).
+- **B3.2** Validation must place every witness transaction of the
+  consignment in a block. None missing.
+- **B3.3** Each SPV proof must verify against the header that the enclave
+  stores at its height. rgb-lib makes this check: the path has at most 32
+  levels and must use up the transaction position, one bit per level. It does
+  not yet refuse a path node that is a 64-byte transaction (CVE-2017-12842);
+  that guard comes with the next rgb-ops release.
 - **B3.4** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
-  blocks deep.
+  blocks deep. Validation reads headers under short locks, so afterwards the
+  enclave confirms under one lock that every header a proof was checked
+  against is still in the chain at that depth. A block above the enclave's
+  tip, or one not yet that deep, is a wait and not a refusal: the enclave
+  answers with its own
+  [error code](tee-spec.md#6-requests), and the caller retries once the
+  signer has the headers.
 - **B3.5** The enclave records the heights, hashes and required depths that
   it used. Just before it uses the key, it checks that no hash changed and
   that no block is shallower than its check required.

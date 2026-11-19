@@ -23,6 +23,39 @@ fn finality_wire_code_survives_changed_diagnostic_wording() {
 }
 
 #[test]
+fn header_wait_wire_code_survives_changed_diagnostic_wording() {
+    for diagnostic in [
+        "spv: witness proof: no header at height 107 (chain tip = 104) [needs tip 112, has tip 104]",
+        "The header chain is behind the proof [needs tip 112, has tip 104]",
+    ] {
+        let status = ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+            code: 9,
+            message: diagnostic.into(),
+        });
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert_eq!(
+            status.message(),
+            format!("bitcoin headers pending: {diagnostic}")
+        );
+        assert!(status
+            .message()
+            .ends_with("[needs tip 112, has tip 104]"));
+    }
+}
+
+#[test]
+fn validation_errors_do_not_become_header_waits() {
+    // Even a familiar diagnostic is not a wait without wire code 9.
+    let diagnostic = "spv: witness proof: no header at height 0 (chain tip = 104)";
+    let status = ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+        code: 3,
+        message: diagnostic.into(),
+    });
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(status.message(), diagnostic);
+}
+
+#[test]
 fn validation_errors_do_not_become_finality_waits() {
     // Even a familiar diagnostic is not retryable without wire code 8.
     for diagnostic in [

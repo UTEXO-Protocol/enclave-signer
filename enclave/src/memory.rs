@@ -12,7 +12,7 @@
 //! The first term covers most parsers that grow with their input: each byte
 //! costs at most `REQUEST_MEMORY_FACTOR` bytes of heap. The second term
 //! covers the protobuf decode. A repeated element can be 2 bytes on the wire
-//! and about 80 bytes in memory. So `framing::check_request_shape` counts the
+//! and about 38 bytes in memory. So `framing::check_request_shape` counts the
 //! elements before the decode and refuses more than `MAX_WIRE_ELEMENTS`.
 //!
 //! A few parsers take more than the factor on the densest inputs measured.
@@ -75,8 +75,7 @@
 //! - the EVM RPC CA certificate (`MAX_EVM_RPC_CA_DER_BYTES`),
 //! - the `SetEndpoints` strings (`MAX_ENDPOINT_STRING_BYTES`),
 //! - an imported mnemonic, on `allow-seed-import` builds only,
-//! - headers (`max_headers_per_submit`) and Merkle paths
-//!   (`MAX_MERKLE_PATH_DEPTH`).
+//! - headers (`max_headers_per_submit`).
 //!
 //! The other byte fields are fixed-size, refused before use, never read, or
 //! read once into a buffer of their own size (the encrypted clone seed). The
@@ -146,8 +145,8 @@ pub const REQUEST_MEMORY_FACTOR: usize = 24;
 
 /// Heap one decoded protobuf element may use beyond its wire bytes. This
 /// covers the struct in its vector, a vector header, and the copy a growing
-/// vector holds during a move. The measured value is about 80 bytes per
-/// occurrence, in a frame of [`MAX_WIRE_ELEMENTS`] occurrences
+/// vector holds during a move. The measured value is about 38 bytes per
+/// occurrence, in a frame of [`MAX_WIRE_ELEMENTS`] empty headers
 /// (`framing::tests::the_wire_element_limit_is_exact`).
 pub const WIRE_ELEMENT_BYTES: usize = 128;
 

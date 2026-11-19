@@ -18,8 +18,8 @@ pub struct ValidatedConsignment {
     /// Used to reject cross-network replay (for example regtest on mainnet).
     pub chain_net: String,
     /// Bitcoin txids that anchor each transition bundle, in **display
-    /// (big-endian) byte order**, as `MerkleProofEntry.txid` on the wire.
-    /// Deduplicated and sorted, so set comparisons are stable.
+    /// (big-endian) byte order**. Deduplicated and sorted, so set comparisons
+    /// are stable.
     pub witness_txids: Vec<[u8; 32]>,
     /// The settling transition: the one burn the inspected bundles hold, or the
     /// last transition read when none burns. `None` only for a transfer with no
@@ -46,12 +46,11 @@ pub struct ValidatedConsignment {
     /// settling transition of any type: the flow check refuses one that is not a burn.
     /// `None` only for a consignment with no bundles.
     pub settling_op_id: Option<[u8; 32]>,
-    /// Witness txids that are **not mined**, in **display (big-endian) byte
-    /// order**, as [`Self::witness_txids`].
-    ///
-    /// Empty after a passing validation: consensus refuses every unmined
-    /// witness. `fundsOut` checks that again before it signs.
-    pub non_mined_witness_txids: Vec<[u8; 32]>,
+    /// The block each witness tx is mined in, one per [`Self::witness_txids`]
+    /// entry and in its order. The SPV proof of the consignment was checked
+    /// against the header named here; the chain checks confirm it is still in
+    /// the enclave chain, deep enough, before the key is used.
+    pub witness_blocks: Vec<WitnessBlock>,
     /// The transitions of the terminal bundles, grouped by the witness tx that
     /// commits each one.
     ///
@@ -79,6 +78,16 @@ impl ValidatedConsignment {
             .flat_map(|(_, transitions)| transitions.iter())
             .collect()
     }
+}
+
+/// Where validation placed one witness tx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessBlock {
+    /// Display-order bytes, as in `witness_txids`.
+    pub txid: [u8; 32],
+    pub height: u32,
+    /// Hash of the header the SPV proof was checked against, in internal byte order.
+    pub hash: [u8; 32],
 }
 
 /// Flat summary of one RGB state transition, read by rgb-lib's inspection

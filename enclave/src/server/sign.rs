@@ -204,12 +204,11 @@ pub(super) fn handle_sign(
             // reverts on a mismatch. This check fails earlier with a reason.
             crate::networks::evm::validation::validate_burn_id(&ctx.bridge_config, release)?;
             #[cfg(feature = "rgb-validation")]
-            if let SourceNetwork::RgbSource(rgb_source) = source_ref {
+            if matches!(source_ref, SourceNetwork::RgbSource(_)) {
                 apply_funds_out_binding(
                     ctx,
                     release,
                     source_validated.rgb_consignment.as_ref(),
-                    &rgb_source.merkle_proofs,
                     &chain_pins,
                     destination
                         .burn_destination
@@ -276,7 +275,6 @@ fn apply_funds_out_binding(
     ctx: &ServerContext,
     release: &crate::networks::evm::validation::ReleaseIdentity,
     validated: Option<&crate::networks::rgb::validation::ValidatedConsignment>,
-    merkle_proofs: &[crate::proto::MerkleProofEntry],
     pins: &crate::networks::rgb::spv_crosscheck::ChainPins,
     burn_destination: Option<&crate::networks::evm::burn_destination::BurnDestinationRecord>,
 ) -> Result<()> {
@@ -312,7 +310,6 @@ fn apply_funds_out_binding(
         crosscheck::verify_btc_relay_agreement(
             release,
             validated,
-            merkle_proofs,
             &chain,
             pins,
             ctx.bridge_config.btc_relay_mode,
@@ -839,7 +836,7 @@ mod key_not_ready {
     }
 
     /// Control: with a ready key a valid burn passes the mint-anchor bind and
-    /// stops at the witnesses: with no SPV proof, none is mined to consensus.
+    /// stops at the witnesses: the enclave chain holds no header for their proofs.
     #[test]
     fn a_ready_key_lets_a_valid_burn_reach_the_witness_check() {
         let (consignment, asset_id) = valid_burn();
@@ -847,10 +844,8 @@ mod key_not_ready {
         let Response::Error(err) = &response else {
             panic!("expected the witness refusal, got {response:?}");
         };
-        assert!(
-            err.message.contains("not confirmed on chain"),
-            "{response:?}"
-        );
+        assert!(err.message.contains("no header at height"), "{response:?}");
+        assert_eq!(err.code, 9, "a header wait has its own wire code");
         assert_eq!(
             rpc_calls, 0,
             "a burn must not read the EVM chain: {response:?}"
@@ -874,7 +869,7 @@ mod funds_out_depth {
     use crate::config::{BridgeConfig, BtcRelayMode};
     use crate::networks::evm::validation::ReleaseIdentity;
     use crate::networks::rgb::spv_crosscheck::ChainPins;
-    use crate::networks::rgb::validation::ValidatedConsignment;
+    use crate::networks::rgb::validation::{ValidatedConsignment, WitnessBlock};
     use crate::state::EnclaveState;
     use alloy_primitives::U256;
     use bitcoin::hashes::Hash;
@@ -904,7 +899,8 @@ mod funds_out_depth {
     /// Runs the binding with the witness 2 deep. The relay checks pass in
     /// `none` mode, so a pass on depth stops at the missing transition.
     fn bind_at(min_confirmations: u32) -> String {
-        let (chain, proofs) = crate::test_support::chain_with_witnesses(&[WITNESS], 1);
+        let chain = crate::test_support::chain_with_witnesses(&[WITNESS], 1);
+        let hash = chain.lock().unwrap().hash_at(1).unwrap();
         let cfg = BridgeConfig {
             btc_relay_mode: BtcRelayMode::None,
             spv_min_confirmations: min_confirmations,
@@ -916,18 +912,16 @@ mod funds_out_depth {
         let validated = ValidatedConsignment {
             witness_txids: vec![WITNESS],
             settling_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+            witness_blocks: vec![WitnessBlock {
+                txid: WITNESS,
+                height: 1,
+                hash,
+            }],
             ..Default::default()
         };
-        apply_funds_out_binding(
-            &ctx,
-            &release(),
-            Some(&validated),
-            &proofs,
-            &ChainPins::new(),
-            None,
-        )
-        .unwrap_err()
-        .to_string()
+        apply_funds_out_binding(&ctx, &release(), Some(&validated), &ChainPins::new(), None)
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]

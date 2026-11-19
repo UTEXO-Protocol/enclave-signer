@@ -71,7 +71,6 @@ See the
 | `ENCLAVE_LISTEN_ADDR` | `127.0.0.1:5000` | TCP listen address, on a build without `vsock` only. |
 | `RUST_LOG` | unset | Log filter. The enclave always turns `alloy_transport_http` logs off: they can hold the full RPC URL. |
 | `MAX_CONSIGNMENT_BYTES` | the image value of `max_consignment_bytes` | It can only lower the image value of that [runtime limit](runtime-limits.md); a larger value stops the boot. Unset, zero or a non-number gives the default. No supplied image sets it. |
-| `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES` | the image values of `max_merkle_proofs` and `max_total_proof_bytes` | Each replaces the image value of its runtime limit with any positive number, lower or higher. Unset, zero or a non-number gives the default. No supplied image sets them. |
 | `CLONE_EXPORT_SOFT_CAP` | unset | Seed exports of one enclave process before a warning. It blocks nothing. |
 | `CLONE_EXPORT_HARD_CAP` | unset | Seed exports of one enclave process. A restart resets the count. Unset or zero means no cap. A set value that is not an unsigned integer stops the boot. No supplied image sets it. |
 | `UTEXO_CLONING_SECRET` | unset | For dev images: the donor cloning secret, read from the image env at boot. Every build without `kms-persistence` reads it, a release burn image too, so no release recipe may set it. |

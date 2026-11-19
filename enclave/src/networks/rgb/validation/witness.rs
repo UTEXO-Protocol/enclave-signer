@@ -1,89 +1,105 @@
-//! The adapter that feeds enclave-verified SPV positions to rgb-lib.
+//! The adapter that lets rgb-lib place each witness from the SPV proof the
+//! consignment carries, against the enclave's own header chain.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
-use bitcoin::{Transaction, Txid};
-use rgb_lib::{
-    ChainNet, ResolveWitness, RgbTransfer as Transfer, WitnessOrd, WitnessPos,
-    WitnessResolverError, WitnessStatus,
-};
+use bitcoin::block::Header;
+use bitcoin::hashes::Hash as _;
+use bitcoin::Txid;
+use rgb_lib::{ChainNet, ResolveWitness, WitnessResolverError, WitnessStatus};
 
-/// The on-chain status of witness txs.
-pub trait ConfirmedWitnesses {
-    /// The block position of `tx` if it is mined at the required depth.
-    /// `Err` says why not: unknown, unmined, too shallow or a failed lookup.
-    fn confirmed(&self, tx: &Transaction) -> std::result::Result<WitnessPos, String>;
+use crate::error::{EnclaveError, Result};
+
+/// The enclave's header chain, as consignment validation reads it.
+pub trait BuriedHeaders {
+    /// The header at `height`, if it is buried at the required depth and at or
+    /// below the safe height. `Err` says why not.
+    fn buried_header(&self, height: u32) -> Result<Header>;
+
+    /// The highest block buried at the required depth when the validation
+    /// began, if any was. It does not move while the validation runs.
+    fn safe_height(&self) -> Option<NonZeroU32>;
 }
 
-/// Positions already proven, as the burn path's verified SPV proofs give them.
-impl ConfirmedWitnesses for BTreeMap<Txid, WitnessPos> {
-    fn confirmed(&self, tx: &Transaction) -> std::result::Result<WitnessPos, String> {
-        self.get(&tx.compute_txid()).copied().ok_or_else(|| {
-            "no merkle proof in the request proves it mined at the required depth against the \
-             enclave header chain"
-                .into()
-        })
-    }
-}
-
-type Answer = std::result::Result<WitnessPos, String>;
-
-/// Feeds verified positions to rgb-lib. Header lookups stay disabled so a
-/// proof in the consignment cannot substitute for enclave verification.
-pub(super) struct OnChainResolver<'a> {
-    txes: BTreeMap<Txid, Transaction>,
+/// Serves block headers and looks no transaction up, so a witness is mined
+/// only where its SPV proof holds against a header of the enclave's chain.
+pub(super) struct HeadersOnlyResolver<'a> {
     chain_net: ChainNet,
-    chain: &'a dyn ConfirmedWitnesses,
-    /// Answers given so far, so each witness costs at most one lookup.
-    answers: RefCell<BTreeMap<Txid, Answer>>,
+    headers: &'a dyn BuriedHeaders,
+    /// Hash of each header served, by height: what the proofs were checked against.
+    served: RefCell<BTreeMap<u32, [u8; 32]>>,
+    /// The first refusal, with its own reason.
+    failure: RefCell<Option<EnclaveError>>,
 }
 
-impl<'a> OnChainResolver<'a> {
-    /// Combines consignment transactions with their verified positions.
-    pub(super) fn new(
-        transfer: &Transfer,
-        chain_net: ChainNet,
-        chain: &'a dyn ConfirmedWitnesses,
-    ) -> Self {
-        let txes: BTreeMap<Txid, Transaction> = transfer
-            .bundles
-            .iter()
-            .map(|wb| (wb.witness_id(), wb.tx.clone()))
-            .collect();
+impl<'a> HeadersOnlyResolver<'a> {
+    pub(super) fn new(chain_net: ChainNet, headers: &'a dyn BuriedHeaders) -> Self {
         Self {
-            txes,
             chain_net,
-            chain,
-            answers: RefCell::new(BTreeMap::new()),
+            headers,
+            served: RefCell::new(BTreeMap::new()),
+            failure: RefCell::new(None),
         }
     }
 
-    fn answer(&self, txid: Txid, tx: &Transaction) -> Answer {
-        if let Some(known) = self.answers.borrow().get(&txid) {
-            return known.clone();
-        }
-        let answer = self.chain.confirmed(tx);
-        self.answers.borrow_mut().insert(txid, answer.clone());
-        answer
+    /// The hash of the header served at `height`, in internal byte order.
+    pub(super) fn served_hash(&self, height: u32) -> Option<[u8; 32]> {
+        self.served.borrow().get(&height).copied()
+    }
+
+    /// Our own refusal behind an rgb-lib error.
+    pub(super) fn take_failure(&self) -> Option<EnclaveError> {
+        self.failure.borrow_mut().take()
+    }
+
+    fn refuse(&self, failure: EnclaveError) -> String {
+        let reason = failure.to_string();
+        self.failure.borrow_mut().get_or_insert(failure);
+        reason
     }
 }
 
-impl ResolveWitness for OnChainResolver<'_> {
+impl ResolveWitness for HeadersOnlyResolver<'_> {
+    /// Reached for a witness with no proof, or with one that does not hold.
     fn resolve_witness(
         &self,
         witness_id: Txid,
     ) -> std::result::Result<WitnessStatus, WitnessResolverError> {
-        let Some(tx) = self.txes.get(&witness_id) else {
-            return Ok(WitnessStatus::Unresolved);
-        };
-        let pos = self.answer(witness_id, tx).map_err(|reason| {
-            WitnessResolverError::ResolverIssue(
-                Some(witness_id),
-                format!("witness tx is not confirmed on chain: {reason}"),
-            )
-        })?;
-        Ok(WitnessStatus::Resolved(tx.clone(), WitnessOrd::Mined(pos)))
+        let reason = self.refuse(EnclaveError::Spv(format!(
+            "witness tx {witness_id} is not proven on chain: the consignment carries no SPV \
+             proof of it that holds against the enclave header chain"
+        )));
+        Err(WitnessResolverError::ResolverIssue(
+            Some(witness_id),
+            reason,
+        ))
+    }
+
+    fn get_block_header(
+        &self,
+        height: NonZeroU32,
+    ) -> std::result::Result<Header, WitnessResolverError> {
+        let header = self
+            .headers
+            .buried_header(height.get())
+            .map_err(|failure| WitnessResolverError::ResolverIssue(None, self.refuse(failure)))?;
+        // Each proof is checked against the header served here, so a height has one header
+        // for the whole validation.
+        let hash = header.block_hash().to_byte_array();
+        let first = *self.served.borrow_mut().entry(height.get()).or_insert(hash);
+        if first != hash {
+            let reason = self.refuse(EnclaveError::Spv(format!(
+                "witness proof: the enclave chain held block {} at height {height} earlier in \
+                 this validation and holds {} there now - the header chain changed during \
+                 validation, refusing to sign",
+                hex::encode(first),
+                hex::encode(hash)
+            )));
+            return Err(WitnessResolverError::ResolverIssue(None, reason));
+        }
+        Ok(header)
     }
 
     fn check_chain_net(
@@ -96,3 +112,6 @@ impl ResolveWitness for OnChainResolver<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

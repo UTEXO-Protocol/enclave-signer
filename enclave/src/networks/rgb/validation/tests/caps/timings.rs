@@ -23,7 +23,7 @@ fn measure(name: &str, bytes: Vec<u8>, confirmed: bool, expected_gate: bool) {
     let chain = if confirmed {
         mined(&witness_ids(&bytes))
     } else {
-        BTreeMap::new()
+        MinedBlocks::of(&[])
     };
     let (err, validation) = time_rgb_lib(&bytes, &chain);
     if confirmed {

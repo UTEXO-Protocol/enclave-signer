@@ -7,9 +7,13 @@ use super::asset_bind::{assert_asset_binding, AssetBindMode};
 use super::reject_list::ListAccess;
 #[cfg(rgb_to_evm)]
 use super::types::ValidatedConsignment;
+#[cfg(rgb_to_evm)]
+use super::witness::BuriedHeaders;
 use crate::config::BridgeConfig;
 use crate::error::EnclaveError;
 use crate::error::Result;
+#[cfg(rgb_to_evm)]
+use crate::networks::rgb::spv::HeaderChain;
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::spv_crosscheck;
 #[cfg(rgb_to_evm)]
@@ -23,9 +27,10 @@ use std::time::SystemTime;
 
 /// Validates the source payload, asset binding, mint backing and RGB history.
 ///
-/// Every witness needs a proof at `SPV_MIN_CONFIRMATIONS` depth in the
-/// enclave's header chain, with those blocks pinned until signing. An unmined
-/// or shallow witness rejects the history.
+/// Every witness needs an SPV proof in the consignment that holds against a
+/// header `SPV_MIN_CONFIRMATIONS` deep in the enclave's chain, with those
+/// blocks pinned until signing. An unproven or shallow witness rejects the
+/// history.
 ///
 /// The asset is bound before external reads. For listed assets, rgb-lib also
 /// checks the burn and companion transfers for rejected ancestry.
@@ -43,13 +48,11 @@ pub fn validate_source(
         )
     })?;
 
-    let proven = {
-        let chain = lock_chain(ctx)?;
-        spv_crosscheck::proven_witnesses(
-            &chain,
-            &source.merkle_proofs,
-            ctx.bridge_config.spv_min_confirmations,
-        )?
+    let min_confirmations = ctx.bridge_config.spv_min_confirmations;
+    let headers = EnclaveChain {
+        chain: ctx.header_chain,
+        min_confirmations,
+        safe: spv_crosscheck::safe_height(&*lock_chain(ctx)?, min_confirmations),
     };
     let bind_asset = |contract_id: &str| {
         assert_asset_binding(
@@ -66,14 +69,13 @@ pub fn validate_source(
     // A burn consignment contains its full mint ancestry. Each mint leaves an
     // anchor that only a bound lock confirms.
     let validated =
-        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &proven, &lists)?;
+        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &headers, &lists)?;
 
     {
         let chain = lock_chain(ctx)?;
         spv_crosscheck::validate_source_chain(
             &chain,
             Some(&validated),
-            &source.merkle_proofs,
             SystemTime::now(),
             ctx.chain_pins,
             ctx.bridge_config.spv_min_confirmations,
@@ -86,10 +88,38 @@ pub fn validate_source(
 #[cfg(rgb_to_evm)]
 fn lock_chain<'a>(
     ctx: &'a ValidationContext<'_>,
-) -> Result<std::sync::MutexGuard<'a, crate::networks::rgb::spv::HeaderChain>> {
-    ctx.header_chain
+) -> Result<std::sync::MutexGuard<'a, HeaderChain>> {
+    lock(ctx.header_chain)
+}
+
+#[cfg(rgb_to_evm)]
+fn lock(chain: &std::sync::Mutex<HeaderChain>) -> Result<std::sync::MutexGuard<'_, HeaderChain>> {
+    chain
         .lock()
         .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))
+}
+
+/// The enclave chain behind short locks, so header submits go on while
+/// rgb-lib validates. `validate_source_chain` then confirms one view.
+#[cfg(rgb_to_evm)]
+struct EnclaveChain<'a> {
+    chain: &'a std::sync::Mutex<HeaderChain>,
+    min_confirmations: u32,
+    /// The safe height when the validation began. Headers are served up to it,
+    /// so they and the height rgb-lib checks witnesses against are one view.
+    safe: Option<std::num::NonZeroU32>,
+}
+
+#[cfg(rgb_to_evm)]
+impl BuriedHeaders for EnclaveChain<'_> {
+    fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+        let chain = lock(self.chain)?;
+        spv_crosscheck::buried_header_within(&chain, height, self.safe, self.min_confirmations)
+    }
+
+    fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+        self.safe
+    }
 }
 
 /// Total size cap (`MAX_CONSIGNMENT_BYTES`, set by the operator). It runs
@@ -117,25 +147,6 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
         ));
     }
     assert_consignment_size(&source.consignment, cfg, "RGB source")?;
-    let limits = crate::limits::in_force(cfg);
-    if source.merkle_proofs.len() as u64 > limits.max_merkle_proofs {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source carries too many merkle proofs: {} (max {})",
-            source.merkle_proofs.len(),
-            limits.max_merkle_proofs
-        )));
-    }
-    let total_proof_bytes: usize = source
-        .merkle_proofs
-        .iter()
-        .map(|p| p.txid.len() + p.merkle_path.iter().map(|s| s.len()).sum::<usize>())
-        .sum();
-    if total_proof_bytes as u64 > limits.max_total_proof_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source merkle proofs too large in aggregate: {total_proof_bytes} bytes (max {})",
-            limits.max_total_proof_bytes
-        )));
-    }
     // Integrity, NOT authorization. The listener controls both `consignment`
     // and `consignment_hash`, so a match only proves the wire copy is intact.
     // Authorization comes from RGB validation, SPV anchoring, and the bind of

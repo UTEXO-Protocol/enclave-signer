@@ -5,6 +5,7 @@
 pub(super) mod bfa_consignment;
 
 use std::io::Cursor;
+use std::num::NonZeroU32;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -13,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, Eip712Domain, SolCall, SolStruct, SolValue};
+use amplify::confinement::Confined;
 use attestation_verify::EvmFinalityTag;
 use bfa_consignment::{History, Issue};
 use bitcoin::block::{Header, Version};
@@ -20,6 +22,7 @@ use bitcoin::consensus::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{BlockHash, CompactTarget, Network, TxMerkleNode};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+use rgbstd::validation::SpvProof;
 use utexo_bridge_enclave::config::BridgeConfig;
 use utexo_bridge_enclave::error::Result;
 use utexo_bridge_enclave::framing;
@@ -32,8 +35,8 @@ use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
 use utexo_bridge_enclave::proto::{
-    BurnDestination, EnclaveRequest, EnclaveResponse, EvmDestination, LzReleaseParams,
-    MerkleProofEntry, RgbSource, SignRequest,
+    BurnDestination, EnclaveRequest, EnclaveResponse, EvmDestination, LzReleaseParams, RgbSource,
+    SignRequest,
 };
 use utexo_bridge_enclave::server::{self, ServerContext};
 use utexo_bridge_enclave::state::EnclaveState;
@@ -154,7 +157,8 @@ fn merkle_parent(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
     sha256d::Hash::hash(&pair).to_byte_array()
 }
 
-fn chain(history: &History) -> (HeaderChain, Vec<MerkleProofEntry>, Bytes) {
+/// The chain, the SPV proof of each bundle's witness in it, and the relay proof.
+fn chain(history: &History) -> (HeaderChain, Vec<SpvProof>, Bytes) {
     assert_eq!(
         history.bundles.len(),
         2,
@@ -189,18 +193,14 @@ fn chain(history: &History) -> (HeaderChain, Vec<MerkleProofEntry>, Bytes) {
             let left = [0xa1; 32];
             let right = merkle_parent([0xa2; 32], [0xa3; 32]);
             let root = merkle_parent(merkle_parent(left, txid.to_byte_array()), right);
-            let merkle_path = [left, right]
-                .into_iter()
-                .map(|mut sibling| {
-                    sibling.reverse();
-                    sibling.to_vec()
-                })
-                .collect();
-            proofs.push(MerkleProofEntry {
-                txid: hex::decode(txid.to_string()).unwrap(),
-                block_height: height,
-                tx_position: 1,
-                merkle_path,
+            proofs.push(SpvProof {
+                block_height: NonZeroU32::new(height).unwrap(),
+                pos: 1,
+                merkle: Confined::try_from(vec![
+                    TxMerkleNode::from_byte_array(left),
+                    TxMerkleNode::from_byte_array(right),
+                ])
+                .unwrap(),
             });
             TxMerkleNode::from_byte_array(root)
         } else {
@@ -364,14 +364,18 @@ impl Fixture {
             vec![units.outpoint],
             vec![bfa_consignment::dust(0x04)],
         );
-        let (chain, merkle_proofs, proof) = chain(&history);
-        let consignment = history.consignment();
+        let (chain, spv_proofs, proof) = chain(&history);
+        // The consignment proves each witness in the block `chain` mined it in.
+        let mut transfer = history.as_transfer();
+        for (bundle, spv_proof) in transfer.bundles.iter_mut().zip(spv_proofs) {
+            bundle.spv_proof = Some(spv_proof);
+        }
+        let consignment = bfa_consignment::save(&transfer);
         let source = RgbSource {
             consignment_valid: false, // The host flag cannot authorize this burn.
             asset_id: history.contract_id.to_string(),
             consignment_hash: keccak256(&consignment).to_vec(),
             consignment,
-            merkle_proofs,
             commission: 0,
         };
         let mut params = FundsOutParams {

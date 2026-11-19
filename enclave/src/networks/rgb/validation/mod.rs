@@ -41,6 +41,8 @@ pub use reject_list::{
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
 pub use source::validate_source;
-pub use types::{OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment};
+pub use types::{
+    OutputSeal, TransitionOutput, TransitionSummary, ValidatedConsignment, WitnessBlock,
+};
 pub use validator::RgbValidator;
-pub use witness::ConfirmedWitnesses;
+pub use witness::BuriedHeaders;

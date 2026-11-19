@@ -2,7 +2,6 @@
 //! the generated consignments (`test_support::bfa_consignment`).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 
 use amplify::ByteArray;
 use bitcoin::hashes::Hash as _;
@@ -11,7 +10,6 @@ use rgb_lib::no_wallet::{RgbOutputInfo, RgbTransitionInfo};
 use rgb_lib::{Assignment, TypeOfTransition};
 use rgbstd::containers::FileContent;
 use rgbstd::contract::AllocatedState;
-use rgbstd::vm::WitnessPos;
 use rgbstd::{BuilderSeal, GraphSeal, RevealedValue};
 #[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
@@ -30,6 +28,7 @@ use crate::config::BridgeConfig;
 use crate::error::Result;
 use crate::networks::rgb::bfa_schema;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
+use crate::test_support::MinedBlocks;
 
 /// The Bridge the generated assets name, and its chain.
 const BRIDGE: [u8; 20] = [0xB1; 20];
@@ -179,16 +178,9 @@ fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
         .unwrap_or_default()
 }
 
-/// `txids` mined deep enough, at increasing heights.
-fn mined(txids: &[bitcoin::Txid]) -> BTreeMap<bitcoin::Txid, WitnessPos> {
-    txids
-        .iter()
-        .zip(100u32..)
-        .map(|(txid, height)| {
-            let height = std::num::NonZeroU32::new(height).unwrap();
-            (*txid, WitnessPos::bitcoin(height, 1_700_000_000).unwrap())
-        })
-        .collect()
+/// `txids` mined deep enough, one per block, as the generator proves them.
+fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
+    MinedBlocks::of(txids)
 }
 
 fn error_of(result: Result<ValidatedConsignment>) -> String {
@@ -1648,11 +1640,27 @@ fn mint_after_a_rights_send() -> Vec<u8> {
     history.consignment()
 }
 
-/// Every witness but `unmined` mined.
-fn validate_without(bytes: &[u8], unmined: bitcoin::Txid) -> Result<ValidatedConsignment> {
-    let mut chain = mined(&witness_ids(bytes));
-    chain.remove(&unmined);
-    validator().validate_consignment(bytes, Some(&bind_all), &chain, &open_lists())
+/// `bytes` with each bundle's SPV proof passed through `change`.
+fn reproven(
+    bytes: &[u8],
+    mut change: impl FnMut(bitcoin::Txid, &mut Option<rgbstd::validation::SpvProof>),
+) -> Vec<u8> {
+    let mut transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes)).unwrap();
+    for bundle in transfer.bundles.iter_mut() {
+        change(bundle.witness_id(), &mut bundle.spv_proof);
+    }
+    gen::save(&transfer)
+}
+
+/// Every witness is mined, but the consignment proves all except `unproven`.
+fn validate_without(bytes: &[u8], unproven: bitcoin::Txid) -> Result<ValidatedConsignment> {
+    let chain = mined(&witness_ids(bytes));
+    let bytes = reproven(bytes, |txid, proof| {
+        if txid == unproven {
+            *proof = None;
+        }
+    });
+    validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists())
 }
 
 #[cfg(rgb_to_evm)]
@@ -1667,7 +1675,20 @@ fn a_fully_mined_history_passes() {
     let bytes = burn_after_transfer();
     let validated = validate(&bytes).expect("every witness is mined");
     assert_eq!(validated.witness_txids.len(), 3);
-    assert!(validated.non_mined_witness_txids.is_empty());
+    // Each witness is placed in the block the generator proved it in.
+    let chain = mined(&witness_ids(&bytes));
+    let mut heights = Vec::new();
+    for (block, txid) in validated
+        .witness_blocks
+        .iter()
+        .zip(&validated.witness_txids)
+    {
+        assert_eq!(block.txid, *txid);
+        let header = chain.headers[&block.height];
+        assert_eq!(block.hash, header.block_hash().to_byte_array());
+        heights.push(block.height);
+    }
+    assert_eq!(heights, vec![1, 2, 3]);
 }
 
 /// Two conflicting off-chain transfers are each valid alone. Only the mined
@@ -1677,7 +1698,7 @@ fn burn_path_refuses_an_unmined_transfer_in_the_history() {
     let bytes = burn_after_transfer();
     let transfer = witness_ids(&bytes)[1];
     let err = error_of(validate_without(&bytes, transfer));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains("not proven on chain"), "{err}");
     assert!(err.contains(&transfer.to_string()), "{err}");
 }
 
@@ -1694,50 +1715,81 @@ fn burn_path_refuses_an_unmined_burn_witness() {
     let bytes = burn_bytes();
     let burn = *witness_ids(&bytes).last().unwrap();
     let err = error_of(validate_without(&bytes, burn));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains("not proven on chain"), "{err}");
 }
 
-/// A proof the consignment carries does not stand in for the enclave's own:
-/// the resolver serves no headers, so a witness it cannot prove is refused.
+/// The enclave checks a proof only against a header of its own chain.
 #[test]
-fn a_consignment_spv_proof_does_not_prove_a_witness() {
+fn a_proof_at_a_height_the_enclave_has_no_header_for_is_refused() {
+    let bytes = burn_bytes();
+    let chain = mined(&witness_ids(&bytes));
+    let burn = *witness_ids(&bytes).last().unwrap();
+    let bytes = reproven(&bytes, |txid, proof| {
+        if txid == burn {
+            proof.as_mut().unwrap().block_height = std::num::NonZeroU32::new(900_000).unwrap();
+        }
+    });
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("no header at height 900000"), "{err}");
+}
+
+/// A proof that does not lead to the enclave's header proves nothing, and the
+/// enclave looks no transaction up in its place.
+#[test]
+fn a_proof_that_does_not_hold_against_the_enclave_header_is_refused() {
     use bitcoin::hashes::Hash;
-    let (mut history, _) = burn_history(Some(MINTED), Some(gen::burn_reason_for(PAYEE)));
-    for bundle in &mut history.bundles {
-        bundle.spv_proof = Some(rgbstd::validation::SpvProof {
-            block_height: std::num::NonZeroU32::new(900_000).unwrap(),
-            pos: 1,
-            merkle: amplify::confinement::Confined::try_from(vec![
+    let bytes = burn_bytes();
+    let chain = mined(&witness_ids(&bytes));
+    let burn = *witness_ids(&bytes).last().unwrap();
+    let bytes = reproven(&bytes, |txid, proof| {
+        if txid == burn {
+            let proof = proof.as_mut().unwrap();
+            proof.pos = 1;
+            proof.merkle = amplify::confinement::Confined::try_from(vec![
                 bitcoin::TxMerkleNode::from_byte_array([0x5a; 32]),
             ])
-            .unwrap(),
-        });
-    }
-    let bytes = history.consignment();
-    let burn = *witness_ids(&bytes).last().unwrap();
-    let err = error_of(validate_without(&bytes, burn));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+            .unwrap();
+        }
+    });
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("not proven on chain"), "{err}");
     assert!(err.contains(&burn.to_string()), "{err}");
-    // No header, so rgb-consensus never checks the carried proof itself.
-    use rgbstd::validation::{ResolveWitness, WitnessResolverError};
-    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes)).unwrap();
-    let chain = mined(&witness_ids(&bytes));
-    let resolver = OnChainResolver::new(&transfer, rgbstd::ChainNet::BitcoinRegtest, &chain);
-    let header = resolver.get_block_header(std::num::NonZeroU32::new(900_000).unwrap());
-    assert!(
-        matches!(header, Err(WitnessResolverError::NotSupported)),
-        "{header:?}"
-    );
 }
 
-/// A failing witness source, binder or list reader refuses with its own
+/// A header source that serves a block above its safe height: rgb-lib's own
+/// depth warning refuses the history.
+#[test]
+fn a_witness_above_the_safe_height_is_refused() {
+    struct Shallow(MinedBlocks);
+    impl BuriedHeaders for Shallow {
+        fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+            self.0.buried_header(height)
+        }
+        fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+            let safe = self.0.safe_height()?.get() - 1;
+            std::num::NonZeroU32::new(safe)
+        }
+    }
+    let bytes = burn_bytes();
+    let chain = Shallow(mined(&witness_ids(&bytes)));
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("UnsafeHistory"), "{err}");
+}
+
+/// A failing header source, binder or list reader refuses with its own
 /// error; none of them is ever read as a pass.
 #[test]
 fn a_failing_resolver_refuses_with_its_own_error() {
     struct Down;
-    impl ConfirmedWitnesses for Down {
-        fn confirmed(&self, _: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-            Err("witness source down".into())
+    impl BuriedHeaders for Down {
+        fn buried_header(&self, _: u32) -> Result<bitcoin::block::Header> {
+            Err(not_ready("headers"))
+        }
+        fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+            None
         }
     }
     let binder = |_: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
@@ -1749,8 +1801,11 @@ fn a_failing_resolver_refuses_with_its_own_error() {
     let bytes = listed_burn().0.consignment();
     let chain = mined(&witness_ids(&bytes));
     let v = validator();
-    let err = error_of(v.validate_consignment(&bytes, Some(&bind_all), &Down, &open_lists()));
-    assert!(err.contains("witness source down"), "{err}");
+    let headers_down = v.validate_consignment(&bytes, Some(&bind_all), &Down, &open_lists());
+    assert_own_error(
+        headers_down.expect_err("the header source is down"),
+        "headers",
+    );
     let binder_down = v.validate_consignment(&bytes, Some(&binder), &chain, &open_lists());
     assert_own_error(binder_down.expect_err("the binder is down"), "binder");
     let reader_down = v.validate_consignment(&bytes, Some(&bind_all), &chain, &read_failing);
@@ -1768,22 +1823,26 @@ fn mint_after_two_rights_sends() -> Vec<u8> {
     history.consignment()
 }
 
-/// A witness source that records each witness it is asked about.
+/// A header source that records each height it is asked for.
 struct Recording<'a> {
-    chain: &'a BTreeMap<bitcoin::Txid, WitnessPos>,
-    asked: RefCell<Vec<bitcoin::Txid>>,
+    chain: &'a MinedBlocks,
+    asked: RefCell<Vec<u32>>,
 }
 
-impl ConfirmedWitnesses for Recording<'_> {
-    fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-        self.asked.borrow_mut().push(tx.compute_txid());
-        self.chain.confirmed(tx)
+impl BuriedHeaders for Recording<'_> {
+    fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+        self.asked.borrow_mut().push(height);
+        self.chain.buried_header(height)
+    }
+
+    fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+        self.chain.safe_height()
     }
 }
 
-/// The burn path proves each witness itself: its proofs are checked anyway.
+/// The burn path places each witness from its own proof and header.
 #[test]
-fn burn_path_asks_about_every_witness() {
+fn burn_path_reads_a_header_for_every_witness() {
     let bytes = mint_after_two_rights_sends();
     let ids = witness_ids(&bytes);
     let chain = mined(&ids);
@@ -1795,9 +1854,8 @@ fn burn_path_asks_about_every_witness() {
         .validate_consignment(&bytes, Some(&bind_all), &source, &open_lists())
         .unwrap();
     let mut asked = source.asked.into_inner();
-    asked.sort();
-    let mut all = ids.clone();
-    all.sort();
+    asked.sort_unstable();
+    let all: Vec<u32> = (1..=u32::try_from(ids.len()).unwrap()).collect();
     assert_eq!(asked, all);
 }
 
@@ -1916,7 +1974,6 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
         asset_id: asset_id.into(),
         consignment_hash: keccak(&consignment),
         consignment,
-        merkle_proofs: vec![],
         commission: 0,
     }
 }
@@ -1924,10 +1981,7 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
 #[cfg(rgb_to_evm)]
 mod source_payload {
     use super::*;
-    use crate::config::{
-        DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS, DEFAULT_MAX_TOTAL_PROOF_BYTES,
-    };
-    use crate::proto::MerkleProofEntry;
+    use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
 
     #[test]
     fn accepts_valid_consignment_hash() {
@@ -1971,40 +2025,6 @@ mod source_payload {
     }
 
     #[test]
-    fn rejects_too_many_merkle_proofs() {
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = (0..DEFAULT_MAX_MERKLE_PROOFS + 1)
-            .map(|_| MerkleProofEntry::default())
-            .collect();
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too many merkle proofs"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn rejects_aggregate_proof_bytes_over_budget() {
-        let per_proof = 32 + 32 * 32;
-        let n = DEFAULT_MAX_TOTAL_PROOF_BYTES / per_proof + 1;
-        assert!(
-            n <= DEFAULT_MAX_MERKLE_PROOFS,
-            "would trip the count cap first"
-        );
-        let proof = MerkleProofEntry {
-            txid: vec![0u8; 32],
-            block_height: 0,
-            tx_position: 0,
-            merkle_path: vec![vec![0u8; 32]; 32],
-        };
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = vec![proof; n];
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too large in aggregate"), "unexpected: {err}");
-    }
-
-    #[test]
     fn rejects_empty_consignment_even_with_valid_flag() {
         let mut source = burn_source("rgb:any");
         source.consignment = vec![];
@@ -2024,8 +2044,8 @@ mod source_payload {
     }
 }
 
-/// The source path end to end: the SPV proofs, consensus over them, the asset
-/// bind, then proof coverage.
+/// The source path end to end: consensus over the consignment's SPV proofs,
+/// the asset bind, then the chain check of the witness blocks.
 #[cfg(rgb_to_evm)]
 mod source_path {
     use super::*;
@@ -2048,23 +2068,35 @@ mod source_path {
         ids.iter().copied().map(display_bytes).collect()
     }
 
-    /// Runs `source` with a proof, 6 deep, for every witness.
+    /// The chain with every witness of `consignment` mined, 6 deep.
+    fn chain_of(consignment: &[u8]) -> Mutex<HeaderChain> {
+        crate::test_support::chain_with_witnesses(&display(&witness_ids(consignment)), 5)
+    }
+
+    /// Runs `source` with every witness mined, 6 deep.
     fn run(
         source: &crate::proto::RgbSource,
         config: &BridgeConfig,
     ) -> Result<ValidatedConsignment> {
-        run_proving(source, config, &display(&witness_ids(&source.consignment)))
+        run_on(source, config, &chain_of(&source.consignment))
     }
 
-    /// Runs `source` with a proof, 6 deep, for each of `proven` only.
-    fn run_proving(
+    /// Runs `source` with every witness mined, 6 deep, and the proof of
+    /// `unproven` taken out of the consignment.
+    fn run_without_proof(
         source: &crate::proto::RgbSource,
         config: &BridgeConfig,
-        proven: &[[u8; 32]],
+        unproven: bitcoin::Txid,
     ) -> Result<ValidatedConsignment> {
-        let (chain, proofs) = crate::test_support::chain_with_witnesses(proven, 5);
+        let chain = chain_of(&source.consignment);
+        let consignment = reproven(&source.consignment, |txid, proof| {
+            if txid == unproven {
+                *proof = None;
+            }
+        });
         let source = crate::proto::RgbSource {
-            merkle_proofs: proofs,
+            consignment_hash: keccak(&consignment),
+            consignment,
             ..source.clone()
         };
         run_on(&source, config, &chain)
@@ -2105,20 +2137,23 @@ mod source_path {
         let id = asset_id();
         let validated = run(&burn_source(&id), &pinned_config(&id)).unwrap();
         assert_eq!(validated.contract_id, id);
-        assert!(validated.non_mined_witness_txids.is_empty());
+        assert_eq!(
+            validated.witness_blocks.len(),
+            validated.witness_txids.len()
+        );
     }
 
-    /// A history witness without a proof is unmined to consensus, which
-    /// refuses before any later check.
+    /// A history witness the consignment does not prove is unmined to
+    /// consensus, which refuses before any later check.
     #[test]
     fn refuses_a_history_witness_without_a_proof() {
         let id = asset_id();
         let source = burn_source(&id);
         let ids = witness_ids(&source.consignment);
-        let err = run_proving(&source, &pinned_config(&id), &display(&ids[1..]))
+        let err = run_without_proof(&source, &pinned_config(&id), ids[0])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not confirmed on chain"), "{err}");
+        assert!(err.contains("not proven on chain"), "{err}");
         assert!(err.contains(&ids[0].to_string()), "{err}");
     }
 
@@ -2133,10 +2168,10 @@ mod source_path {
             ..burn_source(&id)
         };
         let ids = witness_ids(&bytes);
-        let err = run_proving(&source, &pinned_config(&id), &display(&[ids[0], ids[2]]))
+        let err = run_without_proof(&source, &pinned_config(&id), ids[1])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not confirmed on chain"), "{err}");
+        assert!(err.contains("not proven on chain"), "{err}");
         assert!(err.contains(&ids[1].to_string()), "{err}");
     }
 
@@ -2173,10 +2208,9 @@ mod source_path {
     #[test]
     fn confirmation_depth_comes_from_the_config() {
         let id = asset_id();
-        let mut source = burn_source(&id);
+        let source = burn_source(&id);
         let witnesses = validate(&source.consignment).unwrap().witness_txids;
-        let (chain, proofs) = crate::test_support::chain_with_witnesses(&witnesses, 1);
-        source.merkle_proofs = proofs;
+        let chain = crate::test_support::chain_with_witnesses(&witnesses, 1);
 
         let mut config = pinned_config(&id);
         config.spv_min_confirmations = 2;
@@ -2204,12 +2238,7 @@ mod source_path {
             consignment: bytes.clone(),
             ..burn_source(&id)
         };
-        let (chain, proofs) =
-            crate::test_support::chain_with_witnesses(&display(&witness_ids(&bytes)), 5);
-        let source = crate::proto::RgbSource {
-            merkle_proofs: proofs,
-            ..source
-        };
+        let chain = chain_of(&bytes);
         (source, chain, id)
     }
 
@@ -2613,9 +2642,8 @@ fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
 }
 
 /// A burn with a history of 10_000 transfers and an SPV proof on every bundle
-/// passes with the default limits: consensus, the request limits
-/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`) and
-/// the frame. Each proof has 13 siblings, the depth of a full mainnet block.
+/// passes with the default limits: consensus, `MAX_CONSIGNMENT_BYTES` and the
+/// frame. Each proof has 13 siblings, the depth of a full mainnet block.
 ///
 /// Ignored by default because it is slow in a debug build.
 #[cfg(rgb_to_evm)]
@@ -2626,7 +2654,7 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
     use crate::proto::enclave_request::Request;
     use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-    use crate::proto::{EnclaveRequest, EvmDestination, MerkleProofEntry, SignRequest};
+    use crate::proto::{EnclaveRequest, EvmDestination, SignRequest};
     use bitcoin::hashes::Hash;
 
     const TRANSFERS: usize = 10_000;
@@ -2662,17 +2690,6 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     let source = crate::proto::RgbSource {
         consignment_hash: keccak(&consignment),
         consignment: consignment.clone(),
-        merkle_proofs: validated
-            .witness_txids
-            .iter()
-            .enumerate()
-            .map(|(i, txid)| MerkleProofEntry {
-                txid: txid.to_vec(),
-                block_height: 900_000 + i as u32,
-                tx_position: 4_000,
-                merkle_path: vec![vec![0x5a; 32]; DEPTH],
-            })
-            .collect(),
         ..burn_source("rgb:any")
     };
     validate_source_payload(&source, &cfg).expect("the source passes the default caps");

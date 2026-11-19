@@ -16,6 +16,5 @@ conn::tests::
 egress::tests::
 networks::rgb::spv::chain::tests::
 networks::rgb::spv::checkpoint::tests::
-networks::rgb::spv::merkle::tests::
 networks::rgb::spv::validation::tests::
 server::rate_limit::tests::

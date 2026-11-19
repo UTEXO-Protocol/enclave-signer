@@ -27,7 +27,6 @@ fn validated_consignment(
         }),
         settling_witness_txid: None,
         settling_op_id: None,
-        non_mined_witness_txids: vec![],
         // These cases do not reach the PSBT bind.
         transitions_by_witness: vec![],
         ..Default::default()
