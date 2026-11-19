@@ -419,16 +419,18 @@ fn schema_message(schema: Schema) -> Option<&'static str> {
         Schema::RgbSource => Some("RgbSource"),
         Schema::MerkleProofEntry => Some("MerkleProofEntry"),
         Schema::SubmitHeaders => Some("SubmitHeadersRequest"),
+        Schema::SetEndpoints => Some("SetEndpointsRequest"),
         Schema::Leaf => None,
     }
 }
 
-const WALKED: [Schema; 5] = [
+const WALKED: [Schema; 6] = [
     Schema::Request,
     Schema::Sign,
     Schema::RgbSource,
     Schema::MerkleProofEntry,
     Schema::SubmitHeaders,
+    Schema::SetEndpoints,
 ];
 
 fn schema_of(message: &str) -> Schema {

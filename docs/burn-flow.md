@@ -322,6 +322,9 @@ Both routes (`fundsOut` and `lzFundsOut`), in this order:
   `abi.encode(bytes32[] operationIds)`. It must be canonical. The ids must be
   in strictly ascending order, so no id repeats. They must equal, as a set,
   the deposits of Stage 2 (B2.6). An empty list is refused.
+- **B5.10** LayerZero route only: the pair (`destinationChainId`, `dstEid`)
+  must be one of the pairs set at launch. Another pair is refused, and so is
+  every pair when no pair is set. The attested policy does not commit the pairs.
 
 Only a V1 burn can leave through LayerZero, because only V1 names a chain.
 The burn does not name `minAmountLD`: it is checked against the request only

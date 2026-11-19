@@ -405,6 +405,11 @@ impl Fixture {
         // SPV supplies every witness.
         launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap());
         launch.evm_rpc_client = Some(Box::new(EmptyRejectList(list_reads.clone())));
+        // The operator's route list holds the pair of the LayerZero burn.
+        launch.endpoints.lz_routes = vec![utexo_bridge_enclave::config::LzRoute {
+            chain_id: Route::LayerZero.chain(),
+            eid: Route::LayerZero.eid(),
+        }];
         Self {
             ctx,
             source,

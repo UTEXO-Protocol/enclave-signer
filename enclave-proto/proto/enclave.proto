@@ -456,6 +456,16 @@ message SetEndpointsRequest {
   // Absolute ASCII path, e.g. /v3/<API_KEY>. Empty means /. Only letters, digits and /-._~: no authority,
   // query, fragment, escape or dot segment. May contain credentials: it is not logged or attested.
   string evm_rpc_path = 9;
+  // The only (destination chain ID, LayerZero endpoint ID) pairs that a release may name. A
+  // LayerZero release whose pair is not listed is refused. Empty refuses every LayerZero release.
+  // At most 64 pairs, without a repeat of a chain ID or an EID.
+  repeated LzRoute lz_routes = 10;
+}
+
+// One destination network of a LayerZero release.
+message LzRoute {
+  uint64 chain_id = 1; // The destinationChainId of the burn record. Above 0.
+  uint32 eid = 2; // The LayerZero endpoint ID (dstEid) of that chain. Above 0.
 }
 
 message SetEndpointsResponse {}

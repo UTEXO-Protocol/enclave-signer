@@ -97,10 +97,11 @@ environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 | `--kms-key-arn` / `KMS_KEY_ARN` | mint | Full ARN of the symmetric KMS key. An alias is refused. |
 | `--kms-region` / `KMS_REGION` | mint | Commercial AWS region of the key. |
 | `--kms-seed-id` / `KMS_SEED_ID` | mint | Stable signer id, used in the KMS encryption context and sent in each storage request. It must equal the `KMS_SEED_ID` of the parent. |
+| `--lz-routes` / `LZ_ROUTES` | burn, optional | The `CHAIN_ID:EID` pairs that a LayerZero release may name. Repeat the flag, or separate the pairs with commas in the variable. At most 64 pairs, each number above 0, and no chain ID or EID twice. An empty value is no pair. Without a pair the enclave refuses every LayerZero release. A mint signer refuses a pair. Not attested. `deploy-host.sh` takes `LZ_ROUTES` and writes it to the enclave env file. |
 | `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | mint, optional | The identity pin: 40 hex digits, `0x` optional. Empty for the first bootstrap only ([kms-persistence.md](kms-persistence.md)). |
 
 **What is attested.** A `Production` policy commits the EVM RPC host, the
-SHA-256 of the CA and the four KMS values. It does not commit the port or the
+SHA-256 of the CA, the four KMS values. It does not commit the LayerZero routes: they are a launch value that the operator can change with a new launch, without a new image or new keys. The enclave enforces them, but a verifier cannot see them. It does not commit the port or the
 RPC path. A `Development` policy commits none of these. A verifier compares
 the committed values with independently approved ones
 ([pubkey-attestation.md](pubkey-attestation.md)).
@@ -155,7 +156,7 @@ The TLS and ACL settings are in
 | `GRPC_HOST` | `127.0.0.1` | Bind address. The deploy script uses the private EC2 address. |
 | `GRPC_PORT` | `5000` | gRPC port. Deployments use 50051 to 50053. |
 | `GRPC_MAX_CONCURRENT` | `128` | Requests in progress over all connections. The parent refuses a request above the limit and does not queue it. `0` acts as `1`. |
-| `GRPC_MAX_CONCURRENT_SIGN` | `8` | `Sign` requests in progress. A `Sign` above the limit gets `UNAVAILABLE` at once. `0` acts as `1`. The `MemoryMax` of the parent unit counts on the default. |
+| `GRPC_MAX_CONCURRENT_SIGN` | `8` | `Sign` requests in progress. A request keeps its slot until its enclave exchange ends, also after the caller cancels or the RPC times out. A `Sign` above the limit gets `UNAVAILABLE` at once. `0` acts as `1`. The `MemoryMax` of the parent unit counts on the default. |
 | `GRPC_MAX_CONCURRENT_PER_CONN` | `32` | Requests in progress on one connection, and the HTTP/2 stream limit. `0` acts as `1`. |
 | `GRPC_REQUEST_TIMEOUT_SECS` | `120` | Longest run of one gRPC request. Keep it above the request deadline of the enclave plus `ENCLAVE_WAIT_MARGIN_SECS`. The parent logs an error when the deadline in force reaches it. `0` acts as `1`. |
 | `GRPC_CLONE_MAX_PER_MINUTE` | `30` | `Clone` calls per minute for all clients, 1 to 10000. A value out of range, a non-number or an empty value stops the parent at boot. A parent without mTLS does not read it and has no budget. |

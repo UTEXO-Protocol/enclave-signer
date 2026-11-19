@@ -22,6 +22,9 @@
 #   MINT_MODE=recovery (default) or explicit bootstrap for an absent object.
 # DEPLOY_CONFIG_FILE optionally loads approved per-CID JSON (see docs/mint-release.md).
 # Mint requires the matching KMS proxy provisioned before deployment.
+# LayerZero routes, set on each burn enclave at start (docs/configuration.md):
+#   LZ_ROUTES=<CHAIN_ID:EID,CHAIN_ID:EID,...>
+# Without it the enclave refuses every LayerZero release.
 # ENCLAVE_LIMITS_FILE names the runtime limits file that each launch sends
 # (docs/runtime-limits.md). The script writes it into enclave-<CID>.env. It stops
 # before it changes anything when that file exists and ubuntu cannot read it.
@@ -53,7 +56,7 @@ allowed = {
     'KMS_S3_BUCKET', 'KMS_S3_KEY', 'HEADER_ELECTRUM_URL',
     'EVM_RPC_TLS_CA_DER_FILE', 'EVM_RPC_PATH_FILE', 'ENCLAVE_LIMITS_FILE',
     'ENCLAVE_CPU_COUNT', 'ENCLAVE_MEMORY', 'GRPC_REQUEST_TIMEOUT_SECS',
-    'GRPC_MAX_CONCURRENT_SIGN',
+    'GRPC_MAX_CONCURRENT_SIGN', 'LZ_ROUTES',
 }
 try:
     if not os.path.isabs(path):
@@ -142,6 +145,11 @@ EVM_RPC_TLS_CA_DER_FILE="${EVM_RPC_TLS_CA_DER_FILE:-}"
 EVM_RPC_PATH_FILE="${EVM_RPC_PATH_FILE:-}"
 if [ -n "$EVM_RPC_PATH_FILE" ] && [ ! -s "$EVM_RPC_PATH_FILE" ]; then
   echo "EVM_RPC_PATH_FILE must name a file that is not empty" >&2
+  exit 1
+fi
+LZ_ROUTES="${LZ_ROUTES:-}"
+if [ -n "$LZ_ROUTES" ] && ! [[ "$LZ_ROUTES" =~ ^[1-9][0-9]*:[1-9][0-9]*(,[1-9][0-9]*:[1-9][0-9]*)*$ ]]; then
+  echo "LZ_ROUTES must be CHAIN_ID:EID pairs separated by commas" >&2
   exit 1
 fi
 KMS_KEY_ARN="${KMS_KEY_ARN:-}"
@@ -771,6 +779,7 @@ KMS_KEY_ARN=$KMS_KEY_ARN
 KMS_REGION=$KMS_REGION
 KMS_SEED_ID=$KMS_SEED_ID
 KMS_EXPECTED_EVM_ADDRESS=$KMS_EXPECTED_EVM_ADDRESS
+LZ_ROUTES=$LZ_ROUTES
 EOF
 for CID in "${CIDS[@]}"; do
   cat > "/etc/utexo/parent-$CID.env" <<EOF

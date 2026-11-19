@@ -631,6 +631,51 @@ pub struct Endpoints {
     /// `None` without `kms-persistence`, and in an import-only build with no
     /// KMS values.
     pub kms: Option<crate::policy::KmsPin>,
+    /// The (chain ID, EID) pairs that a LayerZero release may name.
+    pub lz_routes: Vec<LzRoute>,
+}
+
+/// One destination network of a LayerZero release: the `destinationChainId`
+/// of a burn record and the `dstEid` that it must come with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LzRoute {
+    pub chain_id: u64,
+    pub eid: u32,
+}
+
+/// Most LayerZero routes that `SetEndpoints` takes.
+pub const MAX_LZ_ROUTES: usize = 64;
+
+/// Checks the LayerZero routes of `SetEndpoints`: at most [`MAX_LZ_ROUTES`], a
+/// chain ID and an EID above 0, and no repeat of either. A repeat would let
+/// one chain have two EIDs, or two chains share one.
+fn parse_lz_routes(routes: &[crate::proto::LzRoute]) -> std::result::Result<Vec<LzRoute>, String> {
+    if routes.len() > MAX_LZ_ROUTES {
+        return Err(format!(
+            "lz_routes has {} entries; the limit is {MAX_LZ_ROUTES}",
+            routes.len()
+        ));
+    }
+    let mut parsed: Vec<LzRoute> = Vec::with_capacity(routes.len());
+    for route in routes {
+        if route.chain_id == 0 || route.eid == 0 {
+            return Err("lz_routes: chain_id and eid must be above 0".into());
+        }
+        if parsed
+            .iter()
+            .any(|seen| seen.chain_id == route.chain_id || seen.eid == route.eid)
+        {
+            return Err(format!(
+                "lz_routes: chain_id {} or eid {} is listed twice",
+                route.chain_id, route.eid
+            ));
+        }
+        parsed.push(LzRoute {
+            chain_id: route.chain_id,
+            eid: route.eid,
+        });
+    }
+    Ok(parsed)
 }
 
 impl Endpoints {
@@ -741,7 +786,12 @@ impl Endpoints {
             None
         };
 
-        Ok(Self { evm_rpc_tls, kms })
+        let lz_routes = parse_lz_routes(&req.lz_routes)?;
+        Ok(Self {
+            evm_rpc_tls,
+            kms,
+            lz_routes,
+        })
     }
 }
 

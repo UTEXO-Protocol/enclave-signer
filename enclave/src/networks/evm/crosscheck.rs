@@ -124,6 +124,32 @@ pub fn validate_funds_out_burn_recipient(
     Ok(())
 }
 
+/// Route bind: a LayerZero release must name a (`destinationChainId`,
+/// `dstEid`) pair that the operator set at launch. The burn record carries
+/// both values and the holder picks them, so nothing else ties the chain that
+/// selects the Bridge's route and commission policy to the endpoint that
+/// receives the send. A direct release has no `dstEid` and needs no pair.
+pub fn validate_lz_route(
+    release: &ReleaseIdentity,
+    routes: &[crate::config::LzRoute],
+) -> Result<()> {
+    let Some(eid) = release.dst_eid else {
+        return Ok(());
+    };
+    let chain = u64::try_from(release.destination_chain_id).ok();
+    if chain.is_some_and(|chain_id| {
+        routes
+            .iter()
+            .any(|r| r.chain_id == chain_id && r.eid == eid)
+    }) {
+        return Ok(());
+    }
+    Err(EnclaveError::CrossCheck(format!(
+        "LayerZero route not allowed: destinationChainId {} with dstEid {eid} is not in the launch route list",
+        release.destination_chain_id
+    )))
+}
+
 /// Source-burn bind: `sourceBurnTxId` must be the RGB OpId of
 /// the settling transition, which [`validate_funds_out_amount`] reads.
 ///

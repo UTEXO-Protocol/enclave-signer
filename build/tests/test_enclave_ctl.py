@@ -520,7 +520,8 @@ if 'limits' in sys.argv and {refuse!r}:
             KMS_KEY_ARN='arn:aws:kms:eu-central-1:123456789012:key/'
                         '0f0e0d0c-0b0a-0908-0706-050403020100',
             KMS_REGION='eu-central-1', KMS_SEED_ID='seed-1',
-            KMS_EXPECTED_EVM_ADDRESS='0x52908400098527886E0F7030069857D2E4169EE7')
+            KMS_EXPECTED_EVM_ADDRESS='0x52908400098527886E0F7030069857D2E4169EE7',
+            LZ_ROUTES='137:30109,1:30101')
         for empty in (False, True):
             values = dict(
                 EIF='/home/ubuntu/cluster/utexo-bridge-enclave.eif', ENCLAVE_CPU_COUNT='2',

@@ -566,3 +566,49 @@ fn a_malformed_funds_in_contract_is_refused_not_replaced() {
         );
     }
 }
+
+fn lz(chain_id: u64, eid: u32) -> crate::proto::LzRoute {
+    crate::proto::LzRoute { chain_id, eid }
+}
+
+#[test]
+fn lz_routes_are_parsed_and_kept() {
+    let got = parse_with(|r| r.lz_routes = vec![lz(1, 30101), lz(137, 30109)]).unwrap();
+    assert_eq!(
+        got.lz_routes,
+        vec![
+            crate::config::LzRoute {
+                chain_id: 1,
+                eid: 30101
+            },
+            crate::config::LzRoute {
+                chain_id: 137,
+                eid: 30109
+            }
+        ]
+    );
+    assert!(parse_with(|_| {}).unwrap().lz_routes.is_empty());
+}
+
+#[test]
+fn bad_lz_routes_are_refused() {
+    let many: Vec<_> = (1..=(MAX_LZ_ROUTES as u64 + 1))
+        .map(|n| lz(n, n as u32))
+        .collect();
+    for (name, routes) in [
+        ("zero chain", vec![lz(0, 30101)]),
+        ("zero eid", vec![lz(1, 0)]),
+        ("repeated chain", vec![lz(1, 30101), lz(1, 30102)]),
+        ("repeated eid", vec![lz(1, 30101), lz(2, 30101)]),
+        ("exact repeat", vec![lz(1, 30101), lz(1, 30101)]),
+        ("too many", many),
+    ] {
+        let err = parse_with(|r| r.lz_routes = routes).unwrap_err();
+        assert!(err.contains("lz_routes"), "{name}: {err}");
+    }
+    // The limit itself is accepted.
+    let at_limit: Vec<_> = (1..=MAX_LZ_ROUTES as u64)
+        .map(|n| lz(n, n as u32))
+        .collect();
+    assert!(parse_with(|r| r.lz_routes = at_limit).is_ok());
+}

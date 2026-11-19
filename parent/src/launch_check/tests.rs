@@ -38,6 +38,7 @@ fn endpoints() -> SetEndpointsRequest {
         kms_seed_id: "seed-1".into(),
         kms_expected_evm_address: format!("0x{}", "ab".repeat(20)),
         evm_rpc_path: String::new(),
+        lz_routes: vec![],
     }
 }
 
@@ -220,6 +221,36 @@ fn evm_source_mismatch_aborts() {
         set!(evm_source, EvmDataSource::Disabled),
         "evm_source mismatch: expected PinnedTlsRpc, attested Disabled",
     );
+}
+
+#[test]
+fn lz_route_flags_parse_chain_and_eid() {
+    assert_eq!(parse_lz_route("137:30109"), Ok((137, 30109)));
+    for bad in [
+        "",
+        "137",
+        "137:",
+        ":30109",
+        "0:30109",
+        "137:0",
+        "a:b",
+        "1:2:3",
+        "1:4294967296",
+    ] {
+        assert!(parse_lz_route(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn an_empty_lz_route_value_is_no_route() {
+    assert_eq!(parse_lz_route_arg(""), Ok(LzRouteArg(None)));
+    assert_eq!(
+        parse_lz_route_arg("137:30109"),
+        Ok(LzRouteArg(Some((137, 30109))))
+    );
+    for bad in ["137", " ", "0:30109", "1:2:3"] {
+        assert!(parse_lz_route_arg(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]

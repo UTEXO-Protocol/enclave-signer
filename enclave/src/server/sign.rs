@@ -322,6 +322,10 @@ fn apply_funds_out_binding(
     // non-burns, so no runtime type test is necessary.
     crosscheck::validate_funds_out_burn_recipient(release, validated, burn_destination)?;
 
+    // The chain and the endpoint of a LayerZero release must be a pair that
+    // the operator approved at launch.
+    crosscheck::validate_lz_route(release, &ctx.launch()?.endpoints.lz_routes)?;
+
     // Settlement bind (spec P6). The deposits in `settlementData` must be
     // exactly the locks consensus confirmed the burn's mint anchors against.
     crosscheck::validate_funds_out_settlement(release, &validated.mint_locks)?;

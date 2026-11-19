@@ -73,9 +73,16 @@ What the enclave checks for V1:
 - `dstEid != 0`: calldata is `lzFundsOut`, calldata `dstEid` == `dstEid`, and
   `recipient` left-padded to 32 bytes == calldata `bytes32 recipient`.
 
-The enclave does not check that `dstEid` is the LayerZero endpoint of
-`destinationChainId`. It checks each value against the record. The wallet
-must write a pair that belongs together.
+The enclave checks each value against the record. It also requires the pair
+(`destinationChainId`, `dstEid`) of a LayerZero release to be one of the
+`CHAIN_ID:EID` pairs that the operator set at launch (`LZ_ROUTES`,
+[configuration](configuration.md#launch-values)). A holder can write any pair
+into a record. Without this rule, nothing would tie the chain that selects the
+Bridge's route and commission policy to the endpoint that receives the send.
+A pair that is not on the list is refused, and so is every LayerZero release
+when the list is empty. A direct release has no `dstEid` and needs no pair.
+The list is not in the attested policy. A new network needs a new list in
+`SetEndpoints`, not a new image.
 
 A V0 burn names no chain, so it is released on the direct route only, and its
 request must carry no record.

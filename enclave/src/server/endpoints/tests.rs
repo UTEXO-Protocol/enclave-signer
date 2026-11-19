@@ -178,6 +178,13 @@ fn a_refused_set_leaves_the_slot_empty() {
             ..valid(1)
         });
     }
+    bad.push(SetEndpointsRequest {
+        lz_routes: vec![LzRoute {
+            chain_id: 0,
+            eid: 30101,
+        }],
+        ..valid(1)
+    });
     for req in bad {
         assert!(handle_set_endpoints(&ctx, req.clone()).is_err(), "{req:?}");
         assert!(ctx.launch.get().is_none(), "{req:?}");
@@ -348,4 +355,47 @@ fn concurrent_sets_have_one_winner() {
     assert_eq!(winners.len(), 1, "{results:?}");
     let want = Endpoints::parse(&valid(winners[0]), &[], true).unwrap();
     assert_eq!(ctx.launch().unwrap().endpoints, want);
+}
+
+/// A mint signer signs no release, so it takes no route.
+#[test]
+fn a_mint_signer_refuses_lz_routes() {
+    let ctx = awaiting(BuildContext {
+        signer_role: crate::policy::SignerRole::Mint,
+        ..BuildContext::current()
+    });
+    let req = SetEndpointsRequest {
+        lz_routes: vec![LzRoute {
+            chain_id: 137,
+            eid: 30109,
+        }],
+        ..valid(1)
+    };
+    let err = handle_set_endpoints(&ctx, req).unwrap_err();
+    assert!(err.to_string().contains("lz_routes must be empty"), "{err}");
+    assert!(ctx.launch.get().is_none());
+}
+
+/// The routes the operator sets are the ones the sign path reads.
+#[test]
+fn the_launch_keeps_the_lz_routes() {
+    let ctx = awaiting(BuildContext {
+        signer_role: crate::policy::SignerRole::Burn,
+        ..BuildContext::current()
+    });
+    let route = LzRoute {
+        chain_id: 137,
+        eid: 30109,
+    };
+    handle_set_endpoints(
+        &ctx,
+        SetEndpointsRequest {
+            lz_routes: vec![route],
+            ..valid(1)
+        },
+    )
+    .unwrap();
+    let kept = &ctx.launch().unwrap().endpoints.lz_routes;
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].chain_id, kept[0].eid), (137, 30109));
 }

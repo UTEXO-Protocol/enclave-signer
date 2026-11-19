@@ -13,6 +13,38 @@ use sha2::{Digest, Sha256};
 use crate::attest_verify::{refuse_mock_production, VerifyMode};
 use crate::enclave_proto::{GetAttestedPublicKeyResponse, SetEndpointsRequest};
 
+/// Parses one `CHAIN_ID:EID` route, as `--lz-route` takes it. Both numbers must be above 0.
+pub fn parse_lz_route(value: &str) -> Result<(u64, u32), String> {
+    let (chain, eid) = value
+        .split_once(':')
+        .ok_or_else(|| format!("route {value:?} is not CHAIN_ID:EID"))?;
+    let chain_id: u64 = chain
+        .parse()
+        .map_err(|_| format!("route {value:?}: chain ID is not a number"))?;
+    let eid: u32 = eid
+        .parse()
+        .map_err(|_| format!("route {value:?}: EID is not a number"))?;
+    if chain_id == 0 || eid == 0 {
+        return Err(format!("route {value:?}: chain ID and EID must be above 0"));
+    }
+    Ok((chain_id, eid))
+}
+
+/// One value of `--lz-routes`: a route, or nothing when the value is empty.
+/// The deploy script writes `LZ_ROUTES=` to the env file when no route is set,
+/// and an empty value must mean "no route".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LzRouteArg(pub Option<(u64, u32)>);
+
+/// Parses a `--lz-routes` value. An empty value is no route; any other value
+/// must be a valid `CHAIN_ID:EID` pair.
+pub fn parse_lz_route_arg(value: &str) -> Result<LzRouteArg, String> {
+    if value.is_empty() {
+        return Ok(LzRouteArg(None));
+    }
+    parse_lz_route(value).map(|route| LzRouteArg(Some(route)))
+}
+
 /// The policy that a production enclave of `role` must attest after
 /// `endpoints` is set. `image_env` is the `Config.Env` JSON list of the
 /// measured image. The deploy inputs do not give the clone-peer PCR3, so it is
