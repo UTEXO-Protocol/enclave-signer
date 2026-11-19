@@ -30,6 +30,21 @@ pub fn parse_lz_route(value: &str) -> Result<(u64, u32), String> {
     Ok((chain_id, eid))
 }
 
+/// One value of `--lz-routes`: a route, or nothing when the value is empty.
+/// The deploy script writes `LZ_ROUTES=` to the env file when no route is set,
+/// and an empty value must mean "no route".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LzRouteArg(pub Option<(u64, u32)>);
+
+/// Parses a `--lz-routes` value. An empty value is no route; any other value
+/// must be a valid `CHAIN_ID:EID` pair.
+pub fn parse_lz_route_arg(value: &str) -> Result<LzRouteArg, String> {
+    if value.is_empty() {
+        return Ok(LzRouteArg(None));
+    }
+    parse_lz_route(value).map(|route| LzRouteArg(Some(route)))
+}
+
 /// The policy that a production enclave of `role` must attest after
 /// `endpoints` is set. `image_env` is the `Config.Env` JSON list of the
 /// measured image. The deploy inputs do not give the clone-peer PCR3, so it is

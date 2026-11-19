@@ -97,7 +97,7 @@ environment and writes them to `/etc/utexo/enclave-<CID>.env`.
 | `--kms-key-arn` / `KMS_KEY_ARN` | mint | Full ARN of the symmetric KMS key. An alias is refused. |
 | `--kms-region` / `KMS_REGION` | mint | Commercial AWS region of the key. |
 | `--kms-seed-id` / `KMS_SEED_ID` | mint | Stable signer id, used in the KMS encryption context and sent in each storage request. It must equal the `KMS_SEED_ID` of the parent. |
-| `--lz-routes` / `LZ_ROUTES` | burn, optional | The `CHAIN_ID:EID` pairs that a LayerZero release may name. Repeat the flag, or separate the pairs with commas in the variable. At most 64 pairs, each number above 0, and no chain ID or EID twice. Without a pair the enclave refuses every LayerZero release. A mint signer refuses a pair. Not attested. `deploy-host.sh` takes `LZ_ROUTES` and writes it to the enclave env file. |
+| `--lz-routes` / `LZ_ROUTES` | burn, optional | The `CHAIN_ID:EID` pairs that a LayerZero release may name. Repeat the flag, or separate the pairs with commas in the variable. At most 64 pairs, each number above 0, and no chain ID or EID twice. An empty value is no pair. Without a pair the enclave refuses every LayerZero release. A mint signer refuses a pair. Not attested. `deploy-host.sh` takes `LZ_ROUTES` and writes it to the enclave env file. |
 | `--kms-expected-evm-address` / `KMS_EXPECTED_EVM_ADDRESS` | mint, optional | The identity pin: 40 hex digits, `0x` optional. Empty for the first bootstrap only ([kms-persistence.md](kms-persistence.md)). |
 
 **What is attested.** A `Production` policy commits the EVM RPC host, the

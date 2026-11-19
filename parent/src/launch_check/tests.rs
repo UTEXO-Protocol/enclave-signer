@@ -242,6 +242,18 @@ fn lz_route_flags_parse_chain_and_eid() {
 }
 
 #[test]
+fn an_empty_lz_route_value_is_no_route() {
+    assert_eq!(parse_lz_route_arg(""), Ok(LzRouteArg(None)));
+    assert_eq!(
+        parse_lz_route_arg("137:30109"),
+        Ok(LzRouteArg(Some((137, 30109))))
+    );
+    for bad in ["137", " ", "0:30109", "1:2:3"] {
+        assert!(parse_lz_route_arg(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
 fn evm_finality_tag_mismatch_aborts() {
     for tag in [EvmFinalityTag::Latest, EvmFinalityTag::Safe] {
         assert_mismatch(

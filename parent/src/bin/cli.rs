@@ -266,14 +266,15 @@ struct EndpointArgs {
     kms_expected_evm_address: Option<String>,
     /// A destination `CHAIN_ID:EID` pair that a LayerZero release may name.
     /// Repeat the flag, or separate the pairs with commas in the variable.
-    /// Without a pair the enclave refuses every LayerZero release.
+    /// An empty value is no pair. Without a pair the enclave refuses every
+    /// LayerZero release.
     #[arg(
         long = "lz-routes",
         env = "LZ_ROUTES",
         value_delimiter = ',',
-        value_parser = utexo_bridge_parent::launch_check::parse_lz_route
+        value_parser = utexo_bridge_parent::launch_check::parse_lz_route_arg
     )]
-    lz_routes: Vec<(u64, u32)>,
+    lz_routes: Vec<utexo_bridge_parent::launch_check::LzRouteArg>,
 }
 
 fn fail(msg: String) -> ! {
@@ -314,7 +315,8 @@ fn endpoints_request(args: EndpointArgs) -> SetEndpointsRequest {
         lz_routes: args
             .lz_routes
             .iter()
-            .map(|&(chain_id, eid)| utexo_bridge_parent::enclave_proto::LzRoute { chain_id, eid })
+            .filter_map(|arg| arg.0)
+            .map(|(chain_id, eid)| utexo_bridge_parent::enclave_proto::LzRoute { chain_id, eid })
             .collect(),
     }
 }
@@ -1138,6 +1140,25 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn an_empty_lz_routes_value_sends_no_route() {
+        let routes = |extra: &[&str]| {
+            let mut argv = vec!["cli", "set-endpoints"];
+            argv.extend_from_slice(extra);
+            let Command::SetEndpoints { endpoints } = Cli::try_parse_from(argv).unwrap().command
+            else {
+                panic!("expected set-endpoints");
+            };
+            endpoints_request(endpoints).lz_routes
+        };
+        assert!(routes(&["--lz-routes="]).is_empty());
+        let one = routes(&["--lz-routes=137:30109"]);
+        assert_eq!((one[0].chain_id, one[0].eid), (137, 30109));
+        assert_eq!(routes(&["--lz-routes=137:30109,1:30101"]).len(), 2);
+        let bad = Cli::try_parse_from(["cli", "set-endpoints", "--lz-routes=137"]);
+        assert!(bad.is_err());
     }
 
     #[test]
