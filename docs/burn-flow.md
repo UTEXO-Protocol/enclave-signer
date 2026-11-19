@@ -244,7 +244,11 @@ gives the header rules and the limits of each network.
 - **B3.4** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
   blocks deep. Validation reads headers under short locks, so afterwards the
   enclave confirms under one lock that every header a proof was checked
-  against is still in the chain at that depth.
+  against is still in the chain at that depth. A block above the enclave's
+  tip, or one not yet that deep, is a wait and not a refusal: the enclave
+  answers with its own
+  [error code](tee-spec.md#6-requests), and the caller retries once the
+  signer has the headers.
 - **B3.5** The enclave records the heights, hashes and required depths that
   it used. Just before it uses the key, it checks that no hash changed and
   that no block is shallower than its check required.

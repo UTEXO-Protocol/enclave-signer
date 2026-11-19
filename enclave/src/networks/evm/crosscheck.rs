@@ -559,13 +559,23 @@ fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -
     display_hash_at(chain, block.height)
         .map(|_| ())
         .ok_or_else(|| {
-            EnclaveError::Spv(format!(
+            let tip = chain.tip_height();
+            let detail = format!(
                 "fundsOut BtcRelay check: no header at {label} block height {} \
-                 (chain tip = {}) - the enclave is behind the chain and cannot confirm the \
+                 (chain tip = {tip}) - the enclave is behind the chain and cannot confirm the \
                  block the calldata names",
-                block.height,
-                chain.tip_height()
-            ))
+                block.height
+            );
+            // At or below the checkpoint no header comes, so only above the tip is a wait.
+            if block.height > tip {
+                EnclaveError::HeadersPending {
+                    required_tip: block.height,
+                    tip,
+                    detail,
+                }
+            } else {
+                EnclaveError::Spv(detail)
+            }
         })
 }
 

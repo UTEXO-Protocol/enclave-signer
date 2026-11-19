@@ -845,6 +845,7 @@ mod key_not_ready {
             panic!("expected the witness refusal, got {response:?}");
         };
         assert!(err.message.contains("no header at height"), "{response:?}");
+        assert_eq!(err.code, 9, "a header wait has its own wire code");
         assert_eq!(
             rpc_calls, 0,
             "a burn must not read the EVM chain: {response:?}"

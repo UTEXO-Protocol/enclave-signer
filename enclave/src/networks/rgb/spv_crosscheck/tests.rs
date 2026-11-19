@@ -156,13 +156,15 @@ fn a_header_short_of_the_depth_is_not_served() {
     let err = buried_header(&chain, 1, MIN_CONFIRMATIONS).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "spv: witness proof: insufficient confirmations for block_height 1 (5 < 6)"
+        "spv: witness proof: insufficient confirmations for block_height 1 (5 < 6) \
+         [needs tip 6, has tip 5]"
     );
+    assert_eq!(err.error_code(), 9, "more headers cure it: a wait");
     assert_eq!(safe_height(&chain, MIN_CONFIRMATIONS), None);
 }
 
-/// The bridge reads the height and the tip out of this text to wait for the
-/// signer's headers.
+/// The caller waits for the signer's headers on the wire code, and reads the
+/// two tips that end the message.
 #[test]
 fn no_header_is_served_above_the_tip() {
     let chain = regtest_chain_with(synth_headers(7));
@@ -170,10 +172,13 @@ fn no_header_is_served_above_the_tip() {
     let err = buried_header(&chain, 8, MIN_CONFIRMATIONS).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "spv: witness proof: no header at height 8 (chain tip = 7)"
+        "spv: witness proof: no header at height 8 (chain tip = 7) [needs tip 13, has tip 7]"
     );
+    assert_eq!(err.error_code(), 9);
 }
 
+/// No header ever comes for a block at or below the checkpoint, so this is a
+/// refusal and not a wait.
 #[test]
 fn no_header_is_served_at_the_checkpoint() {
     let chain = regtest_chain_with(synth_headers(7));
@@ -183,6 +188,7 @@ fn no_header_is_served_at_the_checkpoint() {
         err.to_string().contains("no header at height 0"),
         "got: {err}"
     );
+    assert_eq!(err.error_code(), 3);
 }
 
 /// Min-difficulty blocks count on the testnets. The tip (155_262) is one, so

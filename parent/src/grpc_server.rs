@@ -394,6 +394,12 @@ impl ParentAdapterService {
                 "evm event pending finality: 1 signer node(s) have not seen the deposit finalized yet ({})",
                 err.message
             )),
+            // Stable wire prefix of a Bitcoin header wait. The message ends with the two
+            // tips, `[needs tip N, has tip M]`; the wording before them may change.
+            9 => Status::failed_precondition(format!(
+                "bitcoin headers pending: {}",
+                err.message
+            )),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message

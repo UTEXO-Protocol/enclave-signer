@@ -66,6 +66,21 @@ pub enum EnclaveError {
         finality_block: u64,
     },
 
+    /// The header chain has not reached a block that a proof needs, or has
+    /// not buried it at the required depth. More headers cure it, so the
+    /// caller retries.
+    ///
+    /// Its wire code ([`EnclaveError::error_code`]) identifies the retryable
+    /// state. The two tips that end the message are its data: the tip height
+    /// the enclave needs, a lower bound, and the one it has. The wording
+    /// before them is a diagnostic.
+    #[error("spv: {detail} [needs tip {required_tip}, has tip {tip}]")]
+    HeadersPending {
+        required_tip: u32,
+        tip: u32,
+        detail: String,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -126,6 +141,7 @@ impl EnclaveError {
             EnclaveError::Spv(_) => 3,          // validation failed
             EnclaveError::NotReady { .. } => 2, // not ready
             EnclaveError::EvmFinalityPending { .. } => 8, // retryable EVM finality wait
+            EnclaveError::HeadersPending { .. } => 9, // retryable Bitcoin header wait
             // Listed so that a new variant must choose its code here.
             #[cfg(feature = "kms-persistence")]
             EnclaveError::Custody { .. } => 1,
@@ -208,6 +224,15 @@ mod tests {
                 },
                 8,
                 8,
+            ),
+            (
+                HeadersPending {
+                    required_tip: 106,
+                    tip: 104,
+                    detail: String::new(),
+                },
+                9,
+                9,
             ),
         ];
         for (e, rpc, clone) in rows {

@@ -89,22 +89,37 @@ pub fn validate_source_chain(
 /// the SPV proofs of the consignment against the headers this serves.
 #[cfg(rgb_to_evm)]
 pub fn buried_header(chain: &HeaderChain, height: u32, min_confirmations: u32) -> Result<Header> {
+    let tip = chain.tip_height();
+    // The tip that buries `height` when every block above it proves work.
+    let buried_at = height.saturating_add(min_confirmations.saturating_sub(1));
+
     // `header_at` returns None at or below the checkpoint and above the tip.
-    // Both cases fail.
+    // Both cases fail. Only above the tip do more headers help.
     let header = chain.header_at(height).ok_or_else(|| {
-        EnclaveError::Spv(format!(
-            "witness proof: no header at height {height} (chain tip = {})",
-            chain.tip_height()
-        ))
+        let detail = format!("witness proof: no header at height {height} (chain tip = {tip})");
+        if height > tip {
+            EnclaveError::HeadersPending {
+                required_tip: buried_at,
+                tip,
+                detail,
+            }
+        } else {
+            EnclaveError::Spv(detail)
+        }
     })?;
 
     // Blocks that prove work, from the proof block to the tip.
     let confs = chain.confirmations(height, min_confirmations);
     if confs < min_confirmations {
-        return Err(EnclaveError::Spv(format!(
-            "witness proof: insufficient confirmations for block_height {height} \
-             ({confs} < {min_confirmations})"
-        )));
+        return Err(EnclaveError::HeadersPending {
+            // A block that proves no work adds no depth, so at least one more block.
+            required_tip: buried_at.max(tip.saturating_add(1)),
+            tip,
+            detail: format!(
+                "witness proof: insufficient confirmations for block_height {height} \
+                 ({confs} < {min_confirmations})"
+            ),
+        });
     }
 
     Ok(*header)

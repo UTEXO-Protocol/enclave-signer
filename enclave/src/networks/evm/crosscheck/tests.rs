@@ -1240,6 +1240,14 @@ mod btc_relay {
             err.to_string().contains("no header at latest block height"),
             "got: {err}"
         );
+        assert!(
+            err.to_string().ends_with(&format!(
+                "[needs tip {}, has tip {TIP_HEIGHT}]",
+                TIP_HEIGHT + 1
+            )),
+            "got: {err}"
+        );
+        assert_eq!(err.error_code(), 9, "the enclave is behind: a wait");
     }
 
     #[test]

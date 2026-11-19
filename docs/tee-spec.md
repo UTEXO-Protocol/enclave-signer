@@ -406,6 +406,7 @@ so a gRPC caller identifies the finality wait by its fixed prefix.
 | 6 | `GetClone`: replayed attestation nonce | `ALREADY_EXISTS` |
 | 7 | `GetClone`: seed-export cap reached | `RESOURCE_EXHAUSTED` |
 | 8 | The deposit receipt is above the `safe` or `finalized` head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
+| 9 | The header chain has not reached a block that a proof names, or has not buried it at the required depth. The caller waits for the signer's headers and retries. The message ends with `[needs tip N, has tip M]`: the tip height the enclave needs, a lower bound, and the one it has. A block at or below the checkpoint is code 3, since no header comes for it. | `FAILED_PRECONDITION`, with the fixed prefix `bitcoin headers pending:` |
 
 ## 7. Bitcoin header chain (SPV)
 
