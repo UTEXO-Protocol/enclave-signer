@@ -30,7 +30,7 @@ use std::time::SystemTime;
 /// Every witness needs an SPV proof in the consignment that holds against a
 /// header `SPV_MIN_CONFIRMATIONS` deep in the enclave's chain, with those
 /// blocks pinned until signing. An unproven or shallow witness rejects the
-/// history. The request's `merkle_proofs` are not read.
+/// history.
 ///
 /// The asset is bound before external reads. For listed assets, rgb-lib also
 /// checks the burn and companion transfers for rejected ancestry.
@@ -141,25 +141,6 @@ pub(super) fn validate_source_payload(source: &RgbSource, cfg: &BridgeConfig) ->
         ));
     }
     assert_consignment_size(&source.consignment, cfg, "RGB source")?;
-    let limits = crate::limits::in_force(cfg);
-    if source.merkle_proofs.len() as u64 > limits.max_merkle_proofs {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source carries too many merkle proofs: {} (max {})",
-            source.merkle_proofs.len(),
-            limits.max_merkle_proofs
-        )));
-    }
-    let total_proof_bytes: usize = source
-        .merkle_proofs
-        .iter()
-        .map(|p| p.txid.len() + p.merkle_path.iter().map(|s| s.len()).sum::<usize>())
-        .sum();
-    if total_proof_bytes as u64 > limits.max_total_proof_bytes {
-        return Err(EnclaveError::CrossCheck(format!(
-            "RGB source merkle proofs too large in aggregate: {total_proof_bytes} bytes (max {})",
-            limits.max_total_proof_bytes
-        )));
-    }
     // Integrity, NOT authorization. The listener controls both `consignment`
     // and `consignment_hash`, so a match only proves the wire copy is intact.
     // Authorization comes from RGB validation, SPV anchoring, and the bind of

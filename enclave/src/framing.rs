@@ -7,26 +7,21 @@ use crate::error::{EnclaveError, Result};
 use crate::proto::EnclaveRequest;
 
 /// Maximum size of one framed message in the image. The operator can change
-/// it ([`crate::limits`]). A request is one message, so it holds
-/// the consignment, the Merkle proofs and the calldata.
-///
-/// Sized for the default request limits in [`crate::config`]: a consignment
-/// of [`crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES`], proof bytes of
-/// [`crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES`], and protobuf overhead
-/// for [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proof entries. The parent
-/// has the same constant.
+/// it ([`crate::limits`]). A request is one message, so it holds the
+/// consignment and the calldata. A consignment of
+/// [`crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES`] fits with the rest of a
+/// request. The parent has the same constant.
 pub const MAX_MESSAGE_SIZE: u32 = 24 * 1024 * 1024; // 24 MiB
 
 /// Maximum protobuf field occurrences in one request in the image. The
 /// operator can change it ([`crate::limits`]). The shape check counts
 /// them on the wire before the decode. A decoded element costs far more
-/// memory than its wire form. A field occurrence can be 2 bytes on the wire
-/// and about 80 bytes in memory. A `MerkleProofEntry` with one empty path
-/// element is 4 bytes and two occurrences. So a 24 MiB frame of them decodes
-/// into more than 1 GiB. The largest real request at the image limits is a
-/// burn with [`crate::config::DEFAULT_MAX_MERKLE_PROOFS`] proofs of 13 path
-/// elements each. A test shows that it passes the shape check. The memory
-/// model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for each element.
+/// memory than its wire form: an empty header of `SubmitHeaders` is 2 bytes
+/// on the wire and a `Vec` in a list that can double while it grows. The
+/// largest real request in elements is a `SubmitHeaders` of
+/// `max_headers_per_submit` headers. A test shows that it passes the shape
+/// check. The memory model (`memory.rs`) budgets `WIRE_ELEMENT_BYTES` for
+/// each element.
 /// A packed repeated scalar would be one occurrence for many values. The
 /// request proto has none, and a test refuses one until the model covers it.
 pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
@@ -71,19 +66,13 @@ pub fn read_request(stream: &mut impl Read) -> Result<EnclaveRequest> {
 }
 
 /// The request messages that hold other messages or repeated fields. The
-/// walk recurses only along these paths. It skips a `bytes` field such as the
-/// consignment and never reads it as protobuf.
+/// walk recurses only along these paths. It skips a `bytes` field such as a
+/// header and never reads it as protobuf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Schema {
-    /// `EnclaveRequest`: field 3 is `sign`, field 11 is `submit_headers`, field 17 is
+    /// `EnclaveRequest`: field 11 is `submit_headers`, field 17 is
     /// `set_endpoints`.
     Request,
-    /// `SignRequest`: field 3 is `rgb_source`.
-    Sign,
-    /// `RgbSource`: field 6 is the repeated `merkle_proofs`.
-    RgbSource,
-    /// `MerkleProofEntry`: field 4 is the repeated `merkle_path`.
-    MerkleProofEntry,
     /// `SubmitHeadersRequest`: field 1 is the repeated `headers`.
     SubmitHeaders,
     /// `SetEndpointsRequest`: field 10 is the repeated `lz_routes`. A route
@@ -97,11 +86,8 @@ enum Schema {
 impl Schema {
     fn child(self, tag: u32) -> Schema {
         match (self, tag) {
-            (Schema::Request, 3) => Schema::Sign,
             (Schema::Request, 11) => Schema::SubmitHeaders,
             (Schema::Request, 17) => Schema::SetEndpoints,
-            (Schema::Sign, 3) => Schema::RgbSource,
-            (Schema::RgbSource, 6) => Schema::MerkleProofEntry,
             _ => Schema::Leaf,
         }
     }

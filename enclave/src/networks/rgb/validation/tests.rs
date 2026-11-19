@@ -1974,7 +1974,6 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
         asset_id: asset_id.into(),
         consignment_hash: keccak(&consignment),
         consignment,
-        merkle_proofs: vec![],
         commission: 0,
     }
 }
@@ -1982,10 +1981,7 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
 #[cfg(rgb_to_evm)]
 mod source_payload {
     use super::*;
-    use crate::config::{
-        DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS, DEFAULT_MAX_TOTAL_PROOF_BYTES,
-    };
-    use crate::proto::MerkleProofEntry;
+    use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
 
     #[test]
     fn accepts_valid_consignment_hash() {
@@ -2026,40 +2022,6 @@ mod source_payload {
             .unwrap_err()
             .to_string();
         assert!(err.contains("consignment too large"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn rejects_too_many_merkle_proofs() {
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = (0..DEFAULT_MAX_MERKLE_PROOFS + 1)
-            .map(|_| MerkleProofEntry::default())
-            .collect();
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too many merkle proofs"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn rejects_aggregate_proof_bytes_over_budget() {
-        let per_proof = 32 + 32 * 32;
-        let n = DEFAULT_MAX_TOTAL_PROOF_BYTES / per_proof + 1;
-        assert!(
-            n <= DEFAULT_MAX_MERKLE_PROOFS,
-            "would trip the count cap first"
-        );
-        let proof = MerkleProofEntry {
-            txid: vec![0u8; 32],
-            block_height: 0,
-            tx_position: 0,
-            merkle_path: vec![vec![0u8; 32]; 32],
-        };
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = vec![proof; n];
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too large in aggregate"), "unexpected: {err}");
     }
 
     #[test]
@@ -2680,9 +2642,8 @@ fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
 }
 
 /// A burn with a history of 10_000 transfers and an SPV proof on every bundle
-/// passes with the default limits: consensus, the request limits
-/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`) and
-/// the frame. Each proof has 13 siblings, the depth of a full mainnet block.
+/// passes with the default limits: consensus, `MAX_CONSIGNMENT_BYTES` and the
+/// frame. Each proof has 13 siblings, the depth of a full mainnet block.
 ///
 /// Ignored by default because it is slow in a debug build.
 #[cfg(rgb_to_evm)]
@@ -2693,7 +2654,7 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
     use crate::proto::enclave_request::Request;
     use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-    use crate::proto::{EnclaveRequest, EvmDestination, MerkleProofEntry, SignRequest};
+    use crate::proto::{EnclaveRequest, EvmDestination, SignRequest};
     use bitcoin::hashes::Hash;
 
     const TRANSFERS: usize = 10_000;
@@ -2729,17 +2690,6 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     let source = crate::proto::RgbSource {
         consignment_hash: keccak(&consignment),
         consignment: consignment.clone(),
-        merkle_proofs: validated
-            .witness_txids
-            .iter()
-            .enumerate()
-            .map(|(i, txid)| MerkleProofEntry {
-                txid: txid.to_vec(),
-                block_height: 900_000 + i as u32,
-                tx_position: 4_000,
-                merkle_path: vec![vec![0x5a; 32]; DEPTH],
-            })
-            .collect(),
         ..burn_source("rgb:any")
     };
     validate_source_payload(&source, &cfg).expect("the source passes the default caps");

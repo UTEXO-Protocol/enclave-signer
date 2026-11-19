@@ -136,10 +136,7 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 ### Stage 1 - Is the request within the limits?
 
 - **B1.1** The consignment must be at most `max_consignment_bytes`.
-- **B1.2** The request must carry at most `max_merkle_proofs` proofs, of at
-  most `max_total_proof_bytes` together. The enclave no longer reads these
-  proofs (B2.9); the caps bound a field that is still on the wire.
-- **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check
+- **B1.2** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
@@ -225,8 +222,7 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   mined only when the SPV proof the consignment carries for it leads to the
   Merkle root of the header at its height (B3.3), and the enclave serves a
   header only at the required depth (B3.4). A witness with no proof, or with
-  a proof that does not hold, is unmined and fails consensus. The Merkle
-  proofs of the request are not read.
+  a proof that does not hold, is unmined and fails consensus.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 

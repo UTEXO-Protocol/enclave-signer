@@ -95,16 +95,6 @@ fn grpc_request(request: &EnclaveSignRequest) -> grpc_proto::SignRequest {
                     .checked_add(1)
                     .expect("distinct legacy amount"),
                 rgb_asset_id: source.asset_id.clone(),
-                merkle_proofs: source
-                    .merkle_proofs
-                    .iter()
-                    .map(|proof| grpc_proto::MerkleProofEntry {
-                        txid: proof.txid.clone(),
-                        block_height: proof.block_height,
-                        tx_position: proof.tx_position,
-                        merkle_path: proof.merkle_path.clone(),
-                    })
-                    .collect(),
             })),
         }),
         data: Some(sign_request::Data::EvmData(enriched::EnrichedEvmPayload {

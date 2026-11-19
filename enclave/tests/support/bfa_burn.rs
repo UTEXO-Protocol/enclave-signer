@@ -376,7 +376,6 @@ impl Fixture {
             asset_id: history.contract_id.to_string(),
             consignment_hash: keccak256(&consignment).to_vec(),
             consignment,
-            merkle_proofs: vec![],
             commission: 0,
         };
         let mut params = FundsOutParams {

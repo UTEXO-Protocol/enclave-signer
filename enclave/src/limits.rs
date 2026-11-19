@@ -146,10 +146,6 @@ limits! {
     max_wire_elements: MAX_WIRE_ELEMENTS as u64, 1_024, 1 << 32;
     /// Size of one consignment.
     max_consignment_bytes: crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES as u64, KIB, 1 << 32;
-    /// Merkle proofs of one request.
-    max_merkle_proofs: crate::config::DEFAULT_MAX_MERKLE_PROOFS as u64, 1, 1 << 32;
-    /// Size of all the Merkle proofs of one request.
-    max_total_proof_bytes: crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES as u64, KIB, 1 << 32;
     /// Size of one PSBT or fascia.
     max_psbt_bytes: crate::config::MAX_PSBT_BYTES as u64, KIB, 1 << 32;
     /// Size of an unsigned gas transaction.
@@ -201,14 +197,11 @@ const DENSE_PSBT_RATE: u64 = 103;
 pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
 
 impl Limits {
-    /// The values of the image: the constants, and the request limits that
-    /// `MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS` and `MAX_TOTAL_PROOF_BYTES`
-    /// can lower.
+    /// The values of the image: the constants, and the consignment limit that
+    /// `MAX_CONSIGNMENT_BYTES` can lower.
     pub fn image(cfg: &BridgeConfig) -> Self {
         Self {
             max_consignment_bytes: cfg.max_consignment_bytes as u64,
-            max_merkle_proofs: cfg.max_merkle_proofs as u64,
-            max_total_proof_bytes: cfg.max_total_proof_bytes as u64,
             ..Self::DEFAULTS
         }
     }

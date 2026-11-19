@@ -84,8 +84,6 @@ checks them at launch.
 | `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
 | `max_wire_elements` | 524288 | 1024 | 2^32 | Protobuf field occurrences in a request. |
 | `max_consignment_bytes` | 10485760 | 1024 | 2^32 | Size of a consignment. |
-| `max_merkle_proofs` | 16384 | 1 | 2^32 | Merkle proofs of a request. |
-| `max_total_proof_bytes` | 8388608 | 1024 | 2^32 | Size of all the proofs of a request. |
 | `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT or a fascia. |
 | `max_gas_tx_bytes` | 1048576 | 1024 | 2^32 | Size of an unsigned gas transaction. |
 | `max_rlp_items` | 1024 | 16 | 2^20 | RLP items of a gas transaction. |
@@ -97,10 +95,9 @@ checks them at launch.
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 
-The image env can set the image values of `max_consignment_bytes` (to a lower
-value only), `max_merkle_proofs` and `max_total_proof_bytes`
-([configuration.md](configuration.md#transport-limits-and-dev-settings)). Then
-`limits show` prints those values as the image values.
+The image env can set the image value of `max_consignment_bytes`, to a lower
+value only ([configuration.md](configuration.md#transport-limits-and-dev-settings)).
+Then `limits show` prints that value as the image value.
 
 The lowest values keep the enclave reachable, so the operator can always send a
 new `limits set`. The highest values are very wide on purpose, because validation

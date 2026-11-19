@@ -34,8 +34,6 @@ limit_fields! {
     max_message_bytes,
     max_wire_elements,
     max_consignment_bytes,
-    max_merkle_proofs,
-    max_total_proof_bytes,
     max_psbt_bytes,
     max_gas_tx_bytes,
     max_rlp_items,

@@ -154,7 +154,9 @@ message RgbSource {
   string asset_id = 3; // RGB asset identifier derived from the consignment.
   bytes consignment = 4; // Raw RGB consignment bytes.
   bytes consignment_hash = 5; // keccak256(consignment).
-  repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
+  // 6 is reserved. Do not use it. The SPV proofs travel inside the consignment.
+  reserved 6;
+  reserved "merkle_proofs";
   uint64 commission = 7; // Commission reported by the source event. The enclave does not use it.
   // 8 is reserved. Do not use it.
   reserved 8;
@@ -223,13 +225,6 @@ message RgbDestination {
   // 10 is reserved. Do not use it.
   reserved 10;
   reserved "parent_fascia";
-}
-
-message MerkleProofEntry {
-  bytes txid = 1; // 32-byte transaction ID in display byte order.
-  uint32 block_height = 2; // Height of the block containing the transaction.
-  uint32 tx_position = 3; // Transaction position in the block.
-  repeated bytes merkle_path = 4; // 32-byte sibling hashes from leaf to Merkle root, in display byte order.
 }
 
 message EvmSignatureResponse {
@@ -405,8 +400,9 @@ message Limits {
   uint64 max_message_bytes = 10;
   uint64 max_wire_elements = 11;
   uint64 max_consignment_bytes = 12;
-  uint64 max_merkle_proofs = 13;
-  uint64 max_total_proof_bytes = 14;
+  // 13 and 14 are reserved. Do not use them.
+  reserved 13, 14;
+  reserved "max_merkle_proofs", "max_total_proof_bytes";
   uint64 max_psbt_bytes = 15;
   uint64 max_gas_tx_bytes = 16;
   uint64 max_rlp_items = 17;
