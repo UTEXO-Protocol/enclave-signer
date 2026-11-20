@@ -135,7 +135,7 @@ fn a_release_child_refuses_a_job_it_could_not_confine() {
 #[test]
 fn the_status_fields_of_this_process_read_in_bytes() {
     let rss = status_bytes("VmRSS").expect("a resident size");
-    assert!(rss > 0 && rss % 1024 == 0, "{rss}");
+    assert!(rss > 0 && rss.is_multiple_of(1024), "{rss}");
     assert!(status_bytes("VmHWM").unwrap() >= rss);
     assert_eq!(status_bytes("NoSuchField"), None);
 }
