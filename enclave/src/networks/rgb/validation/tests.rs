@@ -186,6 +186,19 @@ pub(super) fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
     MinedBlocks::of(txids)
 }
 
+/// Every field the enclave reads after validation is the same.
+#[cfg(all(rgb_to_evm, unix))]
+pub(super) fn assert_same(got: &ValidatedConsignment, want: &ValidatedConsignment) {
+    assert_eq!(got.contract_id, want.contract_id);
+    assert_eq!(got.chain_net, want.chain_net);
+    assert_eq!(got.witness_txids, want.witness_txids);
+    assert_eq!(got.witness_blocks, want.witness_blocks);
+    assert_eq!(got.settling_witness_txid, want.settling_witness_txid);
+    assert_eq!(got.settling_op_id, want.settling_op_id);
+    assert_eq!(got.settling_transition, want.settling_transition);
+    assert_eq!(got.mint_locks, want.mint_locks);
+}
+
 fn error_of(result: Result<ValidatedConsignment>) -> String {
     result
         .expect_err("the consignment must be refused")
@@ -1215,10 +1228,8 @@ fn refuses_locks_bound_on_another_chain() {
     assert_eq!(*asked.borrow(), 0, "no anchor is bound on the wrong chain");
 }
 
-/// rgb-lib asks the binder once with no anchor, for the pins and the chain
-/// id, then once for each mint of the history.
-#[test]
-fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+/// Two mints on two genesis rights, then one burn of both.
+fn burn_of_two_mints() -> History {
     let outpoints = vec![right_utxo(), gen::outpoint(0xA1, 0)];
     let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
     let rights = [0, 1].map(|no| history.genesis_right(no, outpoints[usize::from(no)]));
@@ -1239,7 +1250,14 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
         .unwrap();
     let inputs = units.iter().map(|unit| unit.outpoint).collect();
     history.commit(vec![burn], inputs, vec![gen::dust(4)]);
+    history
+}
 
+/// rgb-lib asks the binder once with no anchor, for the pins and the chain
+/// id, then once for each mint of the history.
+#[test]
+fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+    let history = burn_of_two_mints();
     let calls = RefCell::new(Vec::new());
     let record = |anchors: &[MintAnchor]| {
         calls.borrow_mut().push(anchors.to_vec());
@@ -2127,6 +2145,7 @@ mod source_path {
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             anchor_binder: Some(&bind_all),
             reject_list_reader: reader,
+            deadline: crate::test_support::far_deadline(),
         };
         validate_source(source, &ctx)
     }
@@ -2228,6 +2247,31 @@ mod source_path {
     fn pin_check_skipped_when_config_unconfigured() {
         let id = asset_id();
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
+    }
+
+    /// The validator child takes the values in force for the config of the
+    /// enclave. Here `MAX_CONSIGNMENT_BYTES` lowers the consignment limit, and
+    /// a change raises the list entries into the room only that limit leaves.
+    #[test]
+    fn the_validator_child_takes_the_limits_in_force_for_the_config() {
+        use crate::limits::{apply, in_force, Limits};
+        let id = asset_id();
+        let config = BridgeConfig {
+            max_consignment_bytes: 1024 * 1024,
+            ..pinned_config(&id)
+        };
+        let changes = Limits::from(&crate::proto::Limits {
+            max_reject_list_entries: 100_000,
+            ..Default::default()
+        });
+        let limits = apply(&config, &changes, false, |_| Ok(())).unwrap();
+        assert_eq!(limits, in_force(&config));
+        let image_consignment = Limits {
+            max_consignment_bytes: Limits::DEFAULTS.max_consignment_bytes,
+            ..limits
+        };
+        assert!(image_consignment.check().is_err());
+        run(&burn_source(&id), &config).unwrap();
     }
 
     /// The listed burn as a source, every witness proven 6 deep, its chain
@@ -2719,4 +2763,6 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
 }
 
 mod caps;
+#[cfg(all(rgb_to_evm, unix))]
+mod child;
 mod summary;

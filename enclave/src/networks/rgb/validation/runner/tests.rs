@@ -8,7 +8,8 @@ use super::super::child::OOM_SCORE_ADJ_MAX;
 use super::super::child::{lib_test_entry, FAULT_ENV};
 use super::super::reject_list::{Decisions, RejectListReader};
 use super::super::tests::{
-    bind_all, burn_bytes, burn_history, mined, open_lists, validator, witness_ids, PAYEE,
+    assert_same, bind_all, burn_bytes, burn_history, mined, open_lists, validator, witness_ids,
+    PAYEE,
 };
 use super::super::types::WitnessBlock;
 use super::*;
@@ -24,6 +25,11 @@ const SAFE: u32 = 10;
 /// A kill time no scripted exchange reaches.
 fn later() -> Instant {
     Instant::now() + Duration::from_secs(60)
+}
+
+/// The values in force of the calling test.
+fn in_force() -> Limits {
+    crate::limits::get()
 }
 
 fn exited(code: i32) -> ExitStatus {
@@ -499,18 +505,6 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
     }
 }
 
-/// Every field the enclave reads after validation is the same.
-fn assert_same(got: &ValidatedConsignment, want: &ValidatedConsignment) {
-    assert_eq!(got.contract_id, want.contract_id);
-    assert_eq!(got.chain_net, want.chain_net);
-    assert_eq!(got.witness_txids, want.witness_txids);
-    assert_eq!(got.witness_blocks, want.witness_blocks);
-    assert_eq!(got.settling_witness_txid, want.settling_witness_txid);
-    assert_eq!(got.settling_op_id, want.settling_op_id);
-    assert_eq!(got.settling_transition, want.settling_transition);
-    assert_eq!(got.mint_locks, want.mint_locks);
-}
-
 /// Each way a validation ends maps to its error and wire code, in the order
 /// the enclave decides them.
 #[test]
@@ -639,7 +633,14 @@ fn a_validator_past_the_deadline_is_ended_and_reaped() {
     let bytes = b"the file of a validator that hangs".to_vec();
     let deadline = deadline_in(Duration::from_secs(2));
     let err = faulty("hang")
-        .validate_in_child(&bytes, None, &MinedBlocks::of(&[]), &lists, deadline)
+        .validate_in_child(
+            &bytes,
+            None,
+            &MinedBlocks::of(&[]),
+            &lists,
+            &in_force(),
+            deadline,
+        )
         .unwrap_err();
     assert!(Instant::now() < deadline);
     assert!(
@@ -664,6 +665,7 @@ fn no_time_left_starts_no_validator() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             Instant::now() + RESPONSE_MARGIN / 2,
         )
         .unwrap_err();
@@ -687,6 +689,7 @@ fn a_validator_that_cannot_start_is_an_enclave_fault() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .unwrap_err();
@@ -700,6 +703,7 @@ fn a_validator_that_cannot_start_is_an_enclave_fault() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .unwrap_err();
@@ -716,6 +720,7 @@ fn a_panicking_validator_refuses_the_burn() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .unwrap_err();
@@ -741,6 +746,7 @@ fn a_validator_that_exits_early_is_an_enclave_fault() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .unwrap_err();
@@ -761,6 +767,7 @@ fn a_validator_that_breaks_the_protocol_is_ended() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
     };
@@ -788,6 +795,7 @@ fn a_header_wait_wins_over_a_validator_that_then_aborts() {
             None,
             &side,
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .unwrap_err();
@@ -816,6 +824,7 @@ fn the_validator_child_gets_no_environment_of_the_enclave() {
             Some(&bind_all),
             &chain,
             &open_lists(),
+            &in_force(),
             far_deadline(),
         )
         .expect("the child saw no variable of the test process");
@@ -839,7 +848,14 @@ fn the_scratch_file_is_gone_after_every_outcome() {
         read: None,
     };
     validator()
-        .validate_in_child(&pass, Some(&bind_all), &chain, &lists, far_deadline())
+        .validate_in_child(
+            &pass,
+            Some(&bind_all),
+            &chain,
+            &lists,
+            &in_force(),
+            far_deadline(),
+        )
         .expect("a valid burn");
     assert_eq!(held.get(), 1);
     assert_eq!(scratch_files_holding(&pass), 0);
@@ -871,6 +887,7 @@ fn the_scratch_file_is_gone_after_every_outcome() {
             None,
             &MinedBlocks::of(&[]),
             &open_lists(),
+            &in_force(),
             deadline_in(budget),
         );
         assert!(result.is_err(), "{case}");
@@ -891,6 +908,7 @@ fn a_validator_child_holds_no_inherited_descriptor() {
         Some(&bind_all),
         &chain,
         &open_lists(),
+        &in_force(),
         far_deadline(),
     );
     drop(pipe);

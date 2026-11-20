@@ -121,7 +121,7 @@ fn propagate_chain(mut history: History, n: u16, links: u16) -> Vec<u8> {
 
 /// `t` rights, then one bundle of `t` one-right burns in a tx with `d` dummy
 /// inputs before the real one: rgb-lib checks each burn against the whole tx.
-fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
+pub(super) fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
     commit_many_burns(&mut history, t, d);
     history.consignment()
 }
@@ -401,7 +401,7 @@ fn a_burn_of_8193_rights_passes_the_gate_and_reaches_rgb_lib() {
 
 /// The dummy inputs that bring 256 one-right burns to about `cost`: each
 /// costs its 41 bytes and one seal scan per burn.
-fn dummies_for(cost: u64) -> u32 {
+pub(super) fn dummies_for(cost: u64) -> u32 {
     u32::try_from(cost / 256 / 42).unwrap()
 }
 

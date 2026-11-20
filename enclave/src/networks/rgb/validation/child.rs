@@ -232,11 +232,7 @@ fn run_job(
             "the start frame carries no limits".into(),
         ));
     };
-    if let Err(e) = crate::limits::adopt(&(&limits).into()) {
-        return refused(&EnclaveError::Internal(format!(
-            "the validator could not take the limits in force: {e}"
-        )));
-    }
+    crate::limits::adopt(&(&limits).into());
     to_enclave::Body::Verdict(validate(job, io))
 }
 

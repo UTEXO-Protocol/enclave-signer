@@ -114,8 +114,9 @@ limits! {
     evm_rpc_timeout_secs: 15, 1, 3_600;
     /// Modeled time of rgb-lib on one consignment, validation and inspection
     /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
-    /// to validate alone, and the caps add up. The rgb-lib work runs on one
-    /// worker, and the deadline does not stop it. The value of the image passes
+    /// to validate alone, and the caps add up. rgb-lib runs in a validator
+    /// child, which the enclave ends before the request deadline; this limit
+    /// refuses the work first, with its reason. The value of the image passes
     /// a history of 10 000 transfers with an SPV proof on each, with room left
     /// in the model. On a real enclave, no shape took longer than the model
     /// (`docs/runtime-limits.md`).
@@ -209,8 +210,9 @@ impl Limits {
     /// Refuses values outside their range, or that do not fit each other.
     pub fn check(&self) -> Result<(), String> {
         self.check_ranges()?;
-        // The enclave's own work on a request runs beside rgb-lib. A request
-        // past the deadline does all its work and then loses its reply.
+        // rgb-lib shares the deadline with the enclave's own work on the
+        // request, and the enclave ends the validator child before the
+        // deadline. The rest of the deadline is for the enclave's work.
         if self.max_rgb_lib_ms * 4 > self.total_request_timeout_secs * 1000 * 3 {
             return Err(format!(
                 "max_rgb_lib_ms is {}; it must be at most three quarters of \
@@ -398,10 +400,12 @@ pub fn apply(
     })
 }
 
-/// Makes `values` the values in force of this process, for a process that
-/// takes the values in force of another. A zero keeps the image value.
-pub fn adopt(values: &Limits) -> Result<Limits, String> {
-    apply(&BridgeConfig::default(), values, true, |_| Ok(()))
+/// Makes `values` the values in force of this process, as they are: a
+/// validator child takes the values the enclave holds in force. The enclave
+/// judged them against its own configuration, so they are not checked again.
+/// A zero keeps the image value.
+pub fn adopt(values: &Limits) {
+    store::update(|stored| *stored = *values);
 }
 
 #[cfg(test)]

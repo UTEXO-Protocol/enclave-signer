@@ -59,7 +59,7 @@ pub(super) mod to_child {
 /// The values in force and the one job of the child.
 #[derive(Clone, PartialEq, prost::Message)]
 pub(super) struct Start {
-    /// `limits::get()` of the enclave.
+    /// The values in force of the enclave.
     #[prost(message, optional, tag = "1")]
     pub limits: Option<crate::proto::Limits>,
     #[prost(oneof = "start::Job", tags = "2, 3")]

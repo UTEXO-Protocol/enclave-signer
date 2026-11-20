@@ -8,7 +8,9 @@
 //!     This also limits a peer that sends data just before each idle timeout.
 //!
 //! The deadline does not interrupt handler computation or upstream RPC calls.
-//! KMS initialization also checks it before key activation.
+//! The one exception is RGB validation of a burn: the burn signer runs it in a
+//! child process and ends that child before the deadline. KMS initialization
+//! also checks the deadline before key activation.
 //!
 //! `main::serve` also caps work: [`WORKER_THREADS`] workers and a bounded queue
 //! of [`MAX_QUEUED_CONNECTIONS`].
@@ -25,7 +27,8 @@ use std::time::{Duration, Instant};
 pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Socket deadline measured from accept, including time in the worker queue.
-/// This does not cancel work inside a handler.
+/// It stops no work inside a handler; the burn signer ends its validator
+/// child before it.
 pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Time kept before the request deadline to write the response.

@@ -58,7 +58,7 @@ pub struct ValidatedConsignment {
     /// inspection reads the bundles holding a terminal operation and skips the
     /// ancestors, so this usually holds one group: the burn's. The burn path
     /// reads [`Self::settling_transition`], and the mint signer reads the fascia.
-    /// Only tests read this field.
+    /// Only tests read this field; the burn path leaves it empty.
     pub transitions_by_witness: Vec<(bitcoin::Txid, Vec<TransitionSummary>)>,
     /// The locks every mint anchor of the consignment was confirmed against.
     /// A `fundsOut` must cite exactly these deposits in `settlementData`.
@@ -108,7 +108,8 @@ pub struct TransitionSummary {
     /// [`Self::burned_asset_amount`].
     pub asset_output_amount: u64,
     /// Fungible output assignments, each with a destination seal and an
-    /// amount. The declarative mint right is not here.
+    /// amount. The declarative mint right is not here. The burn path leaves
+    /// them empty: a burn has none.
     pub outputs: Vec<TransitionOutput>,
     /// Asset units that this burn destroys, from its `burnedAsset`
     /// (`GS_BURNED_ASSET`) global. Consensus refuses zero. `None` for a

@@ -35,6 +35,7 @@ use super::witness::BuriedHeaders;
 use crate::conn::{DeadlineStream, RESPONSE_MARGIN};
 use crate::error::{EnclaveError, Result};
 use crate::framing;
+use crate::limits::Limits;
 use crate::memory::VALIDATOR_FRAME_FIXED_BYTES;
 
 /// The program of a validator child, its arguments and its whole environment.
@@ -178,15 +179,15 @@ fn ready_of(io: &mut DeadlineStream<UnixStream>) -> Result<ipc::Ready> {
 impl RgbValidator {
     /// Validates `consignment` in a validator child, and answers the child's
     /// resolvers from `bind`, `headers` and `lists` in this process. The child
-    /// ends at [`kill_time`], so the reply is still written before `deadline`.
-    // Only its tests call it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// takes `limits`, the values in force here, as they are. It ends at
+    /// [`kill_time`], so the reply is still written before `deadline`.
     pub(super) fn validate_in_child(
         &self,
         consignment: &[u8],
         bind: Option<AnchorBinder<'_>>,
         headers: &dyn BuriedHeaders,
         lists: &ListAccess<'_>,
+        limits: &Limits,
         deadline: Instant,
     ) -> Result<ValidatedConsignment> {
         let program = self.program.as_ref().ok_or_else(|| {
@@ -211,7 +212,7 @@ impl RgbValidator {
                 read_reject_list: lists.read.is_some(),
             };
             let start = ipc::Start {
-                limits: Some((&crate::limits::get()).into()),
+                limits: Some(limits.into()),
                 job: Some(start::Job::Validate(job)),
             };
             // The records of a verdict take fewer bytes than the file holds.

@@ -140,6 +140,8 @@ pub(super) fn handle_sign(
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         reject_list_reader: Some(&reject_list_reader),
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+        deadline,
     };
     let source_validated = validate_source(req.amount, source_ref, &validation_ctx)?;
 
@@ -784,11 +786,11 @@ mod key_not_ready {
                 )),
             })),
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let response = super::super::dispatch::dispatch(request, &ctx, deadline)
-            .0
-            .response
-            .unwrap();
+        let response =
+            super::super::dispatch::dispatch(request, &ctx, crate::test_support::far_deadline())
+                .0
+                .response
+                .unwrap();
         (response, rpc_calls.load(Ordering::SeqCst))
     }
 
