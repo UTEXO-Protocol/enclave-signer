@@ -17,12 +17,13 @@ flowchart TB
         VPe["vsock-proxy 8002<br/>―<br/>Mint and burn builds only.<br/>8002 → EVM JSON-RPC TLS port.<br/>Relays TLS bytes only."]
 
         subgraph ENCL [AWS Nitro Enclave — TRUSTED, PCR-pinned]
-            Bin[utexo-bridge-enclave<br/>Rust binary<br/>-<br/>Listens on vsock port 5000, any CID.<br/>One connection = one request;<br/>4 worker threads, queue of 16,<br/>idle timeout and socket deadline from the runtime limits.<br/>Handler work is not cancelled by this deadline.<br/>No filesystem persistence.<br/>Env pins read at boot:<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS / BITCOIN_NETWORK<br/>MINT_WITNESS_SAT.<br/>Release bridge build refuses to boot<br/>unless the boot policy is valid Production<br/>or public-Signet Development.<br/>SetEndpoints resolves the SecurityPolicy once<br/>and commits it into attestation user_data.]
+            Bin[utexo-bridge-enclave<br/>Rust binary<br/>-<br/>Listens on vsock port 5000, any CID.<br/>One connection = one request;<br/>4 worker threads, queue of 16,<br/>idle timeout and socket deadline from the runtime limits.<br/>The burn signer ends its validator child before this deadline.<br/>Other handler work is not cancelled by it.<br/>No filesystem persistence.<br/>Env pins read at boot:<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO / GAS_TX_MAX_GAS_LIMIT<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>BTC_MAX_UNOWNED_SATS<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS / BITCOIN_NETWORK<br/>MINT_WITNESS_SAT.<br/>Release bridge build refuses to boot<br/>unless the boot policy is valid Production<br/>or public-Signet Development.<br/>SetEndpoints resolves the SecurityPolicy once<br/>and commits it into attestation user_data.]
             Headers[(Header chain<br/>in-memory)]
             State[(EnclaveState<br/>Phase + KeyManager in SecretBox)]
             Replay[(NonceReplayGuard — cloning<br/>+ op_replay_guard — bridge ops<br/>each bounded in entries and in time)]
             Fwd["vsock_forwarder<br/>loopback -> vsock, per-port<br/>EVM RPC TLS port / KMS 443<br/>KMS host pinned to loopback in /etc/hosts"]
-            RgbVal["RgbValidator<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof."]
+            RgbVal["RgbValidator<br/>burn signer: one validator child per request,<br/>answers its resolver questions, checks its verdict,<br/>ends it before the request deadline."]
+            RgbChild["Validator child, burn signer only<br/>this binary with --rgb-validator,<br/>no environment, fd 0 a socket pair.<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof."]
             EvmVer[events.rs verifier<br/>pinned TLS RPC<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end
@@ -41,6 +42,7 @@ flowchart TB
     Bin --> Replay
     Bin --> Headers
     Bin --> RgbVal
+    RgbVal -->|"spawn, frames over the socket pair"| RgbChild
     Bin --> EvmVer
     Bin -->|"DescribePCR / Attestation"| NSM
     Bin -->|"intra-enclave loopback"| Fwd
@@ -67,4 +69,6 @@ flowchart TB
   [KMS](../kms-persistence.md). A burn signer [clones](../cloning.md) it.
   Clones are replicas of one signing identity; independent quorum members
   need independently made seeds.
+- The validator child holds no key. A fault of rgb-lib ends only the child
+  ([specification](../tee-spec.md#validator-child-burn-signer)).
 - [operations.md](../operations.md) has the launch steps and the checks.

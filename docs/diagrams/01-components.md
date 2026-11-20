@@ -34,7 +34,7 @@ flowchart TB
 
     %% enclave crate
     subgraph ENC [enclave crate — utexo-bridge-enclave]
-        EMain[main.rs + bootstrap.rs<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production<br/>or public-Signet Development,<br/>then listener loop vsock / TCP]
+        EMain["main.rs + bootstrap.rs<br/>with --rgb-validator: one validator child job, no boot step.<br/>boot: a release bridge build panics<br/>unless the boot policy is valid Production<br/>or public-Signet Development,<br/>a release burn signer also unless a probe<br/>validator child confines itself,<br/>then listener loop vsock / TCP"]
         EConn[conn.rs<br/>DeadlineStream: io_idle_timeout_secs, total_request_timeout_secs<br/>4 worker threads, queue of 16]
         ESrv[server/<br/>context.rs ServerContext + dispatch.rs router<br/>+ rate_limit.rs SubmitHeaders budget]
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
@@ -56,7 +56,8 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV[validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs reads the inspection, schema.rs genesis gate]
+            NRV["validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs reads the inspection, schema.rs genesis gate,<br/>runner.rs burn: runs consensus.rs in a validator child,<br/>answers its resolvers, ends it before the deadline,<br/>ipc.rs the frames between them"]
+            NRCH["child.rs - validator child, burn signer only<br/>this binary with --rgb-validator, one per request,<br/>fd 0 a socket pair, no key, no environment:<br/>consensus.rs on the scratch file,<br/>each resolver question to the enclave"]
             NRSC[scratch.rs<br/>the file rgb-lib reads a consignment<br/>or a fascia from]
             NRF["flow.rs<br/>accepted transitions + amount rule"]
             NRP["psbt_validation.rs<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs<br/>mint signer: the transition a PSBT commits,<br/>by rgb-lib inspect_fascia"]
@@ -108,6 +109,8 @@ flowchart TB
     ESrv --> NRV
     ESrv --> NRP
     NRV --> NRSC
+    NRV -->|"spawn, ipc frames"| NRCH
+    NRCH -->|"reads the file"| NRSC
     NRP --> NRSC
     ESrv --> NRB
     ESrv --> NRS

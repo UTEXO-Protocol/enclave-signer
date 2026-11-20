@@ -1,8 +1,10 @@
 //! Validates consignments through rgb-lib's `validate_consignment_with_resolver`.
 //!
-//! This is the only path from a consignment file to
-//! [`super::types::ValidatedConsignment`]. It decodes the file, binds the asset
-//! and checks work limits before using these resolvers:
+//! This is the only code that turns a consignment file into a
+//! [`super::types::ValidatedConsignment`]. The burn signer runs it in a
+//! validator child (`child.rs`) and rebuilds the result from the child's
+//! verdict (`runner.rs`). It decodes the file, binds the asset and checks work
+//! limits before using these resolvers:
 //!
 //! - `HeadersOnlyResolver` feeds the SPV-verified witness positions.
 //! - [`AnchorBinder`] binds each mint claim to its lock, without RPC.

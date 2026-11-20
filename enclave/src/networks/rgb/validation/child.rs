@@ -277,7 +277,7 @@ fn validate(job: ipc::Validate, io: &UnixStream) -> ipc::Verdict {
     }
 }
 
-/// Runs the in-process validation of the file, with each resolver answer
+/// Validates the file of `job` in this process, with each resolver answer
 /// from the enclave.
 fn validate_with(job: &ipc::Validate, link: &ParentLink<'_>) -> Result<ValidatedConsignment> {
     let chain_net: ChainNet = job

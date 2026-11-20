@@ -1,9 +1,12 @@
 # Burn signer seed cloning
 
-A burn signer makes its seed from OS entropy and keeps it in memory only. A
-second burn enclave gets the same seed through the cloning handshake. The
-handshake serves two jobs: a replica of a signer, and recovery after a
-restart. A mint signer does not clone. It recovers its seed through
+A burn signer makes its seed from OS entropy and keeps it in memory only, so
+a crash of the enclave process loses it. A fault of rgb-lib on a consignment
+ends only the validator child
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). A second burn
+enclave gets the same seed through the cloning handshake. The handshake
+serves two jobs: a replica of a signer, and recovery after a restart. A mint
+signer does not clone. It recovers its seed through
 [KMS](kms-persistence.md).
 
 A clone signs as the same EVM address as its donor. Clones are replicas of

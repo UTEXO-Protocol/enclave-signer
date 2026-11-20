@@ -42,8 +42,8 @@ pub const WORKER_THREADS: usize = 4;
 /// connections are closed.
 pub const MAX_QUEUED_CONNECTIONS: usize = 16;
 
-/// Request socket timeouts, for `TcpStream` (dev, tests) and `VsockStream`
-/// (production).
+/// Socket timeouts: the request socket (`TcpStream` in dev and tests,
+/// `VsockStream` in production) and a validator child's `UnixStream`.
 pub trait SocketTimeout {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()>;

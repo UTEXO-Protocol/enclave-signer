@@ -25,10 +25,11 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// (`a_history_of_10_000_transfers_fits_the_default_limits`).
 ///
 /// The memory model caps the value here. Validating the densest consignment
-/// measured takes about 53 times its bytes. At this size a burn request fits
-/// the heap of a worker (`memory.rs`) with little room left. A larger image
-/// value stops the boot ([`parse_consignment_limit`]). `SetLimits` checks a
-/// runtime value (`limits.rs`).
+/// measured takes about 53 times its bytes. At this size a burn request, in
+/// the enclave and its validator child together, fits the heap of a worker
+/// (`memory.rs`) with little room left. A larger image value stops the boot
+/// ([`parse_consignment_limit`]). `SetLimits` checks a runtime value
+/// (`limits.rs`).
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// The most bytes a PSBT may have in the image, on every path that parses

@@ -236,8 +236,9 @@ const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 
 /// Memory one validator child takes beside the validation heap of its
 /// request: the process, its runtime and rgb-lib's one-time state. The
-/// smallest burn of `tests/support/bfa_burn.rs`, 1679 bytes, peaked at 19.3
-/// MiB resident in a debug child on macOS (aarch64); the value adds a margin.
+/// smallest burn of `tests/support/bfa_burn.rs`, 1679 bytes, peaked at up to
+/// 19.4 MiB resident in a debug child on macOS (aarch64); the value adds a
+/// margin.
 /// `tests/test_validator_child_memory.rs` checks it on Linux, and an enclave
 /// logs the peak of each child in "RGB validator ended".
 pub const VALIDATOR_BASELINE_BYTES: usize = 48 * 1024 * 1024;

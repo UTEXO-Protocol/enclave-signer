@@ -10,7 +10,8 @@ flowchart TD
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis"]
+        p1wq -->|yes| p1s["validator child: this binary, no key, one request.<br/>It runs the checks below to the verdict and asks<br/>the enclave for each resolver answer. The enclave<br/>ends it RESPONSE_MARGIN before the request deadline."]
+        p1s --> p1a["Transfer::load: V1 TFR, BFA genesis"]
         p1a --> p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
         p1c -->|yes| p1l{"reject list, if named,<br/>is an EVM contract?"}
@@ -18,8 +19,8 @@ flowchart TD
         p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
         p1k -->|no| p1kr[REFUSE - work cap]:::refuse
         p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only when the SPV proof in the consignment holds<br/>against an enclave header served at<br/>depth ≥ SPV_MIN_CONFIRMATIONS, no tx lookup; listed asset:<br/>reject list over the terminal operations"]
-        p1b --> p1q{valid?}
-        p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
+        p1b --> p1q{"valid, within the kill time,<br/>no crash, verdict checks pass?"}
+        p1q -->|no| p1r[REFUSE — invalid consignment, crash or timeout]:::refuse
     end
     start --> p1w
 
@@ -100,6 +101,11 @@ flowchart TD
   ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
+- Step 1 from `Transfer::load` to the verdict runs in the validator child
+  of the burn signer. The enclave answers each resolver question, keeps its
+  own error when it refuses one, and checks the verdict against the asset
+  bind, the network and its safe height
+  ([specification](../tee-spec.md#validator-child-burn-signer)).
 - A burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside

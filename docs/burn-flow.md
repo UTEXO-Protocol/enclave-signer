@@ -37,6 +37,7 @@ no split.
 | Backend and listener | Operator servers | Nothing | Build the `fundsOut` calldata. Send the request. |
 | Parent | EC2 host | Nothing. On public Signet: its Bitcoin headers. | Moves bytes. Sends Bitcoin headers to the enclave. |
 | Burn signer | Nitro Enclave | Checks and keys | Checks the burn. Signs the release and the gas transaction. |
+| Validator child | Nitro Enclave, a process of the burn signer's binary for one request | Its verdict on one consignment ([specification](tee-spec.md#validator-child-burn-signer)) | Runs rgb-lib on the consignment in Stage 2. Asks the burn signer for each resolver answer. |
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
 The burn signer takes no claim of the request as evidence. It reads the
@@ -64,6 +65,7 @@ sequenceDiagram
     participant L as Listener
     participant P as Parent (untrusted)
     participant E as Burn signer (enclave)
+    participant V as Validator child (enclave)
     participant C as MultisigProxy + Bridge (EVM)
 
     U->>BT: burn transaction
@@ -73,7 +75,11 @@ sequenceDiagram
     L->>P: Sign(RgbSource -> EvmDestination)
     P->>E: forward over vsock
     E->>E: Stage 1: payload limits
-    E->>E: Stage 2: work caps, then rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
+    E->>V: Stage 2 in a validator child: consignment file, limits, safe height
+    V->>V: work caps, then rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
+    V->>E: resolver questions: asset bind, mint locks, headers, reject list
+    E-->>V: each answer, from the pins, the header chain and the EVM RPC
+    V-->>E: verdict, then the enclave reaps the child
     E->>E: Stage 3: SPV freshness, proof coverage, block pins
     E->>E: Stage 4: decode and check calldata
     E->>E: Stage 5: bind release to burn
@@ -120,9 +126,8 @@ If one check fails, the burn signer stops. It signs nothing. It returns an
 error.
 
 The stages group the checks by topic, in code order with these exceptions.
-B3.3 and B3.4 also run before Stage 2, for every proof of the request. Stage
-3b runs inside rgb-lib, so before B3.1, B3.2 and B3.5. The burn-type check
-of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
+Stage 3b runs inside rgb-lib, so before B3.1, B3.2 and B3.5. The burn-type
+check of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 [sequence in code order](diagrams/03-seq-sign-evm.md) shows the exact order.
 
 ### Stage 0 - Can this enclave do this request?
@@ -141,23 +146,29 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
+The rgb-lib part of Stage 2 runs in the validator child, a process of the
+burn signer's own binary that holds no key. The burn signer gives each
+resolver answer itself, ends the child before the request deadline and
+checks its verdict ([specification](tee-spec.md#validator-child-burn-signer)).
+
 - **B2.1** The bytes must be a V1 transfer file. Its genesis is the one the
   `RGB_ASSET_ID` pin names (B2.7), so its schema is BFA.
-- **B2.2** The contract id must pass the asset bind (B2.7) before the enclave
+- **B2.2** The contract id must pass the asset bind (B2.7) before the child
   reads where the genesis publishes its reject list (`GS_REJECT_LIST`), which
   must be an EVM contract; a URL list is refused. The enclave reaches that
   address over the network in Stage 3b, so a foreign genesis must not choose
   it. The reject-list reader is an input to validation, so the bind runs
   before rgb-lib; refusing a foreign asset there also spares rgb-lib the work,
-  which is all that ordering buys beyond the bind itself. Last, the enclave
+  which is all that ordering buys beyond the bind itself. Last, the child
   bounds the work that rgb-lib would do on the transfer and refuses one above
   a work cap ([section 10](#10-work-caps)).
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules that rgb-lib's
-  pinned `rgb-schemas` compiles. rgb-lib asks three resolvers of the enclave: for each
-  witness (B2.9), for each mint (B2.4, B2.5) and for the reject list (Stage
-  3b). A resolver error refuses the request, and so does any rgb-lib warning.
-  rgb-lib must report the consignment that the enclave parsed.
+  pinned `rgb-schemas` compiles. rgb-lib asks three resolvers, and the burn
+  signer answers each question of the child: for each witness (B2.9), for
+  each mint (B2.4, B2.5) and for the reject list (Stage 3b). A resolver
+  error refuses the request, and so does any rgb-lib warning. rgb-lib must
+  report the consignment that the child parsed.
 - **B2.4** For each mint in the history, the burn signer derives the
   `operationId` of the one deposit that can back it:
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
@@ -460,9 +471,12 @@ the other.
 
 ## 10. Work caps
 
-The request deadline does not stop a worker. So the burn signer bounds the
-work of rgb-lib on a consignment before rgb-lib runs (B2.2). Four runtime
-limits apply:
+The burn signer ends its validator child before the request deadline, so
+rgb-lib never runs past it
+([specification](tee-spec.md#validator-child-burn-signer)). That end gives
+the burn only a timeout. So the burn signer also bounds the work of rgb-lib
+on a consignment before rgb-lib runs (B2.2), and refuses expensive work
+early, with its reason. Four runtime limits apply:
 
 | Limit | What it bounds |
 |-------|----------------|

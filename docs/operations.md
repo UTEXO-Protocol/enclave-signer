@@ -111,6 +111,12 @@ an enclave whole hugepages, 1 GiB pages first, so the deploy scripts refuse a
 value that is not a whole number of GiB. `ENCLAVE_MEMORY` sets the value for
 `deploy-host.sh`; its default is the minimum.
 
+A release burn signer also refuses to start when its probe validator child
+does not start or confine itself, or when the OOM settings of the kernel
+could end the enclave process before a validator child
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). Its panic on the
+console names the reason. A start logs "validator child ready".
+
 The allocator pool. `memory_mib` in `/etc/nitro_enclaves/allocator.yaml`
 sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
 
@@ -240,6 +246,9 @@ command. Its exit code 1 means "not ready" or no answer: read the
 ## Restart and upgrade
 
 A restart removes the keys in memory. systemd restores only the processes.
+A fault of rgb-lib on a consignment ends only a validator child of the burn
+signer, not the enclave process, so it removes no key
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)).
 
 - A mint signer recovers its seed with `init`, through KMS. It needs the
   verified address pin ([kms-persistence.md](kms-persistence.md)).
