@@ -23,7 +23,7 @@ pub struct ValidatedConsignment {
     pub witness_txids: Vec<[u8; 32]>,
     /// The settling transition: the one burn the inspected bundles hold, or the
     /// last transition read when none burns. `None` only for a transfer with no
-    /// bundles, which rgbstd rejects.
+    /// bundles, which rgb-lib validates and the route check refuses.
     pub settling_transition: Option<TransitionSummary>,
     /// Bitcoin txid of the witness tx that anchors [`Self::settling_transition`],
     /// for all transition types (burn included). The bundle of the settling

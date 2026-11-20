@@ -2137,6 +2137,29 @@ mod source_path {
         chain: &Mutex<HeaderChain>,
         reader: Option<RejectListReader<'_>>,
     ) -> Result<ValidatedConsignment> {
+        in_context(config, chain, reader, |ctx| validate_source(source, ctx))
+    }
+
+    /// The route proof of `source`, every witness mined 6 deep: the source
+    /// path, then the route check.
+    fn route_proof(
+        source: &crate::proto::RgbSource,
+        config: &BridgeConfig,
+    ) -> Result<crate::networks::RouteProof> {
+        let chain = chain_of(&source.consignment);
+        in_context(config, &chain, None, |ctx| {
+            crate::networks::rgb::validate_source(source, ctx).map(|proof| proof.proof)
+        })
+    }
+
+    /// Runs `check` with the services of the burn path: a validator child of
+    /// this test binary, `chain` and `reader`.
+    fn in_context<T>(
+        config: &BridgeConfig,
+        chain: &Mutex<HeaderChain>,
+        reader: Option<RejectListReader<'_>>,
+        check: impl FnOnce(&ValidationContext<'_>) -> Result<T>,
+    ) -> Result<T> {
         let validator = validator();
         let ctx = ValidationContext {
             bridge_config: config,
@@ -2147,7 +2170,7 @@ mod source_path {
             reject_list_reader: reader,
             deadline: crate::test_support::far_deadline(),
         };
-        validate_source(source, &ctx)
+        check(&ctx)
     }
 
     fn asset_id() -> String {
@@ -2274,6 +2297,39 @@ mod source_path {
         run(&burn_source(&id), &config).unwrap();
     }
 
+    /// A transfer of the genesis alone validates in a validator child as in
+    /// this process, and the route refuses it with code 3 for its missing
+    /// transition.
+    #[test]
+    fn a_transfer_of_the_genesis_alone_is_refused_as_in_process() {
+        let id = asset_id();
+        let bytes = issue().consignment();
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes.clone(),
+            ..burn_source(&id)
+        };
+        let config = pinned_config(&id);
+        let here = validator()
+            .validate_consignment(
+                &bytes,
+                Some(&bind_all),
+                &mined(&witness_ids(&bytes)),
+                &open_lists(),
+            )
+            .unwrap();
+        let there = run(&source, &config).unwrap();
+        assert_same(&there, &here);
+        assert!(there.settling_transition.is_none(), "{there:?}");
+        let err = route_proof(&source, &config).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        assert!(
+            err.to_string()
+                .contains("RGB source requires a consignment with at least one transition"),
+            "{err}"
+        );
+    }
+
     /// The listed burn as a source, every witness proven 6 deep, its chain
     /// and its asset id.
     fn listed_source() -> (crate::proto::RgbSource, Mutex<HeaderChain>, String) {
@@ -2359,6 +2415,46 @@ mod source_path {
         assert!(err.contains("evm-rpc: down"), "{err}");
         let err = error_of(run_reading(&source, &config, &chain, None));
         assert!(err.contains("cannot read it"), "{err}");
+    }
+
+    /// A change of the limits does not reach a running validator child. So
+    /// a list that a raise lets the reader return, but that is over the limit
+    /// the validation started with, is refused with code 3. A retry starts
+    /// under the raise and passes.
+    #[test]
+    fn a_list_over_the_limit_its_validation_started_with_is_refused() {
+        let (started, raised, entries) = (1_000, 10_000, 6_000u32);
+        crate::limits::change_for_test(|l| l.max_reject_list_entries = started);
+        let unrelated: Vec<RejectListEntry> = (0..entries)
+            .map(|n| {
+                let mut op = [0x99; 32];
+                op[..4].copy_from_slice(&n.to_be_bytes());
+                RejectListEntry {
+                    opout: OpoutKey {
+                        op,
+                        ty: 4000,
+                        no: 0,
+                    },
+                    reject: true,
+                }
+            })
+            .collect();
+        let decided = decisions(&unrelated, unrelated.len());
+        // The raise lands after the child started, before the list read.
+        let read = |_: &RejectListContract| {
+            crate::limits::change_for_test(|l| l.max_reject_list_entries = raised);
+            Ok(decided.clone())
+        };
+        let (source, chain, id) = listed_source();
+        let config = pinned_config(&id);
+        let err = run_reading(&source, &config, &chain, Some(&read)).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        let refusal = format!(
+            "holds at least {entries} entries, over the {started} in force when this validation \
+             started"
+        );
+        assert!(err.to_string().contains(&refusal), "{err}");
+        run_reading(&source, &config, &chain, Some(&read)).unwrap();
     }
 }
 

@@ -186,7 +186,9 @@ a header wait. A question after a refusal, a frame that does not decode,
 and a frame over its cap end the exchange. The enclave reads a frame of the
 child under the length of the consignment plus
 `VALIDATOR_FRAME_FIXED_BYTES`. The child reads each answer under a cap that
-holds a reject list of `max_reject_list_entries`.
+holds a reject list of `max_reject_list_entries`, as its start frame gives
+it. A change of the limits does not reach a running child, so the enclave
+refuses the question when the list is longer than that.
 
 **Confinement.** Before it reads its job, the child closes each inherited
 descriptor above fd 2. It sets its OOM score adjustment to the highest
@@ -236,11 +238,11 @@ out-of-memory kill depends on the load at the time.
 would trust this validation in its own process: for the consensus result,
 the settling transition and the mint locks. It checks that the verdict is for
 the contract id of the asset bind and for its own network. It checks that
-the witness blocks are not empty, are in strictly ascending txid order, and
-each have a height from 1 to the safe height of the start. It checks that
-the witness of the settling transition is one of them, and that each field
-and record has its exact length. Stage 3 then confirms every witness block
-in the chain of the enclave under one lock, as for any burn.
+the witness blocks are in strictly ascending txid order, and each have a
+height from 1 to the safe height of the start. It checks that the witness of
+the settling transition is one of them, and that each field and record has
+its exact length. Stage 3 then confirms every witness block in the chain of
+the enclave under one lock, as for any burn.
 
 **Faults, not exploits.** The boundary contains a fault of rgb-lib: a
 panic, a failed allocation, a stack overflow, an out-of-memory kill or a

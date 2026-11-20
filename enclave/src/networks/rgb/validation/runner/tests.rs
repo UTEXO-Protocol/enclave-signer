@@ -205,6 +205,7 @@ fn scripted(
         headers: side,
         bind: (!without.contains(&"anchors")).then_some(&bind as AnchorBinder<'_>),
         lists: &lists,
+        list_entries: in_force().max_reject_list_entries,
     };
     let (ours, theirs) = UnixStream::pair().unwrap();
     let child = thread::spawn(move || {
@@ -442,8 +443,10 @@ fn a_failing_callback_refuses_with_its_own_error_through_the_child() {
     }
 }
 
-/// A verdict made from a real validation passes the checks. A change of any
-/// one property fails them, and the enclave refuses with code 1.
+/// A verdict made from a real validation passes the checks, and so does the
+/// verdict on a transfer of the genesis alone: no witness block and no
+/// settling transition. A change of any one property fails its own check,
+/// and the enclave refuses with code 1.
 #[test]
 fn a_verdict_the_enclave_cannot_accept_is_refused() {
     let bytes = burn_bytes();
@@ -463,45 +466,78 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         outcome(ex, Ok(exited(0)), ChainNet::BitcoinRegtest, safe)
     };
     assert_same(&accept(good.clone()).unwrap(), &validated);
+    let genesis_alone = ipc::Validated {
+        witness_blocks: Bytes::new(),
+        settling: None,
+        ..good.clone()
+    };
+    let alone = accept(genesis_alone).unwrap();
+    assert!(alone.witness_blocks.is_empty(), "{alone:?}");
+    assert!(alone.settling_transition.is_none(), "{alone:?}");
 
     let reorder = |v: &mut ipc::Validated, change: fn(&mut Vec<WitnessBlock>)| {
         let mut blocks = ipc::unpack_witness_blocks(&v.witness_blocks).unwrap();
         change(&mut blocks);
         v.witness_blocks = ipc::pack_witness_blocks(&blocks).into();
     };
-    type Change<'a> = (&'a str, &'a dyn Fn(&mut ipc::Validated));
+    let above = format!("a witness block at height {}, not from 1 to", u32::MAX);
+    let not_a_witness = "a settling witness that is not a witness of the consignment";
+    type Change<'a> = (&'a str, &'a dyn Fn(&mut ipc::Validated), &'a str);
     let cases: [Change<'_>; 9] = [
-        ("another contract", &|v| {
-            v.contract_id = Bytes::from_static(b"rgb:another-asset")
-        }),
-        ("another chain", &|v| {
-            v.chain_net = Bytes::from_static(b"bc")
-        }),
-        ("no block", &|v| v.witness_blocks = Bytes::new()),
-        ("txids out of order", &|v| reorder(v, |b| b.swap(0, 1))),
-        ("a height above the safe one", &|v| {
-            reorder(v, |b| b[0].height = u32::MAX)
-        }),
-        ("a height of 0", &|v| reorder(v, |b| b[0].height = 0)),
-        ("a settling txid of no witness", &|v| {
-            v.settling.as_mut().unwrap().witness_txid = Bytes::from_static(&[0x77; 32])
-        }),
-        ("an unknown type", &|v| {
-            v.settling.as_mut().unwrap().transition_type = 9
-        }),
-        ("a record of another length", &|v| {
-            v.witness_blocks.truncate(v.witness_blocks.len() - 1)
-        }),
+        (
+            "another contract",
+            &|v| v.contract_id = Bytes::from_static(b"rgb:another-asset"),
+            "a verdict on another contract than the bound one",
+        ),
+        (
+            "another chain",
+            &|v| v.chain_net = Bytes::from_static(b"bc"),
+            "a verdict on another chain than bcrt",
+        ),
+        (
+            "a settling witness with no block",
+            &|v| v.witness_blocks = Bytes::new(),
+            not_a_witness,
+        ),
+        (
+            "txids out of order",
+            &|v| reorder(v, |b| b.swap(0, 1)),
+            "witness blocks out of txid order",
+        ),
+        (
+            "a height above the safe one",
+            &|v| reorder(v, |b| b[0].height = u32::MAX),
+            &above,
+        ),
+        (
+            "a height of 0",
+            &|v| reorder(v, |b| b[0].height = 0),
+            "a witness block at height 0, not from 1 to",
+        ),
+        (
+            "a settling txid of no witness",
+            &|v| v.settling.as_mut().unwrap().witness_txid = Bytes::from_static(&[0x77; 32]),
+            not_a_witness,
+        ),
+        (
+            "an unknown type",
+            &|v| v.settling.as_mut().unwrap().transition_type = 9,
+            "the unknown transition type 9",
+        ),
+        (
+            "a record of another length",
+            &|v| v.witness_blocks.truncate(v.witness_blocks.len() - 1),
+            "witness block records, not a whole number",
+        ),
     ];
-    for (case, change) in cases {
+    for (case, change, refusal) in cases {
         let mut v = good.clone();
         change(&mut v);
         let err = accept(v).unwrap_err();
         assert_eq!(err.error_code(), 1, "{case}: {err}");
-        assert!(
-            err.to_string().contains("broke its protocol"),
-            "{case}: {err}"
-        );
+        let text = err.to_string();
+        assert!(text.contains("broke its protocol"), "{case}: {text}");
+        assert!(text.contains(refusal), "{case}: {text}");
     }
 }
 

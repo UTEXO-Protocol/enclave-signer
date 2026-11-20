@@ -199,6 +199,7 @@ impl RgbValidator {
             headers,
             bind,
             lists,
+            list_entries: limits.max_reject_list_entries,
         };
         with_scratch_file("consignment", consignment, |path| {
             let path = path.to_str().ok_or_else(|| {
@@ -284,6 +285,9 @@ struct Services<'a> {
     headers: &'a dyn BuriedHeaders,
     bind: Option<AnchorBinder<'a>>,
     lists: &'a ListAccess<'a>,
+    /// `max_reject_list_entries` of the start frame: the child reads no
+    /// longer list, whatever the limits in force are now.
+    list_entries: u64,
 }
 
 /// How an exchange with a child ended.
@@ -462,7 +466,19 @@ fn answer(
                 chain_id: ask.chain_id,
                 address,
             };
-            read(&list).map(|decisions| to_child::Body::Decisions(ipc::pack_decisions(decisions)))
+            read(&list).and_then(|decisions| {
+                // The reader caps the list under the limits in force now.
+                let entries = decisions.reject.len() + decisions.allow.len();
+                if entries as u64 > services.list_entries {
+                    return Err(EnclaveError::CrossCheck(format!(
+                        "reject list 0x{} holds at least {entries} entries, over the {} in force \
+                         when this validation started - refusing to sign",
+                        hex::encode(address),
+                        services.list_entries
+                    )));
+                }
+                Ok(to_child::Body::Decisions(ipc::pack_decisions(decisions)))
+            })
         }
         to_enclave::Body::Verdict(_) | to_enclave::Body::Ready(_) => {
             return Err("a frame that is not a request".into())
@@ -588,9 +604,6 @@ fn into_validated(
         ));
     }
     let witness_blocks = ipc::unpack_witness_blocks(&v.witness_blocks)?;
-    if witness_blocks.is_empty() {
-        return Err("a verdict with no witness block".into());
-    }
     if !witness_blocks.is_sorted_by(|a, b| a.txid < b.txid) {
         return Err("witness blocks out of txid order".into());
     }
