@@ -65,6 +65,27 @@ fn a_reset_with_values_keeps_only_those_values() {
     assert_eq!(limits.max_psbt_bytes, 2 * MIB);
 }
 
+/// The values in force of another process replace each value here, the
+/// changes made here included. Values the checks refuse change nothing.
+#[test]
+fn adopted_values_are_the_values_in_force() {
+    apply_to_defaults(|l| l.max_psbt_bytes = 2 * MIB).unwrap();
+    let theirs = Limits {
+        max_rgb_lib_ms: 20_000,
+        max_witness_check_cost: 2 * MIB,
+        ..Limits::DEFAULTS
+    };
+    assert_eq!(adopt(&theirs).unwrap(), theirs);
+    assert_eq!(get(), theirs);
+    let refused = Limits {
+        max_rgb_lib_ms: 68_000,
+        ..theirs
+    };
+    let err = adopt(&refused).unwrap_err();
+    assert!(err.contains("three quarters"), "{err}");
+    assert_eq!(get(), theirs);
+}
+
 #[test]
 fn a_refused_change_changes_nothing() {
     apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();

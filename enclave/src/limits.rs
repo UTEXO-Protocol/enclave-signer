@@ -398,5 +398,11 @@ pub fn apply(
     })
 }
 
+/// Makes `values` the values in force of this process, for a process that
+/// takes the values in force of another. A zero keeps the image value.
+pub fn adopt(values: &Limits) -> Result<Limits, String> {
+    apply(&BridgeConfig::default(), values, true, |_| Ok(()))
+}
+
 #[cfg(test)]
 mod tests;

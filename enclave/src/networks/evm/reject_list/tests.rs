@@ -169,7 +169,7 @@ fn a_read_past_the_request_deadline_is_refused() {
     let rpc = ListEvm::new(1, list_of(10));
     for deadline in [
         std::time::Instant::now(),
-        std::time::Instant::now() + RESPONSE_MARGIN / 2,
+        std::time::Instant::now() + crate::conn::RESPONSE_MARGIN / 2,
     ] {
         let err = read_reject_list(&rpc, &LIST, deadline)
             .unwrap_err()

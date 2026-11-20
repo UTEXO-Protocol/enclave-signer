@@ -41,6 +41,20 @@ fn reject_truncated_body() {
     assert!(result.is_err());
 }
 
+/// A frame over the cap of its reader is refused before its body is read,
+/// even under the frame limit in force. A frame at the cap passes.
+#[test]
+fn a_frame_over_the_cap_of_its_reader_is_refused_before_its_body() {
+    let mut wire = 9u32.to_le_bytes().to_vec();
+    wire.extend_from_slice(&[7u8; 9]);
+    let mut cursor = Cursor::new(&wire);
+    let err = read_frame_within(&mut cursor, 8).unwrap_err().to_string();
+    assert!(err.contains("message too large: 9 bytes (max 8)"), "{err}");
+    assert_eq!(cursor.position(), 4);
+    let frame = read_frame_within(&mut Cursor::new(&wire), 9).unwrap();
+    assert_eq!(frame, vec![7u8; 9]);
+}
+
 /// Return a decode error for invalid protobuf data.
 #[test]
 fn reject_garbage_body() {

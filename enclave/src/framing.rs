@@ -29,6 +29,12 @@ pub const MAX_WIRE_ELEMENTS: usize = 1 << 19;
 /// Read a length-prefixed frame from a stream and return its bytes.
 /// Wire format: [4-byte LE u32 length][protobuf bytes].
 fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
+    read_frame_within(stream, crate::limits::get().max_message_bytes)
+}
+
+/// [`read_frame`] of a frame of at most `max` bytes. A longer frame is
+/// refused before its body is read.
+pub(crate) fn read_frame_within(stream: &mut impl Read, max: u64) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf);
@@ -36,7 +42,6 @@ fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
     if len == 0 {
         return Err(EnclaveError::Framing("zero-length message".into()));
     }
-    let max = crate::limits::get().max_message_bytes;
     if u64::from(len) > max {
         return Err(EnclaveError::Framing(format!(
             "message too large: {len} bytes (max {max})"

@@ -5,7 +5,7 @@
 //! - `source.rs`: validate an `RgbSource` payload and its SPV evidence.
 //! - `validator.rs`: the validator of one Bitcoin network.
 //! - `witness.rs`: the resolver of SPV-verified witness positions.
-//! - `consensus.rs`: run rgb-lib validation over the consignment bytes.
+//! - `consensus.rs`: run rgb-lib validation over a consignment file.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `consignment.rs`: read rgb-lib's inspection of the accepted file into
 //!   plain shapes.

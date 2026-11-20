@@ -241,7 +241,7 @@ pub(super) fn dispatch(
 /// such as a declared asset id. The log formatter keeps a buffer as large as
 /// the longest line it wrote on each thread. So a long line would hold heap
 /// after its request ends (`memory.rs`).
-const MAX_ERROR_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_ERROR_TEXT_BYTES: usize = 1024;
 
 /// The text of `e`, cut at [`MAX_ERROR_TEXT_BYTES`] with its full length
 /// after the cut.

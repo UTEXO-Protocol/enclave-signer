@@ -28,6 +28,9 @@ pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// This does not cancel work inside a handler.
 pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Time kept before the request deadline to write the response.
+pub const RESPONSE_MARGIN: Duration = Duration::from_secs(2);
+
 /// Connection worker threads. The only peer is the parent, so a small pool is
 /// sufficient. One slow request does not block the others.
 pub const WORKER_THREADS: usize = 4;
@@ -59,6 +62,17 @@ impl SocketTimeout for vsock::VsockStream {
     }
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         vsock::VsockStream::set_write_timeout(self, dur)
+    }
+}
+
+/// A local socket, such as one end of `UnixStream::pair`.
+#[cfg(unix)]
+impl SocketTimeout for std::os::unix::net::UnixStream {
+    fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, dur)
+    }
+    fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_write_timeout(self, dur)
     }
 }
 
@@ -207,5 +221,30 @@ mod tests {
             DeadlineStream::new(MockSock::with_read(vec![]), Duration::ZERO, IO_IDLE_TIMEOUT);
         let err = s.write(&[1]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// A read on a quiet local socket with no idle cap ends at the deadline.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_socket_read_ends_at_the_deadline() {
+        let (ours, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        let mut s = DeadlineStream::with_deadline(ours, deadline, Duration::MAX);
+        let mut buf = [0u8; 1];
+        let err = s.read(&mut buf).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{err}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(190));
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        assert_eq!(
+            s.read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 }

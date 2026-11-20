@@ -2,6 +2,8 @@
 //! shape to the SPV cross-check of its witness transactions.
 
 #[cfg(rgb_to_evm)]
+use super::super::scratch::with_scratch_file;
+#[cfg(rgb_to_evm)]
 use super::asset_bind::{assert_asset_binding, AssetBindMode};
 #[cfg(rgb_to_evm)]
 use super::reject_list::ListAccess;
@@ -67,9 +69,10 @@ pub fn validate_source(
         read: ctx.reject_list_reader,
     };
     // A burn consignment contains its full mint ancestry. Each mint leaves an
-    // anchor that only a bound lock confirms.
-    let validated =
-        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &headers, &lists)?;
+    // anchor that only a bound lock confirms. rgb-lib reads it from a file.
+    let validated = with_scratch_file("consignment", &source.consignment, |path| {
+        validator.validate_consignment_file(path, ctx.anchor_binder, &headers, &lists)
+    })?;
 
     {
         let chain = lock_chain(ctx)?;
