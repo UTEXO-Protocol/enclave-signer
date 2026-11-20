@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use prost::bytes::Bytes;
+use prost::Message;
 use rgb_lib::ChainNet;
 
 use super::bfa::{AnchorBinder, BoundAnchors, MintAnchor};
@@ -336,7 +337,13 @@ impl ParentLink<'_> {
                 body: Some(request),
             },
         )?;
-        match framing::read_message::<ipc::ToChild>(&mut io)?.body {
+        // The frame drops once decoded.
+        let answer = {
+            let cap = ipc::enclave_frame_bytes(&crate::limits::get());
+            let frame = framing::read_frame_within(&mut io, cap)?;
+            ipc::ToChild::decode(&frame[..])?
+        };
+        match answer.body {
             Some(to_child::Body::Refused(_)) => {
                 self.refused.set(true);
                 Err(EnclaveError::Internal(HELD_TEXT.into()))
@@ -387,15 +394,12 @@ impl ParentLink<'_> {
             chain_id: list.chain_id,
             address: Bytes::copy_from_slice(&list.address),
         });
-        let ipc::Decisions { reject, allow } = match self.ask(request)? {
-            to_child::Body::Decisions(decisions) => decisions,
-            other => return Err(unexpected("a reject list", &other)),
-        };
-        // Each packed list is freed once its set is built.
-        let unpack = |packed: Vec<u8>| ipc::unpack_opouts(&packed).map_err(EnclaveError::Internal);
-        let reject = unpack(reject)?;
-        let allow = unpack(allow)?;
-        Ok(Decisions { reject, allow })
+        match self.ask(request)? {
+            to_child::Body::Decisions(answer) => {
+                ipc::unpack_decisions(answer).map_err(EnclaveError::Internal)
+            }
+            other => Err(unexpected("a reject list", &other)),
+        }
     }
 }
 

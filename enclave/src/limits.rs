@@ -190,11 +190,11 @@ limits! {
 const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 545;
 /// The heap of a PSBT at the densest rate measured. A request sets this rate too.
 const DENSE_PSBT_RATE: u64 = 103;
-/// The heap of one entry of a reject list, from the read to the set that
-/// rgb-lib walks with, with a margin on the rate measured
-/// (`networks::evm::reject_list::tests`). A request holds this beside the rest.
-/// The read reserves the length that the RPC reports, so only this limit stops a
-/// bad length.
+/// The heap of one entry of a reject list, from the read of the enclave to the
+/// set that rgb-lib walks with in the validator child, with a margin on the
+/// rate measured (`networks::rgb::validation::ipc::tests`). A request holds
+/// this beside the rest. The read reserves the length that the RPC reports, so
+/// only this limit stops a bad length.
 pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
 
 impl Limits {

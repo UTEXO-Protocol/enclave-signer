@@ -235,3 +235,40 @@ fn the_validator_uses_the_limits_in_force() {
     let err = in_child();
     assert!(err.contains(&format!("(max {MIB})")), "{err}");
 }
+
+/// A reject list longer than a request frame reaches the child, which reads
+/// its answer under the cap of the list limit.
+#[test]
+fn a_reject_list_longer_than_a_request_frame_reaches_the_child() {
+    let entries = 40_000u32;
+    crate::limits::change_for_test(|l| {
+        l.max_message_bytes = MIB;
+        l.max_reject_list_entries = entries.into();
+    });
+    let unrelated: Vec<RejectListEntry> = (0..entries)
+        .map(|n| {
+            let mut op = [0x99; 32];
+            op[..4].copy_from_slice(&n.to_be_bytes());
+            RejectListEntry {
+                opout: OpoutKey {
+                    op,
+                    ty: 4000,
+                    no: 0,
+                },
+                reject: true,
+            }
+        })
+        .collect();
+    let decided = decisions(&unrelated, unrelated.len());
+    let packed = decided.reject.len() * super::super::ipc::OPOUT_RECORD_BYTES;
+    assert!(packed as u64 > MIB, "{packed} bytes of list");
+    let read = |_: &RejectListContract| Ok(decided.clone());
+    let lists = ListAccess {
+        bind_asset: &any_asset,
+        read: Some(&read),
+    };
+    let bytes = listed_burn().0.consignment();
+    let chain = mined(&witness_ids(&bytes));
+    let (here, there) = here_and_in_child(&bytes, &chain, &lists);
+    assert_same(&there.unwrap(), &here.unwrap());
+}

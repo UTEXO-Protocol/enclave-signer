@@ -16,9 +16,11 @@ use prost::bytes::Bytes;
 use rgb_lib::TypeOfTransition;
 
 use super::bfa::{MintAnchor, VerifiedLock};
-use super::reject_list::OpoutKey;
+use super::reject_list::{self, OpoutKey};
 use super::types::{ValidatedConsignment, WitnessBlock};
 use crate::error::EnclaveError;
+use crate::limits::Limits;
+use crate::memory::VALIDATOR_FRAME_FIXED_BYTES;
 
 /// A message with no fields.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -386,6 +388,33 @@ pub(super) fn unpack_opouts(bytes: &[u8]) -> Result<BTreeSet<OpoutKey>, String> 
         });
     }
     Ok(out)
+}
+
+/// The answer to a reject-list read. The sets drop once packed.
+pub(super) fn pack_decisions(decisions: reject_list::Decisions) -> Decisions {
+    Decisions {
+        reject: pack_opouts(decisions.reject.iter()),
+        allow: pack_opouts(decisions.allow.iter()),
+    }
+}
+
+/// The decisions of an answer to a reject-list read. Each packed list is
+/// freed once its set is built.
+pub(super) fn unpack_decisions(answer: Decisions) -> Result<reject_list::Decisions, String> {
+    let unpack = |packed: Vec<u8>| unpack_opouts(&packed);
+    let reject = unpack(answer.reject)?;
+    let allow = unpack(answer.allow)?;
+    Ok(reject_list::Decisions { reject, allow })
+}
+
+/// The largest frame the enclave sends a child under `limits`: the answer to
+/// a reject-list read at `max_reject_list_entries`, which can be longer than
+/// a request frame. Each other frame of the enclave fits the fixed part.
+pub(super) fn enclave_frame_bytes(limits: &Limits) -> u64 {
+    limits
+        .max_reject_list_entries
+        .saturating_mul(OPOUT_RECORD_BYTES as u64)
+        .saturating_add(VALIDATOR_FRAME_FIXED_BYTES as u64)
 }
 
 /// The records of `N` bytes in `bytes`, or why they do not fit exactly.

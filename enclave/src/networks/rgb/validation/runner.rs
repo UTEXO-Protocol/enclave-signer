@@ -462,13 +462,7 @@ fn answer(
                 chain_id: ask.chain_id,
                 address,
             };
-            // The decisions drop once packed.
-            read(&list).map(|decisions| {
-                to_child::Body::Decisions(ipc::Decisions {
-                    reject: ipc::pack_opouts(decisions.reject.iter()),
-                    allow: ipc::pack_opouts(decisions.allow.iter()),
-                })
-            })
+            read(&list).map(|decisions| to_child::Body::Decisions(ipc::pack_decisions(decisions)))
         }
         to_enclave::Body::Verdict(_) | to_enclave::Body::Ready(_) => {
             return Err("a frame that is not a request".into())

@@ -2379,15 +2379,16 @@ fn long_history(transfers: usize) -> History {
     history
 }
 
-/// Validates one small burn before a measurement, as `measure_dispatch` does.
-/// The one-time build of the schema rules then stays outside the meter. Boot
-/// builds them in production.
+/// Validates one small burn before a measurement. The one-time build of the
+/// schema rules then stays outside the meter: a validator child builds them
+/// once, and `memory::VALIDATOR_BASELINE_BYTES` counts them.
 fn warm_up() {
     validate(&burn_bytes()).unwrap();
 }
 
 /// The request memory model (`memory.rs`): validating a consignment stays
-/// within the memory factor. A history of 2_000 transfers is about 1 MiB.
+/// within the memory factor. A history of 2_000 transfers is about 1 MiB. The
+/// test runs in-process the code of a validator child.
 #[test]
 fn consignment_validation_stays_within_the_request_memory_factor() {
     use crate::memory::peak;
@@ -2606,8 +2607,8 @@ fn validation_peak(history: impl FnOnce() -> History) -> (usize, usize) {
 /// each worker holds. That request carries a consignment of the shape at
 /// `DEFAULT_MAX_CONSIGNMENT_BYTES` and the decoded elements. The read and
 /// decode of its frame of `MAX_MESSAGE_SIZE` take 3 times the frame. Then
-/// `read_request` releases the frame, so validation runs beside the decoded
-/// request, which is at most one frame.
+/// `read_request` releases the frame, so the validation in the child runs
+/// beside the decoded request in the enclave, which is at most one frame.
 #[test]
 fn the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds() {
     use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
