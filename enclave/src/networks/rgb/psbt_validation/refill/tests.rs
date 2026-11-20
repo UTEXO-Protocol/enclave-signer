@@ -149,7 +149,7 @@ fn the_gate_refuses_change_to_a_foreign_output() {
 
 /// Change on an input's script is not the enclave's own without its key-path metadata.
 #[test]
-fn the_gate_refuses_change_back_to_an_input_script_without_rule_c() {
+fn the_gate_refuses_change_back_to_an_input_script_without_its_key_path() {
     let keys = fx::km();
     let mut psbt = refill_with(&keys, 2, 1);
     let fee_input_script = psbt.inputs[1]

@@ -15,7 +15,6 @@
 //! it without this metadata is not counted as owned. A taproot leaf that names
 //! our key proves nothing about the rest of the tree or its internal key, so
 //! an output with a tree is refused too.
-//! [`crate::networks::rgb::btc_crosscheck`] bounds by value what is not proven.
 //!
 //! A refusal cannot rely on that metadata, since the host that builds the PSBT
 //! supplies it. So a witness mint, which must not pay an output of the enclave,
