@@ -67,9 +67,16 @@ pub fn validate_source(
         read: ctx.reject_list_reader,
     };
     // A burn consignment contains its full mint ancestry. Each mint leaves an
-    // anchor that only a bound lock confirms.
-    let validated =
-        validator.validate_consignment(&source.consignment, ctx.anchor_binder, &headers, &lists)?;
+    // anchor that only a bound lock confirms. rgb-lib runs in a validator
+    // child, which takes the limits in force here.
+    let validated = validator.validate_in_child(
+        &source.consignment,
+        ctx.anchor_binder,
+        &headers,
+        &lists,
+        &crate::limits::in_force(ctx.bridge_config),
+        ctx.deadline,
+    )?;
 
     {
         let chain = lock_chain(ctx)?;
@@ -99,8 +106,9 @@ fn lock(chain: &std::sync::Mutex<HeaderChain>) -> Result<std::sync::MutexGuard<'
         .map_err(|e| EnclaveError::Internal(format!("SPV header chain lock poisoned: {e}")))
 }
 
-/// The enclave chain behind short locks, so header submits go on while
-/// rgb-lib validates. `validate_source_chain` then confirms one view.
+/// The enclave chain behind short locks: it answers each header question of
+/// the validator child, and header submits go on between them.
+/// `validate_source_chain` then confirms one view.
 #[cfg(rgb_to_evm)]
 struct EnclaveChain<'a> {
     chain: &'a std::sync::Mutex<HeaderChain>,

@@ -293,6 +293,9 @@ report that conflict and keep it visible until the implementation is fixed.
 - Validate a consignment only with rgb-lib's
   `validate_consignment_with_resolver`, and confirm a mint claim only against a
   lock the enclave bound. Refuse on a resolver error or an rgb-lib warning.
+  The burn signer runs rgb-lib's validation and inspection only in its
+  validator child, and the enclave process gives each resolver answer
+  ([validator child](docs/tee-spec.md#validator-child-burn-signer)).
   Prove what a mint or refill transaction commits only with rgb-lib's
   `inspect_fascia`, and refuse what it refuses; the enclave's own rules around
   it select the asset, the one bundle and the one transition.
@@ -341,8 +344,10 @@ report that conflict and keep it visible until the implementation is fixed.
 - Bound frame bytes, field sizes, collection counts and aggregate work before
   allocation, decoding or expensive validation. Check arithmetic used for caps.
 - Account for all simultaneously live copies: encoded input, decoded objects,
-  queues, worker concurrency, caches and temporary files. Enclave scratch
-  files can use RAM. A per-field cap is not a process-memory bound.
+  queues, worker concurrency, caches, temporary files and child processes.
+  Enclave scratch files can use RAM, and each validator child of the burn
+  signer holds memory of its own. A per-field cap is not a process-memory
+  bound.
 - Bound request-controlled text before it reaches a log line or an error reply.
   A long log line can hold heap after its request ends.
 - Measure a cost model or memory model again when the code or dependency it

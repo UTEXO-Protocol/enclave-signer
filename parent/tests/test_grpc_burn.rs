@@ -40,6 +40,15 @@ use utexo_bridge_parent::transport_security::LimitedIncoming;
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DESTINATION_NETWORK: u32 = 84;
 
+/// The validator child of the burns: the fixture starts this test binary with
+/// only this test, which then serves one validation and exits.
+#[test]
+fn rgb_validator_child() {
+    if let Some(code) = utexo_bridge_enclave::networks::rgb::validation::run_if_test_child() {
+        std::process::exit(code);
+    }
+}
+
 /// Observe bytes consumed and returned by the actual handler, without replacing it.
 struct RecordedStream {
     stream: TcpStream,

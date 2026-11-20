@@ -6,10 +6,13 @@ in [burn-flow.md](burn-flow.md).
 
 ## Why a model
 
-The request deadline does not stop a worker, and parts of rgb-lib's work on
-a consignment grow faster than the file. So the burn signer computes the cost
-of a parsed transfer before rgb-lib runs, and refuses a transfer above a
-limit. The code is `enclave/src/networks/rgb/validation/cost.rs`.
+The burn signer ends its validator child before the request deadline
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). That end is the
+stopwatch: it refuses a burn after the work, with a timeout and no other
+reason. Parts of rgb-lib's work on a consignment grow faster than the file.
+So the burn signer also computes the cost of a parsed transfer before rgb-lib
+runs, and refuses a transfer above a limit, with the cost and the limit. The
+code is `enclave/src/networks/rgb/validation/cost.rs`.
 
 ## What the model counts
 
@@ -85,10 +88,11 @@ burn inspects the terminal bundles alone, so it stays at or under this column.
   the gate prevents: the burn signer inspects a consignment only after its
   validation passed.
 - The resolvers of the timing test are in memory. So the times are the CPU
-  work of rgb-lib, with no RPC, no enclave overhead and no other request at
-  the same time. [runtime-limits.md](runtime-limits.md#measured-times) has
-  times from a real enclave. On every shape measured there, one request took
-  at most its modeled time.
+  work of rgb-lib, with no RPC, no validator child, no enclave overhead and no
+  other request at the same time.
+  [runtime-limits.md](runtime-limits.md#measured-times) has times from a real
+  enclave. On every shape measured there, one request took at most its
+  modeled time.
 
 **Outstanding measurement.** The table holds the rgb-lib revision it was
 measured at. `enclave/Cargo.toml` pins a newer one, which adds the
@@ -134,8 +138,9 @@ The operator can raise each limit on a running enclave.
   bound. A shape that costs rgb-lib more per byte, output, operation or
   genesis leaf than the measured ones runs past its modeled time. So does a
   busy or slower CPU.
-- The budget is rgb-lib's alone. The enclave's own parse, gate and reads of
-  the transfer run outside it.
+- The budget is rgb-lib's alone. The parse, the gate and the reads of the
+  transfer, the start of the validator child and its questions to the enclave
+  run outside it.
 
 ## When to measure again
 
@@ -163,8 +168,9 @@ If a shape takes `k` times its model, runtime limits can account for the
 observed slowdown without rebuilding the image: lower `max_rgb_lib_ms` to
 admit less work for the same wall-time budget, or increase
 `total_request_timeout_secs` to allow the same work more time. The modeled
-budget does not turn into a stopwatch, and increasing it admits more work.
-Include the enclave's own work, RPCs and concurrency when choosing the
+budget is a refusal made in advance, not a stopwatch: the end of the validator
+child before the deadline is the stopwatch. Increasing the budget admits more
+work. Include the enclave's own work, RPCs and concurrency when choosing the
 deadline. Apply and persist the settings as described in
 [runtime-limits.md](runtime-limits.md#commands).
 

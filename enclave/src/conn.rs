@@ -8,7 +8,9 @@
 //!     This also limits a peer that sends data just before each idle timeout.
 //!
 //! The deadline does not interrupt handler computation or upstream RPC calls.
-//! KMS initialization also checks it before key activation.
+//! The one exception is RGB validation of a burn: the burn signer runs it in a
+//! child process and ends that child before the deadline. KMS initialization
+//! also checks the deadline before key activation.
 //!
 //! `main::serve` also caps work: [`WORKER_THREADS`] workers and a bounded queue
 //! of [`MAX_QUEUED_CONNECTIONS`].
@@ -25,8 +27,12 @@ use std::time::{Duration, Instant};
 pub const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Socket deadline measured from accept, including time in the worker queue.
-/// This does not cancel work inside a handler.
+/// It stops no work inside a handler; the burn signer ends its validator
+/// child before it.
 pub const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Time kept before the request deadline to write the response.
+pub const RESPONSE_MARGIN: Duration = Duration::from_secs(2);
 
 /// Connection worker threads. The only peer is the parent, so a small pool is
 /// sufficient. One slow request does not block the others.
@@ -36,8 +42,8 @@ pub const WORKER_THREADS: usize = 4;
 /// connections are closed.
 pub const MAX_QUEUED_CONNECTIONS: usize = 16;
 
-/// Request socket timeouts, for `TcpStream` (dev, tests) and `VsockStream`
-/// (production).
+/// Socket timeouts: the request socket (`TcpStream` in dev and tests,
+/// `VsockStream` in production) and a validator child's `UnixStream`.
 pub trait SocketTimeout {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
@@ -59,6 +65,27 @@ impl SocketTimeout for vsock::VsockStream {
     }
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         vsock::VsockStream::set_write_timeout(self, dur)
+    }
+}
+
+/// A local socket, such as one end of `UnixStream::pair`.
+#[cfg(unix)]
+impl SocketTimeout for std::os::unix::net::UnixStream {
+    fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        closed_peer_is_no_wait(std::os::unix::net::UnixStream::set_read_timeout(self, dur))
+    }
+    fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        closed_peer_is_no_wait(std::os::unix::net::UnixStream::set_write_timeout(self, dur))
+    }
+}
+
+/// macOS refuses a timeout on a local socket whose peer has closed. Such a
+/// socket never blocks: a read returns what is buffered, then EOF.
+#[cfg(unix)]
+fn closed_peer_is_no_wait(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e) if cfg!(target_os = "macos") && e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        other => other,
     }
 }
 
@@ -207,5 +234,43 @@ mod tests {
             DeadlineStream::new(MockSock::with_read(vec![]), Duration::ZERO, IO_IDLE_TIMEOUT);
         let err = s.write(&[1]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// A local socket whose peer has closed reads what the peer sent, then EOF.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_socket_reads_what_its_closed_peer_sent() {
+        let (ours, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(&[7, 8]).unwrap();
+        drop(peer);
+        let mut s = DeadlineStream::new(ours, Duration::from_secs(60), Duration::MAX);
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, [7, 8]);
+    }
+
+    /// A read on a quiet local socket with no idle cap ends at the deadline.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_socket_read_ends_at_the_deadline() {
+        let (ours, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        let mut s = DeadlineStream::with_deadline(ours, deadline, Duration::MAX);
+        let mut buf = [0u8; 1];
+        let err = s.read(&mut buf).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{err}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(190));
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        assert_eq!(
+            s.read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 }

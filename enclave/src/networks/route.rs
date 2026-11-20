@@ -60,6 +60,10 @@ pub struct ValidationContext<'a> {
     /// Reads the asset's reject list.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     pub reject_list_reader: Option<crate::networks::rgb::validation::RejectListReader<'a>>,
+    /// The request deadline. Burn validation ends its validator child
+    /// before it.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+    pub deadline: std::time::Instant,
 }
 
 /// Result of source validation: the route proof and, for an RGB source on an

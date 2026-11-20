@@ -110,9 +110,12 @@ The enclave checks all the new values first. If one check fails, the enclave
 refuses the request and changes nothing.
 
 - Each value must be in its range.
-- `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`.
-  A request that passes the deadline does all its work, and then it cannot send
-  its reply. So 30 s of rgb-lib needs a deadline of at least 40 s.
+- `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`,
+  so the work that the caps admit ends within the deadline, with time left for
+  the other work of the request. Work that runs too long is cut: the burn
+  signer ends its validator child before the deadline and refuses the burn
+  ([tee-spec.md](tee-spec.md#validator-child-burn-signer)). So 30 s of rgb-lib
+  needs a deadline of at least 40 s.
 - Each per-call timeout must be at most `total_request_timeout_secs`:
   `io_idle_timeout_secs`, `first_bytes_timeout_secs` and `evm_rpc_timeout_secs`.
   The deadline does not stop a network call of the enclave, so a longer network
@@ -129,17 +132,22 @@ refuses the request and changes nothing.
   250,000 more entries.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
-  limits, a consignment scratch file for each request, and the baseline. rgb-lib
-  reads a consignment, and a fascia, only from a file, and the enclave keeps that
-  file in RAM. A consignment file takes up to `max_consignment_bytes` and a
-  fascia file up to `max_psbt_bytes`, and never more than `max_message_bytes`. A
+  limits, a consignment scratch file for each request, on the burn signer a
+  validator reserve for each request, and the baseline. rgb-lib reads a
+  consignment, and a fascia, only from a file, and the enclave keeps that file
+  in RAM. A consignment file takes up to `max_consignment_bytes` and a fascia
+  file up to `max_psbt_bytes`, and never more than `max_message_bytes`. A
   request holds one such file at a time. The enclave removes the file when
-  rgb-lib ends, also after a refusal. The boot check does not count the files.
-  This check counts one file at the larger of the two limits, also for a
-  change that keeps the image values. A refusal states how many MiB the new
-  limits need. A larger frame or consignment limit can need a larger
-  `run-enclave --memory` value, which needs a new launch
-  ([operations.md](operations.md#memory)).
+  rgb-lib ends, also after a refusal: the burn signer writes it before its
+  validator child starts and removes it after it reaps the child. The reserve
+  is the memory of a validator child beside the validation heap: its process,
+  its stack, and the verdict frame that the enclave reads, which grows with
+  `max_consignment_bytes` (`memory::validator_reserve`). The boot check counts
+  neither the files nor the reserves. This check counts one file at the larger
+  of the two limits and one reserve for each request, also for a change that
+  keeps the image values. A refusal states how many MiB the new limits need. A
+  larger frame or consignment limit can need a larger `run-enclave --memory`
+  value, which needs a new launch ([operations.md](operations.md#memory)).
 
 ## The reject list
 
@@ -193,7 +201,13 @@ request was at or below the model.
 An honest history at the 10 MiB limit models at about 23 s. Four of them at once take
 about 65 s on 2 vCPUs, so they fit the deadline of the image, 90 s. A forged request
 can model at the 30 s of `max_rgb_lib_ms`. Four of these at once can take about 110 s
-on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
+on 2 vCPUs: the burn signer ends their validator children before the deadline and
+refuses them. On 4 vCPUs they take about 57 s.
+
+**Outstanding measurement.** These times do not include the start of a validator
+child or its questions to the enclave: one for each witness and each mint. Take them
+again through the child before the burn image of this code is released, and replace
+this table.
 
 ## Smaller production host
 

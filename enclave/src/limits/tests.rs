@@ -65,6 +65,30 @@ fn a_reset_with_values_keeps_only_those_values() {
     assert_eq!(limits.max_psbt_bytes, 2 * MIB);
 }
 
+/// The values in force of another process replace each value here, the
+/// changes made here included. They hold as they are, also where the checks
+/// of a change would refuse them: `MAX_CONSIGNMENT_BYTES` can set a value
+/// below the range of a change.
+#[test]
+fn adopted_values_are_the_values_in_force() {
+    apply_to_defaults(|l| l.max_psbt_bytes = 2 * MIB).unwrap();
+    let theirs = Limits {
+        max_rgb_lib_ms: 20_000,
+        max_witness_check_cost: 2 * MIB,
+        ..Limits::DEFAULTS
+    };
+    adopt(&theirs);
+    assert_eq!(get(), theirs);
+    let lowered = Limits {
+        max_consignment_bytes: 512,
+        ..theirs
+    };
+    assert!(lowered.check().is_err());
+    adopt(&lowered);
+    assert_eq!(get(), lowered);
+    assert_eq!(in_force(&BridgeConfig::default()), lowered);
+}
+
 #[test]
 fn a_refused_change_changes_nothing() {
     apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
@@ -92,7 +116,7 @@ fn the_memory_check_of_the_caller_can_refuse_a_change() {
 }
 
 /// The trap of a budget at the deadline: the gate passes a request, and the
-/// request then loses its reply.
+/// enclave then ends its validator child before the deadline.
 #[test]
 fn the_rgb_lib_budget_must_stay_below_the_deadline() {
     let err = apply_to_defaults(|l| l.max_rgb_lib_ms = 68_000).unwrap_err();

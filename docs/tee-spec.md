@@ -54,6 +54,7 @@ Internet -- orchestrator -- EC2 parent (UNTRUSTED) -- vsock -- Nitro Enclave (TR
 |-------|-------------|-----------------|
 | Nitro hardware and NSM | Isolation, measurement (PCRs), attestation signing, entropy | - |
 | Enclave code (this repository) | Validation, key custody, signing | - (the attestation measures it) |
+| Validator child of the burn signer | The verdict of rgb-lib on one consignment. It is this code in a new process, with no key or secret. | Any resolver answer: the enclave gives each one. The parts of a verdict that the enclave checks again ([section 3](#validator-child-burn-signer)). |
 | Parent, listener, backend | Liveness and delivery of data. On a public-Signet image, also the Bitcoin headers that the parent sends ([known limits](#10-known-limits)). | Every claim in a request. The enclave checks each one. |
 | EVM RPC (pinned host and CA) | Mint signer: receipts, canonical blocks and the selected finality head. Burn signer: only the content of an asset's reject list. | TLS authenticates the endpoint. It does not prove EVM history or the answer of an `eth_call`. |
 | Bitcoin indexer | Nothing. The enclave makes no indexer call. | - |
@@ -128,8 +129,128 @@ version field. Each connection carries one request.
 - Each socket read or write can block for `io_idle_timeout_secs`. The socket
   deadline `total_request_timeout_secs` starts when the connection is
   accepted, time in the queue included.
-- The socket deadline does not cancel the work of a handler. A handler can
-  finish its validation after the deadline; its reply is then lost.
+- The socket deadline does not cancel the work of a handler, with one
+  exception: the burn signer ends its validator child before the deadline
+  ([validator child](#validator-child-burn-signer)). Other work, such as the
+  fascia inspection of the mint signer or a slow RPC call, can go on after
+  the deadline; its reply is then lost.
+
+### Validator child (burn signer)
+
+The burn signer runs rgb-lib's validation and inspection in a child
+process. A fault of rgb-lib then ends the child, not the enclave process
+that holds the seed. The mint signer runs its fascia inspection in its own
+process.
+
+**What runs in the child.** The rgb-lib part of Stage 2 of a burn
+([burn-flow.md](burn-flow.md)) on one consignment: the strict decode of the
+file, the work caps, rgb-lib's validation and inspection, and the summary of
+the burn. The payload checks of Stage 1, every resolver answer, and every
+check on the summary run in the enclave process.
+
+**How it starts.** For each burn `Sign` that passes Stage 1, the enclave
+writes the consignment to a scratch file. Then it starts its own binary
+again, through `/proc/self/exe`, with the one argument `--rgb-validator`
+(`CHILD_ARG`). With exactly this argument, `main` runs one job before any
+boot step. The enclave itself starts with no argument, so the host cannot
+select this mode.
+
+- The exec gives the child a new address space: it holds no seed, key,
+  cloning secret or RPC client.
+- Its environment has only the `RUST_LOG` of the enclave, if set.
+- Its fd 0 is one end of a Unix socket pair. Its stdout is `/dev/null`, and
+  its stderr is the console of the enclave.
+- A worker runs at most one child at a time, and reaps it before it replies.
+
+**What crosses the boundary.** Frames with the layout of a request frame.
+Their messages are private to this binary (`validation/ipc.rs`); they are
+not in `enclave-proto`.
+
+- The enclave sends a start frame: the limits in force, the path of the
+  file, the network, the safe height that it read once for this validation,
+  and whether it binds mint anchors and reads a reject list.
+- The child asks, one question at a time, and the enclave gives each answer
+  itself: the asset bind of the contract id, against the declared asset and
+  `RGB_ASSET_ID`; the lock of each mint anchor, as B2.4 derives it; the
+  header at a height, from its own chain, at least `SPV_MIN_CONFIRMATIONS`
+  deep and not above the safe height; and the reject list, over the pinned
+  EVM RPC. The asset bind comes first, and the list is read at most once.
+- The child ends with its verdict: the contract id, the network, the
+  witness blocks, the settling transition, the mint locks and its peak
+  memory. Or it ends with a refusal: the kind and the text of its error.
+
+When the enclave refuses a question, it keeps its own error and answers
+that it refused. The child then ends with a held refusal, and the request
+gets the error that the enclave kept, with its code: for example code 9 for
+a header wait. A question after a refusal, a frame that does not decode,
+and a frame over its cap end the exchange. The enclave reads a frame of the
+child under the length of the consignment plus
+`VALIDATOR_FRAME_FIXED_BYTES`. The child reads each answer under a cap that
+holds a reject list of `max_reject_list_entries`, as its start frame gives
+it. A change of the limits does not reach a running child, so the enclave
+refuses the question when the list is longer than that.
+
+**Confinement.** Before it reads its job, the child closes each inherited
+descriptor above fd 2. It sets its OOM score adjustment to the highest
+value and reads it back, turns core files off, and sets its stack limit to
+`VALIDATOR_STACK_BYTES`, or to the hard limit if that is lower. A panic
+aborts the child in every build. A release child that could not do these
+steps refuses its job. The child has no heap cap. When the enclave runs out
+of memory, the kernel ends the process with the highest OOM score, which is
+a child while one runs.
+
+**Boot check.** After the memory check, the burn signer starts a probe
+child, and reads three kernel settings and the OOM score adjustment of the
+enclave process. A release build refuses to start when the probe child does
+not answer within `IO_IDLE_TIMEOUT` or did not confine itself. It also
+refuses when `vm.overcommit_memory` is 2, `vm.panic_on_oom` is set,
+`vm.oom_kill_allocating_task` is set, the OOM score adjustment of the
+enclave process is above 0, or one of these values cannot be read: with
+these values, an out-of-memory can end the enclave process first. A debug
+build logs a warning and starts. When the probe child answers, the enclave
+logs "validator child ready" with the time the child took to answer, and
+its OOM score adjustment and memory.
+
+**End before the deadline.** The enclave ends the child at the kill time,
+`RESPONSE_MARGIN` before the request deadline, so the reply can still be
+written. When the kill time has passed before the start, the enclave
+writes no scratch file, starts no child and refuses with a timeout. Each
+read and write on the socket stops at the kill time. After the verdict, the
+end of the socket, the kill time or a broken protocol, the enclave sends
+`SIGKILL` and reaps the child. Then it removes the scratch file and
+replies.
+
+**Codes.** The enclave decides the result after it reaps the child. An
+error that the enclave kept comes before any end of the child:
+
+| The validation ends with | Result | Code |
+|---|---|---|
+| A question that the enclave refused | The error that the enclave kept | Its own |
+| A verdict that passes the checks below | Stage 3 and the binds of the release run | - |
+| A refusal of the child | Its error | 3 for a cross-check or SPV error, 1 for another |
+| The kill time | A timeout | 1 |
+| A crash signal: `SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL` or `SIGFPE` | Refused: a panic, a failed allocation or a stack overflow on this consignment | 3 |
+| A `SIGKILL` that the enclave did not send, from the OOM killer | A fault of the enclave | 1 |
+| Another signal or exit, a broken protocol, a verdict that fails the checks, or a failed start | A fault of the enclave | 1 |
+
+A retry repeats a crash on the same consignment, so a crash refuses it. An
+out-of-memory kill depends on the load at the time.
+
+**What the enclave checks again.** The enclave trusts the verdict as it
+would trust this validation in its own process: for the consensus result,
+the settling transition and the mint locks. It checks that the verdict is for
+the contract id of the asset bind and for its own network. It checks that
+the witness blocks are in strictly ascending txid order, and each have a
+height from 1 to the safe height of the start. It checks that the witness of
+the settling transition is one of them, and that each field and record has
+its exact length. Stage 3 then confirms every witness block in the chain of
+the enclave under one lock, as for any burn.
+
+**Faults, not exploits.** The boundary contains a fault of rgb-lib: a
+panic, a failed allocation, a stack overflow, an out-of-memory kill or a
+validation past its time. It does not contain an exploit. The child runs as
+the same user as the enclave process, so code that takes control of rgb-lib
+can reach what that user can reach, the enclave process included.
 
 ### Outbound connections
 
@@ -198,8 +319,15 @@ request can use has a bound that does not depend on the content of the
 request: `REQUEST_MEMORY_FACTOR` times the frame, plus a term for the decoded
 protobuf elements. A parser that can take more has its own size limit. The
 answers of the EVM RPC are outside the model, except a reject list, whose
-entry limit the model counts. A release build refuses to start
-with less usable memory than the model needs for all its workers.
+entry limit the model counts. On the burn signer, the bound covers the
+enclave process and the validator child of the request together: the
+enclave holds the decoded request, and the child the validation. Each child
+also holds a reserve beside that heap: its process, its stack and the
+verdict frame that the enclave reads (`validator_reserve`). A change of
+limits counts one reserve for each worker
+([runtime-limits.md](runtime-limits.md#rules-for-a-change)). A release build
+refuses to start with less usable memory than the model needs for all its
+workers.
 `enclave/src/memory.rs` holds the model and its measured factors; the tests
 are next to the parsers that they measure.
 [operations.md](operations.md#memory) gives the launch value.
@@ -352,12 +480,13 @@ routes are RGB -> EVM and EVM -> RGB. Any other pair is refused. A signer
 compiles one direction only and refuses the other.
 
 **RGB -> EVM (burn signer).** The enclave validates the consignment with
-full RGB consensus, proves every witness transaction in its own header chain,
-and binds the release to the burn. It signs an EIP-712 digest over the
-decoded calldata fields: `TeeFundsOut` on the direct route, `TeeLzFundsOut`
-on the LayerZero route. It builds no batch digest and signs no opaque
-calldata. Section 8 lists the predicates. [burn-flow.md](burn-flow.md) gives
-the checks in order.
+full RGB consensus, in its [validator child](#validator-child-burn-signer),
+proves every witness transaction in its own header chain, and binds the
+release to the burn. It signs an EIP-712 digest over the decoded calldata
+fields: `TeeFundsOut` on the direct route, `TeeLzFundsOut` on the LayerZero
+route. It builds no batch digest and signs no opaque calldata. Section 8
+lists the predicates. [burn-flow.md](burn-flow.md) gives the checks in
+order.
 
 **EVM -> RGB (mint signer).** The enclave reads the mint from the fascia that
 rgb-lib wrote for the PSBT's transaction, and it validates no consignment.
@@ -492,7 +621,7 @@ decisions.
 
 | # | Required | Enforcement |
 |---|----------|-------------|
-| P1 | Valid RGB consignment | Full RGB consensus validation by rgb-lib, under the pinned schema. |
+| P1 | Valid RGB consignment | Full RGB consensus validation by rgb-lib in the validator child, under the pinned schema. |
 | P2 | Expected transition | The settling transition must be a `TS_BURN`: the one burn of the bundles the inspection reads. Two burns are refused. |
 | P3 | Exact amount | `burnedAsset` must equal the calldata `amount`. The host's `rgb_amount` is not evidence. |
 | P4 | Valid calldata | An allowed selector, a size limit, canonical ABI encoding, the destination-chain rule of the route, and a bounded deadline. |
@@ -560,8 +689,13 @@ deployed.
 - **Validation time.** Work caps and a modeled time budget bound the work of
   rgb-lib on a consignment. The model is fitted to measurements, not proved:
   a shape that costs more than the measured ones runs longer than its budget.
-  The caps can also refuse an honest burn with a very long history, until the
-  operator raises them ([validation-cost-model.md](validation-cost-model.md)).
+  The enclave then ends the validator child before the deadline, and the
+  burn gets a timeout instead of a reason. The caps can also refuse an
+  honest burn with a very long history, until the operator raises them
+  ([validation-cost-model.md](validation-cost-model.md)).
+- **Validator child.** The child contains a fault of rgb-lib, not an exploit:
+  it runs as the same user as the enclave process
+  ([validator child](#validator-child-burn-signer)).
 - **Gas transactions.** The gas limits apply to one transaction, not to a
   sum. A gas transaction is not linked to one checked release, and the
   LayerZero fee is not bound to its release. A compromised listener can ask
@@ -624,8 +758,9 @@ deployed.
   min-difficulty blocks at almost no cost, and they count for depth and
   freshness. Run it with `BTC_RELAY_MODE=required` and a relay that applies
   the same rule. The signets and regtest check no proof of work (section 7).
-- **Request deadline.** The socket deadline does not cancel a handler. A
-  handler with slow RPC calls can run past it.
+- **Request deadline.** The socket deadline cancels no work of a handler
+  other than the validator child of the burn signer. A handler with slow RPC
+  calls can run past it.
 - **Build reproducibility.** CI does not pin the Docker and BuildKit versions
   ([building.md](building.md#reproducibility)).
 - **Contract integration.** The Bridge must derive RGB deposit ids as the

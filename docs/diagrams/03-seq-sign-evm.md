@@ -9,6 +9,7 @@ sequenceDiagram
     participant Parent as utexo-bridge-parent<br/>(grpc_server.rs)
     participant Srv as enclave/server/sign.rs<br/>handle_sign
     participant Rgb as networks::rgb::validation<br/>RgbValidator
+    participant Child as validator child<br/>(validation::child, this binary)
     participant Spv as networks::rgb::spv_crosscheck
     participant Chain as spv::HeaderChain
     participant Bind as server::bfa<br/>derived_locks
@@ -28,23 +29,39 @@ sequenceDiagram
     Note over Srv,Bind: 1 - validate_source (RGB), no network call but the reject list
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
-    Rgb->>Rgb: Transfer::load (V1 TFR only),<br/>genesis schema BFA
+    Rgb->>Rgb: one safe height read, kill time = deadline - RESPONSE_MARGIN<br/>(passed => REFUSE, no child), consignment to a scratch file
+    Rgb->>Child: spawn this binary --rgb-validator: no environment,<br/>fd 0 = socket pair, Start{limits in force, file path, chain, safe height}
+    Note over Rgb,Child: every read and write on the socket stops at the kill time.<br/>A refused question: the enclave keeps its error, the child ends held.
+    Child->>Child: Transfer::load (V1 TFR only),<br/>genesis schema BFA
+    Child->>Rgb: BindAsset(contract_id), the first question
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
-    Rgb->>Rgb: reject list, if the genesis names one, must be an EVM contract
-    Rgb->>Rgb: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
-    Rgb->>Rgb: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
-    Rgb->>Bind: anchor resolver: AnchorBinder once with no anchor,<br/>then once per mint anchor
-    Rgb->>Rgb: rgb-ops: genesis bridgeLocation chain == the resolver's EVM_CHAIN_ID
+    Rgb-->>Child: AssetBound
+    Child->>Child: reject list, if the genesis names one, must be an EVM contract
+    Child->>Child: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
+    Child->>Child: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
+    Child->>Rgb: anchor resolver: Anchors once with no anchor,<br/>then once per mint anchor
+    Rgb->>Bind: AnchorBinder
     Bind->>Bind: per anchor: derived lock = rgb_mint_deposit_id<br/>(lockId(mint OpId, witness txid), minted units, no EVM RPC read)
     Bind-->>Rgb: BoundAnchors (one lock per anchor)
-    Rgb->>Spv: witness resolver: chain_net == enclave network, else REFUSE;<br/>buried_header(height) under a short chain lock,<br/>only at depth ≥ SPV_MIN_CONFIRMATIONS, else REFUSE;<br/>no transaction lookup: a witness is Mined(height) only when<br/>the SPV proof in the consignment holds against that header
+    Rgb-->>Child: Bound (EVM_CHAIN_ID, the locks)
+    Child->>Child: rgb-ops: genesis bridgeLocation chain == the resolver's EVM_CHAIN_ID
+    Child->>Child: witness resolver: chain_net == enclave network, else REFUSE
+    Child->>Rgb: Header(height) for each witness with a proof
+    Rgb->>Spv: buried_header(height) under a short chain lock,<br/>not above the safe height, only at depth ≥ SPV_MIN_CONFIRMATIONS,<br/>else REFUSE
+    Rgb-->>Child: the 80-byte header
+    Child->>Child: no transaction lookup: a witness is Mined(height) only when<br/>the SPV proof in the consignment holds against that header
     opt genesis names a reject list
+        Child->>Rgb: RejectList(chain id, address), once, after the asset bind
         Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
-        Rgb->>Rgb: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
+        Rgb-->>Child: Decisions
+        Child->>Child: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
     end
-    Rgb->>Rgb: the bound locks are the anchors, one for one
-    Rgb->>Rgb: rgb-lib inspect_consignment(Terminals) on the same file:<br/>the flat summary of the terminal bundles
-    Rgb->>Rgb: settling transition (their one burn):<br/>burnedAsset, burnReason, OpId
+    Child->>Child: the bound locks are the anchors, one for one
+    Child->>Child: rgb-lib inspect_consignment(Terminals) on the same file:<br/>the flat summary of the terminal bundles
+    Child->>Child: settling transition (their one burn):<br/>burnedAsset, burnReason, OpId
+    Child-->>Rgb: Verdict: Validated, Refused or held
+    Rgb->>Child: SIGKILL and reap after the verdict, the end of the socket,<br/>the kill time or a broken protocol, then remove the scratch file
+    Rgb->>Rgb: the kept enclave error first, else the verdict:<br/>bound contract, chain, witness blocks sorted and not above the safe height,<br/>settling witness among them (else REFUSE)
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source)

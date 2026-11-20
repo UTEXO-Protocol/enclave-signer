@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, Eip712Domain, SolCall, SolStruct, SolValue};
@@ -30,7 +30,7 @@ use utexo_bridge_enclave::keys::KeyManager;
 use utexo_bridge_enclave::networks::evm::events::{BlockData, EvmReceiptProvider, ReceiptData};
 use utexo_bridge_enclave::networks::evm::reject_list::lengthCall;
 use utexo_bridge_enclave::networks::rgb::spv::{Checkpoint, HeaderChain, Network as SpvNet};
-use utexo_bridge_enclave::networks::rgb::validation::RgbValidator;
+use utexo_bridge_enclave::networks::rgb::validation::{ChildProgram, RgbValidator};
 use utexo_bridge_enclave::proto::enclave_request::Request;
 use utexo_bridge_enclave::proto::enclave_response::Response;
 use utexo_bridge_enclave::proto::sign_request::{DestinationNetwork, SourceNetwork};
@@ -51,7 +51,11 @@ pub(super) const LIST: [u8; 20] = [0x4e; 20];
 pub(super) const PAYEE: [u8; 20] = [0x43; 20];
 pub(super) const MINTED: u64 = 100_000;
 pub(super) const BURNED: u64 = 60_000;
+/// The block of the first witness: the mint's.
+const FIRST_WITNESS: u32 = 11;
+/// The block of a burn right after its mint.
 pub(super) const BURN_HEIGHT: u32 = 12;
+/// The tip above that burn.
 pub(super) const TIP: u32 = 18;
 
 // ABI and EIP-712 types are independently declared here, as a consumer of the
@@ -128,6 +132,9 @@ fn mine(mut header: Header) -> Header {
     header
 }
 
+/// Blocks of one Bitcoin difficulty period.
+const DIFFICULTY_PERIOD: u32 = 2016;
+
 /// The relay contract's stored-header layout: header, cumulative work,
 /// height, difficulty-epoch timestamp and ten prior timestamps. Calculated
 /// independently from the fixture headers, not by the enclave relay helper.
@@ -139,10 +146,12 @@ fn relay_commit(headers: &[Header], height: u32) -> B256 {
         times[9] = headers[h - 1].time;
         work = work + headers[h].work();
     }
+    // The first block of the difficulty period that holds `height`.
+    let period_start = height - height % DIFFICULTY_PERIOD;
     let mut record = serialize(&headers[height as usize]);
     record.extend_from_slice(&work.to_be_bytes());
     record.extend_from_slice(&height.to_be_bytes());
-    record.extend_from_slice(&headers[0].time.to_be_bytes());
+    record.extend_from_slice(&headers[period_start as usize].time.to_be_bytes());
     for time in times {
         record.extend_from_slice(&time.to_be_bytes());
     }
@@ -157,18 +166,20 @@ fn merkle_parent(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
     sha256d::Hash::hash(&pair).to_byte_array()
 }
 
-/// The chain, the SPV proof of each bundle's witness in it, and the relay proof.
+/// The chain, the SPV proof of each bundle's witness in it, and the relay
+/// proof. Each bundle has a block of its own from [`FIRST_WITNESS`], the burn
+/// last, and the tip is as far above the burn as [`TIP`] is above
+/// [`BURN_HEIGHT`].
 fn chain(history: &History) -> (HeaderChain, Vec<SpvProof>, Bytes) {
-    assert_eq!(
-        history.bundles.len(),
-        2,
-        "one mint, then one split/burn bundle"
-    );
+    let bundles = u32::try_from(history.bundles.len()).unwrap();
+    let burn_height = FIRST_WITNESS + bundles - 1;
+    let tip = burn_height + (TIP - BURN_HEIGHT);
     let checkpoint = mine(Header {
         version: Version::ONE,
         prev_blockhash: BlockHash::all_zeros(),
         merkle_root: TxMerkleNode::all_zeros(),
-        time: (now() - 120) as u32,
+        // The tip is as old as the tip of a burn right after its mint.
+        time: (now() - 120 - u64::from(tip - TIP)) as u32,
         bits: CompactTarget::from_consensus(0x207fffff),
         nonce: 0,
     });
@@ -185,9 +196,9 @@ fn chain(history: &History) -> (HeaderChain, Vec<SpvProof>, Bytes) {
     );
     let mut headers = vec![checkpoint];
     let mut proofs = Vec::new();
-    for height in 1..=TIP {
-        let merkle_root = if (11..=BURN_HEIGHT).contains(&height) {
-            let txid = history.bundles[(height - 11) as usize].witness_id();
+    for height in 1..=tip {
+        let merkle_root = if (FIRST_WITNESS..=burn_height).contains(&height) {
+            let txid = history.bundles[(height - FIRST_WITNESS) as usize].witness_id();
             // A nonzero position and both path levels must survive transport.
             // Build the root independently of the enclave's Merkle verifier.
             let left = [0xa1; 32];
@@ -220,10 +231,10 @@ fn chain(history: &History) -> (HeaderChain, Vec<SpvProof>, Bytes) {
         headers.push(header);
     }
     let proof = (
-        U256::from(BURN_HEIGHT),
-        relay_commit(&headers, BURN_HEIGHT),
-        U256::from(TIP),
-        relay_commit(&headers, TIP),
+        U256::from(burn_height),
+        relay_commit(&headers, burn_height),
+        U256::from(tip),
+        relay_commit(&headers, tip),
     )
         .abi_encode()
         .into();
@@ -282,6 +293,16 @@ pub(super) fn burn_id(p: &FundsOutParams) -> U256 {
     ).abi_encode()).0)
 }
 
+/// The validator child of the burns: the enclave binary that cargo built for
+/// an enclave test, or the `rgb_validator_child` entry of a test binary that
+/// has no such binary.
+fn child() -> ChildProgram {
+    match option_env!("CARGO_BIN_EXE_utexo-bridge-enclave") {
+        Some(binary) => ChildProgram::binary(binary),
+        None => ChildProgram::test_entry("rgb_validator_child").unwrap(),
+    }
+}
+
 pub(super) struct Fixture {
     pub(super) ctx: ServerContext,
     pub(super) source: RgbSource,
@@ -298,13 +319,20 @@ impl Fixture {
     }
 
     pub(super) fn with_claimed_burn(route: Route, claimed_burned: u64) -> Self {
-        Self::with_destination(route, claimed_burned, Some(PAYEE.to_vec()))
+        Self::with_destination(route, claimed_burned, Some(PAYEE.to_vec()), 0)
+    }
+
+    /// [`Fixture::new`] of units that passed through `transfers` transfers
+    /// between their mint and the burn.
+    #[allow(dead_code)]
+    pub(super) fn after_transfers(route: Route, transfers: usize) -> Self {
+        Self::with_destination(route, BURNED, Some(PAYEE.to_vec()), transfers)
     }
 
     // The Parent matrix uses version cases outside the shared handler suite.
     #[allow(dead_code)]
     pub(super) fn v0(route: Route) -> Self {
-        Self::with_destination(route, BURNED, None)
+        Self::with_destination(route, BURNED, None, 0)
     }
 
     #[allow(dead_code)]
@@ -313,10 +341,15 @@ impl Fixture {
             Route::Direct => assert_eq!(recipient.len(), 20),
             Route::LayerZero => assert!((1..=32).contains(&recipient.len())),
         }
-        Self::with_destination(route, BURNED, Some(recipient))
+        Self::with_destination(route, BURNED, Some(recipient), 0)
     }
 
-    fn with_destination(route: Route, claimed_burned: u64, recipient: Option<Vec<u8>>) -> Self {
+    fn with_destination(
+        route: Route,
+        claimed_burned: u64,
+        recipient: Option<Vec<u8>>,
+        transfers: usize,
+    ) -> Self {
         let burn_destination = recipient.map(|recipient| BurnDestination {
             version: 1,
             destination_chain_id: route.chain(),
@@ -327,7 +360,10 @@ impl Fixture {
         let mut issue = Issue::new(CHAIN_ID, BRIDGE, vec![right]);
         issue.reject_list = Some(bfa_consignment::evm_reject_list(CHAIN_ID, LIST));
         let mut history = History::issue(issue);
-        let units = history.mint_owned(history.genesis_right(0, right), MINTED, 90);
+        let mut units = history.mint_owned(history.genesis_right(0, right), MINTED, 90);
+        for _ in 0..transfers {
+            units = history.transfer(units, MINTED);
+        }
         let reason = match &burn_destination {
             Some(record) => {
                 UtexoBurnDestinationV1 {
@@ -407,7 +443,7 @@ impl Fixture {
         let list_reads = Arc::new(AtomicUsize::new(0));
         let launch = ctx.launch.get_mut().unwrap();
         // SPV supplies every witness.
-        launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap());
+        launch.rgb_validator = Some(RgbValidator::new("regtest").unwrap().with_program(child()));
         launch.evm_rpc_client = Some(Box::new(EmptyRejectList(list_reads.clone())));
         // The operator's route list holds the pair of the LayerZero burn.
         launch.endpoints.lz_routes = vec![utexo_bridge_enclave::config::LzRoute {
@@ -513,6 +549,16 @@ pub(super) fn destination(request: &SignRequest) -> &EvmDestination {
 }
 
 pub(super) fn exchange(ctx: &ServerContext, request: SignRequest) -> EnclaveResponse {
+    let timeout = utexo_bridge_enclave::limits::get().total_request_timeout();
+    exchange_until(ctx, request, Instant::now() + timeout)
+}
+
+/// [`exchange`] of a request whose deadline is `deadline`.
+pub(super) fn exchange_until(
+    ctx: &ServerContext,
+    request: SignRequest,
+    deadline: Instant,
+) -> EnclaveResponse {
     let mut wire = Cursor::new(Vec::new());
     framing::write_message(
         &mut wire,
@@ -523,7 +569,7 @@ pub(super) fn exchange(ctx: &ServerContext, request: SignRequest) -> EnclaveResp
     .unwrap();
     let response_at = wire.position();
     wire.set_position(0);
-    server::handle_connection(&mut wire, ctx);
+    server::handle_connection_until(&mut wire, ctx, deadline);
     wire.set_position(response_at);
     framing::read_message(&mut wire).unwrap()
 }

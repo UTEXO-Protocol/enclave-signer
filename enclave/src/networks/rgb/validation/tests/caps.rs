@@ -121,7 +121,7 @@ fn propagate_chain(mut history: History, n: u16, links: u16) -> Vec<u8> {
 
 /// `t` rights, then one bundle of `t` one-right burns in a tx with `d` dummy
 /// inputs before the real one: rgb-lib checks each burn against the whole tx.
-fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
+pub(super) fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
     commit_many_burns(&mut history, t, d);
     history.consignment()
 }
@@ -401,7 +401,7 @@ fn a_burn_of_8193_rights_passes_the_gate_and_reaches_rgb_lib() {
 
 /// The dummy inputs that bring 256 one-right burns to about `cost`: each
 /// costs its 41 bytes and one seal scan per burn.
-fn dummies_for(cost: u64) -> u32 {
+pub(super) fn dummies_for(cost: u64) -> u32 {
     u32::try_from(cost / 256 / 42).unwrap()
 }
 
@@ -617,6 +617,23 @@ fn the_burn_of_2810_mints_passes_every_cap() {
     ];
     let model = rgb_lib_ns(bytes.len(), uncapped_costs(&transfer), costs);
     assert!(model <= MAX_RGB_LIB_NS / 2, "{model}");
+}
+
+/// The records of a verdict on the burn of 2810 mints take fewer bytes than
+/// its file: a witness block for each bundle and a lock for each mint. So
+/// the verdict fits the frame the enclave reads from its validator child.
+#[cfg(all(rgb_to_evm, unix))]
+#[test]
+fn the_verdict_records_of_the_burn_of_2810_mints_fit_in_its_file() {
+    use super::super::ipc::{LOCK_RECORD_BYTES, WITNESS_BLOCK_RECORD_BYTES};
+    let bytes = honest_burn(issue_of(10, true), 2_810, 0);
+    let bundles = load(&bytes).bundles.len();
+    let records = bundles * WITNESS_BLOCK_RECORD_BYTES + 2_810 * LOCK_RECORD_BYTES;
+    println!(
+        "{bundles} bundles: {records} record bytes, {} file bytes",
+        bytes.len()
+    );
+    assert!(records <= bytes.len(), "{records}");
 }
 
 /// A forged burn of 65,535 rights passes every cap. Its validation alone

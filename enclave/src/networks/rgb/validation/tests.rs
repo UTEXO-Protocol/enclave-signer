@@ -34,7 +34,7 @@ use crate::test_support::MinedBlocks;
 const BRIDGE: [u8; 20] = [0xB1; 20];
 const EVM_CHAIN_ID: u64 = 42161;
 /// The burner's EVM payout address.
-const PAYEE: [u8; 20] = [0x43; 20];
+pub(super) const PAYEE: [u8; 20] = [0x43; 20];
 const MINTED: u64 = 100_000;
 
 /// The outpoint of the genesis mint right.
@@ -55,7 +55,10 @@ fn minted() -> (History, Utxo) {
 }
 
 /// A mint, then a burn of `burned` with the rest as change.
-fn burn_history(burned: Option<u64>, reason: Option<[u8; 32]>) -> (History, gen::Committed) {
+pub(super) fn burn_history(
+    burned: Option<u64>,
+    reason: Option<[u8; 32]>,
+) -> (History, gen::Committed) {
     let (mut history, units) = minted();
     let burn = history.burn(units, MINTED, burned, reason);
     (history, burn)
@@ -118,13 +121,13 @@ fn refuses_a_burn_whose_origin_the_history_conceals() {
     assert!(err.contains("cannot be found"), "{err}");
 }
 
-fn burn_bytes() -> Vec<u8> {
+pub(super) fn burn_bytes() -> Vec<u8> {
     burn_history(Some(60_000), Some(gen::burn_reason_for(PAYEE)))
         .0
         .consignment()
 }
 
-fn validator() -> RgbValidator {
+pub(super) fn validator() -> RgbValidator {
     RgbValidator::new("regtest").unwrap()
 }
 
@@ -138,7 +141,7 @@ fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
 }
 
 /// Binds every anchor to a lock with its own `(lockId, amount)`.
-fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
+pub(super) fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
         evm_chain_id: EVM_CHAIN_ID,
         locks: anchors.iter().map(lock_for).collect(),
@@ -154,7 +157,7 @@ fn empty_list(_: &RejectListContract) -> Result<Decisions> {
 }
 
 /// Any asset binds, and a listed one reads an empty list.
-fn open_lists() -> ListAccess<'static> {
+pub(super) fn open_lists() -> ListAccess<'static> {
     ListAccess {
         bind_asset: &any_asset,
         read: Some(&empty_list),
@@ -172,15 +175,28 @@ fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<Valida
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
-fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
+pub(super) fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
     rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes))
         .map(|t| t.bundles.iter().map(|wb| wb.witness_id()).collect())
         .unwrap_or_default()
 }
 
 /// `txids` mined deep enough, one per block, as the generator proves them.
-fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
+pub(super) fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
     MinedBlocks::of(txids)
+}
+
+/// Every field the enclave reads after validation is the same.
+#[cfg(all(rgb_to_evm, unix))]
+pub(super) fn assert_same(got: &ValidatedConsignment, want: &ValidatedConsignment) {
+    assert_eq!(got.contract_id, want.contract_id);
+    assert_eq!(got.chain_net, want.chain_net);
+    assert_eq!(got.witness_txids, want.witness_txids);
+    assert_eq!(got.witness_blocks, want.witness_blocks);
+    assert_eq!(got.settling_witness_txid, want.settling_witness_txid);
+    assert_eq!(got.settling_op_id, want.settling_op_id);
+    assert_eq!(got.settling_transition, want.settling_transition);
+    assert_eq!(got.mint_locks, want.mint_locks);
 }
 
 fn error_of(result: Result<ValidatedConsignment>) -> String {
@@ -1212,10 +1228,8 @@ fn refuses_locks_bound_on_another_chain() {
     assert_eq!(*asked.borrow(), 0, "no anchor is bound on the wrong chain");
 }
 
-/// rgb-lib asks the binder once with no anchor, for the pins and the chain
-/// id, then once for each mint of the history.
-#[test]
-fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+/// Two mints on two genesis rights, then one burn of both.
+fn burn_of_two_mints() -> History {
     let outpoints = vec![right_utxo(), gen::outpoint(0xA1, 0)];
     let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
     let rights = [0, 1].map(|no| history.genesis_right(no, outpoints[usize::from(no)]));
@@ -1236,7 +1250,14 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
         .unwrap();
     let inputs = units.iter().map(|unit| unit.outpoint).collect();
     history.commit(vec![burn], inputs, vec![gen::dust(4)]);
+    history
+}
 
+/// rgb-lib asks the binder once with no anchor, for the pins and the chain
+/// id, then once for each mint of the history.
+#[test]
+fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+    let history = burn_of_two_mints();
     let calls = RefCell::new(Vec::new());
     let record = |anchors: &[MintAnchor]| {
         calls.borrow_mut().push(anchors.to_vec());
@@ -2116,6 +2137,27 @@ mod source_path {
         chain: &Mutex<HeaderChain>,
         reader: Option<RejectListReader<'_>>,
     ) -> Result<ValidatedConsignment> {
+        in_context(config, chain, reader, |ctx| validate_source(source, ctx))
+    }
+
+    /// The route proof of `source` on the burn path, every witness 6 deep.
+    fn route_proof(
+        source: &crate::proto::RgbSource,
+        config: &BridgeConfig,
+    ) -> Result<crate::networks::RouteProof> {
+        let chain = chain_of(&source.consignment);
+        in_context(config, &chain, None, |ctx| {
+            crate::networks::rgb::validate_source(source, ctx).map(|proof| proof.proof)
+        })
+    }
+
+    /// Runs `check` with the burn path's services and a child of this binary.
+    fn in_context<T>(
+        config: &BridgeConfig,
+        chain: &Mutex<HeaderChain>,
+        reader: Option<RejectListReader<'_>>,
+        check: impl FnOnce(&ValidationContext<'_>) -> Result<T>,
+    ) -> Result<T> {
         let validator = validator();
         let ctx = ValidationContext {
             bridge_config: config,
@@ -2124,8 +2166,9 @@ mod source_path {
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             anchor_binder: Some(&bind_all),
             reject_list_reader: reader,
+            deadline: crate::test_support::far_deadline(),
         };
-        validate_source(source, &ctx)
+        check(&ctx)
     }
 
     fn asset_id() -> String {
@@ -2227,6 +2270,61 @@ mod source_path {
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
     }
 
+    /// The source path gives its validator child the limits in force. A burn
+    /// that the image value of the witness cap admits is refused once a change
+    /// lowers that cap, and the refusal names the lowered value.
+    #[test]
+    fn the_source_path_gives_its_child_the_limits_in_force() {
+        const MIB: u64 = 1024 * 1024;
+        let id = asset_id();
+        let bytes = super::caps::many_burns(issue(), 256, super::caps::dummies_for(2 * MIB));
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes,
+            ..burn_source(&id)
+        };
+        let config = pinned_config(&id);
+        // Past the cost gate, the burn path refuses a release of many burns.
+        let err = error_of(run(&source, &config));
+        assert!(err.contains("carry 256 burns"), "{err}");
+        crate::limits::change_for_test(|l| l.max_witness_check_cost = MIB);
+        let err = error_of(run(&source, &config));
+        assert!(err.contains(&format!("(max {MIB})")), "{err}");
+    }
+
+    /// A transfer of the genesis alone validates in a validator child as in
+    /// this process, and the route refuses it with code 3 for its missing
+    /// transition.
+    #[test]
+    fn a_transfer_of_the_genesis_alone_is_refused_as_in_process() {
+        let id = asset_id();
+        let bytes = issue().consignment();
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes.clone(),
+            ..burn_source(&id)
+        };
+        let config = pinned_config(&id);
+        let here = validator()
+            .validate_consignment(
+                &bytes,
+                Some(&bind_all),
+                &mined(&witness_ids(&bytes)),
+                &open_lists(),
+            )
+            .unwrap();
+        let there = run(&source, &config).unwrap();
+        assert_same(&there, &here);
+        assert!(there.settling_transition.is_none(), "{there:?}");
+        let err = route_proof(&source, &config).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        assert!(
+            err.to_string()
+                .contains("RGB source requires a consignment with at least one transition"),
+            "{err}"
+        );
+    }
+
     /// The listed burn as a source, every witness proven 6 deep, its chain
     /// and its asset id.
     fn listed_source() -> (crate::proto::RgbSource, Mutex<HeaderChain>, String) {
@@ -2313,6 +2411,44 @@ mod source_path {
         let err = error_of(run_reading(&source, &config, &chain, None));
         assert!(err.contains("cannot read it"), "{err}");
     }
+
+    /// A running child keeps the limits of its start, so a list over them is
+    /// refused with code 3 after a raise; a retry under the raise passes.
+    #[test]
+    fn a_list_over_the_limit_its_validation_started_with_is_refused() {
+        let (started, raised, entries) = (1_000, 10_000, 6_000u32);
+        crate::limits::change_for_test(|l| l.max_reject_list_entries = started);
+        let unrelated: Vec<RejectListEntry> = (0..entries)
+            .map(|n| {
+                let mut op = [0x99; 32];
+                op[..4].copy_from_slice(&n.to_be_bytes());
+                RejectListEntry {
+                    opout: OpoutKey {
+                        op,
+                        ty: 4000,
+                        no: 0,
+                    },
+                    reject: n.is_multiple_of(12),
+                }
+            })
+            .collect();
+        let decided = decisions(&unrelated, unrelated.len());
+        // The raise lands after the child started, before the list read.
+        let read = |_: &RejectListContract| {
+            crate::limits::change_for_test(|l| l.max_reject_list_entries = raised);
+            Ok(decided.clone())
+        };
+        let (source, chain, id) = listed_source();
+        let config = pinned_config(&id);
+        let err = run_reading(&source, &config, &chain, Some(&read)).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        let refusal = format!(
+            "holds at least {entries} entries, over the {started} in force when this validation \
+             started"
+        );
+        assert!(err.to_string().contains(&refusal), "{err}");
+        run_reading(&source, &config, &chain, Some(&read)).unwrap();
+    }
 }
 
 // ===== long histories =====
@@ -2332,15 +2468,16 @@ fn long_history(transfers: usize) -> History {
     history
 }
 
-/// Validates one small burn before a measurement, as `measure_dispatch` does.
-/// The one-time build of the schema rules then stays outside the meter. Boot
-/// builds them in production.
+/// Validates one small burn before a measurement. The one-time build of the
+/// schema rules then stays outside the meter: a validator child builds them
+/// once, and `memory::VALIDATOR_BASELINE_BYTES` counts them.
 fn warm_up() {
     validate(&burn_bytes()).unwrap();
 }
 
 /// The request memory model (`memory.rs`): validating a consignment stays
-/// within the memory factor. A history of 2_000 transfers is about 1 MiB.
+/// within the memory factor. A history of 2_000 transfers is about 1 MiB. The
+/// test runs in-process the code of a validator child.
 #[test]
 fn consignment_validation_stays_within_the_request_memory_factor() {
     use crate::memory::peak;
@@ -2559,8 +2696,8 @@ fn validation_peak(history: impl FnOnce() -> History) -> (usize, usize) {
 /// each worker holds. That request carries a consignment of the shape at
 /// `DEFAULT_MAX_CONSIGNMENT_BYTES` and the decoded elements. The read and
 /// decode of its frame of `MAX_MESSAGE_SIZE` take 3 times the frame. Then
-/// `read_request` releases the frame, so validation runs beside the decoded
-/// request, which is at most one frame.
+/// `read_request` releases the frame, so the validation in the child runs
+/// beside the decoded request in the enclave, which is at most one frame.
 #[test]
 fn the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds() {
     use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
@@ -2716,4 +2853,6 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
 }
 
 mod caps;
+#[cfg(all(rgb_to_evm, unix))]
+mod child;
 mod summary;
