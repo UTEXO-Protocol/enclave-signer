@@ -67,7 +67,7 @@ fn our_input(psbt: &mut Psbt, keys: &KeyManager, index: u32) {
     fx::anchor_input(psbt, 0, keys, AccountType::Colored, 0, index, RIGHT_SATS);
 }
 
-/// The rule C metadata the wallet writes for our change at `[0, 99]` on `vout`.
+/// The key-path metadata the wallet writes for our change at `[0, 99]` on `vout`.
 fn claim_change(psbt: &mut Psbt, keys: &KeyManager, vout: usize) {
     let change = [ChildNumber::from(0), ChildNumber::from(99)];
     fx::claim_output(psbt, vout, keys, AccountType::Colored, &change);

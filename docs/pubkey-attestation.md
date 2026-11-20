@@ -176,8 +176,8 @@ Notes on the fields:
 - **`clone_peer_pcr3`.** A verifier sets no expected value. It takes PCR3
   from the verified document, requires it to be present and not all zero for
   a cloning role, and expects none for the mint signer.
-- **Not committed.** The EVM RPC port and path, `BTC_MAX_UNOWNED_SATS`, the
-  value of `BTC_MAX_TOTAL_SATS` (only on or off, as `allow_vanilla_psbt`),
+- **Not committed.** The EVM RPC port and path, the value of
+  `BTC_MAX_TOTAL_SATS` (only on or off, as `allow_vanilla_psbt`),
   `MINT_WITNESS_SAT` and the runtime limits
   ([tee-spec.md](tee-spec.md#4-security-policy)).
 

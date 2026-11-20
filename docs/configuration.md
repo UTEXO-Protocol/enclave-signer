@@ -38,7 +38,6 @@ All of the first three are required for a `Production` policy.
 | `SPV_MIN_CONFIRMATIONS` | `3` | Minimum depth of each Bitcoin witness transaction on the burn path. Zero or a non-number stops the boot. Attested. Both EIF recipes set 3. No mint check reads it. |
 | `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats that a witness mint pays to the user's output. A non-number or a value outside 546 to 10000 stops the boot. It must equal the connector's `MINT_WITNESS_SAT` ([mint-flow.md](mint-flow.md), M8). Measured, not attested: read the value of an image from its `IMAGE-ENV.json`. |
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on the total input value of one `SignBtc` transaction. On a mint signer a non-zero value also turns `allow_vanilla_psbt` on in the attested policy. |
-| `BTC_MAX_UNOWNED_SATS` | `0` | `SignBtc` budget for outputs that the enclave does not prove it owns. |
 | `GAS_TX_ALLOWED_TO` | unset | The only `to` that a gas transaction may have. |
 | `GAS_TX_MAX_GAS_LIMIT` | `0` | Ceiling on `gasLimit`. |
 | `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling, in wei, on `maxFeePerGas`, `maxPriorityFeePerGas` and the legacy `gasPrice`. |

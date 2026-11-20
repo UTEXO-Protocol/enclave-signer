@@ -139,16 +139,15 @@ pub fn assert_only_colored_inputs(psbt: &Psbt, colored: &[usize], path: &str) ->
     Ok(())
 }
 
-/// M8 of a blinded mint and RR12: no sat leaves. With no rule A exemption, each
-/// output must be a rule C output of ours or carry 0 sat, as the OP_RETURN must.
+/// M8 of a blinded mint and RR12: no sat leaves. Each output must be a key-path
+/// output the enclave derives, or carry 0 sat, as the OP_RETURN must.
 #[cfg(feature = "rgb-validation")]
 pub fn assert_keeps_all_sats(
     psbt: &Psbt,
     keys: &crate::keys::KeyManager,
     path: &str,
 ) -> Result<()> {
-    let no_inputs = std::collections::HashSet::new();
-    match super::btc_ownership::unowned_output_sats(psbt, &no_inputs, keys) {
+    match super::btc_ownership::unowned_output_sats(psbt, keys) {
         Some(0) => Ok(()),
         Some(sats) => Err(EnclaveError::CrossCheck(format!(
             "{path} PSBT pays {sats} sat to outputs this enclave does not derive - it keeps \
