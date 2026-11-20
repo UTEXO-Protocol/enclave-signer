@@ -200,14 +200,16 @@ of memory, the kernel ends the process with the highest OOM score, which is
 a child while one runs.
 
 **Boot check.** After the memory check, the burn signer starts a probe
-child and reads three kernel settings. A release build refuses to start
-when the probe child does not answer within `IO_IDLE_TIMEOUT` or did not
-confine itself. It also refuses when `vm.overcommit_memory` is 2,
-`vm.panic_on_oom` is set, `vm.oom_kill_allocating_task` is set, or a
-setting cannot be read: with these settings, an out-of-memory can end the
-enclave process first. A debug build logs a warning and starts. When the
-probe child answers, the enclave logs "validator child ready" with the
-time it took to answer, its OOM score adjustment and its memory.
+child, and reads three kernel settings and the OOM score adjustment of the
+enclave process. A release build refuses to start when the probe child does
+not answer within `IO_IDLE_TIMEOUT` or did not confine itself. It also
+refuses when `vm.overcommit_memory` is 2, `vm.panic_on_oom` is set,
+`vm.oom_kill_allocating_task` is set, the OOM score adjustment of the
+enclave process is above 0, or one of these values cannot be read: with
+these values, an out-of-memory can end the enclave process first. A debug
+build logs a warning and starts. When the probe child answers, the enclave
+logs "validator child ready" with the time the child took to answer, and
+its OOM score adjustment and memory.
 
 **End at the deadline.** The enclave ends the child at the kill time,
 `RESPONSE_MARGIN` before the request deadline, so the reply can still be

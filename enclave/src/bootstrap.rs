@@ -255,17 +255,24 @@ fn judge_validator_child(
     Ok(())
 }
 
-/// Refuses kernel settings under which an out-of-memory can end the enclave
-/// before a validator child, which has the highest OOM score. Only Linux has
-/// these settings to read.
+/// Refuses kernel settings, and an OOM score adjustment of the enclave, under
+/// which an out-of-memory can end the enclave before a validator child, which
+/// has the highest OOM score. Only Linux has these values to read.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
 fn kernel_oom_policy() -> Result<(), String> {
-    oom_policy(|name| std::fs::read_to_string(format!("/proc/sys/vm/{name}")))
+    oom_policy(
+        |name| std::fs::read_to_string(format!("/proc/sys/vm/{name}")),
+        std::fs::read_to_string("/proc/self/oom_score_adj"),
+    )
 }
 
-/// [`kernel_oom_policy`] with `read` giving each `vm` sysctl by its name.
+/// [`kernel_oom_policy`] with `read` giving each `vm` sysctl by its name, and
+/// `enclave_adj` the OOM score adjustment of the enclave.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
-fn oom_policy(read: impl Fn(&str) -> std::io::Result<String>) -> Result<(), String> {
+fn oom_policy(
+    read: impl Fn(&str) -> std::io::Result<String>,
+    enclave_adj: std::io::Result<String>,
+) -> Result<(), String> {
     let value = |name: &str| -> Result<u64, String> {
         let text = read(name).map_err(|e| format!("cannot read vm.{name}: {e}"))?;
         let text = text.trim();
@@ -285,6 +292,20 @@ fn oom_policy(read: impl Fn(&str) -> std::io::Result<String>) -> Result<(), Stri
              the one with the highest OOM score"
                 .into(),
         );
+    }
+    // A child at the highest adjustment adds all of memory to its score, so it
+    // outscores the enclave at any size while the enclave adds nothing.
+    let text = enclave_adj
+        .map_err(|e| format!("cannot read the OOM score adjustment of the enclave: {e}"))?;
+    let text = text.trim();
+    let adj: i32 = text
+        .parse()
+        .map_err(|e| format!("the OOM score adjustment of the enclave reads {text:?}: {e}"))?;
+    if adj > 0 {
+        return Err(format!(
+            "the OOM score adjustment of the enclave is {adj}, above 0: a large enclave can \
+             score above a validator child"
+        ));
     }
     Ok(())
 }
@@ -463,12 +484,13 @@ mod validator_child_tests {
         }
     }
 
-    /// The kernel policy passes only settings under which the OOM killer ends
-    /// the process with the highest score, a validator child.
+    /// The kernel policy passes only settings, and an OOM score adjustment of
+    /// the enclave, under which the OOM killer ends the process with the
+    /// highest score, a validator child.
     #[test]
     fn a_kernel_that_could_end_the_enclave_first_is_refused() {
-        let policy = |overcommit: u8, on_oom: u8, kill_allocating: u8| {
-            oom_policy(|name| {
+        let policy = |overcommit: u8, on_oom: u8, kill_allocating: u8, enclave_adj: i32| {
+            let sysctl = |name: &str| -> std::io::Result<String> {
                 let value = match name {
                     "overcommit_memory" => overcommit,
                     "panic_on_oom" => on_oom,
@@ -476,23 +498,35 @@ mod validator_child_tests {
                     other => panic!("no sysctl vm.{other}"),
                 };
                 Ok(format!("{value}\n"))
-            })
+            };
+            oom_policy(sysctl, Ok(format!("{enclave_adj}\n")))
         };
-        assert_eq!(policy(0, 0, 0), Ok(()));
-        assert_eq!(policy(1, 0, 0), Ok(()));
+        assert_eq!(policy(0, 0, 0, 0), Ok(()));
+        assert_eq!(policy(1, 0, 0, 0), Ok(()));
+        assert_eq!(policy(0, 0, 0, -1000), Ok(()));
         for (refused, what) in [
-            (policy(2, 0, 0), "vm.overcommit_memory"),
-            (policy(0, 1, 0), "vm.panic_on_oom"),
-            (policy(0, 2, 0), "vm.panic_on_oom"),
-            (policy(0, 0, 1), "vm.oom_kill_allocating_task"),
+            (policy(2, 0, 0, 0), "vm.overcommit_memory"),
+            (policy(0, 1, 0, 0), "vm.panic_on_oom"),
+            (policy(0, 2, 0, 0), "vm.panic_on_oom"),
+            (policy(0, 0, 1, 0), "vm.oom_kill_allocating_task"),
+            (policy(0, 0, 0, 1), "adjustment of the enclave is 1,"),
+            (policy(0, 0, 0, 1000), "adjustment of the enclave is 1000,"),
         ] {
             assert!(refused.unwrap_err().contains(what), "{what}");
         }
-        let unreadable = oom_policy(|_| Err(std::io::ErrorKind::NotFound.into()));
+        let zero = || -> std::io::Result<String> { Ok("0\n".into()) };
+        let unreadable = oom_policy(|_| Err(std::io::ErrorKind::NotFound.into()), zero());
         let err = unreadable.unwrap_err();
         assert!(err.contains("cannot read vm.overcommit_memory"), "{err}");
-        let err = oom_policy(|_| Ok("many".into())).unwrap_err();
+        let err = oom_policy(|_| Ok("many".into()), zero()).unwrap_err();
         assert!(err.contains("reads \"many\""), "{err}");
+        let err = oom_policy(|_| zero(), Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
+        assert!(
+            err.contains("cannot read the OOM score adjustment of the enclave"),
+            "{err}"
+        );
+        let err = oom_policy(|_| zero(), Ok("high".into())).unwrap_err();
+        assert!(err.contains("enclave reads \"high\""), "{err}");
     }
 }
 

@@ -112,8 +112,9 @@ value that is not a whole number of GiB. `ENCLAVE_MEMORY` sets the value for
 `deploy-host.sh`; its default is the minimum.
 
 A release burn signer also refuses to start when its probe validator child
-does not start or confine itself, or when the OOM settings of the kernel
-could end the enclave process before a validator child
+does not start or confine itself, or when the OOM settings of the kernel or
+the OOM score adjustment of the enclave process could end the enclave
+process before a validator child
 ([tee-spec.md](tee-spec.md#validator-child-burn-signer)). Its panic on the
 console names the reason. A start logs "validator child ready".
 
