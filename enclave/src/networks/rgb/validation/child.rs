@@ -216,7 +216,17 @@ fn run_job(
     io: &UnixStream,
 ) -> to_enclave::Body {
     let job = match start.job {
-        Some(start::Job::Probe(_)) => return to_enclave::Body::Ready(ready(confined.is_ok())),
+        Some(start::Job::Probe(_)) => {
+            // The enclave judges the report; this names the failed step.
+            if let Err(e) = &confined {
+                if cfg!(target_os = "linux") {
+                    tracing::warn!("the validator could not confine itself: {e}");
+                } else {
+                    tracing::debug!("the validator could not confine itself: {e}");
+                }
+            }
+            return to_enclave::Body::Ready(ready(confined.is_ok()));
+        }
         Some(start::Job::Validate(job)) => job,
         None => {
             return refused(&EnclaveError::Internal(

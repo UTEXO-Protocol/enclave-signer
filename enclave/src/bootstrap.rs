@@ -9,8 +9,12 @@ use crate::networks::rgb::spv::Network;
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, CHECKPOINT_ENV,
 };
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+use crate::networks::rgb::validation::ChildReport;
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+use crate::policy::BuildContext;
 use crate::policy::SecurityPolicy;
 #[cfg(feature = "rgb-validation")]
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
@@ -197,6 +201,94 @@ pub fn log_policy(policy: &SecurityPolicy) {
     }
 }
 
+/// Refuses to start a release burn signer whose validator child does not
+/// start or confine itself, or whose kernel could end the enclave instead of
+/// a child when memory runs out. A debug build logs a warning. `main` panics
+/// on the refusal.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn check_validator_child(build: &BuildContext) -> Result<(), String> {
+    use crate::networks::rgb::validation::{probe_validator_child, ChildProgram};
+    let report = ChildProgram::this_binary()
+        .and_then(|program| probe_validator_child(&program, crate::conn::IO_IDLE_TIMEOUT));
+    judge_validator_child(kernel_oom_policy(), report, build)
+}
+
+/// Judges the kernel policy and the report of a probe child for
+/// [`check_validator_child`].
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn judge_validator_child(
+    kernel: Result<(), String>,
+    report: crate::error::Result<ChildReport>,
+    build: &BuildContext,
+) -> Result<(), String> {
+    let mut problems = Vec::new();
+    if let Err(e) = kernel {
+        problems.push(format!(
+            "the kernel could end the enclave before a validator child: {e}"
+        ));
+    }
+    match &report {
+        Ok(report) if !report.confined => problems.push(format!(
+            "the validator child could not confine itself (OOM score adjustment {})",
+            report.oom_score_adj
+        )),
+        Ok(_) => {}
+        Err(e) => problems.push(format!("the validator child did not answer its probe: {e}")),
+    }
+    if !problems.is_empty() {
+        let problem = problems.join("; ");
+        if !build.debug_or_test {
+            return Err(problem);
+        }
+        tracing::warn!("{problem}; continuing in a debug build");
+    }
+    if let Ok(report) = report {
+        tracing::info!(
+            spawn_ms = report.spawn_ms,
+            confined = report.confined,
+            oom_score_adj = report.oom_score_adj,
+            vm_data_kib = report.vm_data_bytes / 1024,
+            vm_rss_kib = report.vm_rss_bytes / 1024,
+            "validator child ready"
+        );
+    }
+    Ok(())
+}
+
+/// Refuses kernel settings under which an out-of-memory can end the enclave
+/// before a validator child, which has the highest OOM score. Only Linux has
+/// these settings to read.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn kernel_oom_policy() -> Result<(), String> {
+    oom_policy(|name| std::fs::read_to_string(format!("/proc/sys/vm/{name}")))
+}
+
+/// [`kernel_oom_policy`] with `read` giving each `vm` sysctl by its name.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn oom_policy(read: impl Fn(&str) -> std::io::Result<String>) -> Result<(), String> {
+    let value = |name: &str| -> Result<u64, String> {
+        let text = read(name).map_err(|e| format!("cannot read vm.{name}: {e}"))?;
+        let text = text.trim();
+        text.parse()
+            .map_err(|e| format!("vm.{name} reads {text:?}: {e}"))
+    };
+    // Strict accounting fails an allocation of whichever process asks.
+    if value("overcommit_memory")? == 2 {
+        return Err("vm.overcommit_memory is 2: an allocation of the enclave can fail".into());
+    }
+    if value("panic_on_oom")? != 0 {
+        return Err("vm.panic_on_oom is set: an out-of-memory stops the whole kernel".into());
+    }
+    if value("oom_kill_allocating_task")? != 0 {
+        return Err(
+            "vm.oom_kill_allocating_task is set: the kernel ends the process that asked, not \
+             the one with the highest OOM score"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Dev fallback for the donor cloning secret, from `UTEXO_CLONING_SECRET`.
 ///
 /// Use the `InitializeKey` `cloning_secret` field instead: it never goes into
@@ -305,6 +397,102 @@ pub fn build_evm_rpc_client(
             tracing::error!("failed to init EVM RPC client: {e}");
             None
         }
+    }
+}
+
+/// The boot check of the validator child of the burn signer.
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm, unix))]
+mod validator_child_tests {
+    use super::{judge_validator_child, oom_policy};
+    use crate::error::EnclaveError;
+    use crate::networks::rgb::validation::ChildReport;
+    use crate::policy::BuildContext;
+
+    fn build(debug_or_test: bool) -> BuildContext {
+        BuildContext {
+            debug_or_test,
+            ..BuildContext::current()
+        }
+    }
+
+    fn report(confined: bool) -> crate::error::Result<ChildReport> {
+        Ok(ChildReport {
+            confined,
+            oom_score_adj: 1000,
+            vm_data_bytes: 1 << 20,
+            vm_rss_bytes: 1 << 20,
+            spawn_ms: 5,
+        })
+    }
+
+    /// A release burn signer starts only with a probe child that confined
+    /// itself and a kernel that ends a child first. A debug build starts.
+    #[test]
+    fn a_release_burn_signer_refuses_to_start_without_a_working_child() {
+        assert_eq!(
+            judge_validator_child(Ok(()), report(true), &build(false)),
+            Ok(())
+        );
+        type Case = (
+            fn() -> Result<(), String>,
+            fn() -> crate::error::Result<ChildReport>,
+            &'static str,
+        );
+        let cases: [Case; 3] = [
+            (|| Ok(()), || report(false), "could not confine itself"),
+            (
+                || Ok(()),
+                || {
+                    Err(EnclaveError::Internal(
+                        "cannot start the RGB validator".into(),
+                    ))
+                },
+                "did not answer its probe",
+            ),
+            (
+                || Err("vm.panic_on_oom is set".into()),
+                || report(true),
+                "vm.panic_on_oom is set",
+            ),
+        ];
+        for (kernel, child, what) in cases {
+            let err = judge_validator_child(kernel(), child(), &build(false)).unwrap_err();
+            assert!(err.contains(what), "{err}");
+            let debug = judge_validator_child(kernel(), child(), &build(true));
+            assert_eq!(debug, Ok(()), "{what}");
+        }
+    }
+
+    /// The kernel policy passes only settings under which the OOM killer ends
+    /// the process with the highest score, a validator child.
+    #[test]
+    fn a_kernel_that_could_end_the_enclave_first_is_refused() {
+        let policy = |overcommit: u8, on_oom: u8, kill_allocating: u8| {
+            oom_policy(|name| {
+                let value = match name {
+                    "overcommit_memory" => overcommit,
+                    "panic_on_oom" => on_oom,
+                    "oom_kill_allocating_task" => kill_allocating,
+                    other => panic!("no sysctl vm.{other}"),
+                };
+                Ok(format!("{value}\n"))
+            })
+        };
+        assert_eq!(policy(0, 0, 0), Ok(()));
+        assert_eq!(policy(1, 0, 0), Ok(()));
+        for (refused, what) in [
+            (policy(2, 0, 0), "vm.overcommit_memory"),
+            (policy(0, 1, 0), "vm.panic_on_oom"),
+            (policy(0, 2, 0), "vm.panic_on_oom"),
+            (policy(0, 0, 1), "vm.oom_kill_allocating_task"),
+        ] {
+            assert!(refused.unwrap_err().contains(what), "{what}");
+        }
+        let unreadable = oom_policy(|_| Err(std::io::ErrorKind::NotFound.into()));
+        let err = unreadable.unwrap_err();
+        assert!(err.contains("cannot read vm.overcommit_memory"), "{err}");
+        let err = oom_policy(|_| Ok("many".into())).unwrap_err();
+        assert!(err.contains("reads \"many\""), "{err}");
     }
 }
 

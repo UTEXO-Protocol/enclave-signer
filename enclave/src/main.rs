@@ -49,6 +49,13 @@ fn main() {
     if let Err(msg) = utexo_bridge_enclave::memory::check_at_boot(&build_ctx) {
         panic!("{msg}");
     }
+    // Fail closed: a release burn signer whose validator child does not start
+    // or confine itself, or whose kernel could end the enclave instead of a
+    // child when memory runs out, does not start.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+    if let Err(msg) = bootstrap::check_validator_child(&build_ctx) {
+        panic!("{msg}");
+    }
 
     // No cloning with KMS persistence: every replica recovers its seed from KMS.
     #[cfg(not(feature = "kms-persistence"))]
