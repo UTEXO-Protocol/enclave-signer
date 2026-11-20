@@ -6,6 +6,7 @@
 //! - `validator.rs`: the validator of one Bitcoin network.
 //! - `witness.rs`: the resolver of SPV-verified witness positions.
 //! - `consensus.rs`: run rgb-lib validation over a consignment file.
+//! - `ipc.rs`: the frames between the burn signer and its validator child.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `consignment.rs`: read rgb-lib's inspection of the accepted file into
 //!   plain shapes.
@@ -22,6 +23,10 @@ mod bfa;
 mod consensus;
 mod consignment;
 mod cost;
+// Only its tests use these frames.
+#[cfg(all(rgb_to_evm, unix))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod ipc;
 mod reject_list;
 mod schema;
 mod source;

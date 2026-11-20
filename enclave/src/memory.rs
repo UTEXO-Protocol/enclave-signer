@@ -215,6 +215,10 @@ const _: () = assert!(
 // See the hugepage rule in the doc of `RUN_ENCLAVE_MEMORY_MIB`.
 const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 
+/// The part of a validator child's largest frame that does not grow with its
+/// consignment.
+pub const VALIDATOR_FRAME_FIXED_BYTES: usize = 64 * 1024;
+
 /// Refuses to start a release build with less usable memory than
 /// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. `main` panics on
 /// the refusal. A release build on a host with no `/proc/meminfo` refuses to
