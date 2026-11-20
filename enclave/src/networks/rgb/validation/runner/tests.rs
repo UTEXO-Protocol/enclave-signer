@@ -443,10 +443,8 @@ fn a_failing_callback_refuses_with_its_own_error_through_the_child() {
     }
 }
 
-/// A verdict made from a real validation passes the checks, and so does the
-/// verdict on a transfer of the genesis alone: no witness block and no
-/// settling transition. A change of any one property fails its own check,
-/// and the enclave refuses with code 1.
+/// A real verdict passes, also with no witness block and no settling
+/// transition; a change of one property fails its own check with code 1.
 #[test]
 fn a_verdict_the_enclave_cannot_accept_is_refused() {
     let bytes = burn_bytes();

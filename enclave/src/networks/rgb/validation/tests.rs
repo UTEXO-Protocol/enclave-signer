@@ -2140,8 +2140,7 @@ mod source_path {
         in_context(config, chain, reader, |ctx| validate_source(source, ctx))
     }
 
-    /// The route proof of `source`, every witness mined 6 deep: the source
-    /// path, then the route check.
+    /// The route proof of `source` on the burn path, every witness 6 deep.
     fn route_proof(
         source: &crate::proto::RgbSource,
         config: &BridgeConfig,
@@ -2152,8 +2151,7 @@ mod source_path {
         })
     }
 
-    /// Runs `check` with the services of the burn path: a validator child of
-    /// this test binary, `chain` and `reader`.
+    /// Runs `check` with the burn path's services and a child of this binary.
     fn in_context<T>(
         config: &BridgeConfig,
         chain: &Mutex<HeaderChain>,
@@ -2414,10 +2412,8 @@ mod source_path {
         assert!(err.contains("cannot read it"), "{err}");
     }
 
-    /// A change of the limits does not reach a running validator child. So
-    /// a list that a raise lets the reader return, but that is over the limit
-    /// the validation started with, is refused with code 3. A retry starts
-    /// under the raise and passes.
+    /// A running child keeps the limits of its start, so a list over them is
+    /// refused with code 3 after a raise; a retry under the raise passes.
     #[test]
     fn a_list_over_the_limit_its_validation_started_with_is_refused() {
         let (started, raised, entries) = (1_000, 10_000, 6_000u32);
@@ -2432,7 +2428,7 @@ mod source_path {
                         ty: 4000,
                         no: 0,
                     },
-                    reject: true,
+                    reject: n.is_multiple_of(12),
                 }
             })
             .collect();

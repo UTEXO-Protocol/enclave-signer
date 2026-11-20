@@ -294,7 +294,7 @@ fn oom_policy(
         );
     }
     // A child at the highest adjustment adds all of memory to its score, so it
-    // outscores the enclave at any size while the enclave adds nothing.
+    // outscores an enclave at 0 or below at any size.
     let text = enclave_adj
         .map_err(|e| format!("cannot read the OOM score adjustment of the enclave: {e}"))?;
     let text = text.trim();
