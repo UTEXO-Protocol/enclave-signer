@@ -382,11 +382,11 @@ pub struct SignedPsbtResponse {
     #[prost(uint32, tag="2")]
     pub inputs_signed: u32,
 }
-/// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Only the mint signer
-/// signs it. Unlike SignRequest, it carries no RGB consignment and no EVM
-/// correlation. The enclave authorises it from the PSBT, never from a listener
-/// flag. It derives which outputs pay back to scripts it co-controls; the rest
-/// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
+/// Plain-BTC PSBT signing (create_utxo). Only the mint signer signs it. Unlike
+/// SignRequest, it carries no RGB consignment and no EVM correlation. The
+/// enclave authorises it from the PSBT, never from a listener flag. Every
+/// output that carries sats must be a BIP-86 key-path output that the enclave
+/// derives at the path the output names. Total input value must fit the
 /// BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
 /// requires the cap. It signs only vanilla BIP-86 inputs, never a colored
 /// (RGB-allocated) one. Response is a SignedPsbtResponse.

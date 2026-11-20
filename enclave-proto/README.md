@@ -33,8 +33,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `f2900231fbd6cfc5f205da77e12cfe623ef5dc23` (branch `main`, "Add the LayerZero routes to SetEndpointsRequest") |
-| Commit date | 2026-11-18T10:07:27Z |
+| Commit | `b064782507898992a267a588cccd9f673537d6d3` (branch `chore/sign-btc-comment`, "Describe SignBtc without the unowned budget and withdrawals") |
+| Commit date | 2026-11-20T10:13:58Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -45,16 +45,10 @@ crates compile against one schema version. Keep them in lockstep.
 | `proto/enclave.proto` | `proto/enclave/enclave.proto` | verbatim, source of truth |
 | `src/lib.rs` | — | local shim (`include!`) in place of upstream's `mod.rs` |
 
-One vendored comment is behind the code. The comment of `SignBtcRequest`
-names plain withdrawals and a `BTC_MAX_UNOWNED_SATS` budget. The enclave has
-neither: every output that carries sats must be one it derives
-([mint-flow.md](../docs/mint-flow.md#7-plain-btc-signbtc)). The comment is
-corrected upstream, and the next re-sync brings it here.
-
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=f2900231fbd6cfc5f205da77e12cfe623ef5dc23
+REV=b064782507898992a267a588cccd9f673537d6d3
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -69,8 +63,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `937c614ba5167ace7cafa982fded3f4afe807a75` |
-| `proto/enclave/enclave.proto` | `13be9d7ecde29c87f18390c6f45d48757eafc50b` |
+| `rust-gen/src/enclave/enclave.rs` | `932f075e267e3dc85209cb1c1fadc2b0b5e73bba` |
+| `proto/enclave/enclave.proto` | `cbc318588adbfd047be9e7a066d291b41dfc314d` |
 
 ## Why only `prost`
 
