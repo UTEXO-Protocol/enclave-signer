@@ -51,8 +51,17 @@ fn run_fault(fault: &str) -> i32 {
             std::process::abort()
         }
         "env" => {
-            let marked = [TEST_ENTRY_ENV, FAULT_ENV, "RUST_LOG"];
-            if std::env::vars_os().any(|(key, _)| !marked.iter().any(|m| key == *m)) {
+            let mut own = vec![TEST_ENTRY_ENV, FAULT_ENV, "RUST_LOG"];
+            // CoreFoundation sets it in each macOS process that links it.
+            if cfg!(target_os = "macos") {
+                own.push("__CF_USER_TEXT_ENCODING");
+            }
+            let others: Vec<_> = std::env::vars_os()
+                .map(|(key, _)| key)
+                .filter(|key| !own.iter().any(|name| key == *name))
+                .collect();
+            if !others.is_empty() {
+                eprintln!("the validator child has the variables {others:?}");
                 return 3;
             }
             serve()

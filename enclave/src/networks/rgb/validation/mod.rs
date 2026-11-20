@@ -9,6 +9,8 @@
 //! - `child.rs`: the validator child, which runs that validation for the burn
 //!   signer and asks it for every resolver answer.
 //! - `ipc.rs`: the frames between the burn signer and its validator child.
+//! - `runner.rs`: run a burn validation in a validator child, answer its
+//!   resolvers and end it before the request deadline.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `consignment.rs`: read rgb-lib's inspection of the accepted file into
 //!   plain shapes.
@@ -27,11 +29,11 @@ mod child;
 mod consensus;
 mod consignment;
 mod cost;
-// Only the tests use the enclave's side of these frames.
 #[cfg(all(rgb_to_evm, unix))]
-#[cfg_attr(not(test), allow(dead_code))]
 mod ipc;
 mod reject_list;
+#[cfg(all(rgb_to_evm, unix))]
+mod runner;
 mod schema;
 mod source;
 mod types;
@@ -51,6 +53,8 @@ pub use reject_list::{
     decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,
     RejectListReader,
 };
+#[cfg(all(rgb_to_evm, unix))]
+pub use runner::{probe as probe_validator_child, ChildProgram, ChildReport};
 pub use source::assert_consignment_size;
 #[cfg(rgb_to_evm)]
 pub use source::validate_source;

@@ -87,6 +87,13 @@ pub fn run_if_test_child() -> Option<i32> {
     std::env::var_os(TEST_ENTRY_ENV).map(|_| serve())
 }
 
+/// The libtest name of the lib tests' child entry, without the crate name.
+#[cfg(test)]
+pub(super) fn lib_test_entry() -> &'static str {
+    let full = concat!(module_path!(), "::tests::validator_child_entry");
+    full.split_once("::").map_or(full, |(_, name)| name)
+}
+
 /// Ends the process with SIGABRT after the report of any panic, in every
 /// build profile.
 pub(super) fn abort_on_panic() {

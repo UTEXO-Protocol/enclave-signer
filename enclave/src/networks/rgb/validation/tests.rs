@@ -34,7 +34,7 @@ use crate::test_support::MinedBlocks;
 const BRIDGE: [u8; 20] = [0xB1; 20];
 const EVM_CHAIN_ID: u64 = 42161;
 /// The burner's EVM payout address.
-const PAYEE: [u8; 20] = [0x43; 20];
+pub(super) const PAYEE: [u8; 20] = [0x43; 20];
 const MINTED: u64 = 100_000;
 
 /// The outpoint of the genesis mint right.
@@ -55,7 +55,10 @@ fn minted() -> (History, Utxo) {
 }
 
 /// A mint, then a burn of `burned` with the rest as change.
-fn burn_history(burned: Option<u64>, reason: Option<[u8; 32]>) -> (History, gen::Committed) {
+pub(super) fn burn_history(
+    burned: Option<u64>,
+    reason: Option<[u8; 32]>,
+) -> (History, gen::Committed) {
     let (mut history, units) = minted();
     let burn = history.burn(units, MINTED, burned, reason);
     (history, burn)
@@ -118,13 +121,13 @@ fn refuses_a_burn_whose_origin_the_history_conceals() {
     assert!(err.contains("cannot be found"), "{err}");
 }
 
-fn burn_bytes() -> Vec<u8> {
+pub(super) fn burn_bytes() -> Vec<u8> {
     burn_history(Some(60_000), Some(gen::burn_reason_for(PAYEE)))
         .0
         .consignment()
 }
 
-fn validator() -> RgbValidator {
+pub(super) fn validator() -> RgbValidator {
     RgbValidator::new("regtest").unwrap()
 }
 
@@ -138,7 +141,7 @@ fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
 }
 
 /// Binds every anchor to a lock with its own `(lockId, amount)`.
-fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
+pub(super) fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
         evm_chain_id: EVM_CHAIN_ID,
         locks: anchors.iter().map(lock_for).collect(),
@@ -154,7 +157,7 @@ fn empty_list(_: &RejectListContract) -> Result<Decisions> {
 }
 
 /// Any asset binds, and a listed one reads an empty list.
-fn open_lists() -> ListAccess<'static> {
+pub(super) fn open_lists() -> ListAccess<'static> {
     ListAccess {
         bind_asset: &any_asset,
         read: Some(&empty_list),
@@ -172,14 +175,14 @@ fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<Valida
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
-fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
+pub(super) fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
     rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes))
         .map(|t| t.bundles.iter().map(|wb| wb.witness_id()).collect())
         .unwrap_or_default()
 }
 
 /// `txids` mined deep enough, one per block, as the generator proves them.
-fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
+pub(super) fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
     MinedBlocks::of(txids)
 }
 

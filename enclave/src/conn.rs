@@ -69,10 +69,20 @@ impl SocketTimeout for vsock::VsockStream {
 #[cfg(unix)]
 impl SocketTimeout for std::os::unix::net::UnixStream {
     fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        std::os::unix::net::UnixStream::set_read_timeout(self, dur)
+        closed_peer_is_no_wait(std::os::unix::net::UnixStream::set_read_timeout(self, dur))
     }
     fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
-        std::os::unix::net::UnixStream::set_write_timeout(self, dur)
+        closed_peer_is_no_wait(std::os::unix::net::UnixStream::set_write_timeout(self, dur))
+    }
+}
+
+/// macOS refuses a timeout on a local socket whose peer has closed. Such a
+/// socket never blocks: a read returns what is buffered, then EOF.
+#[cfg(unix)]
+fn closed_peer_is_no_wait(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e) if cfg!(target_os = "macos") && e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        other => other,
     }
 }
 
@@ -221,6 +231,19 @@ mod tests {
             DeadlineStream::new(MockSock::with_read(vec![]), Duration::ZERO, IO_IDLE_TIMEOUT);
         let err = s.write(&[1]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// A local socket whose peer has closed reads what the peer sent, then EOF.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_socket_reads_what_its_closed_peer_sent() {
+        let (ours, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(&[7, 8]).unwrap();
+        drop(peer);
+        let mut s = DeadlineStream::new(ours, Duration::from_secs(60), Duration::MAX);
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, [7, 8]);
     }
 
     /// A read on a quiet local socket with no idle cap ends at the deadline.
