@@ -116,7 +116,7 @@ fn the_memory_check_of_the_caller_can_refuse_a_change() {
 }
 
 /// The trap of a budget at the deadline: the gate passes a request, and the
-/// enclave then ends its validator child at the deadline.
+/// enclave then ends its validator child before the deadline.
 #[test]
 fn the_rgb_lib_budget_must_stay_below_the_deadline() {
     let err = apply_to_defaults(|l| l.max_rgb_lib_ms = 68_000).unwrap_err();

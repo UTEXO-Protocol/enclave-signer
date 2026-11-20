@@ -2272,29 +2272,26 @@ mod source_path {
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
     }
 
-    /// The validator child takes the values in force for the config of the
-    /// enclave. Here `MAX_CONSIGNMENT_BYTES` lowers the consignment limit, and
-    /// a change raises the list entries into the room only that limit leaves.
+    /// The source path gives its validator child the limits in force. A burn
+    /// that the image value of the witness cap admits is refused once a change
+    /// lowers that cap, and the refusal names the lowered value.
     #[test]
-    fn the_validator_child_takes_the_limits_in_force_for_the_config() {
-        use crate::limits::{apply, in_force, Limits};
+    fn the_source_path_gives_its_child_the_limits_in_force() {
+        const MIB: u64 = 1024 * 1024;
         let id = asset_id();
-        let config = BridgeConfig {
-            max_consignment_bytes: 1024 * 1024,
-            ..pinned_config(&id)
+        let bytes = super::caps::many_burns(issue(), 256, super::caps::dummies_for(2 * MIB));
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes,
+            ..burn_source(&id)
         };
-        let changes = Limits::from(&crate::proto::Limits {
-            max_reject_list_entries: 100_000,
-            ..Default::default()
-        });
-        let limits = apply(&config, &changes, false, |_| Ok(())).unwrap();
-        assert_eq!(limits, in_force(&config));
-        let image_consignment = Limits {
-            max_consignment_bytes: Limits::DEFAULTS.max_consignment_bytes,
-            ..limits
-        };
-        assert!(image_consignment.check().is_err());
-        run(&burn_source(&id), &config).unwrap();
+        let config = pinned_config(&id);
+        // Past the cost gate, the burn path refuses a release of many burns.
+        let err = error_of(run(&source, &config));
+        assert!(err.contains("carry 256 burns"), "{err}");
+        crate::limits::change_for_test(|l| l.max_witness_check_cost = MIB);
+        let err = error_of(run(&source, &config));
+        assert!(err.contains(&format!("(max {MIB})")), "{err}");
     }
 
     /// A transfer of the genesis alone validates in a validator child as in

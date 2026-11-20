@@ -6,7 +6,7 @@ in [burn-flow.md](burn-flow.md).
 
 ## Why a model
 
-The burn signer ends its validator child at the request deadline
+The burn signer ends its validator child before the request deadline
 ([tee-spec.md](tee-spec.md#validator-child-burn-signer)). That end is the
 stopwatch: it refuses a burn after the work, with a timeout and no other
 reason. Parts of rgb-lib's work on a consignment grow faster than the file.
@@ -169,8 +169,8 @@ observed slowdown without rebuilding the image: lower `max_rgb_lib_ms` to
 admit less work for the same wall-time budget, or increase
 `total_request_timeout_secs` to allow the same work more time. The modeled
 budget is a refusal made in advance, not a stopwatch: the end of the validator
-child at the deadline is the stopwatch. Increasing the budget admits more work.
-Include the enclave's own work, RPCs and concurrency when choosing the
+child before the deadline is the stopwatch. Increasing the budget admits more
+work. Include the enclave's own work, RPCs and concurrency when choosing the
 deadline. Apply and persist the settings as described in
 [runtime-limits.md](runtime-limits.md#commands).
 

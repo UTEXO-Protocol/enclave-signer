@@ -211,7 +211,7 @@ build logs a warning and starts. When the probe child answers, the enclave
 logs "validator child ready" with the time the child took to answer, and
 its OOM score adjustment and memory.
 
-**End at the deadline.** The enclave ends the child at the kill time,
+**End before the deadline.** The enclave ends the child at the kill time,
 `RESPONSE_MARGIN` before the request deadline, so the reply can still be
 written. When the kill time has passed before the start, the enclave
 writes no scratch file, starts no child and refuses with a timeout. Each
@@ -689,9 +689,9 @@ deployed.
 - **Validation time.** Work caps and a modeled time budget bound the work of
   rgb-lib on a consignment. The model is fitted to measurements, not proved:
   a shape that costs more than the measured ones runs longer than its budget.
-  The enclave then ends the validator child at the deadline, and the burn
-  gets a timeout instead of a reason. The caps can also refuse an honest burn
-  with a very long history, until the operator raises them
+  The enclave then ends the validator child before the deadline, and the
+  burn gets a timeout instead of a reason. The caps can also refuse an
+  honest burn with a very long history, until the operator raises them
   ([validation-cost-model.md](validation-cost-model.md)).
 - **Validator child.** The child contains a fault of rgb-lib, not an exploit:
   it runs as the same user as the enclave process

@@ -239,8 +239,10 @@ const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 /// smallest burn of `tests/support/bfa_burn.rs`, 1679 bytes, peaked at up to
 /// 19.4 MiB resident in a debug child on macOS (aarch64); the value adds a
 /// margin.
-/// `tests/test_validator_child_memory.rs` checks it on Linux, and an enclave
-/// logs the peak of each child in "RGB validator ended".
+/// `tests/test_validator_child_memory.rs` checks it on Linux against an upper
+/// bound of the child's peak: the larger of that peak and the peak of the test
+/// process before the exec. An enclave logs the peak of each child in "RGB
+/// validator ended".
 pub const VALIDATOR_BASELINE_BYTES: usize = 48 * 1024 * 1024;
 
 /// The main-thread stack limit a validator child sets; above a worker

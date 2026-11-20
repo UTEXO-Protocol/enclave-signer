@@ -112,8 +112,8 @@ refuses the request and changes nothing.
 - Each value must be in its range.
 - `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`,
   so the work that the caps admit ends within the deadline, with time left for
-  the other work of the request. Past the deadline, the burn signer ends its
-  validator child and refuses the burn
+  the other work of the request. Work that runs too long is cut: the burn
+  signer ends its validator child before the deadline and refuses the burn
   ([tee-spec.md](tee-spec.md#validator-child-burn-signer)). So 30 s of rgb-lib
   needs a deadline of at least 40 s.
 - Each per-call timeout must be at most `total_request_timeout_secs`:
