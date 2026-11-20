@@ -6,6 +6,8 @@
 //! - `validator.rs`: the validator of one Bitcoin network.
 //! - `witness.rs`: the resolver of SPV-verified witness positions.
 //! - `consensus.rs`: run rgb-lib validation over a consignment file.
+//! - `child.rs`: the validator child, which runs that validation for the burn
+//!   signer and asks it for every resolver answer.
 //! - `ipc.rs`: the frames between the burn signer and its validator child.
 //! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `consignment.rs`: read rgb-lib's inspection of the accepted file into
@@ -20,10 +22,12 @@
 
 mod asset_bind;
 mod bfa;
+#[cfg(all(rgb_to_evm, unix))]
+mod child;
 mod consensus;
 mod consignment;
 mod cost;
-// Only its tests use these frames.
+// Only the tests use the enclave's side of these frames.
 #[cfg(all(rgb_to_evm, unix))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ipc;
@@ -39,6 +43,10 @@ mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{decode_opid, lock_id, AnchorBinder, BoundAnchors, MintAnchor, VerifiedLock};
+#[cfg(all(rgb_to_evm, unix, any(test, debug_assertions)))]
+pub use child::run_if_test_child;
+#[cfg(all(rgb_to_evm, unix))]
+pub use child::{serve as serve_validator_child, CHILD_ARG};
 pub use reject_list::{
     decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,
     RejectListReader,

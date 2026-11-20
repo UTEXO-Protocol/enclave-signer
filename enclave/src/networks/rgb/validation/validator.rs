@@ -26,4 +26,10 @@ impl RgbValidator {
         tracing::info!(%bitcoin_network, "RGB validator configured");
         Ok(Self { chain_net })
     }
+
+    /// The validator of `chain_net` inside a validator child.
+    #[cfg(all(rgb_to_evm, unix))]
+    pub(super) fn for_chain_net(chain_net: ChainNet) -> Self {
+        Self { chain_net }
+    }
 }

@@ -24,6 +24,30 @@ pub fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// Runs this process as a validator child of the burn signer when its one
+/// argument is `CHILD_ARG`. Returns the child's exit code, or `None` for the
+/// enclave. The host passes the enclave no argument, so it cannot pick this.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn validator_child() -> Option<i32> {
+    use crate::networks::rgb::validation::{serve_validator_child, CHILD_ARG};
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (Some(arg), None) if arg == CHILD_ARG => Some(serve_validator_child()),
+        _ => None,
+    }
+}
+
+/// Install the tracing subscriber of a validator child: the filter of
+/// [`init_tracing`], written to stderr, as the child's stdout goes nowhere.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn init_child_tracing() {
+    let filter = alloy_http_off(tracing_subscriber::EnvFilter::from_default_env());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// `filter` with Alloy HTTP logging forced off.
 fn alloy_http_off(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
     filter.add_directive(

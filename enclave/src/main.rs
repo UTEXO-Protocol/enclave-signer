@@ -11,6 +11,11 @@ use utexo_bridge_enclave::state::EnclaveState;
 /// The boot sequence, in order. Each step is one call into
 /// [`utexo_bridge_enclave::bootstrap`]; nothing here does work itself.
 fn main() {
+    // A validator child of the burn signer runs its one job and no boot step.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+    if let Some(code) = bootstrap::validator_child() {
+        std::process::exit(code);
+    }
     bootstrap::init_tracing();
     tracing::info!("starting utexo-bridge-enclave");
 

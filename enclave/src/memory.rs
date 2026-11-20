@@ -215,6 +215,10 @@ const _: () = assert!(
 // See the hugepage rule in the doc of `RUN_ENCLAVE_MEMORY_MIB`.
 const _: () = assert!(RUN_ENCLAVE_MEMORY_MIB.is_multiple_of(1024));
 
+/// The main-thread stack limit a validator child sets; above a worker
+/// thread's default stack.
+pub const VALIDATOR_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// The part of a validator child's largest frame that does not grow with its
 /// consignment.
 pub const VALIDATOR_FRAME_FIXED_BYTES: usize = 64 * 1024;
