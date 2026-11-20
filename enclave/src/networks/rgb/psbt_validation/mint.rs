@@ -3,8 +3,6 @@
 //! of the mint), and the sats rule of its PSBT. The rule ids (M1-M8) are those
 //! of `docs/mint-flow.md` section 5.
 
-use std::collections::HashSet;
-
 use amplify::{ByteArray, Wrapper};
 use bitcoin::psbt::Psbt;
 use rgbstd::{BuilderSeal, Transition};
@@ -118,9 +116,9 @@ pub fn assert_mint_sats(
         return assert_keeps_all_sats(psbt, keys, "mint");
     };
     assert_witness_output(psbt, keys, *vout, witness_sat)?;
-    // No rule A exemption, as for a blinded mint: the witness output counts in
-    // full, so every other output must be ours by rule C or carry 0 sat.
-    match btc_ownership::unowned_output_sats(psbt, &HashSet::new(), keys) {
+    // The witness output counts in full, so every other output must be one the
+    // enclave derives, or carry 0 sat.
+    match btc_ownership::unowned_output_sats(psbt, keys) {
         Some(sats) if sats == witness_sat => Ok(()),
         Some(sats) => Err(EnclaveError::CrossCheck(format!(
             "mint PSBT pays {sats} sat to outputs this enclave does not derive - a witness mint \
@@ -133,7 +131,9 @@ pub fn assert_mint_sats(
 }
 
 /// M8 on a witness mint's seal: an output of the tx, not the OP_RETURN, not
-/// ours by rule A or C, and worth exactly `witness_sat`.
+/// the enclave's own, and worth exactly `witness_sat`. The host builds the PSBT
+/// and its output metadata, so the output is also compared with the scripts of
+/// the inputs the enclave controls.
 fn assert_witness_output(
     psbt: &Psbt,
     keys: &KeyManager,
@@ -154,9 +154,9 @@ fn assert_witness_output(
         )));
     }
     let index = vout as usize;
-    let our_inputs = btc_ownership::self_controlled_input_scripts_scoped(psbt, keys, None);
+    let our_inputs = btc_ownership::controlled_input_scripts(psbt, keys);
     if btc_ownership::output_is_self_derived(psbt, index, keys, None)
-        || btc_ownership::output_is_self_owned(psbt, index, &our_inputs)
+        || btc_ownership::output_repays_controlled_input(psbt, index, &our_inputs)
     {
         return Err(EnclaveError::CrossCheck(format!(
             "mint pays its units to vout {vout}, an output of this enclave - a witness mint \

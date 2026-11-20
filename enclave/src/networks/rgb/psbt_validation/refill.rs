@@ -128,8 +128,8 @@ pub fn assert_refill_rights(rights: &[OutputSeal]) -> Result<Vec<u32>> {
     Ok(vouts.into_iter().collect())
 }
 
-/// RR9: each new right is on a rule C output of the Colored account. Rule C
-/// accepts only child path `[0, i]`, the keychain rgb-lib scans. Else the host
+/// RR9: each new right is on a key-path output the enclave derives on the
+/// Colored account, at child path `[0, i]`, the keychain rgb-lib scans. Else the host
 /// could take the right, or park it where the wallet cannot find it.
 pub fn assert_refill_rights_owned(psbt: &Psbt, vouts: &[u32], keys: &KeyManager) -> Result<()> {
     for &vout in vouts {

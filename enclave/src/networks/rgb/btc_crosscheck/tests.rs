@@ -56,8 +56,8 @@ fn foreign_address() -> ScriptBuf {
 }
 
 /// Plain-BTC PSBT that spends `inputs` (sats each) from our address and pays
-/// `outputs`. Inputs have full key-path metadata, so rule (A) accepts any
-/// output back to that address.
+/// `outputs`. An output back to that address names its key path, as the
+/// wallet's own outputs do, so the enclave proves it its own.
 fn psbt_from_our_address(
     keys: &KeyManager,
     inputs: &[u64],
@@ -119,6 +119,15 @@ fn psbt_inner(
             ours.xonly,
             (vec![], (*keys.master_fingerprint(), ours.path.clone())),
         );
+    }
+    for (i, (spk, _)) in outputs.iter().enumerate() {
+        if *spk == ours.spk {
+            p.outputs[i].tap_internal_key = Some(ours.xonly);
+            p.outputs[i].tap_key_origins.insert(
+                ours.xonly,
+                (vec![], (*keys.master_fingerprint(), ours.path.clone())),
+            );
+        }
     }
     p.serialize()
 }
@@ -234,8 +243,8 @@ fn rejects_summed_input_value_over_cap() {
     assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
 }
 
-/// Five 1000-sat colored allocations funded from vanilla inputs fit the
-/// budget. The vanilla change goes back to the spent script (address reuse).
+/// Five 1000-sat outputs the enclave cannot prove its own, funded from vanilla
+/// inputs, fit the budget. The vanilla change is the enclave's own.
 #[test]
 fn create_utxo_allocation_dust_fits_the_budget() {
     let keys = km();

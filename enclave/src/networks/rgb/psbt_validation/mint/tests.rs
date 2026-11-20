@@ -78,7 +78,8 @@ fn refuses_unowned_sats() {
     assert!(err.contains("mint PSBT pays 2000 sat"), "{err}");
 }
 
-/// No rule A: change back to the right's own script still needs rule C.
+/// Change back to the right's own script is not the enclave's own without the
+/// metadata that names its key path.
 #[test]
 fn refuses_change_to_the_input_script_without_its_metadata() {
     let keys = fx::km();
@@ -181,7 +182,7 @@ fn refuses_a_witness_vout_on_the_op_return() {
     assert!(err.contains("vout 0, the OP_RETURN"), "{err}");
 }
 
-/// Rule C on either account: units on our own output never reach the user.
+/// Our own key-path output on either account: units on it never reach the user.
 #[test]
 fn refuses_a_witness_output_the_enclave_derives() {
     let keys = fx::km();
@@ -205,8 +206,8 @@ fn refuses_a_witness_output_the_enclave_derives() {
     }
 }
 
-/// The units sit on our rule C output while a foreign output takes W: the total
-/// check alone passes this, so rule C on the seal is what refuses it.
+/// The units sit on our own key-path output while a foreign output takes W: the
+/// total check alone passes this, so the ownership check on the seal refuses it.
 #[test]
 fn refuses_units_on_our_output_while_a_foreign_output_takes_the_witness_sats() {
     let keys = fx::km();
@@ -225,7 +226,8 @@ fn refuses_units_on_our_output_while_a_foreign_output_takes_the_witness_sats() {
     assert!(err.contains("vout 1, an output of this enclave"), "{err}");
 }
 
-/// Rule A: the right's own script needs no metadata to be ours.
+/// The refusal compares scripts, so the right's own script needs no metadata
+/// to be recognised.
 #[test]
 fn refuses_a_witness_output_on_the_right_input_script() {
     let keys = fx::km();

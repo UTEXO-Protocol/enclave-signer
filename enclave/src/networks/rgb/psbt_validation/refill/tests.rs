@@ -147,7 +147,7 @@ fn the_gate_refuses_change_to_a_foreign_output() {
     assert!(err.contains(&format!("pays {FEE_INPUT_SATS} sat")), "{err}");
 }
 
-/// No rule A here: change on an input's script still needs rule C metadata.
+/// Change on an input's script is not the enclave's own without its key-path metadata.
 #[test]
 fn the_gate_refuses_change_back_to_an_input_script_without_rule_c() {
     let keys = fx::km();

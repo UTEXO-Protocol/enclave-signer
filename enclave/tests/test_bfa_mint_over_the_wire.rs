@@ -466,7 +466,7 @@ struct Built {
 
 /// One deposit as the coordinator would hand it over: the PSBT rgb-lib
 /// committed, with the metadata it writes. The bridge's input is the seeded
-/// right's output; `aux`, if any, is appended. The change is ours (rule C).
+/// right's output; `aux`, if any, is appended. The change is our key-path output.
 fn build_on(
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
@@ -1106,7 +1106,7 @@ fn refuses_a_witness_mint_paying_other_than_the_pinned_mint_witness_sat() {
 }
 
 /// M8 refuses a blinded mint that pays sats out: here the change without its
-/// rule C metadata.
+/// key-path metadata.
 #[test]
 fn refuses_a_mint_that_pays_sats_out_over_the_wire() {
     let mut native = build(None);

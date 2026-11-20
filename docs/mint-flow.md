@@ -284,15 +284,16 @@ needs a new image.
   the enclave cannot see what that output pays.
 - **M8** The sats that the mint pays out. It runs on the PSBT after the fee
   check, and before M6 reads the deposit.
-  - A blinded mint pays no sat out. Every output is a BIP-86 key-path output
-    that the enclave derives at a wallet path (rule C of
-    [section 7](#7-plain-btc-signbtc)), or carries 0 sat, as the `OP_RETURN`
+  - A blinded mint pays no sat out. Every output is the enclave's own
+    ([section 7](#7-plain-btc-signbtc)), or carries 0 sat, as the `OP_RETURN`
     must.
   - A witness mint pays exactly `MINT_WITNESS_SAT` to the output of its seal.
     That output must exist, must not be an `OP_RETURN`, and must not be the
-    enclave's own (rule A or rule C). Every other output is the enclave's by
-    rule C, or carries 0 sat; rule A gives no exemption here. The change may
-    be missing.
+    enclave's own. The host builds the PSBT and its output metadata, so the
+    enclave also refuses an output on the script of an input that it can
+    sign: that comparison needs no metadata, and it matches an input on a
+    script with a tree too. Every other output is the enclave's own, or
+    carries 0 sat. The change may be missing.
   - The connector and the enclave must use the same `MINT_WITNESS_SAT`. The
     PSBT pays the connector's value, fixed at `mint_begin`, and a mismatch is
     refused here, after the user's lock. The attestation does not carry the
@@ -387,20 +388,14 @@ is a request of its own: a `Sign` request cannot reach this path.
   estimate refuses the request.
 
 The enclave derives ownership from its keys. There is no configured list of
-scripts. An output is the enclave's own in two cases:
-
-- **Rule A.** Its script equals the script of an input that the enclave can
-  sign: a Taproot key-path input whose internal key derives from a BIP-86
-  account and, with its tweak, gives the output key. A script tree can hold
-  foreign spend paths, so the exemption is limited to the input value on that
-  script. In `SignBtc` only inputs of the vanilla account count. M8 counts
-  inputs of either account.
-- **Rule C.** It is a BIP-86 key-path output of an enclave account, with no
-  script tree, at a wallet path `[k, i]`: both steps non-hardened, `k` = 0 on
-  the colored account and 0 or 1 on the vanilla account. The PSBT output
-  must carry the internal key and its key origin. The enclave derives the key
-  at that path and rebuilds the script. An output without this data, and an
-  enclave key at any other path, count as not owned.
+scripts. An output is the enclave's own when it is a BIP-86 key-path output
+of an enclave account, with no script tree, at a wallet path `[k, i]`: both
+steps non-hardened, `k` = 0 on the colored account and 0 or 1 on the vanilla
+account. The PSBT output must carry the internal key and its key origin. The
+enclave derives the key at that path and rebuilds the script. An output
+without this data, and an enclave key at any other path, count as not owned.
+So does an output on the script of a spent input: the wallet pays to a new
+address each time, and its outputs carry this data.
 
 An enclave key in one Taproot leaf proves nothing about the rest of the
 tree, so no rule accepts it.
