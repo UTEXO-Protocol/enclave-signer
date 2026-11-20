@@ -64,8 +64,6 @@ fn pinned_bridge_config() -> BridgeConfig {
 fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
     BridgeConfig {
         btc_max_total_sats: max_total_sats,
-        // Sized for `create_utxo` allocation dust (1000 sats x 5).
-        btc_max_unowned_sats: 5_000,
         ..Default::default()
     }
 }
@@ -768,7 +766,7 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     let colored = our_colored_address(&wallet, 0, 0);
 
     // Both outputs are key-path outputs of the enclave key. The enclave derives
-    // both from the output metadata, so neither counts against BTC_MAX_UNOWNED_SATS.
+    // both from the output metadata, so both are its own.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 5_000), (&ours, 50_000)]),
@@ -910,7 +908,7 @@ fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("same custody"),
+                e.message.contains("cannot prove its own"),
                 "expected self-ownership rejection, got: {}",
                 e.message
             );
@@ -1065,10 +1063,10 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    // 50_000 sats is far over the unowned budget.
+    // The 50_000 sats are on an output the enclave cannot prove its own.
     match &resp.response {
         Some(Response::Error(e)) => assert!(
-            e.message.contains("same custody"),
+            e.message.contains("cannot prove its own"),
             "expected the custody rejection, got: {}",
             e.message
         ),
@@ -1154,12 +1152,11 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
         Psbt::deserialize(&build(true)).unwrap().unsigned_tx
     );
 
-    // Control: input 1 does not qualify, so the 55_000 sat output is over the
-    // 5_000 sat unowned budget.
+    // Control: the 55_000 sat output is not one the enclave derives.
     let control = sign(build(false));
     assert!(
         matches!(&control, Some(Response::Error(_))),
-        "the output is over the unowned budget, got {:?}",
+        "the output is not the enclave's own, got {:?}",
         control
     );
 
@@ -1168,7 +1165,7 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
         assert!(
             signed.inputs[0].tap_key_sig.is_none(),
             "the enclave signed the 60_000 sat bridge input while 55_000 sats go to a script \
-             with a foreign spend path; the unowned budget is 5_000 sats"
+             with a foreign spend path"
         );
     }
 }

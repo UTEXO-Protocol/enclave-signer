@@ -382,8 +382,8 @@ is a request of its own: a `Sign` request cannot reach this path.
   `BTC_MAX_TOTAL_SATS` is 0.
 - Only the vanilla account signs. A colored input is never signed here.
 - The total input value must not be more than `BTC_MAX_TOTAL_SATS`.
-- Outputs that the enclave does not own must total at most
-  `BTC_MAX_UNOWNED_SATS`.
+- No sat leaves the wallet. Every output is the enclave's own, or carries
+  0 sat.
 - The fee limits of Stage 3 apply. An input whose size the enclave cannot
   estimate refuses the request.
 
@@ -403,8 +403,8 @@ tree, so no rule accepts it.
 There is no rate limit. Each limit bounds one request, and the change goes
 back to a vanilla output that the host can submit again. So a compromised
 host can turn the whole vanilla balance into fees, at most `MAX_FEE_SATS`
-per signature, and pay up to `BTC_MAX_UNOWNED_SATS` to its own address on
-each request. The bound on the sum belongs outside the enclave.
+per signature. It cannot pay an address outside the wallet. The bound on the
+sum belongs outside the enclave.
 
 ## 8. Rights refill (`SignRightsRefill`)
 

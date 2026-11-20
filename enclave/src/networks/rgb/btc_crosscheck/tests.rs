@@ -132,11 +132,35 @@ fn psbt_inner(
     p.serialize()
 }
 
+/// A `create_utxos` PSBT: one vanilla input of `input_sat`, five 1000-sat
+/// allocations on the Colored account and `change_sat` of vanilla change. Every
+/// output names its key path, as rgb-lib writes it.
+fn create_utxos_psbt(keys: &KeyManager, input_sat: u64, change_sat: u64) -> Vec<u8> {
+    use crate::networks::rgb::btc_ownership::tests::claim_output;
+
+    let ours = our_address(keys);
+    let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
+    outputs.push((ours.spk.clone(), change_sat));
+    let mut psbt = Psbt::deserialize(&psbt_from_our_address(keys, &[input_sat], &outputs)).unwrap();
+    for index in 0..5u32 {
+        let child = [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index },
+        ];
+        claim_output(
+            &mut psbt,
+            index as usize,
+            keys,
+            AccountType::Colored,
+            &child,
+        );
+    }
+    psbt.serialize()
+}
+
 fn cfg_with_cap(cap: u64) -> BridgeConfig {
     BridgeConfig {
         btc_max_total_sats: cap,
-        // Sized for `create_utxo` allocation dust (1000 sats x 5).
-        btc_max_unowned_sats: 5_000,
         ..Default::default()
     }
 }
@@ -187,7 +211,10 @@ fn rejects_output_the_enclave_does_not_control() {
         psbt_bytes: psbt_from_our_address(&keys, &[50_000], &[(foreign_address(), 10_000)]),
     };
     let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
-    assert!(err.to_string().contains("same custody"), "got: {err}");
+    assert!(
+        err.to_string().contains("cannot prove its own"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -243,18 +270,29 @@ fn rejects_summed_input_value_over_cap() {
     assert!(err.to_string().contains("exceeds pinned cap"), "got: {err}");
 }
 
-/// Five 1000-sat outputs the enclave cannot prove its own, funded from vanilla
-/// inputs, fit the budget. The vanilla change is the enclave's own.
+/// Five 1000-sat allocations on the Colored account, funded from a vanilla
+/// input, are the enclave's own, as the vanilla change is.
 #[test]
-fn create_utxo_allocation_dust_fits_the_budget() {
+fn create_utxo_allocations_on_the_colored_account_are_signed() {
     let keys = km();
-    let ours = our_address(&keys);
-    let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
-    outputs.push((ours.spk.clone(), 40_000));
     let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[50_000], &outputs),
+        psbt_bytes: create_utxos_psbt(&keys, 50_000, 40_000),
     };
     assert!(validate_btc_request(&req, &cfg_with_cap(100_000), &keys).is_ok());
+}
+
+/// No sat leaves the wallet, however small: one allocation without the
+/// metadata that names its key path refuses the batch.
+#[test]
+fn refuses_an_allocation_the_enclave_cannot_derive() {
+    let keys = km();
+    let mut psbt = Psbt::deserialize(&create_utxos_psbt(&keys, 50_000, 40_000)).unwrap();
+    psbt.outputs[2] = Default::default();
+    let req = SignBtcRequest {
+        psbt_bytes: psbt.serialize(),
+    };
+    let err = validate_btc_request(&req, &cfg_with_cap(100_000), &keys).unwrap_err();
+    assert!(err.to_string().contains("pays 1000 sats"), "got: {err}");
 }
 
 // --- pinned fee policy on the plain-BTC path ---
@@ -348,12 +386,9 @@ fn rejects_a_fee_below_the_signed_size_floor() {
 #[test]
 fn accepts_a_create_utxos_batch_at_a_normal_fee_rate() {
     let keys = km();
-    let ours = our_address(&keys);
-    let mut outputs: Vec<_> = (0..5).map(|_| (foreign_address(), 1_000)).collect();
     // Approx 310 unsigned vB x 50 sat/vB = 15_500 sat fee.
-    outputs.push((ours.spk.clone(), 100_000 - 5_000 - 15_500));
     let req = SignBtcRequest {
-        psbt_bytes: psbt_from_our_address(&keys, &[100_000], &outputs),
+        psbt_bytes: create_utxos_psbt(&keys, 100_000, 100_000 - 5_000 - 15_500),
     };
     validate_btc_request(&req, &cfg_with_cap(100_000), &keys).expect("create_utxos fee");
 }
@@ -395,7 +430,6 @@ fn refuses_an_output_on_a_hidden_child_path() {
 
     let cfg = BridgeConfig {
         btc_max_total_sats: 1_000_000,
-        btc_max_unowned_sats: 1,
         ..Default::default()
     };
     let bytes = psbt_from_our_address(&keys, &[100_000], &[(hidden_spk, 99_000)]);

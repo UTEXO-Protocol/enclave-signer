@@ -45,6 +45,12 @@ crates compile against one schema version. Keep them in lockstep.
 | `proto/enclave.proto` | `proto/enclave/enclave.proto` | verbatim, source of truth |
 | `src/lib.rs` | — | local shim (`include!`) in place of upstream's `mod.rs` |
 
+One vendored comment is behind the code. The comment of `SignBtcRequest`
+names plain withdrawals and a `BTC_MAX_UNOWNED_SATS` budget. The enclave has
+neither: every output that carries sats must be one it derives
+([mint-flow.md](../docs/mint-flow.md#7-plain-btc-signbtc)). The comment is
+corrected upstream, and the next re-sync brings it here.
+
 Verify against upstream (needs read access to the private repo):
 
 ```bash

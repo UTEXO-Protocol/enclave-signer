@@ -132,10 +132,6 @@ pub struct BridgeConfig {
     /// There is no output script allowlist: the scripts come from a seed that
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
-    /// Budget in sats for plain-BTC outputs that the enclave cannot prove pay
-    /// back into the same custody (`BTC_MAX_UNOWNED_SATS`). `0` = unset: a
-    /// production build refuses a PSBT that pays any such output.
-    pub btc_max_unowned_sats: u64,
     /// Emitter of `FundsIn`/`BridgeFundsIn` (`FUNDS_IN_CONTRACT`), default
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
     /// this deployment, so set it explicitly.
@@ -243,7 +239,6 @@ impl Default for BridgeConfig {
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
-            btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Finalized,
             token_contract: [0u8; 20],
@@ -348,11 +343,6 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
         let funds_in_contract = parse_funds_in_contract(
             std::env::var("FUNDS_IN_CONTRACT").ok().as_deref(),
             bridge_contract,
@@ -419,7 +409,6 @@ impl BridgeConfig {
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,
             btc_max_total_sats,
-            btc_max_unowned_sats,
             funds_in_contract,
             evm_finality_tag,
             token_contract,

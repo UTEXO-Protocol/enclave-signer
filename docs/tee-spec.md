@@ -275,8 +275,8 @@ endpoint is configured; it does not show that the provider is honest.
 - Launch values that nothing attests or measures: the port and path of the
   EVM RPC.
 - Image settings that PCR0 measures and the policy does not commit: the
-  values of `BTC_MAX_TOTAL_SATS` and `BTC_MAX_UNOWNED_SATS` (only "plain BTC
-  on or off" is committed), `MINT_WITNESS_SAT` and `KMS_ALLOWED_ACCOUNT_IDS`.
+  value of `BTC_MAX_TOTAL_SATS` (only "plain BTC on or off" is committed),
+  `MINT_WITNESS_SAT` and `KMS_ALLOWED_ACCOUNT_IDS`.
 - The runtime limits in force, which nothing attests. PCR0 measures only
   their image values.
 
@@ -593,9 +593,8 @@ deployed.
   ([mint-flow.md](mint-flow.md), section 8).
 - **SignBtc spending.** `SignBtc` has no total or rate limit. A compromised
   host can submit the change again and again and turn the whole vanilla
-  balance into miner fees, at most `MAX_FEE_SATS` per signature. With a
-  non-zero `BTC_MAX_UNOWNED_SATS` it can also pay up to that budget to its own
-  address on each request ([mint-flow.md](mint-flow.md), section 7).
+  balance into miner fees, at most `MAX_FEE_SATS` per signature. It cannot
+  pay an address outside the wallet ([mint-flow.md](mint-flow.md), section 7).
 - **Replay guard.** The EVM -> RGB guard is in memory and per enclave. A
   restart, its expiry or another replica lets a second request through. M6
   is the bound (section 9).

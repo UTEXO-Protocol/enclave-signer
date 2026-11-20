@@ -10,8 +10,8 @@ BIP-86 account. A blinded mint pays no sat out; a witness mint pays exactly
 `MINT_WITNESS_SAT` to its seal's output (M8).
 
 Plain-BTC PSBTs do not use this path. They use the separate `SignBtc` request
-(vanilla account, attested `allow_vanilla_psbt`, `BTC_MAX_TOTAL_SATS`,
-`BTC_MAX_UNOWNED_SATS`).
+(vanilla account, attested `allow_vanilla_psbt`, `BTC_MAX_TOTAL_SATS`, and no
+sat on an output the enclave does not derive).
 
 ```mermaid
 sequenceDiagram

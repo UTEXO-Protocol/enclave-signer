@@ -813,9 +813,9 @@ impl ParentService for ParentAdapterService {
             DataType::BtcUtxo => {
                 // Plain-BTC signing, with no source proof or consignment. The
                 // Listener sends the PSBT in `EnrichedBtcPayload.psbt_bytes`.
-                // The enclave signs on the vanilla BIP-86 account. Outputs that
-                // do not pay back to its own scripts must fit `BTC_MAX_UNOWNED_SATS`,
-                // the inputs `BTC_MAX_TOTAL_SATS`, and the fee the fee policy.
+                // The enclave signs on the vanilla BIP-86 account. Every output
+                // that carries sats must be one the enclave derives, the inputs
+                // must fit `BTC_MAX_TOTAL_SATS`, and the fee the fee policy.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {

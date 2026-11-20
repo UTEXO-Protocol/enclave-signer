@@ -510,10 +510,10 @@ fn rejects_a_derived_claim_whose_script_does_not_match() {
     assert!(!owned(&psbt, &keys));
 }
 
-/// An output the enclave derives has no foreign spend path, so the budget
-/// exempts it in full, whatever the inputs hold.
+/// An output the enclave derives has no foreign spend path, so none of its
+/// sats count as unowned, whatever the inputs hold.
 #[test]
-fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
+fn a_derived_output_counts_no_unowned_sat() {
     let keys = km();
     let secp = Secp256k1::new();
     let (our, path) = our_key(&keys, 0, 3);
@@ -538,12 +538,10 @@ struct Gates {
     btc: Option<String>,
 }
 
-/// The budget is pinned, so the permissive unset branch never runs. The
-/// plain-BTC gate applies to the Vanilla account only.
+/// The plain-BTC gate applies to the Vanilla account only.
 fn gates(psbt: &Psbt, keys: &KeyManager, account: AccountType) -> Gates {
     let btc_cfg = BridgeConfig {
         btc_max_total_sats: 1_000_000,
-        btc_max_unowned_sats: 5_000,
         ..Default::default()
     };
     let req = SignBtcRequest {
@@ -617,24 +615,16 @@ struct MergeScenario {
     unverified: Vec<String>,
 }
 
-/// Two inputs A and B on `account`, change back to each script, and one
-/// foreign dust output. Merges our signature on A only and records every
+/// Two inputs A and B on `account`, and change back to each script. Merges
+/// our signature on A only and records every
 /// gate before and after. It does not assert the result, so both accounts
 /// always run.
 fn merge_scenario(account: AccountType) -> MergeScenario {
     let keys = km();
     let a_spk = our_address(&keys, account, 0, 0);
     let b_spk = our_address(&keys, account, 0, 1);
-    let foreign = foreign_address(0xB1);
     assert_ne!(a_spk, b_spk);
-    let mut psbt = psbt_with_n(
-        2,
-        &[
-            (a_spk.clone(), 90_000),
-            (b_spk.clone(), 90_000),
-            (foreign, 1_000),
-        ],
-    );
+    let mut psbt = psbt_with_n(2, &[(a_spk.clone(), 90_000), (b_spk.clone(), 90_000)]);
     assert_eq!(
         anchor_input(&mut psbt, 0, &keys, account, 0, 0, 100_000),
         a_spk
@@ -718,10 +708,9 @@ fn bfa_ownership_is_independent_of_merge_progress() {
         // nothing else changed.
         let both = HashSet::from([s.a_spk.to_bytes(), s.b_spk.to_bytes()]);
         assert_eq!(s.before.owned, both, "{tag}: owned before");
-        // Two outputs pay our own scripts and the foreign one fits the
-        // unowned budget, so the plain-BTC gate passes. It runs on the
-        // Vanilla account only, so the Colored run has no gate result.
-        // This test makes sure the set does not change on a
+        // Both outputs are our own key-path outputs, so the plain-BTC gate
+        // passes. It runs on the Vanilla account only, so the Colored run has
+        // no gate result. This test makes sure the set does not change on a
         // merge.
         assert_eq!(s.before.btc, None, "{tag}: plain-BTC gate before");
         assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
