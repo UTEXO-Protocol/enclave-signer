@@ -968,3 +968,111 @@ fn a_probe_child_reports_no_confinement_where_the_os_has_none() {
     let report = probe(&program, Duration::from_secs(30)).unwrap();
     assert!(!report.confined, "{report:?}");
 }
+
+/// Under a memory limit that holds the enclave and its child, the kernel ends
+/// the child, and the enclave's key signs as before.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs root and cgroup v2; CI runs it in its own step"]
+fn the_kernel_ends_a_child_out_of_memory_and_the_key_still_signs() {
+    let state = crate::state::EnclaveState::new(bitcoin::Network::Bitcoin);
+    state
+        .initialize_from_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+             abandon about",
+        )
+        .unwrap();
+    let digest = [0x07; 32];
+    let before = state.sign_evm(&digest).unwrap();
+    let group = MemoryGroup::enter(MEMORY_GROUP_HEADROOM_BYTES);
+    let err = faulty("grow")
+        .validate_in_child(
+            b"the file of a validator that grows",
+            None,
+            &MinedBlocks::of(&[]),
+            &open_lists(),
+            &in_force(),
+            Instant::now() + Duration::from_secs(120),
+        )
+        .unwrap_err();
+    let kills = group.oom_kills();
+    drop(group);
+    let text = err.to_string();
+    assert_eq!(err.error_code(), 1, "{text}");
+    assert!(
+        text.contains("signal 9") && text.contains("runs out of memory"),
+        "{text}"
+    );
+    assert!(kills >= 1, "the kernel ended no process of the group");
+    assert_eq!(state.sign_evm(&digest).unwrap(), before);
+}
+
+/// The memory a [`MemoryGroup`] allows above its use when this process joins.
+#[cfg(target_os = "linux")]
+const MEMORY_GROUP_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+
+/// This process in a cgroup of its own with a memory limit and no swap; the
+/// children it starts join it. Drop moves the process back and removes it.
+#[cfg(target_os = "linux")]
+struct MemoryGroup {
+    path: std::path::PathBuf,
+    home: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl MemoryGroup {
+    fn enter(headroom: u64) -> Self {
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+        let own = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::/"))
+            .expect("a cgroup v2 path")
+            .to_owned();
+        let controllers = std::fs::read_to_string(root.join("cgroup.subtree_control")).unwrap();
+        if !controllers.split_whitespace().any(|name| name == "memory") {
+            std::fs::write(root.join("cgroup.subtree_control"), "+memory").unwrap();
+        }
+        let path = root.join(format!("utexo-oom-test-{}", std::process::id()));
+        std::fs::create_dir(&path).expect("run as root: the test makes a cgroup");
+        let group = Self {
+            path,
+            home: root.join(own),
+        };
+        group.write("cgroup.procs", &std::process::id().to_string());
+        let used: u64 = group.read("memory.current").trim().parse().unwrap();
+        group.write("memory.max", &(used + headroom).to_string());
+        if group.path.join("memory.swap.max").exists() {
+            group.write("memory.swap.max", "0");
+        }
+        group
+    }
+
+    fn read(&self, file: &str) -> String {
+        std::fs::read_to_string(self.path.join(file)).unwrap()
+    }
+
+    fn write(&self, file: &str, value: &str) {
+        std::fs::write(self.path.join(file), value).unwrap();
+    }
+
+    /// The processes of this group that the OOM killer ended.
+    fn oom_kills(&self) -> u64 {
+        self.read("memory.events")
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MemoryGroup {
+    fn drop(&mut self) {
+        let _ = std::fs::write(
+            self.home.join("cgroup.procs"),
+            std::process::id().to_string(),
+        );
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}

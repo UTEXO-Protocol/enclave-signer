@@ -18,6 +18,9 @@ fn validator_child_entry() {
     std::process::exit(code);
 }
 
+/// Each allocation of the `grow` fault, written so that every page is used.
+const GROW_STEP_BYTES: usize = 16 * 1024 * 1024;
+
 /// Acts out `fault` in place of the child's job and returns the exit code.
 fn run_fault(fault: &str) -> i32 {
     match fault {
@@ -65,6 +68,15 @@ fn run_fault(fault: &str) -> i32 {
                 return 3;
             }
             serve()
+        }
+        // Confines itself as `serve` does, then allocates until it is ended.
+        "grow" => {
+            let _ = confine();
+            let _io = start();
+            let mut held = Vec::new();
+            loop {
+                held.push(vec![1u8; GROW_STEP_BYTES]);
+            }
         }
         // Beside 0, 1 and 2, only the descriptor of the listing itself.
         #[cfg(target_os = "linux")]

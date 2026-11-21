@@ -298,6 +298,17 @@ jobs:
             a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib 2>&1 | tee test.log
           awk '/^test result:/ { n += $4 } END { if (n != 5) { print "::error::expected 5 large-history tests, ran " n; exit 1 } }' test.log
 
+      # The lib test binary runs as root: the test moves itself into a cgroup
+      # with a memory limit, so the kernel must choose between it and its child.
+      - name: Test (validator child out of memory)
+        run: |
+          set -o pipefail
+          bin=$(cargo test $ENCLAVE --features $TEST_FEATURES --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.kind == ["lib"]) | .executable')
+          sudo "$bin" --ignored --exact \
+            networks::rgb::validation::runner::tests::the_kernel_ends_a_child_out_of_memory_and_the_key_still_signs 2>&1 | tee test.log
+          awk '/^test result:/ { n += $4 } END { if (n != 1) { print "::error::expected 1 out-of-memory test, ran " n; exit 1 } }' test.log
+
       - name: Test (RGB release stress, on request)
         if: github.event_name == 'workflow_dispatch' && inputs.run_stress
         timeout-minutes: 30
