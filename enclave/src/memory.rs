@@ -87,7 +87,7 @@
 //! them: they are only compared, hashed or stored. No build reads
 //! `EvmSource.token` or `EvmSource.recipient`. They take memory only in the
 //! decode, which the frame term covers. An error text can quote request
-//! data, so dispatch cuts it at `MAX_ERROR_TEXT_BYTES` before it logs or
+//! data, so dispatch cuts it to `MAX_ERROR_TEXT_BYTES` before it logs or
 //! returns it. The log formatter keeps a buffer as large as the longest line
 //! it wrote on each thread.
 //!

@@ -322,18 +322,34 @@ fn a_child_never_chooses_a_retryable_code() {
     }
 }
 
-/// A long text is cut at `MAX_CHILD_TEXT_BYTES`, never inside a character.
+/// A refusal of the child gives the reply that the same error gives in the
+/// enclave process: the same text, cut at the same place, with its full
+/// length. Dispatch returns it unchanged, and a cut never splits a character.
 #[test]
-fn a_long_refusal_text_is_cut_on_a_char_boundary() {
+fn a_refusal_gives_the_reply_of_the_same_error_in_process() {
     for filler in ["a", "\u{00e9}", "\u{1f600}"] {
-        let text = format!("x{}", filler.repeat(MAX_CHILD_TEXT_BYTES));
-        let cut = refusal(&CrossCheck(text.clone()));
-        assert!(cut.text.len() <= MAX_CHILD_TEXT_BYTES);
-        assert!(cut.text.len() > MAX_CHILD_TEXT_BYTES - filler.len());
-        let Ok(CrossCheck(back)) = refusal_error(&cut) else {
-            panic!("not a cross-check");
-        };
-        assert!(text.starts_with(&back));
+        let long = format!("x{}", filler.repeat(4 * MAX_ERROR_TEXT_BYTES));
+        for e in [
+            CrossCheck(long.clone()),
+            Spv(long.clone()),
+            Internal(long.clone()),
+            CrossCheck("consignment deserialization failed".into()),
+            Io(std::io::Error::other(long.clone())),
+        ] {
+            // The enclave rebuilds any other error as an internal one.
+            let shown = match &e {
+                Io(_) => Internal(e.to_string()).to_string(),
+                _ => e.to_string(),
+            };
+            let sent = refusal(&e);
+            assert!(sent.text.len() <= MAX_ERROR_TEXT_BYTES);
+            let back = refusal_error(&sent).unwrap().to_string();
+            assert_eq!(back, fit_error_text(shown.clone()));
+            assert_eq!(fit_error_text(back.clone()), back);
+            if shown.len() > MAX_ERROR_TEXT_BYTES {
+                assert!(back.ends_with(&format!("... ({} bytes)", shown.len())));
+            }
+        }
     }
 }
 
@@ -349,7 +365,7 @@ fn a_refusal_the_enclave_cannot_read_breaks_the_protocol() {
         (REFUSAL_CROSS_CHECK, bytes(&[0xff, 0xfe]), "not UTF-8"),
         (
             REFUSAL_CROSS_CHECK,
-            bytes(&[b'a'; MAX_CHILD_TEXT_BYTES + 1]),
+            bytes(&[b'a'; MAX_ERROR_TEXT_BYTES + 1]),
             "over",
         ),
     ];
@@ -415,8 +431,8 @@ fn a_verdict_decodes_without_copying_its_records() {
 #[test]
 fn the_largest_fixed_part_fits_its_frame_bytes() {
     let longest_id = Bytes::from(vec![b'x'; MAX_CONTRACT_ID_BYTES]);
-    let longest_refusal = refusal(&CrossCheck("\u{1f600}".repeat(MAX_CHILD_TEXT_BYTES)));
-    assert!(longest_refusal.text.len() > MAX_CHILD_TEXT_BYTES - 4);
+    let longest_refusal = refusal(&CrossCheck("\u{1f600}".repeat(MAX_ERROR_TEXT_BYTES)));
+    assert!(longest_refusal.text.len() > MAX_ERROR_TEXT_BYTES - 64);
     let settling = Settling {
         witness_txid: Bytes::from_static(&[0xff; 32]),
         op_id: Bytes::from_static(&[0xff; 32]),

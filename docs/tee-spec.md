@@ -241,6 +241,10 @@ error that the enclave kept comes before any end of the child:
 A retry repeats a crash on the same consignment, so a crash refuses it.
 As the kernel grants each allocation, an allocation fails only at a size
 that no memory holds. An out-of-memory kill depends on the load at the time.
+A refusal of the child gives the reply that the same error gives in the
+enclave process: the child cuts its text as dispatch cuts an error text, to
+`MAX_ERROR_TEXT_BYTES` with its full length, so dispatch returns it as it
+is.
 
 **What the enclave checks again.** The enclave trusts the verdict as it
 would trust this validation in its own process: for the consensus result,

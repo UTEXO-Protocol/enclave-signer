@@ -21,6 +21,7 @@ use super::types::{ValidatedConsignment, WitnessBlock};
 use crate::error::EnclaveError;
 use crate::limits::Limits;
 use crate::memory::VALIDATOR_FRAME_FIXED_BYTES;
+use crate::server::dispatch::{fit_error_text, MAX_ERROR_TEXT_BYTES};
 
 /// A message with no fields.
 #[derive(Clone, PartialEq, prost::Message)]
@@ -272,9 +273,6 @@ pub(super) const REFUSAL_HELD: u32 = 4;
 /// The longest contract id a child sends. The display form of a contract id
 /// is far shorter, and the refusal of a bind quotes the id.
 pub(super) const MAX_CONTRACT_ID_BYTES: usize = 256;
-/// The longest refusal text a child sends. Dispatch cuts the text of a reply
-/// shorter, so the reply shows the same part of the text.
-pub(super) const MAX_CHILD_TEXT_BYTES: usize = 2 * crate::server::dispatch::MAX_ERROR_TEXT_BYTES;
 
 /// A 32-byte id, txid or hash.
 const ID_BYTES: usize = size_of::<[u8; 32]>();
@@ -471,10 +469,11 @@ pub(super) fn transition_type(code: u32) -> Option<TypeOfTransition> {
     })
 }
 
-/// The refusal a child sends for its own error, with the text cut at
-/// [`MAX_CHILD_TEXT_BYTES`]. A cross-check, SPV or internal error keeps its
-/// kind and text. Any other error becomes an internal one with its display
-/// text, so a child never chooses a retryable code.
+/// The refusal a child sends for its own error. A cross-check, SPV or internal
+/// error keeps its kind and text. Any other error becomes an internal one with
+/// its display text, so a child never chooses a retryable code. The text is
+/// cut as dispatch cuts the reply of the error the enclave rebuilds, so
+/// dispatch returns that reply unchanged.
 pub(super) fn refusal(e: &EnclaveError) -> Refusal {
     let (kind, text) = match e {
         EnclaveError::CrossCheck(text) => (REFUSAL_CROSS_CHECK, Cow::Borrowed(text.as_str())),
@@ -504,10 +503,11 @@ pub(super) fn refusal(e: &EnclaveError) -> Refusal {
         | EnclaveError::PubkeyMismatch
         | EnclaveError::IdentityMismatch => (REFUSAL_INTERNAL, Cow::Owned(e.to_string())),
     };
-    let text = &text[..text.floor_char_boundary(MAX_CHILD_TEXT_BYTES)];
+    let prefix = rebuilt(kind, String::new()).map_or_else(|_| String::new(), |e| e.to_string());
+    let shown = fit_error_text(format!("{prefix}{text}"));
     Refusal {
         kind,
-        text: Bytes::copy_from_slice(text.as_bytes()),
+        text: Bytes::copy_from_slice(&shown.as_bytes()[prefix.len()..]),
     }
 }
 
@@ -515,16 +515,21 @@ pub(super) fn refusal(e: &EnclaveError) -> Refusal {
 /// protocol. A held refusal has no error of its own: the enclave answers with
 /// the one it kept.
 pub(super) fn refusal_error(refusal: &Refusal) -> Result<EnclaveError, String> {
-    if refusal.text.len() > MAX_CHILD_TEXT_BYTES {
+    if refusal.text.len() > MAX_ERROR_TEXT_BYTES {
         return Err(format!(
-            "a refusal text of {} bytes, over {MAX_CHILD_TEXT_BYTES}",
+            "a refusal text of {} bytes, over {MAX_ERROR_TEXT_BYTES}",
             refusal.text.len()
         ));
     }
     let text = std::str::from_utf8(&refusal.text)
         .map_err(|e| format!("a refusal text that is not UTF-8: {e}"))?
         .to_owned();
-    match refusal.kind {
+    rebuilt(refusal.kind, text)
+}
+
+/// The error of a refusal of `kind` with `text`, as the enclave rebuilds it.
+fn rebuilt(kind: u32, text: String) -> Result<EnclaveError, String> {
+    match kind {
         REFUSAL_CROSS_CHECK => Ok(EnclaveError::CrossCheck(text)),
         REFUSAL_SPV => Ok(EnclaveError::Spv(text)),
         REFUSAL_INTERNAL => Ok(EnclaveError::Internal(text)),
