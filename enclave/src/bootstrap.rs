@@ -203,14 +203,36 @@ pub fn log_policy(policy: &SecurityPolicy) {
 
 /// Refuses to start a release burn signer whose validator child does not
 /// start or confine itself, or whose kernel could end the enclave instead of
-/// a child when memory runs out. A debug build logs a warning. `main` panics
-/// on the refusal.
+/// a child when memory runs out. A release build first sets
+/// [`OVERCOMMIT_SYSCTL`]. A debug build logs a warning. `main` panics on the
+/// refusal.
 #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
 pub fn check_validator_child(build: &BuildContext) -> Result<(), String> {
     use crate::networks::rgb::validation::{probe_validator_child, ChildProgram};
+    let set = overcommit_for(build, std::path::Path::new(OVERCOMMIT_SYSCTL));
     let report = ChildProgram::this_binary()
         .and_then(|program| probe_validator_child(&program, crate::conn::IO_IDLE_TIMEOUT));
-    judge_validator_child(kernel_oom_policy(), report, build)
+    judge_validator_child(set.and_then(|()| kernel_oom_policy()), report, build)
+}
+
+/// The `vm.overcommit_memory` sysctl.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+const OVERCOMMIT_SYSCTL: &str = "/proc/sys/vm/overcommit_memory";
+
+/// The `vm.overcommit_memory` value that grants each allocation
+/// (`OVERCOMMIT_ALWAYS` in `include/uapi/linux/mman.h`).
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+const OVERCOMMIT_ALWAYS: u64 = 1;
+
+/// Writes [`OVERCOMMIT_ALWAYS`] to the sysctl at `path` in a release build.
+/// A debug build leaves the setting of its host as it is.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn overcommit_for(build: &BuildContext, path: &std::path::Path) -> Result<(), String> {
+    if build.debug_or_test {
+        return Ok(());
+    }
+    std::fs::write(path, OVERCOMMIT_ALWAYS.to_string())
+        .map_err(|e| format!("cannot set vm.overcommit_memory to {OVERCOMMIT_ALWAYS}: {e}"))
 }
 
 /// Judges the kernel policy and the report of a probe child for
@@ -279,9 +301,14 @@ fn oom_policy(
         text.parse()
             .map_err(|e| format!("vm.{name} reads {text:?}: {e}"))
     };
-    // Strict accounting fails an allocation of whichever process asks.
-    if value("overcommit_memory")? == 2 {
-        return Err("vm.overcommit_memory is 2: an allocation of the enclave can fail".into());
+    // Under any other value, the enclave kernel can fail an allocation of
+    // whichever process asks before it ends a child.
+    let overcommit = value("overcommit_memory")?;
+    if overcommit != OVERCOMMIT_ALWAYS {
+        return Err(format!(
+            "vm.overcommit_memory is {overcommit}, not {OVERCOMMIT_ALWAYS}: an allocation of the \
+             enclave can fail before the kernel ends a validator child"
+        ));
     }
     if value("panic_on_oom")? != 0 {
         return Err("vm.panic_on_oom is set: an out-of-memory stops the whole kernel".into());
@@ -424,7 +451,7 @@ pub fn build_evm_rpc_client(
 /// The boot check of the validator child of the burn signer.
 #[cfg(all(test, feature = "rgb-validation", rgb_to_evm, unix))]
 mod validator_child_tests {
-    use super::{judge_validator_child, oom_policy};
+    use super::{judge_validator_child, oom_policy, overcommit_for, OVERCOMMIT_ALWAYS};
     use crate::error::EnclaveError;
     use crate::networks::rgb::validation::ChildReport;
     use crate::policy::BuildContext;
@@ -501,32 +528,65 @@ mod validator_child_tests {
             };
             oom_policy(sysctl, Ok(format!("{enclave_adj}\n")))
         };
-        assert_eq!(policy(0, 0, 0, 0), Ok(()));
         assert_eq!(policy(1, 0, 0, 0), Ok(()));
-        assert_eq!(policy(0, 0, 0, -1000), Ok(()));
+        assert_eq!(policy(1, 0, 0, -1000), Ok(()));
         for (refused, what) in [
-            (policy(2, 0, 0, 0), "vm.overcommit_memory"),
-            (policy(0, 1, 0, 0), "vm.panic_on_oom"),
-            (policy(0, 2, 0, 0), "vm.panic_on_oom"),
-            (policy(0, 0, 1, 0), "vm.oom_kill_allocating_task"),
-            (policy(0, 0, 0, 1), "adjustment of the enclave is 1,"),
-            (policy(0, 0, 0, 1000), "adjustment of the enclave is 1000,"),
+            (policy(0, 0, 0, 0), "vm.overcommit_memory is 0, not 1"),
+            (policy(2, 0, 0, 0), "vm.overcommit_memory is 2, not 1"),
+            (policy(1, 1, 0, 0), "vm.panic_on_oom"),
+            (policy(1, 2, 0, 0), "vm.panic_on_oom"),
+            (policy(1, 0, 1, 0), "vm.oom_kill_allocating_task"),
+            (policy(1, 0, 0, 1), "adjustment of the enclave is 1,"),
+            (policy(1, 0, 0, 1000), "adjustment of the enclave is 1000,"),
         ] {
             assert!(refused.unwrap_err().contains(what), "{what}");
         }
         let zero = || -> std::io::Result<String> { Ok("0\n".into()) };
+        let sysctl = |name: &str| -> std::io::Result<String> {
+            let value = if name == "overcommit_memory" { 1 } else { 0 };
+            Ok(format!("{value}\n"))
+        };
         let unreadable = oom_policy(|_| Err(std::io::ErrorKind::NotFound.into()), zero());
         let err = unreadable.unwrap_err();
         assert!(err.contains("cannot read vm.overcommit_memory"), "{err}");
         let err = oom_policy(|_| Ok("many".into()), zero()).unwrap_err();
         assert!(err.contains("reads \"many\""), "{err}");
-        let err = oom_policy(|_| zero(), Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
+        let err = oom_policy(sysctl, Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
         assert!(
             err.contains("cannot read the OOM score adjustment of the enclave"),
             "{err}"
         );
-        let err = oom_policy(|_| zero(), Ok("high".into())).unwrap_err();
+        let err = oom_policy(sysctl, Ok("high".into())).unwrap_err();
         assert!(err.contains("enclave reads \"high\""), "{err}");
+    }
+
+    /// A release build sets the overcommit sysctl, and a refusal names it. A
+    /// debug build leaves the setting of its host as it is.
+    #[test]
+    fn a_release_burn_signer_sets_the_kernel_to_grant_each_allocation() {
+        let dir = std::env::temp_dir().join(format!("utexo-overcommit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sysctl = dir.join("overcommit_memory");
+        std::fs::write(&sysctl, "0\n").unwrap();
+        overcommit_for(&build(true), &sysctl).unwrap();
+        assert_eq!(std::fs::read_to_string(&sysctl).unwrap(), "0\n");
+        overcommit_for(&build(false), &sysctl).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&sysctl).unwrap(),
+            OVERCOMMIT_ALWAYS.to_string()
+        );
+        let missing = dir.join("no-such-dir").join("overcommit_memory");
+        let err = overcommit_for(&build(false), &missing).unwrap_err();
+        assert!(
+            err.contains("cannot set vm.overcommit_memory to 1"),
+            "{err}"
+        );
+        let refused = judge_validator_child(Err(err), report(true), &build(false)).unwrap_err();
+        assert!(
+            refused.contains("cannot set vm.overcommit_memory"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

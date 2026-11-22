@@ -199,17 +199,22 @@ steps refuses its job. The child has no heap cap. When the enclave runs out
 of memory, the kernel ends the process with the highest OOM score, which is
 a child while one runs.
 
-**Boot check.** After the memory check, the burn signer starts a probe
-child, and reads three kernel settings and the OOM score adjustment of the
-enclave process. A release build refuses to start when the probe child does
-not answer within `IO_IDLE_TIMEOUT` or did not confine itself. It also
-refuses when `vm.overcommit_memory` is 2, `vm.panic_on_oom` is set,
-`vm.oom_kill_allocating_task` is set, the OOM score adjustment of the
+**Boot check.** After the memory check, a release burn signer sets
+`vm.overcommit_memory` to `OVERCOMMIT_ALWAYS`, so the kernel grants each
+allocation. Under the other values, the enclave kernel fails an allocation
+of whichever process asks when free memory runs short, so the enclave
+process can stop before the kernel ends a child. Then the burn signer
+starts a probe child, and reads three kernel settings and the OOM score
+adjustment of the enclave process. A release build refuses to start when it
+cannot set `vm.overcommit_memory`, or when the probe child does not answer
+within `IO_IDLE_TIMEOUT` or did not confine itself. It also refuses when
+`vm.overcommit_memory` is not `OVERCOMMIT_ALWAYS`, `vm.panic_on_oom` is
+set, `vm.oom_kill_allocating_task` is set, the OOM score adjustment of the
 enclave process is above 0, or one of these values cannot be read: with
 these values, an out-of-memory can end the enclave process first. A debug
-build logs a warning and starts. When the probe child answers, the enclave
-logs "validator child ready" with the time the child took to answer, and
-its OOM score adjustment and memory.
+build leaves `vm.overcommit_memory` as it is, logs a warning and starts.
+When the probe child answers, the enclave logs "validator child ready" with
+the time the child took to answer, and its OOM score adjustment and memory.
 
 **End before the deadline.** The enclave ends the child at the kill time,
 `RESPONSE_MARGIN` before the request deadline, so the reply can still be
@@ -233,8 +238,9 @@ error that the enclave kept comes before any end of the child:
 | A `SIGKILL` that the enclave did not send, from the OOM killer | A fault of the enclave | 1 |
 | Another signal or exit, a broken protocol, a verdict that fails the checks, or a failed start | A fault of the enclave | 1 |
 
-A retry repeats a crash on the same consignment, so a crash refuses it. An
-out-of-memory kill depends on the load at the time.
+A retry repeats a crash on the same consignment, so a crash refuses it.
+As the kernel grants each allocation, an allocation fails only at a size
+that no memory holds. An out-of-memory kill depends on the load at the time.
 
 **What the enclave checks again.** The enclave trusts the verdict as it
 would trust this validation in its own process: for the consensus result,
