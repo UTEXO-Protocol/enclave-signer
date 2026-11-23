@@ -61,6 +61,13 @@ fn refill_colored_inputs(psbt: &Psbt, keys: &KeyManager) -> Result<Vec<usize>> {
 /// own tx. Returns the new rights' vouts (RR9).
 pub fn refill_rights(committed: &Committed) -> Result<Vec<u32>> {
     let transition = &committed.transition;
+    // RR3: a refill is the bridge's own tx, so its right's UTXO holds nothing else.
+    if committed.moves != 0 {
+        return Err(EnclaveError::CrossCheck(format!(
+            "rights refill commits {} other transition(s) - a refill commits its propagate only",
+            committed.moves
+        )));
+    }
     assert_propagate(transition)?;
     assert_single_right_input(transition, "a rights refill")?;
     assert_rights_only(transition)?;

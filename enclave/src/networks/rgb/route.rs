@@ -97,7 +97,7 @@ pub fn validate_destination_anchor(
     ))
 }
 
-/// The mint its PSBT and fascia commit, bound to the deposit (F1-F7, M1-M8).
+/// The mint its PSBT and fascia commit, bound to the deposit (F1-F7, M1-M9).
 /// Returns the minted units.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
@@ -114,6 +114,7 @@ pub fn validate_destination_anchor(
         &destination.fascia,
         &destination.asset_id,
         ctx.bridge_config,
+        schemata::TS_MINT,
     )?;
     let mint = psbt_validation::mint_facts(&committed)?;
     psbt_validation::assert_mints_net_deposit(&mint, source_amount, source_commission)?;
@@ -121,12 +122,12 @@ pub fn validate_destination_anchor(
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched: the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &colored, "mint")?;
-    let mint_sats = ctx.mint_sats.ok_or_else(|| {
+    let mint_outputs = ctx.mint_outputs.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
-            "mint cannot be signed: no sats check is wired in".into(),
+            "mint cannot be signed: no outputs check is wired in".into(),
         )
     })?;
-    mint_sats(&psbt, &mint.recipient)?;
+    mint_outputs(&psbt, &mint.recipient, &committed.moved_to)?;
     // Last: the only network read on this path.
     let bind = ctx.mint_binder.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
@@ -138,17 +139,19 @@ pub fn validate_destination_anchor(
 }
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which
-/// `asset_id` must name too. Returns the committed transition.
+/// `asset_id` must name too. Returns what the tx commits around its one
+/// transition of type `main`.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn pinned_commitment(
     psbt: &bitcoin::psbt::Psbt,
     fascia: &[u8],
     asset_id: &str,
     cfg: &BridgeConfig,
+    main: rgbstd::TransitionType,
 ) -> Result<psbt_commit::Committed> {
     let pin = psbt_commit::Pin::of(cfg)?;
     let parsed = psbt_commit::parse_fascia(fascia, "fascia")?;
-    let committed = psbt_commit::committed_transition(psbt, parsed, fascia, "fascia", pin)?;
+    let committed = psbt_commit::committed_transition(psbt, parsed, fascia, "fascia", pin, main)?;
     validation::assert_asset_binding(
         &pin.contract.to_string(),
         asset_id,
@@ -192,7 +195,8 @@ pub fn validate_rights_refill(
     cfg: &BridgeConfig,
 ) -> Result<Vec<u32>> {
     psbt_validation::assert_txid_and_sighash_fixed(psbt)?;
-    let committed = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg)?;
+    let propagate = schemata::TS_PROPAGATE;
+    let committed = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg, propagate)?;
     psbt_validation::refill_rights(&committed)
 }
 

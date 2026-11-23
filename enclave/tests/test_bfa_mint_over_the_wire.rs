@@ -217,16 +217,28 @@ fn pay(
     }
 }
 
+/// What a mint does beside paying its units.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// Consumes its right, as rgb-lib builds it.
+    Plain,
+    /// Passes its right on to the bridge change.
+    KeepsRight,
+    /// Moves another right to this vout by a second transition, as rgb-lib
+    /// moves other state of the spent UTXO. The enclave cannot see what that
+    /// UTXO holds, so the fixture names the issuer's spent right.
+    MovesRightTo(u32),
+}
+
 /// Issues a BFA asset, with `reject_list` if any. The issuer seeds its right
 /// to the bridge's key-path output (`bridge_spk`, vout 1 of the seed). A
-/// `mint` gives `issued` units to `payee`. Its witness tx spends the right and
-/// `aux` (if any). The mint consumes the right, or with `keeps_right` passes
-/// it on to the bridge change.
+/// `mint` of `shape` gives `issued` units to `payee`. Its witness tx spends
+/// the right and `aux` (if any).
 fn issue_and_mint(
     bridge_spk: &ScriptBuf,
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
-    keeps_right: bool,
+    shape: Shape,
     payee: Payee,
     issued: u64,
 ) -> Deposit {
@@ -252,10 +264,15 @@ fn issue_and_mint(
         .map(|aux| vec![OutPoint::new(aux.funding.compute_txid(), 0)])
         .unwrap_or_default();
     let (to, outputs) = pay(payee, &user_funding, bridge_spk);
-    let mint = if keeps_right {
-        history.mint_keeping_right(right, issued, BEFORE_BLOCK, to, extra, outputs)
-    } else {
-        history.mint(right, issued, BEFORE_BLOCK, to, extra, outputs)
+    let mint = match shape {
+        Shape::Plain => history.mint(right, issued, BEFORE_BLOCK, to, extra, outputs),
+        Shape::KeepsRight => {
+            history.mint_keeping_right(right, issued, BEFORE_BLOCK, to, extra, outputs)
+        }
+        Shape::MovesRightTo(vout) => {
+            let beside = genesis_right;
+            history.mint_moving_right(right, issued, BEFORE_BLOCK, to, beside, vout, outputs)
+        }
     };
 
     Deposit {
@@ -470,10 +487,10 @@ struct Built {
 fn build_on(
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
-    keeps_right: bool,
+    shape: Shape,
     payee: Payee,
 ) -> Built {
-    build_issuing(aux, reject_list, keeps_right, payee, MINTED)
+    build_issuing(aux, reject_list, shape, payee, MINTED)
 }
 
 /// The same valid mint shape, with `issued` units committed in its fascia.
@@ -481,14 +498,14 @@ fn build_on(
 fn build_issuing(
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
-    keeps_right: bool,
+    shape: Shape,
     payee: Payee,
     issued: u64,
 ) -> Built {
     let keys = KeyManager::from_seed(SEED, Network::Regtest).unwrap();
     let (our, our_path) = colored_key(&keys);
     let bridge_spk = bridge_address(our);
-    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, keeps_right, payee, issued);
+    let deposit = issue_and_mint(&bridge_spk, aux, reject_list, shape, payee, issued);
 
     let origin = (vec![], (*keys.master_fingerprint(), our_path));
     let mut psbt = deposit.mint.psbt.clone();
@@ -509,7 +526,7 @@ fn build_issuing(
 }
 
 fn build(aux: Option<&Aux>) -> Built {
-    build_on(aux, None, false, Payee::Blinded)
+    build_on(aux, None, Shape::Plain, Payee::Blinded)
 }
 
 /// The built deposit through the front door, over the wire, against a lock
@@ -782,7 +799,7 @@ fn signs_valid_mint_that_finalizes_to_the_bound_txid() {
 #[test]
 fn refuses_a_mint_whose_committed_amount_differs_from_the_deposit() {
     for issued in [MINTED - 1, MINTED + 1] {
-        let minted = build_issuing(None, None, false, Payee::Blinded, issued);
+        let minted = build_issuing(None, None, Shape::Plain, Payee::Blinded, issued);
         let request = sign_request(&minted);
         let chain = deposit_chain(&minted, LOCK_BLOCK, LOCK_BLOCK, vec![]);
         let ctx = context(bridge_config(&minted.deposit.contract_id), chain);
@@ -1026,13 +1043,41 @@ fn refuses_a_lock_at_or_after_before_block() {
 /// enclave owns. The mint signer refuses it all the same.
 #[test]
 fn refuses_a_mint_that_passes_its_right_on() {
-    let refusal = refusal(&drive(&build_on(None, None, true, Payee::Blinded)));
+    let refusal = refusal(&drive(&build_on(
+        None,
+        None,
+        Shape::KeepsRight,
+        Payee::Blinded,
+    )));
     assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
+}
+
+/// Other state of the right's UTXO moves to the bridge change by a second
+/// transition. It stays in the wallet, so the mint is signed.
+#[test]
+fn signs_a_mint_that_moves_other_state_to_the_bridge_change() {
+    for (payee, change) in [(Payee::Blinded, 1), (Payee::Witness, 2)] {
+        let built = build_on(None, None, Shape::MovesRightTo(change), payee);
+        let (_, inputs_signed) = signed_psbt(&drive(&built)).expect("the state stays ours");
+        assert_eq!(inputs_signed, 1);
+    }
+}
+
+/// M9: that state may not leave with the user's output, nor sit on the
+/// OP_RETURN.
+#[test]
+fn refuses_a_mint_that_moves_other_state_off_the_bridge_outputs() {
+    for vout in [0, 1] {
+        let built = build_on(None, None, Shape::MovesRightTo(vout), Payee::Witness);
+        let refusal = refusal(&drive(&built));
+        let want = format!("moves other state of its right's UTXO to vout {vout}");
+        assert!(refusal.contains(&want), "{refusal}");
+    }
 }
 
 fn build_listed() -> Built {
     let list = bfa_consignment::evm_reject_list(EVM_CHAIN_ID, LIST);
-    build_on(None, Some(list), false, Payee::Blinded)
+    build_on(None, Some(list), Shape::Plain, Payee::Blinded)
 }
 
 /// The mint signer reads no reject list: the connector's rgb-lib checks it
@@ -1050,7 +1095,7 @@ fn signs_a_listed_mint_without_reading_the_list() {
 /// consumer accepts it. The user's output carries exactly `MINT_WITNESS_SAT`.
 #[test]
 fn signs_a_witness_mint_paying_exactly_mint_witness_sat() {
-    let witness = build_on(None, None, false, Payee::Witness);
+    let witness = build_on(None, None, Shape::Plain, Payee::Witness);
     let (signed, inputs_signed) = signed_psbt(&drive(&witness)).expect("witness mint signs");
     assert_eq!(inputs_signed, 1);
     let bound = witness.psbt.unsigned_tx.compute_txid();
@@ -1076,7 +1121,7 @@ fn signs_a_witness_mint_paying_exactly_mint_witness_sat() {
 #[test]
 fn refuses_a_deposit_that_names_a_destination_address() {
     for payee in [Payee::Blinded, Payee::Witness] {
-        let mut built = build_on(None, None, false, payee);
+        let mut built = build_on(None, None, Shape::Plain, payee);
         built.deposit.destination_address = "bcrt:utxob:a-recipient".into();
         let refusal = refusal(&drive(&built));
         assert!(
@@ -1090,7 +1135,7 @@ fn refuses_a_deposit_that_names_a_destination_address() {
 /// whose PSBT pays the default [`DEFAULT_MINT_WITNESS_SAT`] to the user.
 #[test]
 fn refuses_a_witness_mint_paying_other_than_the_pinned_mint_witness_sat() {
-    let witness = build_on(None, None, false, Payee::Witness);
+    let witness = build_on(None, None, Shape::Plain, Payee::Witness);
     let config = BridgeConfig {
         mint_witness_sat: 1_000,
         ..bridge_config(&witness.deposit.contract_id)

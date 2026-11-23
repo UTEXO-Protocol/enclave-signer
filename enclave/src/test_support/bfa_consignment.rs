@@ -365,7 +365,44 @@ impl History {
             .mint_transition(right, amount, before_block, to)
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
+        self.commit_mint(
+            vec![mint],
+            amount,
+            before_block,
+            right,
+            extra_inputs,
+            outputs,
+        )
+    }
+
+    #[cfg(evm_to_rgb)]
+    /// A [`Self::mint`] whose bundle also moves the right `beside` to `vout`, as
+    /// rgb-lib moves other state of the UTXO it spends. A fixture of the mint
+    /// wire test only.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn mint_moving_right(
+        &mut self,
+        right: Utxo,
+        amount: u64,
+        before_block: u64,
+        to: BuilderSeal<GraphSeal>,
+        beside: Utxo,
+        vout: u32,
+        outputs: Vec<TxOut>,
+    ) -> Committed {
+        let moved = self.rights_transition(beside, &[vout]);
+        let mint = self
+            .mint_transition(right, amount, before_block, to)
+            .complete_transition()
+            .unwrap();
+        self.commit_mint(
+            vec![moved, mint],
+            amount,
+            before_block,
+            right,
+            vec![],
+            outputs,
+        )
     }
 
     #[cfg(evm_to_rgb)]
@@ -387,7 +424,14 @@ impl History {
             .unwrap()
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
+        self.commit_mint(
+            vec![mint],
+            amount,
+            before_block,
+            right,
+            extra_inputs,
+            outputs,
+        )
     }
 
     /// The mint of `amount` to `to` on `right`, still open for more outputs.
@@ -409,11 +453,11 @@ impl History {
             .unwrap()
     }
 
-    /// Commits `mint` in a tx that spends `right`, then `extra_inputs`, and
-    /// records its claim.
+    /// Commits `transitions`, the mint last, in a tx that spends `right`, then
+    /// `extra_inputs`, and records the mint's claim.
     fn commit_mint(
         &mut self,
-        mint: Transition,
+        transitions: Vec<Transition>,
         amount: u64,
         before_block: u64,
         right: Utxo,
@@ -423,7 +467,7 @@ impl History {
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let minted = self.commit_psbt(vec![mint], inputs, outputs);
+        let minted = self.commit_psbt(transitions, inputs, outputs);
         self.mints.push(Mint {
             opid: minted.opid,
             witness_id: minted.tx.compute_txid(),

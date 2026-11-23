@@ -47,7 +47,7 @@ pub struct ValidationContext<'a> {
     /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
     /// keys are not held across I/O. `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-    pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
+    pub mint_outputs: Option<crate::networks::rgb::psbt_validation::MintOutputsCheck<'a>>,
     /// Binds each BFA mint anchor of a consignment to an EVM lock. With
     /// `None`, a consignment with a mint anchor is refused.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]

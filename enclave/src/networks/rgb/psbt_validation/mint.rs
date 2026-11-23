@@ -13,7 +13,7 @@ use super::super::psbt_commit::{assert_single_right_input, witness_vout, Committ
 use super::super::validation::{lock_id, output_seal, single_global};
 use super::assert_keeps_all_sats;
 use crate::error::{EnclaveError, Result};
-use crate::keys::KeyManager;
+use crate::keys::{AccountType, KeyManager};
 
 /// Inputs a mint spends (F7).
 pub const MINT_INPUTS: usize = 1;
@@ -73,8 +73,9 @@ pub enum MintRecipient {
 /// M6: binds the mint to the request's verified EVM deposit, or refuses.
 pub type MintBinder<'a> = &'a dyn Fn(&MintFacts) -> Result<()>;
 
-/// M8 with the enclave keys and the pinned witness amount, or refuses.
-pub type MintSatsCheck<'a> = &'a dyn Fn(&Psbt, &MintRecipient) -> Result<()>;
+/// M8 and M9 with the enclave keys and the pinned witness amount, or refuses.
+/// The vouts are the outputs the mint's side transitions move state to.
+pub type MintOutputsCheck<'a> = &'a dyn Fn(&Psbt, &MintRecipient, &[u32]) -> Result<()>;
 
 /// M1-M5 and M7: a `mint` that consumes one right and issues exactly its
 /// `issuedSupply` to one recipient seal, nothing else.
@@ -128,6 +129,29 @@ pub fn assert_mint_sats(
             "mint PSBT output total overflows u64".into(),
         )),
     }
+}
+
+/// M9: state that a side transition moves stays in the wallet. Each vout is a
+/// Colored key-path output the enclave derives, the keychain rgb-lib scans, and
+/// carries sats: a wallet does not track an empty output.
+pub fn assert_moved_state_kept(psbt: &Psbt, keys: &KeyManager, vouts: &[u32]) -> Result<()> {
+    for &vout in vouts {
+        let index = vout as usize;
+        let sats = psbt
+            .unsigned_tx
+            .output
+            .get(index)
+            .map(|out| out.value.to_sat());
+        let ours =
+            btc_ownership::output_is_self_derived(psbt, index, keys, Some(AccountType::Colored));
+        if !ours || sats.unwrap_or_default() == 0 {
+            return Err(EnclaveError::CrossCheck(format!(
+                "mint moves other state of its right's UTXO to vout {vout}, which is not a funded \
+                 Colored key-path output of this enclave - refusing to give that state away"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// M8 on a witness mint's seal: an output of the tx, not the OP_RETURN, not

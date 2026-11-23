@@ -295,7 +295,8 @@ report that conflict and keep it visible until the implementation is fixed.
   lock the enclave bound. Refuse on a resolver error or an rgb-lib warning.
   Prove what a mint or refill transaction commits only with rgb-lib's
   `inspect_fascia`, and refuse what it refuses; the enclave's own rules around
-  it select the asset, the one bundle and the one transition.
+  it select the asset, the one main transition and what a side transition may
+  do.
   `clippy.toml` bans the direct calls; update the bans when an RGB crate renames
   those methods.
 - Bind the asset before any external read that a consignment selects. A
