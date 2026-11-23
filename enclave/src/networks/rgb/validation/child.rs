@@ -267,7 +267,7 @@ fn refused(e: &EnclaveError) -> to_enclave::Body {
 /// Validates the file of `job`. A held refusal answers every refusal of the
 /// enclave, so the enclave returns the error it kept.
 fn validate(job: ipc::Validate, io: &UnixStream) -> ipc::Verdict {
-    let link = ParentLink {
+    let link = EnclaveLink {
         io,
         refused: Cell::new(false),
     };
@@ -288,12 +288,12 @@ fn validate(job: ipc::Validate, io: &UnixStream) -> ipc::Verdict {
 
 /// Validates the file of `job` in this process, with each resolver answer
 /// from the enclave.
-fn validate_with(job: &ipc::Validate, link: &ParentLink<'_>) -> Result<ValidatedConsignment> {
+fn validate_with(job: &ipc::Validate, link: &EnclaveLink<'_>) -> Result<ValidatedConsignment> {
     let chain_net: ChainNet = job
         .chain_net
         .parse()
         .map_err(|e| EnclaveError::Internal(format!("the enclave sent an unknown chain: {e}")))?;
-    let headers = ParentChain {
+    let headers = EnclaveHeaders {
         link,
         safe: NonZeroU32::new(job.safe_height),
     };
@@ -324,15 +324,15 @@ fn ready(confined: bool) -> ipc::Ready {
     }
 }
 
-/// The enclave end of the socket. A resolver asks one question at a time, and
-/// `&UnixStream` reads and writes, so it needs no lock.
-struct ParentLink<'a> {
+/// The child's end of its socket to the enclave. A resolver asks one question
+/// at a time, and `&UnixStream` reads and writes, so it needs no lock.
+struct EnclaveLink<'a> {
     io: &'a UnixStream,
     /// The enclave refused a request and keeps the reason.
     refused: Cell<bool>,
 }
 
-impl ParentLink<'_> {
+impl EnclaveLink<'_> {
     /// Sends `request` and reads its answer. After a refusal the child asks
     /// nothing more.
     fn ask(&self, request: to_enclave::Body) -> Result<to_child::Body> {
@@ -427,12 +427,12 @@ fn unexpected(asked: &str, answer: &to_child::Body) -> EnclaveError {
 
 /// The enclave chain as the child reads it: each header from the enclave, and
 /// the one safe height the enclave read before the child started.
-struct ParentChain<'a> {
-    link: &'a ParentLink<'a>,
+struct EnclaveHeaders<'a> {
+    link: &'a EnclaveLink<'a>,
     safe: Option<NonZeroU32>,
 }
 
-impl BuriedHeaders for ParentChain<'_> {
+impl BuriedHeaders for EnclaveHeaders<'_> {
     fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
         self.link.header(height)
     }
