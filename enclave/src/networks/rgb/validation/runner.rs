@@ -670,8 +670,10 @@ fn outcome(
 }
 
 /// The consignment of a verdict, after the checks that tie it to this
-/// validation, or what broke the protocol. The transitions by witness and the
-/// outputs of the settling transition stay empty.
+/// validation, or what broke the protocol. The witness txids are the ones of
+/// the bundles, so the enclave's own B3.2 check compares them with the witness
+/// blocks. The transitions by witness and the outputs of the settling
+/// transition stay empty.
 fn into_validated(
     v: ipc::Validated,
     bound: &str,
@@ -702,7 +704,10 @@ fn into_validated(
             block.height
         ));
     }
-    let witness_txids: Vec<[u8; 32]> = witness_blocks.iter().map(|block| block.txid).collect();
+    let witness_txids = ipc::unpack_witness_txids(&v.witness_txids)?;
+    if !witness_txids.is_sorted_by(|a, b| a < b) {
+        return Err("witness txids out of order".into());
+    }
     let (settling_witness_txid, settling_op_id, settling_transition) = match v.settling {
         Some(settling) => {
             let (txid, op_id, transition) = settling_of(settling, &witness_txids)?;

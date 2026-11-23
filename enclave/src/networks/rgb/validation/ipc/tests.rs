@@ -389,6 +389,7 @@ fn a_verdict_decodes_without_copying_its_records() {
     let (frame, decoded, peak) = peak::measure(
         || {
             let consignment = ValidatedConsignment {
+                witness_txids: (0..30_000u32).map(|n| [n as u8; 32]).collect(),
                 witness_blocks: (0..30_000u32).map(|n| block(n as u8)).collect(),
                 mint_locks: (0..10_000u32).map(|n| lock(n as u8)).collect(),
                 ..burn()
@@ -412,13 +413,14 @@ fn a_verdict_decodes_without_copying_its_records() {
     else {
         panic!("not a validated verdict");
     };
-    let records = v.witness_blocks.len() + v.mint_locks.len();
+    let records = v.witness_txids.len() + v.witness_blocks.len() + v.mint_locks.len();
     assert_eq!(
         records,
-        30_000 * WITNESS_BLOCK_RECORD_BYTES + 10_000 * LOCK_RECORD_BYTES
+        30_000 * (WITNESS_TXID_RECORD_BYTES + WITNESS_BLOCK_RECORD_BYTES)
+            + 10_000 * LOCK_RECORD_BYTES
     );
     let within = |field: &Bytes| frame.as_ptr_range().contains(&field.as_ptr());
-    assert!(within(&v.witness_blocks) && within(&v.mint_locks));
+    assert!(within(&v.witness_txids) && within(&v.witness_blocks) && within(&v.mint_locks));
     assert!(
         peak <= 1024,
         "a decode of {records} bytes of records took {peak} bytes"
@@ -447,6 +449,7 @@ fn the_largest_fixed_part_fits_its_frame_bytes() {
         witness_blocks: Bytes::new(),
         settling: Some(settling),
         mint_locks: Bytes::new(),
+        witness_txids: Bytes::new(),
     };
     let bodies = [
         to_enclave::Body::Verdict(Verdict {

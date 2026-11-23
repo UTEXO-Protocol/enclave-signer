@@ -214,6 +214,10 @@ pub(super) struct Validated {
     /// [`LOCK_RECORD_BYTES`] records.
     #[prost(bytes = "bytes", tag = "5")]
     pub mint_locks: Bytes,
+    /// [`WITNESS_TXID_RECORD_BYTES`] records: the witness txids of the
+    /// bundles, in ascending order.
+    #[prost(bytes = "bytes", tag = "6")]
+    pub witness_txids: Bytes,
 }
 
 /// The settling transition and the witness tx that anchors it.
@@ -278,6 +282,8 @@ pub(super) const MAX_CONTRACT_ID_BYTES: usize = 256;
 const ID_BYTES: usize = size_of::<[u8; 32]>();
 /// A witness block: txid in display order, height, hash in internal order.
 pub(super) const WITNESS_BLOCK_RECORD_BYTES: usize = ID_BYTES + size_of::<u32>() + ID_BYTES;
+/// A witness txid, in display order.
+pub(super) const WITNESS_TXID_RECORD_BYTES: usize = ID_BYTES;
 /// A lock: lock id, minted amount, operation id, net amount.
 pub(super) const LOCK_RECORD_BYTES: usize =
     ID_BYTES + size_of::<u64>() + ID_BYTES + size_of::<u64>();
@@ -295,6 +301,14 @@ pub(super) fn pack_witness_blocks(blocks: &[WitnessBlock]) -> Vec<u8> {
         out.extend_from_slice(&block.hash);
     }
     out
+}
+
+pub(super) fn pack_witness_txids(txids: &[[u8; 32]]) -> Vec<u8> {
+    txids.as_flattened().to_vec()
+}
+
+pub(super) fn unpack_witness_txids(bytes: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+    Ok(records::<WITNESS_TXID_RECORD_BYTES>(bytes, "witness txid")?.to_vec())
 }
 
 pub(super) fn unpack_witness_blocks(bytes: &[u8]) -> Result<Vec<WitnessBlock>, String> {
@@ -572,6 +586,7 @@ pub(super) fn validated(consignment: &ValidatedConsignment) -> Validated {
         witness_blocks: pack_witness_blocks(&consignment.witness_blocks).into(),
         settling,
         mint_locks: pack_locks(&consignment.mint_locks).into(),
+        witness_txids: pack_witness_txids(&consignment.witness_txids).into(),
     }
 }
 

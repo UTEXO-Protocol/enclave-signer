@@ -269,6 +269,7 @@ fn valid() -> ipc::Validated {
         witness_blocks: ipc::pack_witness_blocks(&[block]).into(),
         settling: None,
         mint_locks: Bytes::new(),
+        witness_txids: Bytes::from_static(&[0x01; 32]),
     }
 }
 
@@ -499,8 +500,9 @@ fn a_failing_callback_refuses_with_its_own_error_through_the_child() {
     }
 }
 
-/// A real verdict passes, also with no witness block and no settling
-/// transition; a change of one property fails its own check with code 1.
+/// A real verdict passes, also with no witness and no settling transition; a
+/// change of one property fails its own check with code 1. A witness with no
+/// block passes them, and the enclave's own B3.2 check refuses it.
 #[test]
 fn a_verdict_the_enclave_cannot_accept_is_refused() {
     let bytes = burn_bytes();
@@ -521,6 +523,7 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
     };
     assert_same(&accept(good.clone()).unwrap(), &validated);
     let genesis_alone = ipc::Validated {
+        witness_txids: Bytes::new(),
         witness_blocks: Bytes::new(),
         settling: None,
         ..good.clone()
@@ -534,6 +537,11 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         change(&mut blocks);
         v.witness_blocks = ipc::pack_witness_blocks(&blocks).into();
     };
+    let retxid = |v: &mut ipc::Validated, change: &dyn Fn(&mut Vec<[u8; 32]>)| {
+        let mut txids = ipc::unpack_witness_txids(&v.witness_txids).unwrap();
+        change(&mut txids);
+        v.witness_txids = ipc::pack_witness_txids(&txids).into();
+    };
     let safe_height = safe.map_or(0, NonZeroU32::get);
     let above = format!(
         "a witness block at height {}, not from 1 to {safe_height}",
@@ -541,7 +549,7 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
     );
     let not_a_witness = "a settling witness that is not a witness of the consignment";
     type Change<'a> = (&'a str, &'a dyn Fn(&mut ipc::Validated), &'a str);
-    let cases: [Change<'_>; 10] = [
+    let cases: [Change<'_>; 12] = [
         (
             "another contract",
             &|v| v.contract_id = Bytes::from_static(b"rgb:another-asset"),
@@ -553,9 +561,19 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
             "a verdict on another chain than bcrt",
         ),
         (
-            "a settling witness with no block",
-            &|v| v.witness_blocks = Bytes::new(),
-            not_a_witness,
+            "witness txids out of order",
+            &|v| retxid(v, &|t| t.swap(0, 1)),
+            "witness txids out of order",
+        ),
+        (
+            "a witness txid twice",
+            &|v| retxid(v, &|t| t.insert(0, t[0])),
+            "witness txids out of order",
+        ),
+        (
+            "a witness txid record of another length",
+            &|v| v.witness_txids.truncate(v.witness_txids.len() - 1),
+            "witness txid records, not a whole number",
         ),
         (
             "txids out of order",
@@ -602,6 +620,16 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         assert!(text.contains("broke its protocol"), "{case}: {text}");
         assert!(text.contains(refusal), "{case}: {text}");
     }
+
+    use crate::networks::evm::crosscheck::assert_witnesses_confirmed;
+    assert_witnesses_confirmed(&accept(good.clone()).unwrap()).unwrap();
+    let unplaced = ipc::Validated {
+        witness_blocks: Bytes::new(),
+        ..good
+    };
+    let err = assert_witnesses_confirmed(&accept(unplaced).unwrap()).unwrap_err();
+    assert_eq!(err.error_code(), 3, "{err}");
+    assert!(err.to_string().contains("placed 0 of"), "{err}");
 }
 
 /// Each way a validation ends maps to its error and wire code, in the order

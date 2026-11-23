@@ -620,15 +620,19 @@ fn the_burn_of_2810_mints_passes_every_cap() {
 }
 
 /// The records of a verdict on the burn of 2810 mints take fewer bytes than
-/// its file: a witness block for each bundle and a lock for each mint. So
-/// the verdict fits the frame the enclave reads from its validator child.
+/// its file: a witness txid and a witness block for each bundle and a lock
+/// for each mint. So the verdict fits the frame the enclave reads from its
+/// validator child.
 #[cfg(all(rgb_to_evm, unix))]
 #[test]
 fn the_verdict_records_of_the_burn_of_2810_mints_fit_in_its_file() {
-    use super::super::ipc::{LOCK_RECORD_BYTES, WITNESS_BLOCK_RECORD_BYTES};
+    use super::super::ipc::{
+        LOCK_RECORD_BYTES, WITNESS_BLOCK_RECORD_BYTES, WITNESS_TXID_RECORD_BYTES,
+    };
     let bytes = honest_burn(issue_of(10, true), 2_810, 0);
     let bundles = load(&bytes).bundles.len();
-    let records = bundles * WITNESS_BLOCK_RECORD_BYTES + 2_810 * LOCK_RECORD_BYTES;
+    let witness = WITNESS_TXID_RECORD_BYTES + WITNESS_BLOCK_RECORD_BYTES;
+    let records = bundles * witness + 2_810 * LOCK_RECORD_BYTES;
     println!(
         "{bundles} bundles: {records} record bytes, {} file bytes",
         bytes.len()

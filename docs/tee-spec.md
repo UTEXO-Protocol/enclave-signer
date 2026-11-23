@@ -176,8 +176,9 @@ not in `enclave-proto`.
   deep and not above the safe height; and the reject list, over the pinned
   EVM RPC. The asset bind comes first, and the list is read at most once.
 - The child ends with its verdict: the contract id, the network, the
-  witness blocks, the settling transition, the mint locks and its peak
-  memory. Or it ends with a refusal: the kind and the text of its error.
+  witness txids of the bundles, the witness blocks, the settling transition,
+  the mint locks and its peak memory. Or it ends with a refusal: the kind and
+  the text of its error.
 
 When the enclave refuses a question, it keeps its own error and answers
 that it refused. The child then ends with a held refusal, and the request
@@ -254,10 +255,12 @@ would trust this validation in its own process: for the consensus result,
 the settling transition and the mint locks. It checks that the verdict is for
 the contract id of the asset bind and for its own network. It checks that
 the witness blocks are in strictly ascending txid order, and each have a
-height from 1 to the safe height of the start. It checks that the witness of
-the settling transition is one of them, and that each field and record has
-its exact length. Stage 3 then confirms every witness block in the chain of
-the enclave under one lock, as for any burn.
+height from 1 to the safe height of the start, and that the witness txids
+are in strictly ascending order. It checks that the witness of the settling
+transition is one of those txids, and that each field and record has its
+exact length. Then B3.2 compares the witness txids with the witness blocks,
+and Stage 3 confirms every witness block in the chain of the enclave under
+one lock, as for any burn.
 
 **Faults, not exploits.** The boundary contains a fault of rgb-lib: a
 panic, a failed allocation, a stack overflow, an out-of-memory kill or a
