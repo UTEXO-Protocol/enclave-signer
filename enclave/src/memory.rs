@@ -51,9 +51,9 @@
 //! [`crate::framing::MAX_MESSAGE_SIZE`] bytes. Add the memory the enclave uses
 //! with no request in flight, and the result is [`MIN_ENCLAVE_MEMORY_BYTES`].
 //! [`check_at_boot`] refuses to start a release build on less usable memory,
-//! or with no readable total. The kernel keeps part of the launch value for
-//! itself, so `run-enclave --memory` must give at least
-//! [`RUN_ENCLAVE_MEMORY_MIB`].
+//! on less than the limits in force need ([`check_limits`]), or with no
+//! readable total. The kernel keeps part of the launch value for itself, so
+//! `run-enclave --memory` must give at least [`RUN_ENCLAVE_MEMORY_MIB`].
 //!
 //! Responses from the pinned EVM RPC are outside the model. TLS pins their
 //! sender, and the host cannot change them. The reject
@@ -131,12 +131,10 @@
 //! and its verdict frame, which the enclave reads while the child lives
 //! ([`validator_frame_bytes`]).
 //!
-//! The boot check counts neither the scratch files nor the reserves: they
-//! come from the memory that [`RUN_ENCLAVE_MEMORY_MIB`] keeps above the
-//! minimum. A change of limits counts one file at the larger of the two
-//! limits and one reserve: [`check_limits`] adds both for each worker. So a
-//! change needs usable memory for them above the minimum, even at the image
-//! values.
+//! [`check_limits`] adds one file at the larger of the two limits and one
+//! reserve for each worker, at boot and for a change of limits. At the image
+//! values, they come from the memory that [`RUN_ENCLAVE_MEMORY_MIB`] keeps
+//! above the minimum.
 
 use crate::conn::WORKER_THREADS;
 use crate::framing::{MAX_MESSAGE_SIZE, MAX_WIRE_ELEMENTS};
@@ -184,7 +182,7 @@ pub const fn request_bound(frame: usize) -> usize {
 pub const BASELINE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Usable memory the enclave needs to serve `WORKER_THREADS` largest requests
-/// at once. The boot check requires this much in `MemTotal`.
+/// at once. The boot check requires at least this much in `MemTotal`.
 pub const MIN_ENCLAVE_MEMORY_BYTES: usize =
     BASELINE_BYTES + WORKER_THREADS * request_bound(MAX_MESSAGE_SIZE as usize);
 
@@ -280,23 +278,31 @@ const IMAGE_VALIDATOR_RESERVE_BYTES: usize = VALIDATOR_BASELINE_BYTES
     + VALIDATOR_FRAME_FIXED_BYTES;
 
 /// Refuses to start a release build with less usable memory than
-/// [`MIN_ENCLAVE_MEMORY_BYTES`], or with no readable total. `main` panics on
-/// the refusal. A release build on a host with no `/proc/meminfo` refuses to
-/// start too, for example the TCP fallback of `main` on macOS. Debug and test
-/// builds run in local stacks of any size and on other operating systems, so
-/// they log a warning instead. A pass logs the total at info level, which is
-/// how a deploy reads `MemTotal` (see [`RUN_ENCLAVE_MEMORY_MIB`]).
-pub fn check_at_boot(ctx: &BuildContext) -> Result<(), String> {
-    check(total_memory_bytes(), ctx)
+/// [`MIN_ENCLAVE_MEMORY_BYTES`], or than `limits`, the values in force at
+/// boot, need as [`check_limits`] counts them, or with no readable total.
+/// `main` panics on the refusal. A release build on a host with no
+/// `/proc/meminfo` refuses to start too, for example the TCP fallback of
+/// `main` on macOS. Debug and test builds run in local stacks of any size and
+/// on other operating systems, so they log a warning instead. A pass logs the
+/// total at info level, which is how a deploy reads `MemTotal` (see
+/// [`RUN_ENCLAVE_MEMORY_MIB`]).
+pub fn check_at_boot(limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
+    check(total_memory_bytes(), limits, ctx)
 }
 
 /// The boot check for a known total. `None` means `/proc/meminfo` could not
 /// be read or has no `MemTotal` line.
-fn check(total: Option<usize>, ctx: &BuildContext) -> Result<(), String> {
+fn check(total: Option<usize>, limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
     let required_mib = MIN_ENCLAVE_MEMORY_BYTES / (1024 * 1024);
     let problem = match total {
         Some(total) if total >= MIN_ENCLAVE_MEMORY_BYTES => {
+            check_limits_against(limits, Some(total), ctx).map_err(|e| {
+                format!("{e}; give run-enclave --memory at least {RUN_ENCLAVE_MEMORY_MIB} MiB")
+            })?;
             let total_mib = total / (1024 * 1024);
+            let required_mib = needed_bytes(limits, ctx)
+                .max(MIN_ENCLAVE_MEMORY_BYTES)
+                .div_ceil(1024 * 1024);
             tracing::info!(total_mib, required_mib, "memory check passed");
             return Ok(());
         }
@@ -331,16 +337,22 @@ pub fn check_limits(limits: &Limits, ctx: &BuildContext) -> Result<(), String> {
     check_limits_against(limits, total_memory_bytes(), ctx)
 }
 
+/// The usable memory that `limits` need: the baseline, and for each worker
+/// its request bound, its scratch file and its validator reserve.
+fn needed_bytes(limits: &Limits, ctx: &BuildContext) -> usize {
+    let request =
+        limits.request_bound_bytes() + limits.scratch_file_bytes() + validator_reserve(limits, ctx);
+    BASELINE_BYTES + WORKER_THREADS * request as usize
+}
+
 fn check_limits_against(
     limits: &Limits,
     total: Option<usize>,
     ctx: &BuildContext,
 ) -> Result<(), String> {
-    let reserve = validator_reserve(limits, ctx);
-    let request = limits.request_bound_bytes() + limits.scratch_file_bytes() + reserve;
-    let needed = BASELINE_BYTES + WORKER_THREADS * request as usize;
+    let needed = needed_bytes(limits, ctx);
     let needed_mib = needed.div_ceil(1024 * 1024);
-    let beside = match reserve {
+    let beside = match validator_reserve(limits, ctx) {
         0 => "their scratch files",
         _ => "their scratch files, their validator children",
     };
@@ -526,12 +538,42 @@ mod tests {
 
     #[test]
     fn a_release_build_refuses_too_little_or_unknown_memory() {
-        assert!(check(Some(MIN_ENCLAVE_MEMORY_BYTES), &build(false)).is_ok());
-        let err = check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &build(false)).unwrap_err();
+        let image = Limits::DEFAULTS;
+        let mint = release(SignerRole::Mint);
+        assert!(check(Some(needed_bytes(&image, &mint)), &image, &mint).is_ok());
+        let err = check(Some(MIN_ENCLAVE_MEMORY_BYTES - 1), &image, &mint).unwrap_err();
         assert!(err.contains("3071 MiB of usable memory"), "{err}");
         assert!(err.contains("--memory at least 4096 MiB"), "{err}");
-        let err = check(None, &build(false)).unwrap_err();
+        let err = check(None, &image, &mint).unwrap_err();
         assert!(err.contains("total memory unknown"), "{err}");
+        assert!(check(Some(1), &image, &build(true)).is_ok());
+    }
+
+    /// At boot, the limits in force need what a change to them needs: their
+    /// scratch files, and on a burn signer their validator reserves. A release
+    /// build starts at that total and refuses one byte less.
+    #[test]
+    fn the_boot_check_needs_what_the_limits_in_force_need() {
+        let image = Limits::DEFAULTS;
+        let roles = [
+            (SignerRole::Mint, 0, "need 3112 MiB"),
+            (SignerRole::Burn, image_reserves(), "need 3377 MiB"),
+        ];
+        for (role, reserves, need) in roles {
+            let build = release(role);
+            let fits = MIN_ENCLAVE_MEMORY_BYTES + image_scratch_files() + reserves;
+            assert_eq!(needed_bytes(&image, &build), fits, "{build:?}");
+            assert!(check(Some(fits), &image, &build).is_ok(), "{build:?}");
+            let err = check(Some(fits - 1), &image, &build).unwrap_err();
+            assert!(err.contains(need), "{err}");
+            assert!(err.contains("--memory at least 4096 MiB"), "{err}");
+            assert!(check_limits_against(&image, Some(fits - 1), &build).is_err());
+            let debug = BuildContext {
+                debug_or_test: true,
+                ..build
+            };
+            assert!(check(Some(fits - 1), &image, &debug).is_ok());
+        }
     }
 
     const MIB: usize = 1024 * 1024;
@@ -577,8 +619,7 @@ mod tests {
 
     /// Each worker can hold a scratch file of `max_consignment_bytes` or of
     /// `max_psbt_bytes`, whichever is larger, beside its heap, and never more
-    /// than its frame. The boot check leaves the files of the image values to
-    /// the launch margin, so a change needs memory for them above the
+    /// than its frame. So the image values need memory for them above the
     /// minimum. A mint signer runs no validator child, so only its files count.
     #[test]
     fn a_change_of_limits_counts_a_scratch_file_for_each_worker() {

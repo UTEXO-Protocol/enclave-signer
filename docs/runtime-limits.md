@@ -142,10 +142,10 @@ refuses the request and changes nothing.
   validator child starts and removes it after it reaps the child. The reserve
   is the memory of a validator child beside the validation heap: its process,
   its stack, and the verdict frame that the enclave reads, which grows with
-  `max_consignment_bytes` (`memory::validator_reserve`). The boot check counts
-  neither the files nor the reserves. This check counts one file at the larger
-  of the two limits and one reserve for each request, also for a change that
-  keeps the image values. A refusal states how many MiB the new limits need. A
+  `max_consignment_bytes` (`memory::validator_reserve`). This check counts one
+  file at the larger of the two limits and one reserve for each request, and
+  the boot check counts them the same way for the values in force at boot. A
+  refusal states how many MiB the new limits need. A
   larger frame or consignment limit can need a larger `run-enclave --memory`
   value, which needs a new launch ([operations.md](operations.md#memory)).
 
