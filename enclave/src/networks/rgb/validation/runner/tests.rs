@@ -1152,7 +1152,9 @@ fn a_probe_child_reports_no_confinement_where_the_os_has_none() {
 }
 
 /// Under a memory limit that holds the enclave and its child, the kernel ends
-/// the child, and the enclave's key signs as before.
+/// the child, and the enclave's key signs as before. The enclave holds more
+/// memory than the child can take, so only the child's OOM score puts it
+/// first.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "needs root and cgroup v2; CI runs it in its own step"]
@@ -1194,11 +1196,15 @@ fn the_kernel_ends_a_child_out_of_memory_and_the_key_still_signs() {
 const MEMORY_GROUP_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
 /// This process in a cgroup of its own with a memory limit and no swap; the
-/// children it starts join it. Drop moves the process back and removes it.
+/// children it starts join it. The process holds twice the headroom in the
+/// group, at OOM score adjustment 0. Drop moves the process back, sets its
+/// adjustment back and removes the group.
 #[cfg(target_os = "linux")]
 struct MemoryGroup {
     path: std::path::PathBuf,
     home: std::path::PathBuf,
+    own_adj: String,
+    _ballast: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1217,11 +1223,18 @@ impl MemoryGroup {
         }
         let path = root.join(format!("utexo-oom-test-{}", std::process::id()));
         std::fs::create_dir(&path).expect("run as root: the test makes a cgroup");
-        let group = Self {
+        let own_adj = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+        let mut group = Self {
             path,
             home: root.join(own),
+            own_adj,
+            _ballast: Vec::new(),
         };
         group.write("cgroup.procs", &std::process::id().to_string());
+        std::fs::write("/proc/self/oom_score_adj", "0").unwrap();
+        // Each page written, so the group holds it.
+        let ballast = vec![1u8; usize::try_from(2 * headroom).unwrap()];
+        group._ballast = std::hint::black_box(ballast);
         let used: u64 = group.read("memory.current").trim().parse().unwrap();
         group.write("memory.max", &(used + headroom).to_string());
         if group.path.join("memory.swap.max").exists() {
@@ -1251,6 +1264,7 @@ impl MemoryGroup {
 #[cfg(target_os = "linux")]
 impl Drop for MemoryGroup {
     fn drop(&mut self) {
+        let _ = std::fs::write("/proc/self/oom_score_adj", self.own_adj.trim());
         let _ = std::fs::write(
             self.home.join("cgroup.procs"),
             std::process::id().to_string(),
