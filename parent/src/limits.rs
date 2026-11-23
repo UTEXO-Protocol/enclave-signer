@@ -42,12 +42,28 @@ limit_fields! {
     mint_max_outputs,
 }
 
-/// Sets one `NAME=VALUE` pair on `limits`.
-fn assign(limits: &mut Limits, pair: &str) -> Result<(), String> {
+/// Names that are reserved in the schema and set nothing. A limits file of an
+/// operator can still name one. Such a pair is skipped with a note, so the
+/// other limits of the file still apply.
+const RESERVED_NAMES: [&str; 4] = [
+    "max_rgb_lib_ms",
+    "max_witness_check_cost",
+    "max_bundle_id_cost",
+    "max_reject_walk_cost",
+];
+
+/// Sets one `NAME=VALUE` pair on `limits`. Returns a note when the pair was
+/// skipped.
+fn assign(limits: &mut Limits, pair: &str) -> Result<Option<String>, String> {
     let (name, value) = pair
         .split_once('=')
         .ok_or_else(|| format!("{pair:?} is not NAME=VALUE"))?;
     let (name, value) = (name.trim(), value.trim());
+    if RESERVED_NAMES.contains(&name) {
+        return Ok(Some(format!(
+            "{name} is not a limit of this enclave; the pair is skipped"
+        )));
+    }
     let value: u64 = value
         .parse()
         .map_err(|_| format!("{name}: {value:?} is not a whole number"))?;
@@ -58,22 +74,24 @@ fn assign(limits: &mut Limits, pair: &str) -> Result<(), String> {
     let field = field(limits, name)
         .ok_or_else(|| format!("{name:?} is not a limit; `limits show` lists the names"))?;
     *field = value;
-    Ok(())
+    Ok(None)
 }
 
 /// The limits of `pairs` and of the lines of `file`, if given. A `#` starts a
 /// comment. Empty lines are skipped. A pair overrides a line of the file.
-pub fn parse(pairs: &[String], file: Option<&str>) -> Result<Limits, String> {
+/// Also returns a note for each pair that was skipped.
+pub fn parse(pairs: &[String], file: Option<&str>) -> Result<(Limits, Vec<String>), String> {
     let mut limits = Limits::default();
+    let mut skipped = Vec::new();
     let lines = file
         .into_iter()
         .flat_map(str::lines)
         .map(|line| line.split('#').next().unwrap_or("").trim())
         .filter(|line| !line.is_empty());
     for pair in lines.chain(pairs.iter().map(String::as_str)) {
-        assign(&mut limits, pair)?;
+        skipped.extend(assign(&mut limits, pair)?);
     }
-    Ok(limits)
+    Ok((limits, skipped))
 }
 
 /// The table of `limits show`.
@@ -145,7 +163,7 @@ mod tests {
 
     #[test]
     fn pairs_set_only_the_named_limits() {
-        let limits = parse(
+        let (limits, _) = parse(
             &pairs(&["evm_rpc_timeout_secs=24", "total_request_timeout_secs = 40"]),
             None,
         )
@@ -158,9 +176,26 @@ mod tests {
     #[test]
     fn a_file_has_comments_and_empty_lines_and_a_pair_overrides_it() {
         let file = "# Slower RPC.\n\nevm_rpc_timeout_secs=24  # 24 s\nmax_psbt_bytes=2097152\n";
-        let limits = parse(&pairs(&["evm_rpc_timeout_secs=21"]), Some(file)).unwrap();
+        let (limits, skipped) = parse(&pairs(&["evm_rpc_timeout_secs=21"]), Some(file)).unwrap();
+        assert!(skipped.is_empty());
         assert_eq!(limits.evm_rpc_timeout_secs, 21);
         assert_eq!(limits.max_psbt_bytes, 2_097_152);
+    }
+
+    /// A file can still name a limit that is reserved in the schema. The
+    /// pair is skipped with a note, and the other limits of the file apply.
+    #[test]
+    fn a_reserved_name_is_skipped_and_the_rest_of_the_file_applies() {
+        let file = "max_rgb_lib_ms=30000\ntotal_request_timeout_secs=320\n";
+        let (limits, skipped) = parse(&[], Some(file)).unwrap();
+        assert_eq!(limits.total_request_timeout_secs, 320);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].starts_with("max_rgb_lib_ms"), "{skipped:?}");
+        for name in RESERVED_NAMES {
+            let (limits, skipped) = parse(&pairs(&[&format!("{name}=1")]), None).unwrap();
+            assert_eq!(limits, Limits::default(), "{name}");
+            assert_eq!(skipped.len(), 1, "{name}");
+        }
     }
 
     #[test]

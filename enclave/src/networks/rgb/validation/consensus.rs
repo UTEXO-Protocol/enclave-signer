@@ -140,7 +140,7 @@ impl RgbValidator {
         );
         let validation = resolver_failure_first(validation, resolvers.take_failure(), list)?;
         check_validation(&validation, transfer)?;
-        // Only what validation passed; the gate counted the inspection too.
+        // Only what validation passed.
         Ok((validation, extract_transition_summary(path)?))
     }
 }

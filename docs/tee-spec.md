@@ -220,7 +220,7 @@ the time the child took to answer, and its OOM score adjustment and memory.
 **End before the deadline.** The enclave ends the child at the kill time,
 `RESPONSE_MARGIN` before the request deadline, so the reply can still be
 written. When the kill time has passed before the start, the enclave
-writes no scratch file, starts no child and refuses with a timeout. It
+writes no scratch file, starts no child and refuses with a timeout, code 1. It
 checks the time again after it writes the file. Each read and write on the
 socket stops at the kill time. A timer thread of the worker sends `SIGKILL`
 at the kill time, also while the worker answers a question, and each EVM
@@ -237,7 +237,7 @@ error that the enclave kept comes before any end of the child:
 | A question that the enclave refused | The error that the enclave kept | Its own |
 | A verdict that passes the checks below | Stage 3 and the binds of the release run | - |
 | A refusal of the child | Its error | 3 for a cross-check or SPV error, 1 for another |
-| The kill time | A timeout | 1 |
+| The kill time | Refused: the validation did not end in time | 10 |
 | A crash signal: `SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL` or `SIGFPE` | Refused: a panic, a failed allocation or a stack overflow on this consignment | 3 |
 | A `SIGKILL` that the enclave did not send, from the OOM killer | A fault of the enclave | 1 |
 | Another signal or exit, a broken protocol, a verdict that fails the checks, or a failed start | A fault of the enclave | 1 |
@@ -554,7 +554,7 @@ prefix.
 | 7 | `GetClone`: seed-export cap reached | `RESOURCE_EXHAUSTED` |
 | 8 | The deposit receipt is above the `safe` or `finalized` head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
 | 9 | The header chain has not reached a block that a proof names, or has not buried it at the required depth. The caller waits for the signer's headers and retries. The message ends with `[needs tip N, has tip M]`: the tip height the enclave needs, a lower bound, and the one it has. A block at or below the checkpoint is code 3, since no header comes for it. | `FAILED_PRECONDITION`, with the fixed prefix `bitcoin headers pending:` |
-| 10 | The burn signer ended its validator child at the kill time, before the request deadline. The consignment got no verdict. The same request can pass later, when the enclave runs fewer validations at once. | `FAILED_PRECONDITION`, with the fixed prefix `rgb validation timed out:` |
+| 10 | The burn signer ended its validator child at the kill time, before the request deadline. The consignment got no verdict. The same request can pass later, when the enclave runs fewer validations at once. A kill time that passes before the child starts, or while the enclave reads a reject list, is code 1; a reject list that the time left cannot read is code 3. | `FAILED_PRECONDITION`, with the fixed prefix `rgb validation timed out:` |
 
 ## 7. Bitcoin header chain (SPV)
 

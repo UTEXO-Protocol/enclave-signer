@@ -53,14 +53,16 @@ reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has on
 ```text
 # Long histories.
 total_request_timeout_secs=120
-mint_replay_ttl_secs=7200
 ```
 
 `deploy-host.sh` and `utexo-enclave-ctl.sh` send this file at each launch, before
 `set-endpoints`. The file is optional: with no file, the launch sends nothing and
 logs nothing. The enclave unit runs as `ubuntu`, so that user must be able to read
 the file. If the launch cannot read the file, or the enclave refuses it, the launch
-logs this and continues, and the enclave keeps the image values.
+logs this and continues, and the enclave keeps the image values. A line that names
+a limit reserved in the schema (`max_rgb_lib_ms`, `max_witness_check_cost`,
+`max_bundle_id_cost`, `max_reject_walk_cost`) sets nothing: the CLI skips it with a
+note, and the other lines apply.
 
 Before it downloads or stops anything, `deploy-host.sh` checks the file as
 `ubuntu`. When the file, or a link at its path, exists and `ubuntu` cannot read it,
@@ -212,10 +214,13 @@ For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
 | `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
 | Backend request timeout | At least 340 s |
 
-The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: 30 s of rgb-lib for one
-history alone, twice that CPU time, four workers sharing one core, and one
-quarter left for other work. The ×2 factor is headroom for the smaller
-host. [Measured times](#measured-times) has the times of one history. Timeouts round up to five seconds: enclave 320, parent wait 330,
+The deadline is `30 s × 2 × 4 / 0.75 = 320 s`. The 30 s is an allowance for
+one history alone, not a measured time and not a limit: no check holds a
+validation to it. The rest is twice that CPU time, four workers sharing one
+core, and one quarter left for other work. The ×2 factor is headroom for the
+smaller host. [Measured times](#measured-times) has the times of one
+history. Every request can hold a worker until this deadline, so a longer
+deadline also raises what a forged consignment costs. Timeouts round up to five seconds: enclave 320, parent wait 330,
 parent request 335, backend 340.
 
 Use [the parent profile](../deploy/profiles/burn-small-host.env) and

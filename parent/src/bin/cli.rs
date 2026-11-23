@@ -662,8 +662,12 @@ fn main() {
                         std::fs::read_to_string(&path)
                             .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
                     });
-                    let values = utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
-                        .unwrap_or_else(|e| fail(e));
+                    let (values, skipped) =
+                        utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
+                            .unwrap_or_else(|e| fail(e));
+                    for note in skipped {
+                        eprintln!("note: {note}");
+                    }
                     client.set_limits(values, reset)
                 }
             };
