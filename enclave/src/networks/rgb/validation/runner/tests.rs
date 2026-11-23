@@ -323,6 +323,62 @@ fn the_reject_list_is_read_once_and_only_after_the_bind() {
     assert_eq!(side.reads.get(), 1);
 }
 
+/// A request that the enclave cannot take as it is breaks the protocol, and
+/// the enclave serves nothing for it. The longest contract id binds.
+#[test]
+fn a_malformed_request_breaks_the_protocol() {
+    let list = |len: usize| {
+        to_enclave::Body::RejectList(ipc::ListAddress {
+            chain_id: 42161,
+            address: Bytes::from(vec![0x11; len]),
+        })
+    };
+    let long = "a".repeat(ipc::MAX_CONTRACT_ID_BYTES + 1);
+    let not_utf8 = to_enclave::Body::BindAsset(ipc::BindAsset {
+        contract_id: Bytes::from_static(&[0xff, 0xfe]),
+    });
+    let ready = to_enclave::Body::Ready(ipc::Ready::default());
+    let cases = [
+        (
+            false,
+            bind_asset(&long),
+            format!("a contract id of {} bytes", long.len()),
+        ),
+        (false, not_utf8, "a contract id that is not UTF-8".into()),
+        (true, bind_asset(CONTRACT), "a second asset bind".into()),
+        (
+            true,
+            to_enclave::Body::Header(0),
+            "a header at height 0".into(),
+        ),
+        (true, list(19), "a list address of 19 bytes".into()),
+        (true, list(21), "a list address of 21 bytes".into()),
+        (true, ready, "a frame that is not a request".into()),
+    ];
+    for (after_bind, request, what) in cases {
+        let side = Side::default();
+        let ex = scripted(&side, &[], later(), move |mut peer| {
+            if after_bind {
+                peer.bind();
+            }
+            peer.send(request);
+        });
+        assert_protocol(&ex, &what);
+        assert_eq!(side.calls(), u32::from(after_bind), "{what}");
+    }
+
+    let side = Side::default();
+    let ex = scripted(&side, &[], later(), |mut peer| {
+        let longest = "a".repeat(ipc::MAX_CONTRACT_ID_BYTES);
+        let answer = peer.ask(bind_asset(&longest));
+        assert!(
+            matches!(answer, Some(to_child::Body::AssetBound(_))),
+            "{answer:?}"
+        );
+    });
+    assert!(matches!(ex.ended, Ended::Closed), "{:?}", ex.ended);
+}
+
 /// Mint anchors need a binder, and come one at a time in whole records.
 #[test]
 fn anchors_without_a_binder_or_with_two_records_are_refused() {
@@ -473,15 +529,19 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
     assert!(alone.witness_blocks.is_empty(), "{alone:?}");
     assert!(alone.settling_transition.is_none(), "{alone:?}");
 
-    let reorder = |v: &mut ipc::Validated, change: fn(&mut Vec<WitnessBlock>)| {
+    let reorder = |v: &mut ipc::Validated, change: &dyn Fn(&mut Vec<WitnessBlock>)| {
         let mut blocks = ipc::unpack_witness_blocks(&v.witness_blocks).unwrap();
         change(&mut blocks);
         v.witness_blocks = ipc::pack_witness_blocks(&blocks).into();
     };
-    let above = format!("a witness block at height {}, not from 1 to", u32::MAX);
+    let safe_height = safe.map_or(0, NonZeroU32::get);
+    let above = format!(
+        "a witness block at height {}, not from 1 to {safe_height}",
+        safe_height + 1
+    );
     let not_a_witness = "a settling witness that is not a witness of the consignment";
     type Change<'a> = (&'a str, &'a dyn Fn(&mut ipc::Validated), &'a str);
-    let cases: [Change<'_>; 9] = [
+    let cases: [Change<'_>; 10] = [
         (
             "another contract",
             &|v| v.contract_id = Bytes::from_static(b"rgb:another-asset"),
@@ -499,17 +559,22 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         ),
         (
             "txids out of order",
-            &|v| reorder(v, |b| b.swap(0, 1)),
+            &|v| reorder(v, &|b| b.swap(0, 1)),
+            "witness blocks out of txid order",
+        ),
+        (
+            "a txid twice",
+            &|v| reorder(v, &|b| b.insert(0, b[0])),
             "witness blocks out of txid order",
         ),
         (
             "a height above the safe one",
-            &|v| reorder(v, |b| b[0].height = u32::MAX),
+            &|v| reorder(v, &|b| b[0].height = safe_height + 1),
             &above,
         ),
         (
             "a height of 0",
-            &|v| reorder(v, |b| b[0].height = 0),
+            &|v| reorder(v, &|b| b[0].height = 0),
             "a witness block at height 0, not from 1 to",
         ),
         (
@@ -1046,6 +1111,24 @@ fn a_validator_child_holds_no_inherited_descriptor() {
     );
     drop(pipe);
     result.expect("the child closed every descriptor it inherited");
+}
+
+/// The child turns core files off and sets its stack limit.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_validator_child_sets_its_core_and_stack_limits() {
+    let bytes = burn_bytes();
+    let chain = mined(&witness_ids(&bytes));
+    faulty("limits")
+        .validate_in_child(
+            &bytes,
+            Some(&bind_all),
+            &chain,
+            &open_lists(),
+            &in_force(),
+            far_deadline(),
+        )
+        .expect("the child set its core and stack limits");
 }
 
 /// A probe child confines itself and is the first the OOM killer ends.

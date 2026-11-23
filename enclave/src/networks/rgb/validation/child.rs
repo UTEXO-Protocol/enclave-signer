@@ -51,8 +51,7 @@ const HELD_TEXT: &str = "the enclave refused this request";
 
 /// Runs the one job of a validator child and returns its exit code.
 pub fn serve() -> i32 {
-    abort_on_panic();
-    let confined = confine();
+    let confined = enter();
     let Ok(mut io) = channel() else {
         return EXIT_NO_CHANNEL;
     };
@@ -71,7 +70,7 @@ pub fn serve() -> i32 {
             return EXIT_NO_START;
         }
     };
-    let body = run_job(start, confined, &io);
+    let body = run_job(start, confined, &BuildContext::current(), &io);
     match framing::write_message(&mut io, &ipc::ToEnclave { body: Some(body) }) {
         Ok(()) => 0,
         Err(e) => {
@@ -95,9 +94,16 @@ pub(super) fn lib_test_entry() -> &'static str {
     full.split_once("::").map_or(full, |(_, name)| name)
 }
 
+/// The first steps of a child, before it reads its job: a panic aborts it,
+/// and it confines itself.
+pub(super) fn enter() -> std::result::Result<(), String> {
+    abort_on_panic();
+    confine()
+}
+
 /// Ends the process with SIGABRT after the report of any panic, in every
 /// build profile.
-pub(super) fn abort_on_panic() {
+fn abort_on_panic() {
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         report(info);
@@ -210,10 +216,12 @@ fn channel() -> std::io::Result<UnixStream> {
     ))
 }
 
-/// The last frame of the job that `start` names.
+/// The last frame of the job that `start` names. A release `build` refuses a
+/// job it could not confine.
 fn run_job(
     start: ipc::Start,
     confined: std::result::Result<(), String>,
+    build: &BuildContext,
     io: &UnixStream,
 ) -> to_enclave::Body {
     let job = match start.job {
@@ -235,7 +243,7 @@ fn run_job(
             ))
         }
     };
-    if let Err(e) = confinement_outcome(confined, &BuildContext::current()) {
+    if let Err(e) = confinement_outcome(confined, build) {
         return refused(&EnclaveError::Internal(e));
     }
     let Some(limits) = start.limits else {
