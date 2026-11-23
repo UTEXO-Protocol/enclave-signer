@@ -12,7 +12,8 @@ use bitcoin::{Amount, ScriptBuf, TxOut};
 use psrgbt::RgbPsbtExt;
 use rgbstd::contract::{AllocatedState, TransitionBuilder};
 use rgbstd::{
-    BuilderSeal, GlobalValues, GraphSeal, MetaValue, RevealedData, SecretSeal, Transition,
+    BuilderSeal, GlobalValues, GraphSeal, MetaValue, Opout, RevealedData, RevealedValue,
+    SecretSeal, Transition,
 };
 
 use super::*;
@@ -302,8 +303,8 @@ fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
     assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
-/// rgb-lib moves a second right of the spent UTXO by a propagate in the mint's
-/// bundle. F6 signs one transition only.
+/// A propagate of another right in the mint's bundle. F6 signs one transition
+/// only.
 #[test]
 fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     let keys = fx::km();
@@ -313,6 +314,70 @@ fn refuses_a_mint_whose_bundle_carries_a_side_propagate() {
     let mint = committed_bundle(&mut history, vec![mint, side], rights[0]);
     let err = mint_refusal(&destination(&history, &mint), &history);
     assert!(err.contains("discloses 2 transitions"), "{err}");
+}
+
+/// Units beside the right.
+const UNITS: u64 = 500;
+
+/// Puts `UNITS` on the UTXO of `right`: a blinded receive from a mint on `other`.
+fn units_beside(history: &mut History, right: Utxo, other: Utxo, keys: &KeyManager) -> Opout {
+    let seal = GraphSeal::with_blinding(right.outpoint.txid, right.outpoint.vout, 9);
+    let to = BuilderSeal::from(seal);
+    let change = vec![ours(keys, 98, CHANGE_SATS)];
+    let receive = history.mint(other, UNITS, BEFORE_BLOCK, to, vec![], change);
+    Opout::new(receive.opid, schemata::OS_ASSET, 0)
+}
+
+/// The transfer of `units` to `vout` of its own tx.
+fn move_units(history: &mut History, units: Opout, vout: usize) -> Transition {
+    let seal = GraphSeal::with_blinded_vout(u32::try_from(vout).unwrap(), 10);
+    history
+        .transition("transfer")
+        .add_input(units, AllocatedState::from(RevealedValue::from(UNITS)))
+        .unwrap()
+        .add_fungible_state("assetOwner", seal, UNITS)
+        .unwrap()
+        .complete_transition()
+        .unwrap()
+}
+
+/// A mint of `MINTED` to `to` on seed right 0, whose UTXO also holds units. As
+/// rgb-lib does it, a second transition moves them to our change. The tx pays
+/// `paid` from vout 1, then that change.
+fn mint_moving_units(to: BuilderSeal<GraphSeal>, paid: Vec<TxOut>) -> (History, Made) {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let units = units_beside(&mut history, rights[0], rights[1], &keys);
+    let mint = mint_builder(&mut history, rights[0], MINTED)
+        .add_fungible_state("assetOwner", to, MINTED)
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let change = paid.len() + 1;
+    let moved = move_units(&mut history, units, change);
+    let paid_sats: u64 = paid.iter().map(|o| o.value.to_sat()).sum();
+    let change_sats = RIGHT_SATS - WITNESS_MINT_FEE - paid_sats;
+    let outputs = [paid, vec![ours(&keys, 99, change_sats)]].concat();
+    let mut made = history.commit_psbt(vec![mint, moved], vec![rights[0].outpoint], outputs);
+    our_input(&mut made.psbt, &keys, 1);
+    claim_change(&mut made.psbt, &keys, change);
+    (history, made)
+}
+
+/// Units beside the right move to our change in the mint's tx. The change is
+/// allowed, the second transition is not: F6 refuses the mint before its deposit
+/// is read.
+#[test]
+fn refuses_a_mint_that_moves_the_units_of_its_rights_utxo_to_the_change() {
+    let blinded = BuilderSeal::Concealed(recipient());
+    let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
+    for (to, paid) in [(blinded, vec![]), (witness, vec![depositor(WITNESS_SATS)])] {
+        let (history, mint) = mint_moving_units(to, paid);
+        let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("the fascia discloses 2 transitions"), "{err}");
+        assert!(bound.is_none(), "no deposit is read for a refused mint");
+    }
 }
 
 /// The mint's transition in another tx, which spends another of our Colored

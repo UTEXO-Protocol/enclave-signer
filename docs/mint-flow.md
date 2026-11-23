@@ -245,8 +245,8 @@ around it are the enclave's.
   count, so the map names no transition the fascia hides. The two readings
   must name the same transaction, asset and transition. rgb-lib moves any
   other allocation of the spent UTXO by a transition of its own in the same
-  bundle. So a link right must not share a UTXO with mint rights: F6 refuses
-  that mint or refill.
+  bundle. So asset units or a link right must not share a UTXO with a mint
+  right: F6 refuses that mint or refill.
   The inspection also decodes every global and metadata entry of the
   transition, so one that no schema defines, or a value of the wrong length,
   is refused here, before M4 reads it.
