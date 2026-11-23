@@ -293,9 +293,14 @@ pub(super) fn burn_id(p: &FundsOutParams) -> U256 {
     ).abi_encode()).0)
 }
 
-/// The validator child of the burns: the enclave binary that cargo built.
+/// The validator child of the burns: the enclave binary that cargo built for
+/// an enclave test, or the `rgb_validator_child` entry of a test binary of a
+/// package without that binary, the parent's.
 fn child() -> ChildProgram {
-    ChildProgram::binary(env!("CARGO_BIN_EXE_utexo-bridge-enclave"))
+    match option_env!("CARGO_BIN_EXE_utexo-bridge-enclave") {
+        Some(binary) => ChildProgram::binary(binary),
+        None => ChildProgram::test_entry("rgb_validator_child").unwrap(),
+    }
 }
 
 pub(super) struct Fixture {

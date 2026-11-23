@@ -28,7 +28,7 @@ use rgb_lib::ChainNet;
 use super::super::scratch::with_scratch_file;
 use super::bfa::AnchorBinder;
 use super::child::CHILD_ARG;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, debug_assertions, not(feature = "vsock")))]
 use super::child::TEST_ENTRY_ENV;
 use super::ipc::{self, start, to_child, to_enclave, verdict};
 use super::reject_list::{ListAccess, RejectListContract};
@@ -75,7 +75,7 @@ impl ChildProgram {
     }
 
     /// This test binary, running only its test `entry` as the child.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, not(feature = "vsock")))]
     pub fn test_entry(entry: &str) -> Result<Self> {
         let program = std::env::current_exe()
             .map_err(|e| EnclaveError::Internal(format!("cannot find the test binary: {e}")))?;

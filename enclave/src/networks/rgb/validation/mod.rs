@@ -45,7 +45,7 @@ mod tests;
 
 pub use asset_bind::{assert_asset_binding, AssetBindMode};
 pub use bfa::{decode_opid, lock_id, AnchorBinder, BoundAnchors, MintAnchor, VerifiedLock};
-#[cfg(all(rgb_to_evm, unix, any(test, debug_assertions)))]
+#[cfg(all(rgb_to_evm, unix, any(test, debug_assertions, not(feature = "vsock"))))]
 pub use child::run_if_test_child;
 #[cfg(all(rgb_to_evm, unix))]
 pub use child::{serve as serve_validator_child, CHILD_ARG};

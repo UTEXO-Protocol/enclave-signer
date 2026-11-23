@@ -30,7 +30,7 @@ use crate::policy::BuildContext;
 pub const CHILD_ARG: &str = "--rgb-validator";
 
 /// Set for a test binary that serves as a validator child.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, debug_assertions, not(feature = "vsock")))]
 pub const TEST_ENTRY_ENV: &str = "UTEXO_RGB_VALIDATOR_TEST_ENTRY";
 
 /// Names the fault a test child acts out instead of its job.
@@ -83,7 +83,7 @@ pub fn serve() -> i32 {
 
 /// Serves as a validator child when this is a test binary started with
 /// [`TEST_ENTRY_ENV`].
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, debug_assertions, not(feature = "vsock")))]
 pub fn run_if_test_child() -> Option<i32> {
     std::env::var_os(TEST_ENTRY_ENV).map(|_| serve())
 }
