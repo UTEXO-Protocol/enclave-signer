@@ -36,8 +36,9 @@ impl RgbValidator {
         })
     }
 
-    /// This validator, with its burn validations in a child of `program`.
-    #[cfg(all(rgb_to_evm, unix, any(test, debug_assertions)))]
+    /// This validator, with its burn validations in a child of `program`. A
+    /// release build with `vsock`, as each image is, has no such choice.
+    #[cfg(all(rgb_to_evm, unix, any(test, debug_assertions, not(feature = "vsock"))))]
     pub fn with_program(mut self, program: ChildProgram) -> Self {
         self.program = Some(program);
         self

@@ -53,8 +53,9 @@ fn the_mode_switch_runs_before_any_boot_step() {
 #[test]
 fn the_mode_needs_exactly_its_one_argument() {
     let (code, output) = run_enclave(&[CHILD_ARG, CHILD_ARG]);
-    // The exit code of a panic.
-    assert_eq!(code, Some(101), "{output}");
+    // A panic exits with 101, and aborts a release build.
+    let panicked = cfg!(debug_assertions).then_some(101);
+    assert_eq!(code, panicked, "{output}");
     assert!(output.contains("starting utexo-bridge-enclave"), "{output}");
     assert!(output.contains("'not-a-network' is not valid"), "{output}");
 }

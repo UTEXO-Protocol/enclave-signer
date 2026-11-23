@@ -238,6 +238,8 @@ jobs:
         run: |
           for role in mint-signer burn-signer; do
             cargo clippy --release $ENCLAVE --features vsock,$role -- -D warnings
+            # The integration tests build against the release library too.
+            cargo check --release $ENCLAVE --features $role --test '*'
           done
 
       # Unsupported feature sets must fail on their own `compile_error!`, not on

@@ -62,8 +62,9 @@ impl ChildProgram {
     }
 
     /// The binary at `path` with [`CHILD_ARG`]: an integration test runs the
-    /// binary that cargo built.
-    #[cfg(any(test, debug_assertions))]
+    /// binary that cargo built. A release build with `vsock`, as each image
+    /// is, runs only [`Self::this_binary`].
+    #[cfg(any(test, debug_assertions, not(feature = "vsock")))]
     pub fn binary(path: impl Into<PathBuf>) -> Self {
         Self::child_of(path.into())
     }
