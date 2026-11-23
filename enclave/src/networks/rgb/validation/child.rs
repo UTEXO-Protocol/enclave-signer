@@ -1,7 +1,8 @@
 //! The validator child: this binary started with [`CHILD_ARG`]. It validates
 //! one consignment file and asks the enclave for every resolver answer.
 //!
-//! The child gets one socket as its fd 0 and no environment of the enclave.
+//! The child gets one socket as its fd 0, and of the enclave's environment
+//! only `RUST_LOG`.
 //! It decodes no request: the enclave sends the path of the file it wrote, the
 //! limits in force and the one safe height of the validation.
 

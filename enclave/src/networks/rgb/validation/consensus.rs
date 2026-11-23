@@ -48,7 +48,9 @@ impl RgbValidator {
     /// `bind` is required for histories containing mints. `headers` is the
     /// enclave chain the consignment's SPV proofs are checked against; `lists`
     /// binds the asset and supplies its reject list.
-    pub fn validate_consignment_file(
+    // Only the validator child of the burn signer calls it.
+    #[cfg_attr(not(all(rgb_to_evm, unix)), allow(dead_code))]
+    pub(super) fn validate_consignment_file(
         &self,
         path: &Path,
         bind: Option<AnchorBinder<'_>>,

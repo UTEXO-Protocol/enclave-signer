@@ -30,7 +30,7 @@ sequenceDiagram
     Srv->>Rgb: validate_source(RgbSource)
     Rgb->>Rgb: cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256(consignment) == consignment_hash (integrity),<br/>asset_id declared
     Rgb->>Rgb: one safe height read, kill time = deadline - RESPONSE_MARGIN<br/>(passed => REFUSE, no child), consignment to a scratch file
-    Rgb->>Child: spawn this binary --rgb-validator: no environment,<br/>fd 0 = socket pair, Start{limits in force, file path, chain, safe height}
+    Rgb->>Child: spawn this binary --rgb-validator: only RUST_LOG,<br/>fd 0 = socket pair, Start{limits in force, file path, chain, safe height}
     Note over Rgb,Child: every read and write on the socket stops at the kill time.<br/>A refused question: the enclave keeps its error, the child ends held.
     Child->>Child: Transfer::load (V1 TFR only),<br/>genesis schema BFA
     Child->>Rgb: BindAsset(contract_id), the first question

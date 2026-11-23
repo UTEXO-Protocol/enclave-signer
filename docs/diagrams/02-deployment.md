@@ -23,7 +23,7 @@ flowchart TB
             Replay[(NonceReplayGuard — cloning<br/>+ op_replay_guard — bridge ops<br/>each bounded in entries and in time)]
             Fwd["vsock_forwarder<br/>loopback -> vsock, per-port<br/>EVM RPC TLS port / KMS 443<br/>KMS host pinned to loopback in /etc/hosts"]
             RgbVal["RgbValidator<br/>burn signer: one validator child per request,<br/>answers its resolver questions, checks its verdict,<br/>ends it before the request deadline."]
-            RgbChild["Validator child, burn signer only<br/>this binary with --rgb-validator,<br/>no environment, fd 0 a socket pair.<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof."]
+            RgbChild["Validator child, burn signer only<br/>this binary with --rgb-validator,<br/>only RUST_LOG of the environment, fd 0 a socket pair.<br/>rgb-lib validate_consignment_with_resolver<br/>+ inspect_consignment, burn witnesses by SPV proof."]
             EvmVer[events.rs verifier<br/>pinned TLS RPC<br/>receipt/head correctness trusted]
             NSM[/dev/nsm — Nitro Security Module/]
         end

@@ -1010,9 +1010,9 @@ fn a_header_wait_wins_over_a_validator_that_then_aborts() {
     );
 }
 
-/// The child sees none of the variables of the enclave process.
+/// The child sees no variable of the enclave process but `RUST_LOG`.
 #[test]
-fn the_validator_child_gets_no_environment_of_the_enclave() {
+fn the_validator_child_gets_only_the_log_filter_of_the_enclave() {
     assert!(std::env::vars_os().any(|(key, _)| key != "RUST_LOG"));
     let bytes = burn_bytes();
     let chain = mined(&witness_ids(&bytes));

@@ -57,7 +57,7 @@ flowchart TB
         end
         subgraph NRGB [networks/rgb/]
             NRV["validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>cost.rs work caps before rgb-lib,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs reads the inspection, schema.rs genesis gate,<br/>runner.rs burn: runs consensus.rs in a validator child,<br/>answers its resolvers, ends it before the deadline,<br/>ipc.rs the frames between them"]
-            NRCH["child.rs - validator child, burn signer only<br/>this binary with --rgb-validator, one per request,<br/>fd 0 a socket pair, no key, no environment:<br/>consensus.rs on the scratch file,<br/>each resolver question to the enclave"]
+            NRCH["child.rs - validator child, burn signer only<br/>this binary with --rgb-validator, one per request,<br/>fd 0 a socket pair, no key, only RUST_LOG of the environment:<br/>consensus.rs on the scratch file,<br/>each resolver question to the enclave"]
             NRSC[scratch.rs<br/>the file rgb-lib reads a consignment<br/>or a fascia from]
             NRF["flow.rs<br/>accepted transitions + amount rule"]
             NRP["psbt_validation.rs<br/>mint signer: mint and refill rules;<br/>pinned fee policy (max rate + max fee, both PSBT paths)<br/>psbt_commit.rs<br/>mint signer: the transition a PSBT commits,<br/>by rgb-lib inspect_fascia"]
