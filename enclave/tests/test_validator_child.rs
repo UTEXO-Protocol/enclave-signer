@@ -75,7 +75,9 @@ fn the_enclave_binary_answers_the_probe() {
 const BUDGET: Duration = Duration::from_millis(300);
 
 /// A burn whose validation outlasts its deadline is refused before that
-/// deadline. The enclave then signs the same burn with the default deadline.
+/// deadline: the enclave ends its validator child, or starts none when the
+/// steps before it spent the time. The enclave then signs the same burn with
+/// the default deadline.
 #[test]
 fn a_burn_past_its_deadline_is_refused_before_it_and_the_enclave_signs_after() {
     let fixture = Fixture::after_transfers(Route::Direct, 2_000);
@@ -91,7 +93,10 @@ fn a_burn_past_its_deadline_is_refused_before_it_and_the_enclave_signs_after() {
     };
     assert_eq!(error.code, 1, "{error:?}");
     assert!(
-        error.message.contains("the enclave ended its validator"),
+        error.message.contains("the enclave ended its validator")
+            || error
+                .message
+                .contains("request deadline passed before RGB validation"),
         "{error:?}"
     );
     fixture.control();
