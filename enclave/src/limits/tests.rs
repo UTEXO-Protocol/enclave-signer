@@ -34,15 +34,15 @@ fn the_image_values_pass_the_checks_and_match_the_memory_model() {
 #[test]
 fn a_change_holds_until_a_reset_and_keeps_the_other_values() {
     let cfg = BridgeConfig::default();
-    let limits = apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
-    assert_eq!(limits.max_rgb_lib_ms, 20_000);
-    assert_eq!(get().max_rgb_lib_ms, 20_000);
+    let limits = apply_to_defaults(|l| l.evm_rpc_timeout_secs = 20).unwrap();
+    assert_eq!(limits.evm_rpc_timeout_secs, 20);
+    assert_eq!(get().evm_rpc_timeout_secs, 20);
     assert_eq!(get().max_psbt_bytes, Limits::DEFAULTS.max_psbt_bytes);
 
     apply_to_defaults(|l| l.max_psbt_bytes = 2 * MIB).unwrap();
     assert_eq!(
-        get().max_rgb_lib_ms,
-        20_000,
+        get().evm_rpc_timeout_secs,
+        20,
         "a second change keeps the first"
     );
 
@@ -53,7 +53,7 @@ fn a_change_holds_until_a_reset_and_keeps_the_other_values() {
 
 #[test]
 fn a_reset_with_values_keeps_only_those_values() {
-    apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
+    apply_to_defaults(|l| l.evm_rpc_timeout_secs = 20).unwrap();
     let limits = apply(
         &BridgeConfig::default(),
         &changes(|l| l.max_psbt_bytes = 2 * MIB),
@@ -61,7 +61,10 @@ fn a_reset_with_values_keeps_only_those_values() {
         accept,
     )
     .unwrap();
-    assert_eq!(limits.max_rgb_lib_ms, Limits::DEFAULTS.max_rgb_lib_ms);
+    assert_eq!(
+        limits.evm_rpc_timeout_secs,
+        Limits::DEFAULTS.evm_rpc_timeout_secs
+    );
     assert_eq!(limits.max_psbt_bytes, 2 * MIB);
 }
 
@@ -73,8 +76,8 @@ fn a_reset_with_values_keeps_only_those_values() {
 fn adopted_values_are_the_values_in_force() {
     apply_to_defaults(|l| l.max_psbt_bytes = 2 * MIB).unwrap();
     let theirs = Limits {
-        max_rgb_lib_ms: 20_000,
-        max_witness_check_cost: 2 * MIB,
+        evm_rpc_timeout_secs: 20,
+        max_gas_tx_bytes: 2 * MIB,
         ..Limits::DEFAULTS
     };
     adopt(&theirs);
@@ -91,14 +94,14 @@ fn adopted_values_are_the_values_in_force() {
 
 #[test]
 fn a_refused_change_changes_nothing() {
-    apply_to_defaults(|l| l.max_rgb_lib_ms = 20_000).unwrap();
+    apply_to_defaults(|l| l.evm_rpc_timeout_secs = 20).unwrap();
     let err = apply_to_defaults(|l| {
         l.max_psbt_bytes = 2 * MIB;
         l.total_request_timeout_secs = 1;
     })
     .unwrap_err();
     assert!(err.contains("total_request_timeout_secs is 1"), "{err}");
-    assert_eq!(get().max_rgb_lib_ms, 20_000);
+    assert_eq!(get().evm_rpc_timeout_secs, 20);
     assert_eq!(get().max_psbt_bytes, Limits::DEFAULTS.max_psbt_bytes);
 }
 
@@ -113,20 +116,6 @@ fn the_memory_check_of_the_caller_can_refuse_a_change() {
     .unwrap_err();
     assert_eq!(err, "no memory");
     assert_eq!(get(), Limits::DEFAULTS);
-}
-
-/// The trap of a budget at the deadline: the gate passes a request, and the
-/// enclave then ends its validator child before the deadline.
-#[test]
-fn the_rgb_lib_budget_must_stay_below_the_deadline() {
-    let err = apply_to_defaults(|l| l.max_rgb_lib_ms = 68_000).unwrap_err();
-    assert!(err.contains("three quarters"), "{err}");
-    let limits = apply_to_defaults(|l| {
-        l.max_rgb_lib_ms = 68_000;
-        l.total_request_timeout_secs = 100;
-    })
-    .unwrap();
-    assert_eq!(limits.max_rgb_lib_ms, 68_000);
 }
 
 /// Sets the per-call timeout `name`. The test names each field itself, so
@@ -178,8 +167,6 @@ fn each_per_call_timeout_must_fit_the_request_deadline() {
 #[test]
 fn a_shorter_deadline_needs_shorter_per_call_timeouts() {
     let evm_rpc = Limits::DEFAULTS.evm_rpc_timeout_secs;
-    // The rgb-lib budget must fit the shorter deadline too.
-    apply_to_defaults(|l| l.max_rgb_lib_ms = 10_000).unwrap();
     apply_to_defaults(|l| l.total_request_timeout_secs = evm_rpc).unwrap();
     let err = apply_to_defaults(|l| l.total_request_timeout_secs = evm_rpc - 1).unwrap_err();
     assert!(
@@ -243,14 +230,7 @@ fn the_checks_refuse_the_highest_values_without_an_overflow() {
     let highest = Limits::HIGHEST;
     assert!(highest.check_ranges().is_ok());
     assert!(highest.request_bound_bytes() > 0);
-    assert!(highest.max_rgb_lib_ns() > 0);
-    assert!(highest.check().is_err(), "the budget is over the deadline");
-    // Past the time check, the memory checks run on the highest sizes.
-    let sizes = Limits {
-        max_rgb_lib_ms: 1_000,
-        ..highest
-    };
-    let _ = sizes.check();
+    assert!(highest.check().is_err(), "the sizes are over the memory");
 }
 
 /// A `SetLimits` request is far below the lowest frame and element limits,
@@ -265,7 +245,6 @@ fn the_lowest_values_keep_the_enclave_reachable() {
         l.io_idle_timeout_secs = 2;
         l.first_bytes_timeout_secs = 1;
         l.evm_rpc_timeout_secs = 1;
-        l.max_rgb_lib_ms = 1_000;
         l.max_consignment_bytes = KIB;
         l.max_psbt_bytes = KIB;
     });

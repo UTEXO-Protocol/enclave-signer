@@ -5,7 +5,6 @@ use std::cell::Cell;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 
-use super::caps::{dummies_for, many_burns};
 use super::*;
 use crate::config::DEFAULT_SPV_MIN_CONFIRMATIONS;
 use crate::error::EnclaveError;
@@ -195,45 +194,6 @@ fn a_refusal_through_the_child_matches_the_refusal_in_process() {
     let listed = history.consignment();
     let chain = mined(&witness_ids(&listed));
     check("a burn the list rejects", &listed, &chain, &lists, 3);
-
-    // Last, as the lowered cap holds for the rest of the test.
-    crate::limits::change_for_test(|l| l.max_witness_check_cost = MIB);
-    let wide = many_burns(issue(), 256, dummies_for(2 * MIB));
-    check(
-        "a refusal of the cost gate",
-        &wide,
-        &unmined,
-        &open_lists(),
-        3,
-    );
-}
-
-/// The child takes the limits in force here: a cap that a change lowered
-/// refuses a burn that the image value admits, and names the lowered value.
-#[test]
-fn the_validator_uses_the_limits_in_force() {
-    let wide = many_burns(issue(), 256, dummies_for(2 * MIB));
-    let unmined = MinedBlocks::of(&[]);
-    let in_child = || {
-        let limits = crate::limits::get();
-        validator()
-            .validate_in_child(
-                &wide,
-                Some(&bind_all),
-                &unmined,
-                &open_lists(),
-                &limits,
-                far_deadline(),
-            )
-            .unwrap_err()
-            .to_string()
-    };
-    // The image value admits it: rgb-lib asks for a header the chain lacks.
-    let err = in_child();
-    assert!(err.contains("no header at height"), "{err}");
-    crate::limits::change_for_test(|l| l.max_witness_check_cost = MIB);
-    let err = in_child();
-    assert!(err.contains(&format!("(max {MIB})")), "{err}");
 }
 
 /// A reject list longer than a request frame reaches the child, which reads

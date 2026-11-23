@@ -76,7 +76,7 @@ sequenceDiagram
     P->>E: forward over vsock
     E->>E: Stage 1: payload limits
     E->>V: Stage 2 in a validator child: consignment file, limits, safe height
-    V->>V: work caps, then rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
+    V->>V: rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
     V->>E: resolver questions: asset bind, mint locks, headers, reject list
     E-->>V: each answer, from the pins, the header chain and the EVM RPC
     V-->>E: verdict, then the enclave reaps the child
@@ -115,7 +115,7 @@ The [sequence diagram in code order](diagrams/03-seq-sign-evm.md) and the
 | EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Independent encoders and [protocol vectors](burn-vector-provenance.md) check its format. |
 
 `SPV_MIN_CONFIRMATIONS` is an image setting
-([configuration.md](configuration.md)). The size and work limits named below
+([configuration.md](configuration.md)). The size limits named below
 (`max_...`) are runtime limits ([runtime-limits.md](runtime-limits.md)). The
 other SPV constants are in the
 [specification](tee-spec.md#7-bitcoin-header-chain-spv).
@@ -159,9 +159,7 @@ checks its verdict ([specification](tee-spec.md#validator-child-burn-signer)).
   address over the network in Stage 3b, so a foreign genesis must not choose
   it. The reject-list reader is an input to validation, so the bind runs
   before rgb-lib; refusing a foreign asset there also spares rgb-lib the work,
-  which is all that ordering buys beyond the bind itself. Last, the child
-  bounds the work that rgb-lib would do on the transfer and refuses one above
-  a work cap ([section 10](#10-work-caps)).
+  which is all that ordering buys beyond the bind itself.
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules that rgb-lib's
   pinned `rgb-schemas` compiles. rgb-lib asks three resolvers, and the burn
@@ -469,35 +467,20 @@ globals. So the burn signer needs three proofs that agree:
 proves that they are the deposits behind this burn (B5.9). Each half needs
 the other.
 
-## 10. Work caps
+## 10. Validation time
 
-The burn signer ends its validator child before the request deadline, so
-rgb-lib never runs past it
-([specification](tee-spec.md#validator-child-burn-signer)). That end gives
-the burn only a timeout. So the burn signer also bounds the work of rgb-lib
-on a consignment before rgb-lib runs (B2.2), and refuses expensive work
-early, with its reason. Four runtime limits apply:
+No check bounds the work of rgb-lib on a consignment before it runs. The
+request deadline bounds it: the burn signer ends its validator child at the
+kill time, before the deadline, so rgb-lib never runs past it
+([specification](tee-spec.md#validator-child-burn-signer)).
 
-| Limit | What it bounds |
-|-------|----------------|
-| `max_witness_check_cost` | The checks of each transition against the witness transaction and the anchor of its bundle. |
-| `max_bundle_id_cost` | The hashing of bundle ids over the input map of each bundle. |
-| `max_reject_walk_cost` | For an asset with a reject list: the steps of the walk of B3.10. |
-| `max_rgb_lib_ms` | The modeled time of rgb-lib's validation and inspection: the file, its outputs, its operations, the genesis hashes and the three costs above. |
-
-The first two bound work of rgb-lib that grows faster than the file: an
-honest bundle has one or two transitions, and a forged bundle can have
-thousands. The third bounds a count of the reject walk, one walk for each
-origin. The time budget bounds the sum. A refusal states the cost that
-passed its limit and the value of the limit.
-
-An honest burn is far below the caps. The widest burn that the bridge
-expects, 2810 mints burned by one transition, uses about 6 percent of the
-witness cap and 4 percent of the bundle id cap, and it models at about a
-fifth of the time budget.
-
-The time budget can refuse an honest burn with a very long history. The
-operator can raise each limit on a running enclave
+A burn whose validation is ended this way is refused with error code 10
+([specification](tee-spec.md#63-errors)). The refusal says nothing about the
+consignment. The same consignment can pass a later request, when the enclave
+runs fewer validations at once. A consignment that one validation alone
+cannot finish within the deadline is refused on every request, until the
+operator raises `total_request_timeout_secs`
 ([runtime-limits.md](runtime-limits.md)).
-[validation-cost-model.md](validation-cost-model.md) has the model, its
-measurements and the honest shapes that it refuses.
+
+`max_consignment_bytes` bounds the file, and with it the memory of a
+validation ([runtime-limits.md](runtime-limits.md)).

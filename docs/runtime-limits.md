@@ -20,7 +20,7 @@ utexo-bridge-parent-cli --addr vsock://16:5000 limits show
 ```
 
 ```bash
-utexo-bridge-parent-cli --addr vsock://16:5000 limits set max_rgb_lib_ms=24000 total_request_timeout_secs=40
+utexo-bridge-parent-cli --addr vsock://16:5000 limits set evm_rpc_timeout_secs=20 total_request_timeout_secs=120
 ```
 
 ```bash
@@ -52,8 +52,8 @@ reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has on
 
 ```text
 # Long histories.
-max_rgb_lib_ms=24000
-total_request_timeout_secs=40
+total_request_timeout_secs=120
+mint_replay_ttl_secs=7200
 ```
 
 `deploy-host.sh` and `utexo-enclave-ctl.sh` send this file at each launch, before
@@ -75,10 +75,6 @@ checks them at launch.
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
-| `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
-| `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
-| `max_bundle_id_cost` | 262144 | 1024 | 2^50 | Steps to hash bundle ids. |
-| `max_reject_walk_cost` | 67108864 | 1048576 | 2^50 | Steps of the reject-list walk. |
 | `max_reject_list_entries` | 20000 | 1 | 2^32 | Entries of a reject list. |
 | `reject_list_page_entries` | 1000 | 1 | 2^20 | Entries in one RPC call that reads a reject list. |
 | `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
@@ -110,12 +106,6 @@ The enclave checks all the new values first. If one check fails, the enclave
 refuses the request and changes nothing.
 
 - Each value must be in its range.
-- `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`,
-  so the work that the caps admit ends within the deadline, with time left for
-  the other work of the request. Work that runs too long is cut: the burn
-  signer ends its validator child before the deadline and refuses the burn
-  ([tee-spec.md](tee-spec.md#validator-child-burn-signer)). So 30 s of rgb-lib
-  needs a deadline of at least 40 s.
 - Each per-call timeout must be at most `total_request_timeout_secs`:
   `io_idle_timeout_secs`, `first_bytes_timeout_secs` and `evm_rpc_timeout_secs`.
   The deadline does not stop a network call of the enclave, so a longer network
@@ -178,18 +168,19 @@ The parent logs a warning when its value is below the value in force.
 
 ## Measured times
 
-The work limits (`max_rgb_lib_ms` and the three `..._cost` limits) bound the
-work of rgb-lib on one consignment.
-[validation-cost-model.md](validation-cost-model.md) has the model behind
-them.
+`total_request_timeout_secs` bounds the time of rgb-lib on one consignment:
+the burn signer ends its validator child before the deadline and refuses the
+burn with error code 10
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). No limit refuses a
+consignment for the work it asks before rgb-lib runs.
 
 These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
 8375C at 2.9 GHz, nitro-cli 1.4.5, enclave kernel 4.14.256) on 2026-11-23, with
 2 vCPUs and 4096 MiB. `MemTotal` was 3943 MiB. Each request is a burn of 10,000
 transfers with a 13-sibling SPV proof on each, 8,932,383 bytes, with a consignment
 of its own. The production burn build validates it as the validator child, so each
-time includes the start of the child and its questions to the enclave. The model
-gives it 20.10 s. Two runs gave the same times within 0.3 s.
+time includes the start of the child and its questions to the enclave. Two runs
+gave the same times within 0.3 s.
 
 | Requests at once | Time of each request, 2 vCPUs (1 core) |
 |---|---|
@@ -198,14 +189,15 @@ gives it 20.10 s. Two runs gave the same times within 0.3 s.
 | 4 | 42.9 to 43.2 s |
 
 The default launch has 2 vCPUs, and these are two threads of one core. So four
-requests take 3.6 times as long as one, and one request takes 0.60 of its model.
-4 vCPUs were not measured through the validator child.
+requests take 3.6 times as long as one. 4 vCPUs were not measured through the
+validator child.
 
-An honest history at the 10 MiB limit models at about 23 s. Four of them at once take
-about 50 s on 2 vCPUs, so they fit the deadline of the image, 90 s, less
-`RESPONSE_MARGIN`. A forged request can model at the 30 s of `max_rgb_lib_ms`. Four
-of these at once can take about 107 s on 2 vCPUs: the burn signer ends their validator
-children before the deadline and refuses them.
+Four of these requests at once fit the deadline of the image, 90 s, less
+`RESPONSE_MARGIN`. A request that takes longer, alone or beside others, does not:
+the burn signer ends its validator child before the deadline and refuses the burn.
+Measure the longest history that the bridge accepts on the CPU of the burn
+enclaves, at the concurrency of the host, before a change of
+`total_request_timeout_secs`, of `max_consignment_bytes` or of the rgb-lib pin.
 
 ## Smaller production host
 
@@ -214,23 +206,16 @@ For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
 
 | Setting | Value |
 |---|---:|
-| `max_rgb_lib_ms` | 30000 |
 | `total_request_timeout_secs` | 320 |
 | `GRPC_MAX_CONCURRENT_SIGN` | 4 |
 | Parent enclave wait | 330 s |
 | `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
 | Backend request timeout | At least 340 s |
 
-The CPU times behind these values are in
-[validation-cost-model.md](validation-cost-model.md#measurements). Checked on
-2026-11-10 on a Nitro enclave with 2 vCPUs and 4096 MiB: `limits set` accepts
-the two enclave limits, and `limits show` reads them back with every other
-limit at its image value.
-
-The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: keep the admitted histories,
-reserve twice the CPU time, account for four workers sharing one core, and
-leave one quarter for other work. The ×2 factor is headroom for the smaller
-host. Timeouts round up to five seconds: enclave 320, parent wait 330,
+The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: 30 s of rgb-lib for one
+history alone, twice that CPU time, four workers sharing one core, and one
+quarter left for other work. The ×2 factor is headroom for the smaller
+host. [Measured times](#measured-times) has the times of one history. Timeouts round up to five seconds: enclave 320, parent wait 330,
 parent request 335, backend 340.
 
 Use [the parent profile](../deploy/profiles/burn-small-host.env) and
@@ -263,9 +248,8 @@ These values also stay constants:
 - `MAX_RLP_DEPTH`: it keeps the decoder from using all of the stack.
 - `MAX_STORED_HEADERS`: at the mainnet block rate, the chain reaches it in about
   19 years.
-- The rates of the cost model (`validation/cost.rs`) and of the memory model
-  (`memory.rs`). They describe the code of the image, so they change with the code.
-  `max_rgb_lib_ms` and the request deadline already cover a slower CPU.
+- The rates of the memory model (`memory.rs`). They describe the code of the
+  image, so they change with the code.
 - Small fixed formats, such as a mnemonic, a KMS reply and an attestation document.
 - The KMS and seed recovery timeouts.
 

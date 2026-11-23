@@ -144,7 +144,7 @@ process.
 
 **What runs in the child.** The rgb-lib part of Stage 2 of a burn
 ([burn-flow.md](burn-flow.md)) on one consignment: the strict decode of the
-file, the work caps, rgb-lib's validation and inspection, and the summary of
+file, rgb-lib's validation and inspection, and the summary of
 the burn. The payload checks of Stage 1, every resolver answer, and every
 check on the summary run in the enclave process.
 
@@ -539,8 +539,9 @@ state the spent output holds. It then signs with the colored account.
 
 A refused request gets an `ErrorResponse` with a code. The parent maps the
 code to a gRPC status. A direct caller identifies a retryable state by the
-code, not by the text. The parent gives codes 3 and 8 the same gRPC status,
-so a gRPC caller identifies the finality wait by its fixed prefix.
+code, not by the text. The parent gives codes 3, 8, 9 and 10 the same gRPC
+status, so a gRPC caller identifies each of the last three by its fixed
+prefix.
 
 | Code | Meaning | gRPC status |
 |------|---------|-------------|
@@ -553,6 +554,7 @@ so a gRPC caller identifies the finality wait by its fixed prefix.
 | 7 | `GetClone`: seed-export cap reached | `RESOURCE_EXHAUSTED` |
 | 8 | The deposit receipt is above the `safe` or `finalized` head. The caller waits and retries. | `FAILED_PRECONDITION`, with the fixed prefix `evm event pending finality:` |
 | 9 | The header chain has not reached a block that a proof names, or has not buried it at the required depth. The caller waits for the signer's headers and retries. The message ends with `[needs tip N, has tip M]`: the tip height the enclave needs, a lower bound, and the one it has. A block at or below the checkpoint is code 3, since no header comes for it. | `FAILED_PRECONDITION`, with the fixed prefix `bitcoin headers pending:` |
+| 10 | The burn signer ended its validator child at the kill time, before the request deadline. The consignment got no verdict. The same request can pass later, when the enclave runs fewer validations at once. | `FAILED_PRECONDITION`, with the fixed prefix `rgb validation timed out:` |
 
 ## 7. Bitcoin header chain (SPV)
 
@@ -703,13 +705,13 @@ deployed.
   append to the list can stop every release. A burn of rejected units stays
   refused until an allow for them is finalized, and its units are already
   burned ([burn-flow.md](burn-flow.md), Stage 3b).
-- **Validation time.** Work caps and a modeled time budget bound the work of
-  rgb-lib on a consignment. The model is fitted to measurements, not proved:
-  a shape that costs more than the measured ones runs longer than its budget.
-  The enclave then ends the validator child before the deadline, and the
-  burn gets a timeout instead of a reason. The caps can also refuse an
-  honest burn with a very long history, until the operator raises them
-  ([validation-cost-model.md](validation-cost-model.md)).
+- **Validation time.** Only the request deadline bounds the work of rgb-lib
+  on a consignment: the enclave ends the validator child before it, and the
+  burn gets error code 10 instead of a reason. A forged consignment can hold
+  a worker until then, so the worst case is the workers times the deadline.
+  An honest burn whose history one validation cannot finish within the
+  deadline stays refused until the operator raises
+  `total_request_timeout_secs` ([runtime-limits.md](runtime-limits.md)).
 - **Validator child.** The child contains a fault of rgb-lib, not an exploit:
   it runs as the same user as the enclave process
   ([validator child](#validator-child-burn-signer)).

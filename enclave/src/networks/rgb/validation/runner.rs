@@ -667,11 +667,7 @@ fn outcome(
         Ended::Verdict(ipc::Verdict { outcome: None, .. }) => "a verdict with no outcome".into(),
         Ended::Deadline => {
             tracing::warn!("the enclave ended its RGB validator at the kill time");
-            return Err(EnclaveError::Io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "RGB validation did not end before the request deadline: the enclave ended its \
-                 validator",
-            )));
+            return Err(EnclaveError::RgbValidationTimedOut);
         }
         Ended::Closed => {
             let e = ended_without_verdict(status);

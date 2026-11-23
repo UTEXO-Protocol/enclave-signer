@@ -2270,28 +2270,6 @@ mod source_path {
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
     }
 
-    /// The source path gives its validator child the limits in force. A burn
-    /// that the image value of the witness cap admits is refused once a change
-    /// lowers that cap, and the refusal names the lowered value.
-    #[test]
-    fn the_source_path_gives_its_child_the_limits_in_force() {
-        const MIB: u64 = 1024 * 1024;
-        let id = asset_id();
-        let bytes = super::caps::many_burns(issue(), 256, super::caps::dummies_for(2 * MIB));
-        let source = crate::proto::RgbSource {
-            consignment_hash: keccak(&bytes),
-            consignment: bytes,
-            ..burn_source(&id)
-        };
-        let config = pinned_config(&id);
-        // Past the cost gate, the burn path refuses a release of many burns.
-        let err = error_of(run(&source, &config));
-        assert!(err.contains("carry 256 burns"), "{err}");
-        crate::limits::change_for_test(|l| l.max_witness_check_cost = MIB);
-        let err = error_of(run(&source, &config));
-        assert!(err.contains(&format!("(max {MIB})")), "{err}");
-    }
-
     /// A transfer of the genesis alone validates in a validator child as in
     /// this process, and the route refuses it with code 3 for its missing
     /// transition.
@@ -2852,7 +2830,7 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     );
 }
 
-mod caps;
 #[cfg(all(rgb_to_evm, unix))]
 mod child;
+mod shapes;
 mod summary;

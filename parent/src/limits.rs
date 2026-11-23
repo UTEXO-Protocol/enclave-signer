@@ -25,10 +25,6 @@ limit_fields! {
     io_idle_timeout_secs,
     first_bytes_timeout_secs,
     evm_rpc_timeout_secs,
-    max_rgb_lib_ms,
-    max_witness_check_cost,
-    max_bundle_id_cost,
-    max_reject_walk_cost,
     max_reject_list_entries,
     reject_list_page_entries,
     max_message_bytes,
@@ -150,30 +146,30 @@ mod tests {
     #[test]
     fn pairs_set_only_the_named_limits() {
         let limits = parse(
-            &pairs(&["max_rgb_lib_ms=24000", "total_request_timeout_secs = 40"]),
+            &pairs(&["evm_rpc_timeout_secs=24", "total_request_timeout_secs = 40"]),
             None,
         )
         .unwrap();
-        assert_eq!(limits.max_rgb_lib_ms, 24_000);
+        assert_eq!(limits.evm_rpc_timeout_secs, 24);
         assert_eq!(limits.total_request_timeout_secs, 40);
         assert_eq!(limits.max_psbt_bytes, 0, "0 keeps the value in the enclave");
     }
 
     #[test]
     fn a_file_has_comments_and_empty_lines_and_a_pair_overrides_it() {
-        let file = "# Longer burns.\n\nmax_rgb_lib_ms=24000  # 24 s\nmax_psbt_bytes=2097152\n";
-        let limits = parse(&pairs(&["max_rgb_lib_ms=21000"]), Some(file)).unwrap();
-        assert_eq!(limits.max_rgb_lib_ms, 21_000);
+        let file = "# Slower RPC.\n\nevm_rpc_timeout_secs=24  # 24 s\nmax_psbt_bytes=2097152\n";
+        let limits = parse(&pairs(&["evm_rpc_timeout_secs=21"]), Some(file)).unwrap();
+        assert_eq!(limits.evm_rpc_timeout_secs, 21);
         assert_eq!(limits.max_psbt_bytes, 2_097_152);
     }
 
     #[test]
     fn bad_input_is_refused() {
         for (pair, text) in [
-            ("max_rgb_lib_ms", "not NAME=VALUE"),
-            ("max_rgb_lib_ms=20s", "not a whole number"),
-            ("max_rgb_lib_ms=-1", "not a whole number"),
-            ("max_rgb_lib_ms=0", "0 is not a value"),
+            ("evm_rpc_timeout_secs", "not NAME=VALUE"),
+            ("evm_rpc_timeout_secs=20s", "not a whole number"),
+            ("evm_rpc_timeout_secs=-1", "not a whole number"),
+            ("evm_rpc_timeout_secs=0", "0 is not a value"),
             ("spv_min_confirmations=1", "not a limit"),
         ] {
             let err = parse(&pairs(&[pair]), None).unwrap_err();

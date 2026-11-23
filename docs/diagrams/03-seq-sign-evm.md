@@ -37,7 +37,6 @@ sequenceDiagram
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb-->>Child: AssetBound
     Child->>Child: reject list, if the genesis names one, must be an EVM contract
-    Child->>Child: work caps (cost.rs): witness checks, bundle ids,<br/>reject walk (listed asset only),<br/>then their modeled time with the file,<br/>validation and inspection together
     Child->>Child: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Child->>Rgb: anchor resolver: Anchors once with no anchor,<br/>then once per mint anchor
     Rgb->>Bind: AnchorBinder

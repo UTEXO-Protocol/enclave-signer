@@ -60,18 +60,22 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
         u64::from(MAX_MESSAGE_SIZE)
     );
 
-    // A refused change keeps the values. 68 s of rgb-lib is over three quarters
-    // of the image value of `total_request_timeout_secs`.
+    // A refused change keeps the values. An EVM call of 95 s is over the image
+    // value of `total_request_timeout_secs`.
     let refused = set(
         port,
         WireLimits {
-            max_rgb_lib_ms: 68_000,
+            evm_rpc_timeout_secs: 95,
             ..Default::default()
         },
         false,
     );
     match refused {
-        ERes::Error(e) => assert!(e.message.contains("three quarters"), "{}", e.message),
+        ERes::Error(e) => assert!(
+            e.message.contains("evm_rpc_timeout_secs is 95"),
+            "{}",
+            e.message
+        ),
         other => panic!("unexpected response: {other:?}"),
     }
     assert_eq!(current(&get(port)), current(&start));
@@ -80,7 +84,7 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
     let changed = set(
         port,
         WireLimits {
-            max_rgb_lib_ms: 68_000,
+            evm_rpc_timeout_secs: 95,
             total_request_timeout_secs: 100,
             mint_replay_ttl_secs: 7_200,
             ..Default::default()
@@ -89,7 +93,7 @@ fn the_operator_changes_and_resets_the_limits_of_a_running_enclave() {
     );
     assert!(matches!(changed, ERes::Limits(_)), "{changed:?}");
     let seen = current(&get(port));
-    assert_eq!(seen.max_rgb_lib_ms, 68_000);
+    assert_eq!(seen.evm_rpc_timeout_secs, 95);
     assert_eq!(seen.total_request_timeout_secs, 100);
     assert_eq!(seen.mint_replay_ttl_secs, 7_200);
 

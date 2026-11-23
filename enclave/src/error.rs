@@ -81,6 +81,15 @@ pub enum EnclaveError {
         detail: String,
     },
 
+    /// The validator child did not end by its kill time, so the enclave ended
+    /// it. The same consignment can end in time on a later request, when the
+    /// enclave has less other work. Its wire code
+    /// ([`EnclaveError::error_code`]), not this wording, identifies it.
+    #[error(
+        "RGB validation did not end before the request deadline: the enclave ended its validator"
+    )]
+    RgbValidationTimedOut,
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -142,6 +151,7 @@ impl EnclaveError {
             EnclaveError::NotReady { .. } => 2, // not ready
             EnclaveError::EvmFinalityPending { .. } => 8, // retryable EVM finality wait
             EnclaveError::HeadersPending { .. } => 9, // retryable Bitcoin header wait
+            EnclaveError::RgbValidationTimedOut => 10, // validation ended at its kill time
             // Listed so that a new variant must choose its code here.
             #[cfg(feature = "kms-persistence")]
             EnclaveError::Custody { .. } => 1,
@@ -234,6 +244,7 @@ mod tests {
                 9,
                 9,
             ),
+            (RgbValidationTimedOut, 10, 10),
         ];
         for (e, rpc, clone) in rows {
             assert_eq!(e.error_code(), rpc, "{e:?}");

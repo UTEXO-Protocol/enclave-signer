@@ -35,7 +35,6 @@ requests and relays bytes; it is outside the enclave trust boundary.
 | Burn seed cloning | `enclave/src/cloning.rs`, the parent `clone` command | [Cloning](docs/cloning.md) |
 | Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md) |
 | Runtime limits | `enclave/src/limits.rs`, `enclave/src/memory.rs`, `parent/src/limits.rs` | [Runtime limits](docs/runtime-limits.md) |
-| Work caps of consignment validation | `enclave/src/networks/rgb/validation/cost.rs` | [Cost model](docs/validation-cost-model.md) |
 | Wire schema | `enclave-proto/`, `parent/Cargo.toml` | [Proto provenance and sync procedure](enclave-proto/README.md) |
 | Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [Building](docs/building.md), [configuration](docs/configuration.md), [operations](docs/operations.md), [stage profile](build/profiles/README.md) |
 | Architecture and request sequences | Related handlers and adapters | [Diagram index](docs/diagrams/README.md) |
@@ -350,20 +349,15 @@ report that conflict and keep it visible until the implementation is fixed.
   bound.
 - Bound request-controlled text before it reaches a log line or an error reply.
   A long log line can hold heap after its request ends.
-- Measure a cost model or memory model again when the code or dependency it
-  describes changes.
-- For every rgb-lib or rgb-consensus pin change, rerun the release-mode
-  consignment validation and inspection timings on the CPU used by the burn
-  enclaves. Follow [the cost-model measurement procedure](docs/validation-cost-model.md#when-to-measure-again):
-  measure every documented shape, compare validation plus inspection with its
-  model, and record the source and dependency revisions, compiler, CPU, load,
-  concurrency and repeated results. A passing test on another CPU is not this
-  measurement. If all admitted shapes fit, no change is needed for that CPU
-  and load. Keep allowances for other hardware or concurrency separate from
-  measured results, and round planned timeouts up to five seconds. If a shape
-  exceeds its model, document the observed ratio and either account for it in
-  runtime limits or recalibrate the model. Coefficient changes require an EIF
-  rebuild and new PCR expectations; runtime limit changes do not.
+- Measure the memory model again when the code or dependency it describes
+  changes.
+- For every rgb-lib or rgb-consensus pin change, measure again the burn
+  validation times of [runtime-limits.md](docs/runtime-limits.md#measured-times)
+  on the CPU used by the burn enclaves, through the validator child. Record
+  the source and dependency revisions, compiler, CPU, load, concurrency and
+  repeated results. A passing test on another CPU is not this measurement.
+  Keep allowances for other hardware or concurrency separate from measured
+  results, and round planned timeouts up to five seconds.
 - Carry a request deadline through queueing, connection setup, reads, writes,
   RPC retries and expensive work. A socket timeout alone does not cancel a
   handler or prove that signing stopped.

@@ -16,9 +16,7 @@ flowchart TD
         p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
         p1c -->|yes| p1l{"reject list, if named,<br/>is an EVM contract?"}
         p1l -->|no| p1lr[REFUSE - not an EVM reject list]:::refuse
-        p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
-        p1k -->|no| p1kr[REFUSE - work cap]:::refuse
-        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only when the SPV proof in the consignment holds<br/>against an enclave header served at<br/>depth ≥ SPV_MIN_CONFIRMATIONS, no tx lookup; listed asset:<br/>reject list over the terminal operations"]
+        p1l -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only when the SPV proof in the consignment holds<br/>against an enclave header served at<br/>depth ≥ SPV_MIN_CONFIRMATIONS, no tx lookup; listed asset:<br/>reject list over the terminal operations"]
         p1b --> p1q{"valid, within the kill time,<br/>no crash, verdict checks pass?"}
         p1q -->|no| p1r[REFUSE — invalid consignment, crash or timeout]:::refuse
     end

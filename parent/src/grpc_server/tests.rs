@@ -44,6 +44,26 @@ fn header_wait_wire_code_survives_changed_diagnostic_wording() {
 }
 
 #[test]
+fn a_validation_ended_at_its_kill_time_has_its_wire_prefix() {
+    let diagnostic = "RGB validation did not end before the request deadline";
+    let status = ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+        code: 10,
+        message: diagnostic.into(),
+    });
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(
+        status.message(),
+        format!("rgb validation timed out: {diagnostic}")
+    );
+    // The same wording without wire code 10 is an internal error.
+    let status = ParentAdapterService::enclave_error_to_status(&enclave_proto::ErrorResponse {
+        code: 1,
+        message: diagnostic.into(),
+    });
+    assert_eq!(status.code(), Code::Internal);
+}
+
+#[test]
 fn validation_errors_do_not_become_header_waits() {
     // Even a familiar diagnostic is not a wait without wire code 9.
     let diagnostic = "spv: witness proof: no header at height 0 (chain tip = 104)";

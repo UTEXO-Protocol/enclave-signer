@@ -715,12 +715,8 @@ fn each_outcome_maps_to_its_wire_code() {
     }
     // The kill time.
     let err = outcome_of(bound(Ended::Deadline), signaled(9)).unwrap_err();
-    assert!(
-        matches!(&err, EnclaveError::Io(e) if e.kind() == io::ErrorKind::TimedOut),
-        "{err}"
-    );
-    assert!(err.to_string().contains("the enclave ended its validator"));
-    assert_eq!(err.error_code(), 1);
+    assert!(matches!(err, EnclaveError::RgbValidationTimedOut), "{err}");
+    assert_eq!(err.error_code(), 10);
     // A child that ended before its verdict.
     #[cfg(target_os = "linux")]
     for (signal, name) in CRASH_SIGNALS {
@@ -821,11 +817,7 @@ fn a_validator_past_the_deadline_is_ended_and_reaped() {
         )
         .unwrap_err();
     assert!(Instant::now() < deadline);
-    assert!(
-        matches!(&err, EnclaveError::Io(e) if e.kind() == io::ErrorKind::TimedOut),
-        "{err}"
-    );
-    assert!(err.to_string().contains("the enclave ended its validator"));
+    assert!(matches!(err, EnclaveError::RgbValidationTimedOut), "{err}");
     let pid = pid.into_inner().expect("the child sent its pid");
     assert_ne!(pid, std::process::id());
     #[cfg(target_os = "linux")]
@@ -881,11 +873,7 @@ fn the_kill_timer_ends_a_child_while_the_worker_answers_it() {
         )
         .unwrap_err();
     assert!(Instant::now() < deadline);
-    assert!(
-        err.to_string().contains("the enclave ended its validator"),
-        "{err}"
-    );
-    assert_eq!(err.error_code(), 1);
+    assert!(matches!(err, EnclaveError::RgbValidationTimedOut), "{err}");
     let pid = pid.get().expect("the child sent its pid");
     assert_ne!(pid, std::process::id());
     assert_eq!(process_state(pid), None);

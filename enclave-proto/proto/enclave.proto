@@ -393,10 +393,9 @@ message Limits {
   // 4 and 5 are reserved. Do not use them.
   reserved 4, 5;
   reserved "electrum_timeout_secs", "esplora_timeout_secs";
-  uint64 max_rgb_lib_ms = 6;
-  uint64 max_witness_check_cost = 7;
-  uint64 max_bundle_id_cost = 8;
-  uint64 max_reject_walk_cost = 9;
+  // 6 to 9 are reserved. Do not use them.
+  reserved 6, 7, 8, 9;
+  reserved "max_rgb_lib_ms", "max_witness_check_cost", "max_bundle_id_cost", "max_reject_walk_cost";
   uint64 max_message_bytes = 10;
   uint64 max_wire_elements = 11;
   uint64 max_consignment_bytes = 12;

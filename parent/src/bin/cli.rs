@@ -220,7 +220,7 @@ enum LimitsAction {
     Show,
     /// Change limits. Limits that are not named keep their values
     Set {
-        /// NAME=VALUE pairs, for example max_rgb_lib_ms=24000. `limits show`
+        /// NAME=VALUE pairs, for example evm_rpc_timeout_secs=24. `limits show`
         /// lists the names.
         pairs: Vec<String>,
         /// Read NAME=VALUE lines from this file. A pair on the command line

@@ -11,7 +11,6 @@
 //! - `ipc.rs`: the frames between the burn signer and its validator child.
 //! - `runner.rs`: run a burn validation in a validator child, answer its
 //!   resolvers and end it before the request deadline.
-//! - `cost.rs`: the caps on the work rgb-lib does, checked before it runs.
 //! - `consignment.rs`: read rgb-lib's inspection of the accepted file into
 //!   plain shapes.
 //! - `types.rs`: those shapes.
@@ -28,7 +27,6 @@ mod bfa;
 mod child;
 mod consensus;
 mod consignment;
-mod cost;
 #[cfg(all(rgb_to_evm, unix))]
 mod ipc;
 mod reject_list;

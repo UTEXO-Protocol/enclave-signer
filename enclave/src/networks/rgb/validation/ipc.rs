@@ -506,6 +506,7 @@ pub(super) fn refusal(e: &EnclaveError) -> Refusal {
         | EnclaveError::Signing(_)
         | EnclaveError::EvmFinalityPending { .. }
         | EnclaveError::HeadersPending { .. }
+        | EnclaveError::RgbValidationTimedOut
         | EnclaveError::NotReady { .. }
         | EnclaveError::Attestation(_)
         | EnclaveError::Certificate(_)

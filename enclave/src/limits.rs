@@ -27,8 +27,8 @@
 //! validation takes longer as histories grow, and a new image costs a change of
 //! the PCR values. They only stop a typing error and an overflow. The checks
 //! across limits protect the enclave: they keep the request memory model
-//! (`memory.rs`), and they keep the time budget of rgb-lib and each per-call
-//! timeout within the request deadline.
+//! (`memory.rs`), and they keep each per-call timeout within the request
+//! deadline.
 
 use std::time::Duration;
 
@@ -112,27 +112,6 @@ limits! {
     /// work, so a few stalls can hold all the workers. The value of the image
     /// covers a healthy fetch through loopback, vsock and the RPC.
     evm_rpc_timeout_secs: 15, 1, 3_600;
-    /// Modeled time of rgb-lib on one consignment, validation and inspection
-    /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
-    /// to validate alone, and the caps add up. rgb-lib runs in a validator
-    /// child, which the enclave ends before the request deadline; this limit
-    /// refuses the work first, with its reason. The value of the image passes
-    /// a history of 10 000 transfers with an SPV proof on each, with room left
-    /// in the model. On a real enclave, no shape took longer than the model
-    /// (`docs/runtime-limits.md`).
-    max_rgb_lib_ms: 30_000, 1_000, 86_400_000;
-    /// Steps to check transitions against their witness txs. Forged bundles at
-    /// the value of the image take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
-    /// costs far less (`validation/tests/caps.rs`, docs/burn-flow.md).
-    max_witness_check_cost: 128 * MIB, MIB, 1 << 50;
-    /// Steps to hash bundle ids. 512 transitions in one bundle take rgb-lib
-    /// 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs far less.
-    max_bundle_id_cost: 256 * KIB, KIB, 1 << 50;
-    /// Steps of the reject-list walk, counted per origin. One step of the
-    /// per-origin walk takes 45 to 73 ns, measured on rgb-lib 1ae1c160. The
-    /// value of the image keeps that walk to a few seconds. The burn of 2810
-    /// mints costs far less.
-    max_reject_walk_cost: 64 * MIB, MIB, 1 << 50;
     /// Entries of a reject list. Over this value the enclave refuses each
     /// request that reads the list. The list is append-only, so it cannot get
     /// shorter again. Each page takes one RPC call of the request deadline. At
@@ -210,16 +189,6 @@ impl Limits {
     /// Refuses values outside their range, or that do not fit each other.
     pub fn check(&self) -> Result<(), String> {
         self.check_ranges()?;
-        // rgb-lib shares the deadline with the enclave's own work on the
-        // request, and the enclave ends the validator child before the
-        // deadline. The rest of the deadline is for the enclave's work.
-        if self.max_rgb_lib_ms * 4 > self.total_request_timeout_secs * 1000 * 3 {
-            return Err(format!(
-                "max_rgb_lib_ms is {}; it must be at most three quarters of \
-                 total_request_timeout_secs, {} s",
-                self.max_rgb_lib_ms, self.total_request_timeout_secs
-            ));
-        }
         // The deadline stops the reads and writes of the request socket, but
         // not the network calls of the enclave, beside the EVM calls that
         // answer a validator child. So a longer network timeout lets one
@@ -311,11 +280,6 @@ impl Limits {
     /// The longest time one socket read or write can block.
     pub fn io_idle_timeout(&self) -> Duration {
         Duration::from_secs(self.io_idle_timeout_secs)
-    }
-
-    /// The modeled time of rgb-lib, in ns.
-    pub fn max_rgb_lib_ns(&self) -> u64 {
-        self.max_rgb_lib_ms * 1_000_000
     }
 }
 

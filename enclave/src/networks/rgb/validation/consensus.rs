@@ -3,8 +3,8 @@
 //! This is the only code that turns a consignment file into a
 //! [`super::types::ValidatedConsignment`]. The burn signer runs it in a
 //! validator child (`child.rs`) and rebuilds the result from the child's
-//! verdict (`runner.rs`). It decodes the file, binds the asset and checks work
-//! limits before using these resolvers:
+//! verdict (`runner.rs`). It decodes the file and binds the asset before using
+//! these resolvers:
 //!
 //! - `HeadersOnlyResolver` feeds the SPV-verified witness positions.
 //! - [`AnchorBinder`] binds each mint claim to its lock, without RPC.
@@ -30,7 +30,6 @@ use rgb_lib::{ConsignmentExt, FileContent, ResolveClaim, RgbTransfer as Transfer
 use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::extract_transition_summary;
-use super::cost::assert_bounded_for_rgb_lib;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
 use super::schema::reject_list;
 use super::types::WitnessBlock;
@@ -160,14 +159,14 @@ pub(super) fn resolver_failure_first<T>(
 }
 
 /// Parses the transfer in the file at `path` and runs every check that needs
-/// no resolver, so a foreign or oversized history never reaches rgb-lib.
+/// no resolver, so a foreign history never reaches rgb-lib.
 /// Returns its list and the length of the file.
 fn load_bounded(
     path: &Path,
     lists: &ListAccess<'_>,
 ) -> Result<(Transfer, Option<RejectListContract>, usize)> {
     let file = File::open(path).map_err(|e| file_error(path, e))?;
-    // Saturates where a length has no `usize`: the gate then refuses it.
+    // Saturates where a length has no `usize`.
     let bytes_len = file.metadata().map_err(|e| file_error(path, e))?.len();
     let bytes_len = usize::try_from(bytes_len).unwrap_or(usize::MAX);
     tracing::info!(bytes_len, "starting RGB consignment validation");
@@ -188,7 +187,6 @@ fn load_bounded(
     // one schema. Refusing here also spares rgb-lib the work.
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
     let list = reject_list(&transfer.genesis)?;
-    assert_bounded_for_rgb_lib(&transfer, bytes_len, list.is_some())?;
     Ok((transfer, list, bytes_len))
 }
 

@@ -91,13 +91,13 @@ fn a_burn_past_its_deadline_is_refused_before_it_and_the_enclave_signs_after() {
     let Some(Response::Error(error)) = response.response else {
         panic!("expected the deadline refusal: {response:?}");
     };
-    assert_eq!(error.code, 1, "{error:?}");
-    assert!(
-        error.message.contains("the enclave ended its validator")
-            || error
-                .message
-                .contains("request deadline passed before RGB validation"),
-        "{error:?}"
-    );
+    // An ended child has its own wire code. With no time left to start one,
+    // the refusal is an internal error.
+    let ended = error.code == 10 && error.message.contains("the enclave ended its validator");
+    let not_started = error.code == 1
+        && error
+            .message
+            .contains("request deadline passed before RGB validation");
+    assert!(ended || not_started, "{error:?}");
     fixture.control();
 }

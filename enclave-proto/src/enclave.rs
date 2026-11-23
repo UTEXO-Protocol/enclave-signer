@@ -572,14 +572,6 @@ pub struct Limits {
     pub io_idle_timeout_secs: u64,
     #[prost(uint64, tag="3")]
     pub first_bytes_timeout_secs: u64,
-    #[prost(uint64, tag="6")]
-    pub max_rgb_lib_ms: u64,
-    #[prost(uint64, tag="7")]
-    pub max_witness_check_cost: u64,
-    #[prost(uint64, tag="8")]
-    pub max_bundle_id_cost: u64,
-    #[prost(uint64, tag="9")]
-    pub max_reject_walk_cost: u64,
     #[prost(uint64, tag="10")]
     pub max_message_bytes: u64,
     #[prost(uint64, tag="11")]

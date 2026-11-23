@@ -39,9 +39,7 @@
 //!   full RGB validation keeps its B-trees. By the count of the test, a whole
 //!   burn request with such a consignment fits the heap each worker holds at
 //!   the image limits, with little room left: the enclave holds the decoded
-//!   request, and the validator child the validation. The real peak is lower,
-//!   because at the image values the cost gate of validation refuses a chain
-//!   this dense well below `max_consignment_bytes`. A smaller frame with such
+//!   request, and the validator child the validation. A smaller frame with such
 //!   a consignment can take more than its own request bound. Validation
 //!   clones the decoded consignment, so each decoded list keeps only its
 //!   length. `MAX_CONSIGNMENT_BYTES` can lower the image value, and

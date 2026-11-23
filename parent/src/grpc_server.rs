@@ -400,6 +400,11 @@ impl ParentAdapterService {
                 "bitcoin headers pending: {}",
                 err.message
             )),
+            // Stable wire prefix of a validation the enclave ended at its kill time.
+            10 => Status::failed_precondition(format!(
+                "rgb validation timed out: {}",
+                err.message
+            )),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message
