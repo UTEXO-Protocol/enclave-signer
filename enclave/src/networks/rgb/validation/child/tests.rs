@@ -36,6 +36,20 @@ fn run_fault(fault: &str) -> i32 {
             ask(&mut io, bind_asset(&std::process::id().to_string()));
             hang()
         }
+        // Reports its pid as the contract id, asks for its reject list, then
+        // waits for its end.
+        "list" => {
+            let mut io = start();
+            ask(&mut io, bind_asset(&std::process::id().to_string()));
+            ask(
+                &mut io,
+                to_enclave::Body::RejectList(ipc::ListAddress {
+                    chain_id: 42161,
+                    address: Bytes::from_static(&[0x11; 20]),
+                }),
+            );
+            hang()
+        }
         "garbage" => {
             let mut io = channel().unwrap();
             io.write_all(&4u32.to_le_bytes()).unwrap();

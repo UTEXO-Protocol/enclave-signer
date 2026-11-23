@@ -36,6 +36,22 @@ pub(crate) fn bridge_funds_in_data(gross: u64, net: u64, commission: u64, dest: 
     d
 }
 
+/// The EVM RPC client of the enclave, pointed at `stalled`: a listener that
+/// never accepts, so each call waits until its time ends.
+#[cfg(feature = "rgb-validation")]
+pub(crate) fn stalled_evm_client(
+    stalled: &std::net::TcpListener,
+) -> crate::networks::evm::events::AlloyEvmClient {
+    let ca_hex = include_str!("../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
+    crate::networks::evm::events::AlloyEvmClient::with_pinned_tls(&crate::config::EvmRpcTls {
+        host: "rpc.test".into(),
+        ca_der: hex::decode(ca_hex.trim()).unwrap(),
+        tls_port: stalled.local_addr().unwrap().port(),
+        path: "/".into(),
+    })
+    .unwrap()
+}
+
 /// In-memory EVM RPC: a fixed receipt covered by each tagged canonical head,
 /// on chain `chain_id`.
 #[cfg(feature = "rgb-validation")]

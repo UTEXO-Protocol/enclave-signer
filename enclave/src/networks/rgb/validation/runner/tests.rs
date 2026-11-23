@@ -8,8 +8,8 @@ use super::super::child::OOM_SCORE_ADJ_MAX;
 use super::super::child::{lib_test_entry, FAULT_ENV};
 use super::super::reject_list::{Decisions, RejectListReader};
 use super::super::tests::{
-    assert_same, bind_all, burn_bytes, burn_history, mined, open_lists, validator, witness_ids,
-    PAYEE,
+    assert_same, bind_all, burn_bytes, burn_history, listed_burn, mined, open_lists, validator,
+    witness_ids, PAYEE,
 };
 use super::super::types::WitnessBlock;
 use super::*;
@@ -687,6 +687,105 @@ fn a_validator_past_the_deadline_is_ended_and_reaped() {
     #[cfg(target_os = "linux")]
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     assert_eq!(scratch_files_holding(&bytes), 0);
+}
+
+/// Sleeps until `at`.
+fn sleep_until(at: Instant) {
+    thread::sleep(at.saturating_duration_since(Instant::now()));
+}
+
+/// The state letter of process `pid` as `ps` gives it, while it exists.
+fn process_state(pid: u32) -> Option<char> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().chars().next()
+}
+
+/// The kill timer ends a child at the kill time while the worker is still in
+/// an answer that does not watch the time. The reply comes before the
+/// deadline.
+#[test]
+fn the_kill_timer_ends_a_child_while_the_worker_answers_it() {
+    let pid = Cell::new(None);
+    let record = |id: &str| {
+        pid.set(id.parse::<u32>().ok());
+        Ok(())
+    };
+    let deadline = deadline_in(Duration::from_millis(1_500));
+    let kill_at = deadline - RESPONSE_MARGIN;
+    let slow = |_: &RejectListContract| {
+        sleep_until(kill_at + RESPONSE_MARGIN / 4);
+        // Killed, and not reaped while the worker is here.
+        assert_eq!(process_state(pid.get().unwrap()), Some('Z'));
+        sleep_until(kill_at + RESPONSE_MARGIN / 2);
+        Ok(Decisions::default())
+    };
+    let lists = ListAccess {
+        bind_asset: &record,
+        read: Some(&slow),
+    };
+    let err = faulty("list")
+        .validate_in_child(
+            b"the file of a validator that asks for its list",
+            None,
+            &MinedBlocks::of(&[]),
+            &lists,
+            &in_force(),
+            deadline,
+        )
+        .unwrap_err();
+    assert!(Instant::now() < deadline);
+    assert!(
+        err.to_string().contains("the enclave ended its validator"),
+        "{err}"
+    );
+    assert_eq!(err.error_code(), 1);
+    let pid = pid.get().expect("the child sent its pid");
+    assert_ne!(pid, std::process::id());
+    assert_eq!(process_state(pid), None);
+}
+
+/// A listed burn whose list read stalls on the EVM RPC: the call ends at the
+/// kill time, long before `evm_rpc_timeout_secs`, and the burn is refused
+/// with a timeout before the deadline.
+#[test]
+fn a_stalled_list_read_ends_at_the_kill_time() {
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = crate::test_support::stalled_evm_client(&stalled);
+    let read = |_: &RejectListContract| {
+        crate::networks::evm::events::check_node_chain_id(&client, 42161)
+            .map(|_| Decisions::default())
+    };
+    let any_asset = |_: &str| Ok(());
+    let lists = ListAccess {
+        bind_asset: &any_asset,
+        read: Some(&read),
+    };
+    let bytes = listed_burn().0.consignment();
+    let chain = mined(&witness_ids(&bytes));
+    let budget = Duration::from_secs(3);
+    let rpc_timeout = Duration::from_secs(in_force().evm_rpc_timeout_secs);
+    assert!(rpc_timeout > budget + RESPONSE_MARGIN);
+    let deadline = deadline_in(budget);
+    let err = validator()
+        .validate_in_child(
+            &bytes,
+            Some(&bind_all),
+            &chain,
+            &lists,
+            &in_force(),
+            deadline,
+        )
+        .unwrap_err();
+    assert!(Instant::now() < deadline);
+    assert_eq!(err.error_code(), 1, "{err}");
+    assert!(
+        err.to_string()
+            .contains("eth_chainId did not end before the request deadline"),
+        "{err}"
+    );
 }
 
 /// With no time left for a child, the validation times out before a spawn.

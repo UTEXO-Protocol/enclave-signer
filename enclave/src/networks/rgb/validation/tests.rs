@@ -256,7 +256,7 @@ fn listed() -> History {
 
 /// A listed asset: a mint, then a burn of 60_000 with change. Returns the
 /// genesis right, the minted units and the burn.
-fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
+pub(super) fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
     let mut history = listed();
     let right = history.genesis_right(0, right_utxo());
     let units = history.mint_owned(right, MINTED, 90);

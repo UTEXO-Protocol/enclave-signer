@@ -219,11 +219,14 @@ the time the child took to answer, and its OOM score adjustment and memory.
 **End before the deadline.** The enclave ends the child at the kill time,
 `RESPONSE_MARGIN` before the request deadline, so the reply can still be
 written. When the kill time has passed before the start, the enclave
-writes no scratch file, starts no child and refuses with a timeout. Each
-read and write on the socket stops at the kill time. After the verdict, the
-end of the socket, the kill time or a broken protocol, the enclave sends
-`SIGKILL` and reaps the child. Then it removes the scratch file and
-replies.
+writes no scratch file, starts no child and refuses with a timeout. It
+checks the time again after it writes the file. Each read and write on the
+socket stops at the kill time. A timer thread of the worker sends `SIGKILL`
+at the kill time, also while the worker answers a question, and each EVM
+RPC call of an answer ends at the kill time too. A call that it ends gives
+a timeout, code 1. After the verdict, the end of the socket, the kill time
+or a broken protocol, the enclave stops the timer, sends `SIGKILL` and
+reaps the child. Then it removes the scratch file and replies.
 
 **Codes.** The enclave decides the result after it reaps the child. An
 error that the enclave kept comes before any end of the child:

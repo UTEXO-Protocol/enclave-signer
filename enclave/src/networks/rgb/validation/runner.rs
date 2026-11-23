@@ -1,10 +1,12 @@
 //! Runs one burn validation in a validator child and answers its resolvers.
-//! The enclave ends the child before the request deadline.
+//! The enclave ends the child at its kill time, before the request deadline,
+//! also while the worker answers one of its questions.
 //!
 //! The child is this binary started with `CHILD_ARG`, so exec gives it a new
-//! address space. It gets no environment of the enclave and one socket as its
-//! fd 0. The enclave keeps the scratch file, the one safe height and every
-//! resolver answer, and it checks the verdict before it uses it.
+//! address space. Of the enclave's environment it gets only `RUST_LOG`, and
+//! one socket as its fd 0. The enclave keeps the scratch file, the one safe
+//! height and every resolver answer, and it checks the verdict before it uses
+//! it.
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -14,7 +16,8 @@ use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::Hash as _;
@@ -37,8 +40,10 @@ use crate::error::{EnclaveError, Result};
 use crate::framing;
 use crate::limits::Limits;
 use crate::memory::VALIDATOR_FRAME_FIXED_BYTES;
+use crate::networks::evm::events::with_calls_ending_by;
 
-/// The program of a validator child, its arguments and its whole environment.
+/// The program of a validator child, its arguments and its environment beside
+/// `RUST_LOG`.
 #[derive(Debug, Clone)]
 pub struct ChildProgram {
     program: PathBuf,
@@ -125,7 +130,7 @@ impl ChildProgram {
                 .map_err(start_error)?
         };
         Ok(Running {
-            child,
+            child: Mutex::new(child),
             io: DeadlineStream::with_deadline(ours, kill_at, Duration::MAX),
             reaped: false,
         })
@@ -181,7 +186,8 @@ impl RgbValidator {
     /// Validates `consignment` in a validator child, and answers the child's
     /// resolvers from `bind`, `headers` and `lists` in this process. The child
     /// takes `limits`, the values in force here, as they are. It ends at
-    /// [`kill_time`], so the reply is still written before `deadline`.
+    /// [`kill_time`], and each EVM RPC call of an answer ends then too, so the
+    /// reply is still written before `deadline`.
     pub(super) fn validate_in_child(
         &self,
         consignment: &[u8],
@@ -219,10 +225,14 @@ impl RgbValidator {
             };
             // The records of a verdict take fewer bytes than the file holds.
             let cap = consignment.len() as u64 + VALIDATOR_FRAME_FIXED_BYTES as u64;
+            // The write of the file took time.
+            kill_time(deadline)?;
             let started = Instant::now();
             let mut running = program.spawn(kill_at)?;
-            let _span = tracing::info_span!("rgb_validator", pid = running.child.id()).entered();
-            let ex = exchange(&mut running.io, start, cap, kill_at, &services);
+            let _span = tracing::info_span!("rgb_validator", pid = running.pid()).entered();
+            let ex = running.until_killed(kill_at, |io| {
+                with_calls_ending_by(kill_at, || exchange(io, start, cap, kill_at, &services))
+            })?;
             let status = running.finish();
             tracing::info!(
                 elapsed_ms = millis(started.elapsed()),
@@ -258,18 +268,91 @@ fn millis(elapsed: Duration) -> u64 {
 /// A started child. Dropping it ends and reaps the child, also on an early
 /// return or an unwinding panic.
 struct Running {
-    child: std::process::Child,
+    /// A [`KillTimer`] kills the child through the lock; only `finish` reaps.
+    child: Mutex<Child>,
     io: DeadlineStream<UnixStream>,
     reaped: bool,
 }
 
 impl Running {
+    fn pid(&self) -> u32 {
+        lock(&self.child).id()
+    }
+
+    /// Runs `work` on the socket, while a timer thread kills the child at
+    /// `kill_at`: the worker may then be in an answer that does not watch the
+    /// time. The timer stops before this returns.
+    fn until_killed<T>(
+        &mut self,
+        kill_at: Instant,
+        work: impl FnOnce(&mut DeadlineStream<UnixStream>) -> T,
+    ) -> Result<T> {
+        let timer = KillTimer::default();
+        let Running { child, io, .. } = self;
+        let child = &*child;
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("rgb-validator-timer".into())
+                .spawn_scoped(scope, || timer.run(child, kill_at))
+                .map_err(|e| {
+                    EnclaveError::Internal(format!(
+                        "cannot start the kill timer of the RGB validator: {e}"
+                    ))
+                })?;
+            let _stop = StopTimer(&timer);
+            Ok(work(io))
+        })
+    }
+
     /// Ends the child and reaps it. The kill does not change the status of a
     /// child that is already exiting.
     fn finish(&mut self) -> io::Result<ExitStatus> {
-        let _ = self.child.kill();
+        let child = self.child.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let _ = child.kill();
         self.reaped = true;
-        self.child.wait()
+        child.wait()
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Kills a child at its kill time from a thread of its own.
+#[derive(Default)]
+struct KillTimer {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl KillTimer {
+    /// Kills `child` at `kill_at`, unless the timer stops first. The kill
+    /// holds the lock that a stop takes, and the worker stops the timer before
+    /// it reaps, so the kill never reaches a reaped child.
+    fn run(&self, child: &Mutex<Child>, kill_at: Instant) {
+        let mut stopped = lock(&self.stopped);
+        while !*stopped {
+            let left = kill_at.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                let _ = lock(child).kill();
+                return;
+            }
+            stopped = self
+                .wake
+                .wait_timeout(stopped, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// Stops its timer when it drops: after the work, or on an unwinding panic.
+struct StopTimer<'a>(&'a KillTimer);
+
+impl Drop for StopTimer<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.stopped) = true;
+        self.0.wake.notify_all();
     }
 }
 

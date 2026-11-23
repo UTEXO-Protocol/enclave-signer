@@ -221,9 +221,10 @@ impl Limits {
             ));
         }
         // The deadline stops the reads and writes of the request socket, but
-        // not the network calls of the enclave. So a longer network timeout
-        // lets one stalled call hold a worker past the deadline, and the
-        // request loses its reply. A longer idle timeout never applies.
+        // not the network calls of the enclave, beside the EVM calls that
+        // answer a validator child. So a longer network timeout lets one
+        // stalled call hold a worker past the deadline, and the request loses
+        // its reply. A longer idle timeout never applies.
         for (name, secs) in self.per_call_timeouts() {
             if secs > self.total_request_timeout_secs {
                 return Err(format!(
