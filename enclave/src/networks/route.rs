@@ -44,7 +44,7 @@ pub struct ValidationContext<'a> {
     /// `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
-    /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
+    /// M8 and M9 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
     /// keys are not held across I/O. `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_outputs: Option<crate::networks::rgb::psbt_validation::MintOutputsCheck<'a>>,

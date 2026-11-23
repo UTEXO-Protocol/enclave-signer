@@ -62,7 +62,16 @@ fn read_as(
     let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
     let bytes = gen::fascia_bytes(fascia);
     let wire = parse_fascia(&bytes, "fascia")?;
-    committed_transition(&psbt, wire, &bytes, "fascia", Pin::for_test(pin), main)
+    let pin = Pin::for_test(pin);
+    committed_transition(
+        &psbt,
+        wire,
+        &bytes,
+        "fascia",
+        pin,
+        main,
+        MAX_SIDE_TRANSITIONS,
+    )
 }
 
 /// The core with a propagate as the main transition: most fixtures send rights.
@@ -139,7 +148,7 @@ fn reads_a_mint_from_a_psbt_stripped_of_rgb_keys() {
     let committed = read_as(tx, &minted.fascia, cid, schemata::TS_MINT).unwrap();
     assert_eq!(committed.opid, minted.opid);
     assert_eq!(committed.transition.transition_type, schemata::TS_MINT);
-    assert_eq!((committed.moves, committed.moved_to), (0, vec![]));
+    assert!(committed.moved_to.is_empty());
     let err = read(tx, &minted.fascia, cid).unwrap_err().to_string();
     assert!(err.contains("discloses 0 transitions of type"), "{err}");
 }
@@ -283,12 +292,13 @@ fn refuses_op_return_that_is_not_34_bytes() {
 
 // ===== F4: the pinned contract =====
 
-/// Our rights send and another contract's, in one PSBT and one commitment.
-fn two_contracts() -> (History, History, Transaction, Fascia) {
+/// Our rights send and another contract's right moved to `their_vouts`, in one
+/// PSBT and one commitment.
+fn two_contracts(their_vouts: &[u32]) -> (History, History, Transaction, Fascia) {
     let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
     let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
     let our_send = send_of(&mut ours, our_rights[0]);
-    let their_send = send_of(&mut theirs, their_rights[0]);
+    let their_send = theirs.rights_transition(their_rights[0], their_vouts);
     let inputs = vec![our_rights[0].outpoint, their_rights[0].outpoint];
     let (tx, fascia) = crafted(inputs, |psbt| {
         psbt.push_rgb_transition(our_send).unwrap();
@@ -301,10 +311,37 @@ fn two_contracts() -> (History, History, Transaction, Fascia) {
 /// which the caller proves ours.
 #[test]
 fn reads_a_second_contract_bundle_as_a_move() {
-    let (ours, _, tx, fascia) = two_contracts();
+    let (ours, _, tx, fascia) = two_contracts(&[2]);
     let committed = read(&tx, &fascia, ours.contract_id).unwrap();
     assert_eq!(committed.transition.contract_id, ours.contract_id);
-    assert_eq!((committed.moves, committed.moved_to), (1, vec![1, 2]));
+    assert_eq!(committed.moved_to, vec![2]);
+}
+
+/// A side transition moves each allocation on as one. A propagate that makes
+/// two rights of one is a refill, which a mint does not carry.
+#[test]
+fn refuses_a_side_transition_that_makes_more_state_than_it_closes() {
+    let (ours, _, tx, fascia) = two_contracts(&[1, 2]);
+    let err = refusal(&tx, &fascia, ours.contract_id);
+    assert!(err.contains("closes 1 seal(s) and assigns 2"), "{err}");
+}
+
+/// A caller that takes no side transition is refused before rgb-lib reads
+/// the fascia.
+#[test]
+fn refuses_a_side_transition_where_none_is_allowed() {
+    let (ours, _, tx, fascia) = two_contracts(&[2]);
+    let psbt = Psbt::from_unsigned_tx(tx).unwrap();
+    let bytes = gen::fascia_bytes(&fascia);
+    let wire = parse_fascia(&bytes, "fascia").unwrap();
+    let (pin, main) = (Pin::for_test(ours.contract_id), schemata::TS_PROPAGATE);
+    let err = committed_transition(&psbt, wire, &bytes, "fascia", pin, main, 0)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("1 transition(s) beside the main one - at most 0"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -318,17 +355,27 @@ fn refuses_a_fascia_without_the_pinned_bundle() {
     );
 }
 
-/// rgb-lib rebuilds an MPC tree over the bundles, so their number is bounded.
+/// rgb-lib inspects every transition and rebuilds an MPC tree over the
+/// bundles, so their number is bounded: the main transition and
+/// `MAX_SIDE_TRANSITIONS` more pass the count, one more does not.
 #[test]
-fn refuses_more_bundles_than_the_limit() {
+fn refuses_more_side_transitions_than_the_limit() {
     let (_, sent) = rights_send();
     let one = sent.fascia.bundles().values().next().unwrap().clone();
-    let many = (0..=MAX_FASCIA_BUNDLES as u8)
-        .map(|tag| (ContractId::from([tag; 32]), one.clone()))
-        .collect();
-    let fascia = with_bundles(&sent.fascia, many);
-    let err = refusal(&sent.tx, &fascia, ContractId::from([0; 32]));
-    assert!(err.contains("contract bundles - at most 16"), "{err}");
+    let bundles = |count: usize| {
+        let many = (0..count as u8)
+            .map(|tag| (ContractId::from([tag; 32]), one.clone()))
+            .collect();
+        with_bundles(&sent.fascia, many)
+    };
+    let pin = ContractId::from([0; 32]);
+    let over = refusal(&sent.tx, &bundles(MAX_SIDE_TRANSITIONS + 2), pin);
+    assert!(
+        over.contains("17 transition(s) beside the main one - at most 16"),
+        "{over}"
+    );
+    let at = refusal(&sent.tx, &bundles(MAX_SIDE_TRANSITIONS + 1), pin);
+    assert!(!at.contains("at most"), "{at}");
 }
 
 #[test]
@@ -352,7 +399,7 @@ fn refuses_a_missing_or_invalid_pin() {
 /// The tx commits both bundles; the fascia drops the other contract's.
 #[test]
 fn refuses_a_bundle_hidden_from_the_fascia() {
-    let (ours, _, tx, fascia) = two_contracts();
+    let (ours, _, tx, fascia) = two_contracts(&[2]);
     let only_ours = BTreeMap::from([(ours.contract_id, bundle(&fascia, ours.contract_id))]);
     let err = refusal(&tx, &with_bundles(&fascia, only_ours), ours.contract_id);
     assert!(err.contains("doesn't commit to"), "{err}");
@@ -408,7 +455,7 @@ fn refuses_a_fascia_whose_entropy_does_not_give_the_op_return() {
     assert!(err.contains("doesn't commit to"), "{err}");
 }
 
-// ===== F6: one disclosed transition, exactly the input map =====
+// ===== F6: one main transition, moves beside it, exactly the input maps =====
 
 #[test]
 fn refuses_two_known_transitions() {
@@ -730,6 +777,7 @@ fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
                 "fascia",
                 Pin::for_test(history.contract_id),
                 schemata::TS_PROPAGATE,
+                0,
             )
         },
     );

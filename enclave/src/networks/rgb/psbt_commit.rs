@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use amplify::confinement::{Confined, U24};
+use amplify::Wrapper;
 use bitcoin::psbt::Psbt;
 use bitcoin::Transaction;
 use rgb_lib::no_wallet::{inspect_fascia, RgbInspection};
@@ -27,13 +28,16 @@ use super::validation::{output_seal, OutputSeal};
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 
-/// Most bundles a fascia may disclose. A UTXO holds few assets, and rgb-lib
-/// rebuilds an MPC tree over the bundles.
-pub const MAX_FASCIA_BUNDLES: usize = 16;
+/// Most side transitions a mint may commit. rgb-lib builds one per other
+/// allocation of the spent UTXO, which holds few. It also bounds the bundles,
+/// over which rgb-lib rebuilds an MPC tree, and the transitions it inspects.
+pub const MAX_SIDE_TRANSITIONS: usize = 16;
 
-/// The types that only move state on: what rgb-lib builds for the other
-/// allocations of a UTXO it spends. A burn, a mint, an inflation or a link
-/// changes state, so it is never a side transition.
+/// The types rgb-lib moves the other allocations of a spent UTXO with, by
+/// their number in the pinned schemas. In the pinned contract a burn, a mint,
+/// an inflation or a link is therefore never a side transition. The enclave
+/// knows no other contract's schema: there the type is only a number, and M9
+/// keeps the state.
 const MOVE_TYPES: [TransitionType; 4] = [
     schemata::TS_TRANSFER,
     schemata::TS_PROPAGATE,
@@ -48,9 +52,7 @@ pub struct Committed {
     pub txid: bitcoin::Txid,
     pub opid: OpId,
     pub transition: Transition,
-    /// How many other transitions the tx commits, of any contract.
-    pub moves: usize,
-    /// The vouts of this tx those transitions assign state to. The caller
+    /// The vouts of this tx the side transitions assign state to. The caller
     /// proves each the enclave's own.
     pub moved_to: Vec<u32>,
 }
@@ -142,8 +144,8 @@ pub fn parse_fascia(bytes: &[u8], field: &str) -> Result<Fascia> {
 
 /// F3-F6: `fascia`, which `bytes` encodes, is of the PSBT's tx, whose first
 /// OP_RETURN commits exactly its bundles. The pinned contract's bundle holds
-/// one transition of type `main`, and every other transition only moves state
-/// to an output of this tx.
+/// one transition of type `main`. The tx commits at most `max_side` other
+/// transitions, and each only moves state to an output of this tx.
 ///
 /// The fascia is dropped before rgb-lib decodes its own copy, so only one
 /// decoded fascia is live at a time (`memory.rs`).
@@ -154,10 +156,12 @@ pub fn committed_transition(
     field: &str,
     pin: Pin,
     main: TransitionType,
+    max_side: usize,
 ) -> Result<Committed> {
     let txid = psbt.unsigned_tx.compute_txid();
     assert_opret_host(&psbt.unsigned_tx)?;
     let bundles = fascia.bundles();
+    assert_side_count(bundles, max_side)?;
     let transition = main_transition(pinned_bundle(bundles, pin.contract)?, main)?;
     let opid = transition.id();
     let mut disclosed = BTreeMap::new();
@@ -173,14 +177,28 @@ pub fn committed_transition(
     drop(fascia);
     let inspection = inspect(psbt, bytes, field, pin)?;
     assert_inspects_as(&inspection, field, &disclosed, txid)?;
-    let transitions: usize = disclosed.values().map(|d| d.opids.len()).sum();
     Ok(Committed {
         txid,
         opid,
         transition,
-        moves: transitions - 1,
         moved_to: moved_to.into_iter().collect(),
     })
+}
+
+/// F4: the fascia discloses the main transition and at most `max_side` more.
+/// It runs before rgb-lib reads the fascia, whose work grows with them.
+fn assert_side_count(
+    bundles: &BTreeMap<ContractId, TransitionBundle>,
+    max_side: usize,
+) -> Result<()> {
+    let disclosed: usize = bundles.values().map(|b| b.known_transitions.len()).sum();
+    let side = disclosed.saturating_sub(1);
+    if side > max_side {
+        return Err(EnclaveError::CrossCheck(format!(
+            "the fascia discloses {side} transition(s) beside the main one - at most {max_side}"
+        )));
+    }
+    Ok(())
 }
 
 /// F3: consensus reads the commitment from the first OP_RETURN or P2TR output.
@@ -202,17 +220,11 @@ fn assert_opret_host(tx: &Transaction) -> Result<()> {
     }
 }
 
-/// F4: a bounded number of bundles, one of them the pinned contract's.
+/// F4: one of the bundles is the pinned contract's.
 fn pinned_bundle(
     bundles: &BTreeMap<ContractId, TransitionBundle>,
     pin: ContractId,
 ) -> Result<&TransitionBundle> {
-    if bundles.len() > MAX_FASCIA_BUNDLES {
-        return Err(EnclaveError::CrossCheck(format!(
-            "the fascia discloses {} contract bundles - at most {MAX_FASCIA_BUNDLES}",
-            bundles.len()
-        )));
-    }
     bundles.get(&pin).ok_or_else(|| {
         EnclaveError::CrossCheck(format!(
             "the fascia discloses no bundle of the pinned RGB_ASSET_ID {pin}"
@@ -233,29 +245,43 @@ fn main_transition(bundle: &TransitionBundle, main: TransitionType) -> Result<Tr
         .collect();
     let [transition] = of_type.as_slice() else {
         return Err(EnclaveError::CrossCheck(format!(
-            "the fascia discloses {} transitions of type {main} in the pinned asset's bundle - \
-             the mint signer signs exactly one",
-            of_type.len()
+            "the fascia discloses {} transitions of type {} in the pinned asset's bundle - the \
+             mint signer signs exactly one",
+            of_type.len(),
+            main.to_inner()
         )));
     };
     Ok((*transition).clone())
 }
 
-/// F6: a side transition only moves state, and every seal it assigns is an
-/// output of this tx. Returns those vouts.
+/// F6: a side transition is of a move type, assigns one seal per input it
+/// closes, as rgb-lib moves an allocation, and every seal is an output of this
+/// tx. So it cannot turn one right into many. Returns those vouts.
 fn move_vouts(transition: &Transition) -> Result<Vec<u32>> {
     let (opid, ty) = (transition.id(), transition.transition_type);
     if !MOVE_TYPES.contains(&ty) {
         return Err(EnclaveError::CrossCheck(format!(
-            "the fascia discloses transition {opid} of type {ty} beside the main one - a side \
-             transition only moves state on"
+            "the fascia discloses transition {opid} of type {} beside the main one - a side \
+             transition only moves state on",
+            ty.to_inner()
         )));
     }
-    let what = format!("state that side transition {opid} moves");
-    transition
+    let seals: Vec<_> = transition
         .assignments
         .values()
         .flat_map(|typed| typed.seals())
+        .collect();
+    if seals.len() != transition.inputs.len() {
+        return Err(EnclaveError::CrossCheck(format!(
+            "side transition {opid} closes {} seal(s) and assigns {} - a side transition moves \
+             each allocation on as one",
+            transition.inputs.len(),
+            seals.len()
+        )));
+    }
+    let what = format!("state that side transition {opid} moves");
+    seals
+        .into_iter()
         .map(|seal| witness_vout(&output_seal(seal), &what))
         .collect()
 }
@@ -276,8 +302,8 @@ fn disclosed_by(bundle: &TransitionBundle) -> Disclosed {
 /// commitment carries, and refuses a concealed commitment that carries none.
 ///
 /// rgb-lib builds its MPC source from the bundles of the file it reads, in a
-/// map of at most 65535 entries. That holds because [`pinned_bundle`] has
-/// already refused a fascia of more than [`MAX_FASCIA_BUNDLES`] bundles, and
+/// map of at most 65535 entries. That holds because [`assert_side_count`] has
+/// already bounded the transitions, and each bundle holds one or more, and
 /// the file carries the same bytes.
 fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
     // rgb-lib parses the PSBT from its base64 form.

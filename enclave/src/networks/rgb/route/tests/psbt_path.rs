@@ -428,7 +428,7 @@ fn m9_refuses_a_mint_that_moves_units_off_our_colored_outputs() {
         }
         let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
         let err = result.unwrap_err().to_string();
-        let want = format!("moves other state of its right's UTXO to vout {moved_to}");
+        let want = format!("moves state to vout {moved_to}");
         assert!(err.contains(&want), "{err}");
         assert!(bound.is_none(), "no deposit is read for a refused mint");
     }
@@ -503,10 +503,7 @@ fn m9_refuses_a_mint_that_moves_another_assets_state_to_the_depositor() {
     let (history, mint) = mint_moving_another_asset(witness, vec![depositor(WITNESS_SATS)], 1);
     let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("moves other state of its right's UTXO to vout 1"),
-        "{err}"
-    );
+    assert!(err.contains("moves state to vout 1"), "{err}");
     assert!(bound.is_none(), "no deposit is read for a refused mint");
 }
 
@@ -538,7 +535,61 @@ fn refuses_a_refill_that_moves_another_assets_state() {
     let err = run_refill(&made, &request, &history)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("commits 1 other transition(s)"), "{err}");
+    assert!(
+        err.contains("1 transition(s) beside the main one - at most 0"),
+        "{err}"
+    );
+}
+
+/// The same for a side transition in the refill's own bundle: units of the
+/// right's UTXO moved to an output the refill rules do not read.
+#[test]
+fn refuses_a_refill_that_moves_units_in_its_own_bundle() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let units = units_beside(&mut history, rights[0], rights[1], &keys);
+    let moved = move_units(&mut history, units, 1);
+    let refill = history.rights_transition(rights[0], &[1, 2, 3]);
+    let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
+    let mut made = history.commit_psbt(vec![moved, refill], vec![rights[0].outpoint], outputs);
+    our_input(&mut made.psbt, &keys, 1);
+    let request = SignRightsRefillRequest {
+        psbt_bytes: made.psbt.serialize(),
+        asset_id: history.contract_id.to_string(),
+        fascia: made.fascia_bytes(),
+    };
+    let err = run_refill(&made, &request, &history)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("1 transition(s) beside the main one - at most 0"),
+        "{err}"
+    );
+}
+
+/// A link right and units beside the right, each moved to the change by its
+/// own transition: two side transitions on one output, as rgb-lib builds a
+/// UTXO that holds several allocations.
+#[test]
+fn a_mint_moves_a_link_right_and_units_to_the_change() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let units = units_beside(&mut history, rights[0], rights[1], &keys);
+    let moved = move_units(&mut history, units, 1);
+    let link = Opout::new(units.op, schemata::OS_LINK, 0);
+    let linked = history
+        .transition("transferLink")
+        .add_input(link, AllocatedState::Void)
+        .unwrap()
+        .add_rights("linkRight", GraphSeal::with_blinded_vout(1u32, 11))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let mint = mint_with(&mut history, rights[0], |mint| mint);
+    let made = committed_bundle(&mut history, vec![moved, linked, mint], rights[0]);
+    let (minted, bound) = run_mint(&destination(&history, &made), &pinned(&history));
+    assert_eq!(minted.unwrap(), MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(made.opid));
 }
 
 /// The mint's transition in another tx, which spends another of our Colored
@@ -1156,8 +1207,12 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
         "fascia",
         psbt_commit::Pin::for_test(history.contract_id),
         schemata::TS_PROPAGATE,
+        0,
     )
     .unwrap();
+    // M1: the mint rules refuse a transition that is no mint.
+    let err = crate::networks::rgb::psbt_validation::mint_facts(&committed).unwrap_err();
+    assert!(err.to_string().contains("not a mint"), "{err}");
 
     let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());

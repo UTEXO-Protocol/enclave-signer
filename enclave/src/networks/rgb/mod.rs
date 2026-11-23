@@ -7,7 +7,7 @@
 //! - `validation/`: consignment parsing, rgb-lib validation, asset binding,
 //!   and the `RgbValidator` of one Bitcoin network.
 //! - `psbt_validation.rs`: binds a PSBT to a validated RGB transition.
-//! - `psbt_commit.rs`: the mint signer's core: the transition a PSBT commits.
+//! - `psbt_commit.rs`: the mint signer's core: the transitions a PSBT commits.
 //! - `btc_crosscheck.rs`: the plain-BTC (`SignBtc`) authorization gate.
 //! - `btc_ownership.rs`: proves that the enclave controls an output or input script.
 //! - `spv/`: the in-enclave Bitcoin header chain and Merkle verifier.

@@ -250,7 +250,6 @@ fn committed(transition: Transition) -> Committed {
         txid: bitcoin::Txid::all_zeros(),
         opid: transition.id(),
         transition,
-        moves: 0,
         moved_to: vec![],
     }
 }

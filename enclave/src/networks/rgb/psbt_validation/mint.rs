@@ -1,7 +1,7 @@
 //! The mint rules (`Sign`, EVM -> RGB): the rules on the committed transition,
 //! read from the fascia (what the VM's `sas` and `plc` enforce, and the shape
-//! of the mint), and the sats rule of its PSBT. The rule ids (M1-M8) are those
-//! of `docs/mint-flow.md` section 5.
+//! of the mint), and the rules on the outputs of its PSBT. The rule ids (M1-M9)
+//! are those of `docs/mint-flow.md` section 5.
 
 use amplify::{ByteArray, Wrapper};
 use bitcoin::psbt::Psbt;
@@ -146,8 +146,8 @@ pub fn assert_moved_state_kept(psbt: &Psbt, keys: &KeyManager, vouts: &[u32]) ->
             btc_ownership::output_is_self_derived(psbt, index, keys, Some(AccountType::Colored));
         if !ours || sats.unwrap_or_default() == 0 {
             return Err(EnclaveError::CrossCheck(format!(
-                "mint moves other state of its right's UTXO to vout {vout}, which is not a funded \
-                 Colored key-path output of this enclave - refusing to give that state away"
+                "mint has a side transition that moves state to vout {vout}, which is not a \
+                 funded Colored key-path output of this enclave - refusing to give that state away"
             )));
         }
     }

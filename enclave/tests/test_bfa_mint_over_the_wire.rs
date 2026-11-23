@@ -1070,7 +1070,7 @@ fn refuses_a_mint_that_moves_other_state_off_the_bridge_outputs() {
     for vout in [0, 1] {
         let built = build_on(None, None, Shape::MovesRightTo(vout), Payee::Witness);
         let refusal = refusal(&drive(&built));
-        let want = format!("moves other state of its right's UTXO to vout {vout}");
+        let want = format!("moves state to vout {vout}");
         assert!(refusal.contains(&want), "{refusal}");
     }
 }

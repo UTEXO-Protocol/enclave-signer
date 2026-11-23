@@ -133,7 +133,7 @@ one of them and no fascia fails F4.
 | `TS_MINT` | 8013 | Mint transition. A mint commits exactly one, and beside it only side transitions (F6). |
 | `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition a refill may commit (RR6). |
 | `TS_TRANSFER`, `TS_TRANSFER_INFLATION`, `TS_TRANSFER_LINK` | 10000, 8015, 8016 | With `TS_PROPAGATE`, the types a side transition may have: they move state on (F6). |
-| `MAX_FASCIA_BUNDLES` | 16 | Most contract bundles in a fascia (F4). |
+| `MAX_SIDE_TRANSITIONS` | 16 | Most side transitions of a mint, in all bundles together (F4). A refill takes none. |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). It holds no units. |
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. |
@@ -231,11 +231,14 @@ around it are the enclave's.
 - **F4** `fascia` must not be empty and must decode as rgb-lib reads its
   fascia file: strict encoding, nothing after it, at most `max_psbt_bytes`.
   Its witness txid must be the PSBT's unsigned txid, which rgb-lib's
-  inspection binds. It discloses at most 16 bundles (`MAX_FASCIA_BUNDLES`),
-  one of them of the contract that `RGB_ASSET_ID` names. The request's
-  `asset_id` must name that contract too. A bundle of another contract is
-  allowed: rgb-lib moves the state of every asset on the UTXO that it
-  spends, each asset in its own bundle.
+  inspection binds. One of its bundles is of the contract that
+  `RGB_ASSET_ID` names, and the request's `asset_id` must name that contract
+  too. A bundle of another contract is allowed: rgb-lib moves the state of
+  every asset on the UTXO that it spends, each asset in its own bundle.
+  Beside its main transition (F6) a mint's fascia discloses at most 16
+  transitions (`MAX_SIDE_TRANSITIONS`), in all bundles together, and a
+  refill's discloses none. The enclave counts them before rgb-lib reads the
+  fascia, as the work of the inspection grows with them.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. The enclave passes no entropy of its own, so rgb-lib takes the
@@ -248,15 +251,24 @@ around it are the enclave's.
   transition of the transaction, in that bundle or in another contract's, is
   a **side transition**. rgb-lib builds one for each other allocation of the
   UTXO that it spends, to move that state to its change.
-  - A side transition must be of a type that only moves state on:
+  - A side transition must be of a type that rgb-lib moves state on with:
     `TS_TRANSFER`, `TS_PROPAGATE`, `TS_TRANSFER_INFLATION` or
-    `TS_TRANSFER_LINK`. A second mint, a burn, an inflation or a link is
-    refused.
+    `TS_TRANSFER_LINK`. So in the pinned contract a second mint, a burn, an
+    inflation or a link is refused. The enclave knows no other contract's
+    schema: there the type is only a number, and M9 keeps the state.
+  - A side transition assigns exactly one seal for each input that it
+    closes, as rgb-lib moves each allocation on as one. So a side propagate
+    cannot turn one right into many: only a refill does that.
   - Every seal that a side transition assigns must be a witness seal: an
     output of this transaction. A blinded seal or an output of another
     transaction is refused, as the enclave cannot see who holds it. M9 then
     proves each of those outputs the enclave's own. A refill takes no side
     transition (RR3).
+  - rgb-lib moves state to the new change output of the transaction first.
+    Without a change output, or when it is full, rgb-lib moves the state to
+    a UTXO that the wallet already holds. That seal is on another
+    transaction, so the mint is refused, after the user's lock. The bridge
+    must refuse such a mint before the deposit.
   - Every transition is stored under its own id, which rgb-lib recomputes,
     and belongs to the contract of its bundle. In each bundle the input map
     must close exactly the inputs of the disclosed transitions: rgb-lib binds

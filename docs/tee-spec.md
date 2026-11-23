@@ -572,7 +572,7 @@ deployed.
   consensus, genesis, ancestor, witness depth or reject list. A host that
   controls the bridge can make a mint that no wallet accepts, after the user
   locked. It cannot mint units that no deposit backs, and it cannot move
-  other state of the wallet ([mint-flow.md](mint-flow.md), section 11).
+  other state out of the wallet ([mint-flow.md](mint-flow.md), section 11).
 - **Mint recipient.** The enclave checks that the signed mint is the one that
   the deposit's lockId names. It does not check that this mint pays the user.
   The lockId commits the mint transition with its seal, and the mint
@@ -583,8 +583,10 @@ deployed.
   and no fee bump is implemented. It must confirm at its original fee.
 - **Spent state.** The mint signer does not see which RGB state an input
   holds. A compromised host can make it sign a mint or a refill that spends a
-  Colored UTXO of the enclave with other state, such as a right, and that
-  state is lost. It cannot take the state. A refill needs no deposit, and its
+  Colored UTXO of the enclave with other state, such as a right, without
+  moving that state or moving less than the UTXO holds, and that state is
+  lost. It cannot take the state: a mint may move it only to a Colored output
+  of the enclave (M9). A refill needs no deposit, and its
   inputs can be any Colored UTXOs of the enclave that RR0 and RR10 allow, with
   fees from the enclave's Colored sats. The hourly refill limit is in memory
   and per process, not a total: a full mint wallet can lose its rights within
