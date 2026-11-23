@@ -66,6 +66,40 @@ fn burn() -> ValidatedConsignment {
     }
 }
 
+/// A settling transition comes with its witness txid and OpId, or the child
+/// refuses its own verdict.
+#[test]
+fn a_settling_transition_without_its_txid_or_opid_is_refused() {
+    let halves = [
+        ValidatedConsignment {
+            settling_witness_txid: None,
+            ..burn()
+        },
+        ValidatedConsignment {
+            settling_op_id: None,
+            ..burn()
+        },
+        ValidatedConsignment {
+            settling_transition: None,
+            ..burn()
+        },
+    ];
+    for half in halves {
+        let err = validated(&half).unwrap_err();
+        assert!(
+            matches!(&err, Internal(text) if text.contains("settling")),
+            "{err}"
+        );
+    }
+    let none = ValidatedConsignment {
+        settling_transition: None,
+        settling_witness_txid: None,
+        settling_op_id: None,
+        ..burn()
+    };
+    assert!(validated(&none).unwrap().settling.is_none());
+}
+
 /// `message` in a frame, as one end writes it.
 fn frame_of(message: &impl Message) -> Vec<u8> {
     let mut wire = Vec::new();
@@ -133,7 +167,9 @@ fn every_message_round_trips() {
             address: Bytes::from_static(&[0x4e; 20]),
         }),
         to_enclave::Body::Verdict(Verdict {
-            outcome: Some(verdict::Outcome::Validated(Box::new(validated(&burn())))),
+            outcome: Some(verdict::Outcome::Validated(Box::new(
+                validated(&burn()).unwrap(),
+            ))),
             peak_rss_bytes: 1 << 30,
         }),
         to_enclave::Body::Verdict(Verdict {
@@ -396,9 +432,9 @@ fn a_verdict_decodes_without_copying_its_records() {
             };
             let verdict = ToEnclave {
                 body: Some(to_enclave::Body::Verdict(Verdict {
-                    outcome: Some(verdict::Outcome::Validated(Box::new(validated(
-                        &consignment,
-                    )))),
+                    outcome: Some(verdict::Outcome::Validated(Box::new(
+                        validated(&consignment).unwrap(),
+                    ))),
                     peak_rss_bytes: 0,
                 })),
             };

@@ -531,7 +531,7 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         .validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists())
         .unwrap();
     let safe = chain.safe_height();
-    let good = ipc::validated(&validated);
+    let good = ipc::validated(&validated).unwrap();
     let accept = |v: ipc::Validated| {
         let ex = Exchange {
             ended: verdict_of(verdict::Outcome::Validated(Box::new(v))),

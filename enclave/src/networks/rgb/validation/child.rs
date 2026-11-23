@@ -276,7 +276,10 @@ fn validate(job: ipc::Validate, io: &UnixStream) -> ipc::Verdict {
         ipc::held()
     } else {
         match result {
-            Ok(validated) => ipc::verdict::Outcome::Validated(Box::new(ipc::validated(&validated))),
+            Ok(validated) => match ipc::validated(&validated) {
+                Ok(validated) => ipc::verdict::Outcome::Validated(Box::new(validated)),
+                Err(e) => ipc::verdict::Outcome::Refused(ipc::refusal(&e)),
+            },
             Err(e) => ipc::verdict::Outcome::Refused(ipc::refusal(&e)),
         }
     };

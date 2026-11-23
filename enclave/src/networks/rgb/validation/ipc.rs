@@ -561,8 +561,9 @@ pub(super) fn held() -> verdict::Outcome {
 }
 
 /// What a child sends of the consignment it validated. The transitions by
-/// witness and the outputs of the settling transition stay behind.
-pub(super) fn validated(consignment: &ValidatedConsignment) -> Validated {
+/// witness and the outputs of the settling transition stay behind. A settling
+/// transition comes with its witness txid and OpId, or none of them does.
+pub(super) fn validated(consignment: &ValidatedConsignment) -> Result<Validated, EnclaveError> {
     let settling = match (
         &consignment.settling_transition,
         consignment.settling_witness_txid,
@@ -578,16 +579,21 @@ pub(super) fn validated(consignment: &ValidatedConsignment) -> Validated {
                 .burn_reason
                 .map_or_else(Bytes::new, |reason| Bytes::copy_from_slice(&reason)),
         }),
-        _ => None,
+        (None, None, None) => None,
+        _ => {
+            return Err(EnclaveError::Internal(
+                "a settling transition without its witness txid or OpId".into(),
+            ))
+        }
     };
-    Validated {
+    Ok(Validated {
         contract_id: Bytes::copy_from_slice(consignment.contract_id.as_bytes()),
         chain_net: Bytes::copy_from_slice(consignment.chain_net.as_bytes()),
         witness_blocks: pack_witness_blocks(&consignment.witness_blocks).into(),
         settling,
         mint_locks: pack_locks(&consignment.mint_locks).into(),
         witness_txids: pack_witness_txids(&consignment.witness_txids).into(),
-    }
+    })
 }
 
 #[cfg(test)]
