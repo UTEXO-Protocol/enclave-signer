@@ -380,6 +380,26 @@ fn a_malformed_request_breaks_the_protocol() {
     assert!(matches!(ex.ended, Ended::Closed), "{:?}", ex.ended);
 }
 
+/// After the enclave refused a request, it serves no other: the next one
+/// breaks the protocol, and the kept error stays the result.
+#[test]
+fn a_request_after_a_refusal_breaks_the_protocol() {
+    let side = Side::failing("headers", header_wait);
+    let ex = scripted(&side, &[], later(), |mut peer| {
+        peer.bind();
+        let answer = peer.ask(to_enclave::Body::Header(1));
+        assert!(
+            matches!(answer, Some(to_child::Body::Refused(_))),
+            "{answer:?}"
+        );
+        peer.send(anchors(1));
+    });
+    assert_protocol(&ex, "a request after the enclave refused one");
+    assert_eq!(side.anchor_binds.get(), 0);
+    let err = outcome_of(ex, exited(0)).unwrap_err();
+    assert_eq!(err.error_code(), 9, "{err}");
+}
+
 /// Mint anchors need a binder, and come one at a time in whole records.
 #[test]
 fn anchors_without_a_binder_or_with_two_records_are_refused() {
