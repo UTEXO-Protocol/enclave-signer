@@ -163,13 +163,23 @@ fn confinement_outcome(
 }
 
 /// Closes each descriptor above 2. The listing's own descriptor is closed
-/// before the loop, so its number gives `EBADF`.
+/// before the loop, so its number gives `EBADF`. A listing that fails part
+/// way refuses, so no descriptor stays open unseen.
 #[cfg(target_os = "linux")]
 fn close_inherited_fds() -> std::io::Result<()> {
-    let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")?
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-        .filter(|fd| *fd > 2)
-        .collect();
+    let mut fds = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let name = entry?.file_name();
+        let fd: i32 = name.to_str().and_then(|n| n.parse().ok()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("a descriptor named {name:?}"),
+            )
+        })?;
+        if fd > 2 {
+            fds.push(fd);
+        }
+    }
     for fd in fds {
         match nix::unistd::close(fd) {
             Ok(()) | Err(nix::errno::Errno::EBADF) => {}
