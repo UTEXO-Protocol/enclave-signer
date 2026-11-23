@@ -17,10 +17,11 @@
 //! an output with a tree is refused too.
 //!
 //! A refusal cannot rely on that metadata, since the host that builds the PSBT
-//! supplies it. So a witness mint, which must not pay an output of the enclave,
-//! also compares the output with the scripts of the inputs the enclave controls
-//! ([`controlled_input_scripts`]). That comparison needs no metadata, and it
-//! matches a tapret-tweaked input too.
+//! supplies it. So a witness mint, which must not put its units on an output of
+//! the enclave, also compares that one output with the scripts of the inputs the
+//! enclave controls ([`controlled_input_scripts`]). That comparison needs no
+//! metadata, and it matches a tapret-tweaked input too. The change of the mint is
+//! the enclave's own output.
 
 use std::collections::HashSet;
 
