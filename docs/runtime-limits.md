@@ -184,30 +184,28 @@ work of rgb-lib on one consignment.
 them.
 
 These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
-8375C at 2.9 GHz, nitro-cli 1.4.5) on 2026-11-05, with 4096 MiB. `MemTotal` was
-3943 MiB. The request is a history of 10,000 transfers with a proof on each. The
-model gives it 19.95 s.
+8375C at 2.9 GHz, nitro-cli 1.4.5, enclave kernel 4.14.256) on 2026-11-23, with
+2 vCPUs and 4096 MiB. `MemTotal` was 3943 MiB. Each request is a burn of 10,000
+transfers with a 13-sibling SPV proof on each, 8,932,383 bytes, with a consignment
+of its own. The production burn build validates it as the validator child, so each
+time includes the start of the child and its questions to the enclave. The model
+gives it 20.10 s. Two runs gave the same times within 0.3 s.
 
-| Requests at once | 2 vCPUs (1 core) | 4 vCPUs (2 cores) |
-|---|---|---|
-| 1 | 14.3 s | 14.3 s |
-| 2 | 26.8 s | 14.9 s |
-| 4 | 52.8 s | 27.1 s |
+| Requests at once | Time of each request, 2 vCPUs (1 core) |
+|---|---|
+| 1 | 12.0 to 12.1 s |
+| 2 | 21.3 to 21.5 s |
+| 4 | 42.9 to 43.2 s |
 
 The default launch has 2 vCPUs, and these are two threads of one core. So four
-requests take 3.7 times as long as one. On every shape measured, the time of one
-request was at or below the model.
+requests take 3.6 times as long as one, and one request takes 0.60 of its model.
+4 vCPUs were not measured through the validator child.
 
 An honest history at the 10 MiB limit models at about 23 s. Four of them at once take
-about 65 s on 2 vCPUs, so they fit the deadline of the image, 90 s. A forged request
-can model at the 30 s of `max_rgb_lib_ms`. Four of these at once can take about 110 s
-on 2 vCPUs: the burn signer ends their validator children before the deadline and
-refuses them. On 4 vCPUs they take about 57 s.
-
-**Outstanding measurement.** These times do not include the start of a validator
-child or its questions to the enclave: one for each witness and each mint. Take them
-again through the child before the burn image of this code is released, and replace
-this table.
+about 50 s on 2 vCPUs, so they fit the deadline of the image, 90 s, less
+`RESPONSE_MARGIN`. A forged request can model at the 30 s of `max_rgb_lib_ms`. Four
+of these at once can take about 107 s on 2 vCPUs: the burn signer ends their validator
+children before the deadline and refuses them.
 
 ## Smaller production host
 
