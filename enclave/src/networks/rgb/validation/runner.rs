@@ -24,6 +24,7 @@ use bitcoin::hashes::Hash as _;
 use prost::bytes::Bytes;
 use prost::Message;
 use rgb_lib::ChainNet;
+use sha2::{Digest, Sha256};
 
 use super::super::scratch::with_scratch_file;
 use super::bfa::AnchorBinder;
@@ -430,6 +431,8 @@ struct Exchange {
     kept: Option<EnclaveError>,
     /// The contract id the asset bind passed.
     bound: Option<String>,
+    /// Digest of the lock records the enclave bound, in the order it sent them.
+    locks: Sha256,
     /// Requests answered, for the log.
     requests: u64,
 }
@@ -448,6 +451,7 @@ fn exchange<S: Read + Write>(
         ended: Ended::Closed,
         kept: None,
         bound: None,
+        locks: Sha256::new(),
         requests: 0,
     };
     let mut list_read = false;
@@ -516,14 +520,20 @@ fn answer(
             let bind = services
                 .bind
                 .ok_or("mint anchors, but the enclave binds no anchor")?;
-            let anchors = ipc::unpack_anchors(&ask.records)?;
-            if anchors.len() > 1 {
-                return Err(format!("{} mint anchors in one request", anchors.len()));
+            // At most one record, checked before the records are read.
+            if ask.records.len() > ipc::ANCHOR_RECORD_BYTES {
+                return Err(format!(
+                    "{} bytes of mint anchors in one request, over one record",
+                    ask.records.len()
+                ));
             }
+            let anchors = ipc::unpack_anchors(&ask.records)?;
             bind(&anchors).map(|bound| {
+                let locks = ipc::pack_locks(&bound.locks);
+                ex.locks.update(&locks);
                 to_child::Body::Bound(ipc::Bound {
                     evm_chain_id: bound.evm_chain_id,
-                    locks: ipc::pack_locks(&bound.locks),
+                    locks,
                 })
             })
         }
@@ -618,7 +628,11 @@ fn outcome(
     safe: Option<NonZeroU32>,
 ) -> Result<ValidatedConsignment> {
     let Exchange {
-        ended, kept, bound, ..
+        ended,
+        kept,
+        bound,
+        locks,
+        ..
     } = ex;
     if let Some(kept) = kept {
         if !ended.is_held() {
@@ -635,10 +649,12 @@ fn outcome(
             outcome: Some(verdict::Outcome::Validated(validated)),
             ..
         }) => match bound {
-            Some(bound) => match into_validated(*validated, &bound, chain_net, safe) {
-                Ok(validated) => return Ok(validated),
-                Err(what) => what,
-            },
+            Some(bound) => {
+                match into_validated(*validated, &bound, &locks.finalize(), chain_net, safe) {
+                    Ok(validated) => return Ok(validated),
+                    Err(what) => what,
+                }
+            }
             None => "a validated consignment without an asset bind".into(),
         },
         Ended::Verdict(ipc::Verdict {
@@ -672,11 +688,13 @@ fn outcome(
 /// The consignment of a verdict, after the checks that tie it to this
 /// validation, or what broke the protocol. The witness txids are the ones of
 /// the bundles, so the enclave's own B3.2 check compares them with the witness
-/// blocks. The transitions by witness and the outputs of the settling
-/// transition stay empty.
+/// blocks. Its mint locks must be the ones the enclave bound, whose digest is
+/// `answered_locks`. The transitions by witness and the outputs of the
+/// settling transition stay empty.
 fn into_validated(
     v: ipc::Validated,
     bound: &str,
+    answered_locks: &[u8],
     chain_net: ChainNet,
     safe: Option<NonZeroU32>,
 ) -> std::result::Result<ValidatedConsignment, String> {
@@ -715,6 +733,9 @@ fn into_validated(
         }
         None => (None, None, None),
     };
+    if Sha256::digest(&v.mint_locks).as_slice() != answered_locks {
+        return Err("mint locks other than the ones the enclave bound".into());
+    }
     let mint_locks = ipc::unpack_locks(&v.mint_locks)?;
     Ok(ValidatedConsignment {
         contract_id: bound.to_owned(),

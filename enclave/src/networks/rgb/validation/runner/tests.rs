@@ -245,6 +245,7 @@ fn bound(ended: Ended) -> Exchange {
         ended,
         kept: None,
         bound: Some(CONTRACT.into()),
+        locks: Sha256::new(),
         requests: 0,
     }
 }
@@ -413,11 +414,11 @@ fn anchors_without_a_binder_or_with_two_records_are_refused() {
         peer.bind();
         peer.send(anchors(2));
     });
-    assert_protocol(&ex, "2 mint anchors in one request");
+    assert_protocol(&ex, "bytes of mint anchors in one request, over one record");
     let ex = scripted(&side, &[], later(), |mut peer| {
         peer.bind();
         peer.send(to_enclave::Body::Anchors(ipc::Anchors {
-            records: Bytes::from(vec![0; ipc::ANCHOR_RECORD_BYTES + 1]),
+            records: Bytes::from(vec![0; ipc::ANCHOR_RECORD_BYTES - 1]),
         }));
     });
     assert_protocol(&ex, "not a whole number");
@@ -438,6 +439,24 @@ fn anchors_without_a_binder_or_with_two_records_are_refused() {
     });
     assert!(matches!(ex.ended, Ended::Closed), "{:?}", ex.ended);
     assert_eq!((side.anchor_binds.get(), ex.requests), (2, 3));
+    // The enclave keeps the digest of the one lock it bound.
+    let to_child::Body::Bound(one) = answer_of(anchors(1)) else {
+        unreachable!()
+    };
+    assert_eq!(ex.locks.finalize(), Sha256::digest(&one.locks));
+}
+
+/// The enclave's answer to an `Anchors` request, from the test binder.
+fn answer_of(request: to_enclave::Body) -> to_child::Body {
+    let to_enclave::Body::Anchors(ask) = request else {
+        unreachable!()
+    };
+    let anchors = ipc::unpack_anchors(&ask.records).unwrap();
+    let bound = bind_all(&anchors).unwrap();
+    to_child::Body::Bound(ipc::Bound {
+        evm_chain_id: bound.evm_chain_id,
+        locks: ipc::pack_locks(&bound.locks),
+    })
 }
 
 /// A kept refusal is the result, with its own code and tips, whatever the
@@ -532,11 +551,15 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
         .unwrap();
     let safe = chain.safe_height();
     let good = ipc::validated(&validated).unwrap();
+    // The enclave bound the locks of the good verdict.
+    let mut answered = Sha256::new();
+    answered.update(&good.mint_locks);
     let accept = |v: ipc::Validated| {
         let ex = Exchange {
             ended: verdict_of(verdict::Outcome::Validated(Box::new(v))),
             kept: None,
             bound: Some(validated.contract_id.clone()),
+            locks: answered.clone(),
             requests: 0,
         };
         outcome(ex, Ok(exited(0)), ChainNet::BitcoinRegtest, safe)
@@ -569,7 +592,7 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
     );
     let not_a_witness = "a settling witness that is not a witness of the consignment";
     type Change<'a> = (&'a str, &'a dyn Fn(&mut ipc::Validated), &'a str);
-    let cases: [Change<'_>; 12] = [
+    let cases: [Change<'_>; 13] = [
         (
             "another contract",
             &|v| v.contract_id = Bytes::from_static(b"rgb:another-asset"),
@@ -629,6 +652,14 @@ fn a_verdict_the_enclave_cannot_accept_is_refused() {
             "a record of another length",
             &|v| v.witness_blocks.truncate(v.witness_blocks.len() - 1),
             "witness block records, not a whole number",
+        ),
+        (
+            "a lock the enclave did not bind",
+            &|v| {
+                let extra = [0x5c; ipc::LOCK_RECORD_BYTES];
+                v.mint_locks = [v.mint_locks.as_ref(), &extra[..]].concat().into();
+            },
+            "mint locks other than the ones the enclave bound",
         ),
     ];
     for (case, change, refusal) in cases {

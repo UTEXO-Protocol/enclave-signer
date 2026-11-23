@@ -104,7 +104,7 @@ flowchart TD
 - Step 1 from `Transfer::load` to the verdict runs in the validator child
   of the burn signer. The enclave answers each resolver question, keeps its
   own error when it refuses one, and checks the verdict against the asset
-  bind, the network and its safe height
+  bind, the network, the mint locks it bound and its safe height
   ([specification](../tee-spec.md#validator-child-burn-signer)).
 - A burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after

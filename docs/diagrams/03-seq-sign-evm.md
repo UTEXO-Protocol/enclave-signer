@@ -61,7 +61,7 @@ sequenceDiagram
     Child->>Child: settling transition (their one burn):<br/>burnedAsset, burnReason, OpId
     Child-->>Rgb: Verdict: Validated, Refused or held
     Rgb->>Child: SIGKILL and reap after the verdict, the end of the socket,<br/>the kill time or a broken protocol, then remove the scratch file
-    Rgb->>Rgb: the kept enclave error first, else the verdict:<br/>bound contract, chain, witness blocks sorted and not above the safe height,<br/>witness txids sorted, settling witness among them (else REFUSE)
+    Rgb->>Rgb: the kept enclave error first, else the verdict:<br/>bound contract, chain, mint locks the enclave bound,<br/>witness blocks sorted and not above the safe height,<br/>witness txids sorted, settling witness among them (else REFUSE)
     Rgb-->>Srv: ValidatedConsignment
 
     Note over Srv,Chain: SPV gate (inside validate_source)

@@ -251,9 +251,10 @@ enclave process: the child cuts its text as dispatch cuts an error text, to
 is.
 
 **What the enclave checks again.** The enclave trusts the verdict as it
-would trust this validation in its own process: for the consensus result,
-the settling transition and the mint locks. It checks that the verdict is for
-the contract id of the asset bind and for its own network. It checks that
+would trust this validation in its own process: for the consensus result
+and the settling transition. It checks that the verdict is for the contract
+id of the asset bind and for its own network, and that its mint locks are
+the locks the enclave bound, in the order it bound them. It checks that
 the witness blocks are in strictly ascending txid order, and each have a
 height from 1 to the safe height of the start, and that the witness txids
 are in strictly ascending order. It checks that the witness of the settling
