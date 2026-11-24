@@ -197,37 +197,24 @@ validator child.
 Four of these requests at once fit the deadline of the image, 90 s, less
 `RESPONSE_MARGIN`. A request that takes longer, alone or beside others, does not:
 the burn signer ends its validator child before the deadline and refuses the burn.
-Measure the longest history that the bridge accepts on the CPU of the burn
-enclaves, at the concurrency of the host, before a change of
-`total_request_timeout_secs`, of `max_consignment_bytes` or of the rgb-lib pin.
+Before a change that cuts this headroom on purpose (a shorter deadline, a
+larger `max_consignment_bytes`, fewer vCPUs or more workers), measure the
+longest history that the bridge accepts on the CPU of the burn enclaves, at
+the concurrency of the host.
 
 ## Smaller production host
 
 For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
-**4096 MiB** and these settings:
+**4096 MiB** and `GRPC_MAX_CONCURRENT_SIGN=4`.
 
-| Setting | Value |
-|---|---:|
-| `total_request_timeout_secs` | 320 |
-| `GRPC_MAX_CONCURRENT_SIGN` | 4 |
-| Parent enclave wait | 330 s |
-| `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
-| Backend request timeout | At least 340 s |
+The deadline stays the image's 90 s, so the parent, node and backend timeouts
+stay at their defaults too. This is the enclave of
+[Measured times](#measured-times): four requests at once take 43 s there.
+Every request can hold a worker until the deadline, so a longer deadline only
+raises what a forged consignment costs.
 
-The deadline is `30 s × 2 × 4 / 0.75 = 320 s`. The 30 s is an allowance for
-one history alone, not a measured time and not a limit: no check holds a
-validation to it. The rest is twice that CPU time, four workers sharing one
-core, and one quarter left for other work. The ×2 factor is headroom for the
-smaller host. [Measured times](#measured-times) has the times of one
-history. Every request can hold a worker until this deadline, so a longer
-deadline also raises what a forged consignment costs. Timeouts round up to five seconds: enclave 320, parent wait 330,
-parent request 335, backend 340.
-
-Use [the parent profile](../deploy/profiles/burn-small-host.env) and
-[the limits file](../deploy/profiles/burn-small-host-limits.conf) on every
-host deploy. Set the backend and parent values before raising the enclave
-deadline; [apply and persist the limits](#commands) for each selected CID.
-The release workflow does not forward the profile overrides.
+Use [the parent profile](../deploy/profiles/burn-small-host.env) on every
+host deploy. The release workflow does not forward the profile overrides.
 
 ## What the attestation shows
 

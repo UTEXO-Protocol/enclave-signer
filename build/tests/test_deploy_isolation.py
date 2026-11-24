@@ -254,7 +254,7 @@ elif name == 'ss':
                           self.local / 'lib/utexo/18'):
             self.assertEqual(directory.stat().st_mode & 0o005, 0o005, str(directory))
 
-    def test_parent_timeout_is_written_for_only_the_selected_cid(self):
+    def test_parent_profile_is_written_for_only_the_selected_cid(self):
         self.assert_success(self.deploy(16, 'mint'))
         peer = self.etc / 'utexo/parent-16.env'
         before = peer.read_bytes()
@@ -268,7 +268,7 @@ elif name == 'ss':
         self.assertEqual(self.config(18)['ENCLAVE_MEMORY'], '4096')
         self.assertEqual(peer.read_bytes(), before)
         parent = (self.etc / 'utexo/parent-18.env').read_text()
-        self.assertIn('GRPC_REQUEST_TIMEOUT_SECS=335\n', parent)
+        self.assertIn('GRPC_REQUEST_TIMEOUT_SECS=120\n', parent)
         self.assertIn('GRPC_MAX_CONCURRENT_SIGN=4\n', parent)
 
     def test_invalid_parent_timeout_fails_before_host_changes(self):

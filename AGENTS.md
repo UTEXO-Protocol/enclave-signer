@@ -351,13 +351,6 @@ report that conflict and keep it visible until the implementation is fixed.
   A long log line can hold heap after its request ends.
 - Measure the memory model again when the code or dependency it describes
   changes.
-- For every rgb-lib or rgb-consensus pin change, measure again the burn
-  validation times of [runtime-limits.md](docs/runtime-limits.md#measured-times)
-  on the CPU used by the burn enclaves, through the validator child. Record
-  the source and dependency revisions, compiler, CPU, load, concurrency and
-  repeated results. A passing test on another CPU is not this measurement.
-  Keep allowances for other hardware or concurrency separate from measured
-  results, and round planned timeouts up to five seconds.
 - Carry a request deadline through queueing, connection setup, reads, writes,
   RPC retries and expensive work. A socket timeout alone does not cancel a
   handler or prove that signing stopped.
