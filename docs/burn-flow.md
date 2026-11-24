@@ -475,14 +475,18 @@ kill time, before the deadline, so rgb-lib never runs past it
 ([specification](tee-spec.md#validator-child-burn-signer)).
 
 A burn whose validation is ended this way is refused with error code 10
-([specification](tee-spec.md#63-errors)), also when the kill time comes
+([specification](tee-spec.md#63-errors)), also when the time runs out
 while the enclave reads the reject list: that read is the last step of a
-validation, so a slow one leaves it too little time. The refusal says
-nothing about the consignment. The same consignment can pass a later request, when the enclave
+validation, so a slow one leaves it too little time, and the enclave makes
+no call that no longer fits the deadline. The refusal says nothing about
+the consignment. The same consignment can pass a later request, when the enclave
 runs fewer validations at once. A consignment that one validation alone
 cannot finish within the deadline is refused on every request, until the
 operator raises `total_request_timeout_secs`
 ([runtime-limits.md](runtime-limits.md)).
 
-`max_consignment_bytes` bounds the file, and with it the memory of a
-validation ([runtime-limits.md](runtime-limits.md)).
+`max_consignment_bytes` bounds the file. The memory of a validation follows
+from it and from the other inputs of the memory model: the entries of the
+reject list (`max_reject_list_entries`), the workers, the scratch file, the
+frames and the reserve of each validator child
+([runtime-limits.md](runtime-limits.md)).

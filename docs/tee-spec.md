@@ -226,7 +226,8 @@ socket stops at the kill time. A timer thread of the worker sends `SIGKILL`
 at the kill time, also while the worker answers a question, and each EVM
 RPC call of an answer ends at the kill time too. An answer still open at
 the kill time ends the validation as the kill time does, code 10, and the
-enclave logs the call it cut. After the verdict, the end of the socket, the kill time
+enclave logs the call it cut. A reject-list call that no longer fits the
+deadline is not made, and gives code 10 too. After the verdict, the end of the socket, the kill time
 or a broken protocol, the enclave stops the timer, sends `SIGKILL` and
 reaps the child. Then it removes the scratch file and replies.
 
