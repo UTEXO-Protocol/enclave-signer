@@ -879,9 +879,11 @@ fn the_kill_timer_ends_a_child_while_the_worker_answers_it() {
     assert_eq!(process_state(pid), None);
 }
 
-/// A listed burn whose list read stalls on the EVM RPC: the call ends at the
-/// kill time, long before `evm_rpc_timeout_secs`, and the burn is refused
-/// with a timeout before the deadline.
+/// A listed burn whose list read is still open at the kill time: the call ends
+/// there, long before `evm_rpc_timeout_secs`, and the burn is refused before
+/// the deadline as a validation that ran out of time. The read is the last
+/// step of a validation, so a slow one leaves it too little time with a
+/// healthy provider too, and a retry would cost the whole validation again.
 #[test]
 fn a_stalled_list_read_ends_at_the_kill_time() {
     let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -912,12 +914,8 @@ fn a_stalled_list_read_ends_at_the_kill_time() {
         )
         .unwrap_err();
     assert!(Instant::now() < deadline);
-    assert_eq!(err.error_code(), 1, "{err}");
-    assert!(
-        err.to_string()
-            .contains("eth_chainId did not end before the request deadline"),
-        "{err}"
-    );
+    assert!(matches!(err, EnclaveError::RgbValidationTimedOut), "{err}");
+    assert_eq!(err.error_code(), 10);
 }
 
 /// With no time left for a child, the validation times out before a spawn.
