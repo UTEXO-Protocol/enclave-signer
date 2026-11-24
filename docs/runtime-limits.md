@@ -274,8 +274,10 @@ deadline.
 
 Timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS` on
 the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` (default 110 s) and
-`PARENT_ADAPTER_GRPC_TIMEOUT` (default 120 s) on the signer node, and the timeout of
-the backend (2 minutes). Each must stay above the deadline plus
+`PARENT_ADAPTER_GRPC_TIMEOUT` (default 120 s) on the signer node, its inbound
+`GRPC_REQUEST_TIMEOUT` (default 120 s, and `GRPC_SHUTDOWN_TIMEOUT` at least as long),
+`NODE_SIGN_TIMEOUT` of the backend's signer for each node (default 2 minutes), and the
+backend's own request timeout. Each must stay above the deadline plus
 `ENCLAVE_WAIT_MARGIN_SECS`. The image's 90 s fits these defaults; a longer deadline
 needs every one of them raised first, the node's attempt timeout too. A
 shorter one ends a slow request before the enclave answers, so the refusal of a

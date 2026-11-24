@@ -162,19 +162,19 @@ fn a_provider_without_eth_call_fails_closed() {
     assert!(err.contains("makes no eth_call"), "{err}");
 }
 
-/// A read that cannot end before the request deadline refuses with its cause
-/// and makes no call, rather than losing the response.
+/// A read that cannot end before the request deadline makes no call, rather
+/// than losing the response. It is the validation that ran out of time, not a
+/// fault of the list or of the provider, so the backend rechecks it later.
 #[test]
-fn a_read_past_the_request_deadline_is_refused() {
+fn a_read_past_the_request_deadline_is_a_validation_out_of_time() {
     let rpc = ListEvm::new(1, list_of(10));
     for deadline in [
         std::time::Instant::now(),
         std::time::Instant::now() + crate::conn::RESPONSE_MARGIN / 2,
     ] {
-        let err = read_reject_list(&rpc, &LIST, deadline)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("exceeded the request budget"), "{err}");
+        let err = read_reject_list(&rpc, &LIST, deadline).unwrap_err();
+        assert!(matches!(err, EnclaveError::RgbValidationTimedOut), "{err}");
+        assert_eq!(err.error_code(), 10);
     }
     assert!(rpc.calls().is_empty());
 }

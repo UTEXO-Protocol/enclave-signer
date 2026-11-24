@@ -94,6 +94,38 @@ fn a_burn_of_8193_rights_reaches_the_witness_checks() {
     assert!(asked > 0, "rgb-lib ran: {err}");
 }
 
+/// `t` rights, then one bundle of `t` one-right burns in a tx with `d` dummy
+/// inputs before the real one: rgb-lib checks each burn against the whole tx.
+fn many_burns(mut history: History, t: u16, d: u32) -> Vec<u8> {
+    let right = history.genesis_right(0, right_utxo());
+    let (rights, at) = propagate_rights(&mut history, right, t);
+    let burns = (0..t)
+        .map(|no| {
+            let right = Opout::new(rights, bfa_schema::OS_MINT, no);
+            let burn = history.transition("burn");
+            let burn = burn.add_input(right, AllocatedState::Void).unwrap();
+            burn.complete_transition().unwrap()
+        })
+        .collect();
+    history.commit_bundle(
+        gen::bundle_of(burns),
+        dummies_then(d, at),
+        vec![gen::dust(4)],
+    );
+    history.consignment()
+}
+
+/// 256 burns in one bundle of a tx with 13,400 inputs: 256 scans of a tx of
+/// about 550 KB, more work than any check allowed before rgb-lib ran. No
+/// check refuses it now, so it reaches the witness checks of rgb-lib.
+#[test]
+fn many_burns_in_a_wide_tx_reach_the_witness_checks() {
+    let bytes = many_burns(issue(), 256, 13_400);
+    let (err, asked) = validate_unmined(&bytes);
+    assert!(err.contains("no header at height"), "{err}");
+    assert!(asked > 0, "rgb-lib ran: {err}");
+}
+
 /// rgb-lib refuses the second copy of a transition in a bundle: the first
 /// spent its inputs.
 #[test]

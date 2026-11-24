@@ -311,7 +311,10 @@ jobs:
       - name: Test (RGB release stress, on request)
         if: github.event_name == 'workflow_dispatch' && inputs.run_stress
         timeout-minutes: 30
-        run: cargo test --locked --release $ENCLAVE --features burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --locked --release $ENCLAVE --features $TEST_FEATURES --lib -- --ignored --nocapture --test-threads=1 10_000 2>&1 | tee stress.log
+          awk '/^test result:/ { n += $4 } END { if (n != 3) { print "::error::expected 3 large-history tests, ran " n; exit 1 } }' stress.log
 
       # The burn build without `vsock` and without the test-only features.
       - name: Test (burn without test features)
