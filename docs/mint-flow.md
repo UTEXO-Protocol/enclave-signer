@@ -142,7 +142,7 @@ one of them and no fascia fails F4.
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| MPC tree minimum depth | 3 | The least depth rgb-lib commits with, and rebuilds the tree at in F5. It grows to hold one leaf per bundle. |
+| MPC tree minimum depth | 3 | The least depth rgb-lib commits with, and rebuilds the tree at in F5. It grows until every contract id has a position of its own. |
 | Colored account | `m/86'/827166'/0'` on mainnet | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
 
@@ -237,12 +237,11 @@ rules around it are the enclave's.
   too. A bundle of another contract is allowed when it only moves state
   (F6): rgb-lib moves the state of every asset on the UTXO that it spends,
   each asset in its own bundle.
-  The size limit is also what bounds the work of F5 and of the inspection:
-  the MPC tree is as wide as the smallest power of two that holds one leaf
-  per bundle, and every leaf of that width is hashed, so the bundle count
-  sets the cost and the byte limit sets the count. The inspection also reads
-  each transition that the fascia discloses, so the byte limit bounds that
-  work too.
+  The size limit bounds the bytes that the inspection reads. It does not
+  bound the work of F5: the MPC tree grows until every contract id has a
+  position of its own, and every position of that width is hashed, taken or
+  not. So the cost follows the bundle count and the ids, which the host
+  picks, and a few thousand small bundles fit in 1 MiB.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. The enclave passes no entropy of its own, so rgb-lib takes the

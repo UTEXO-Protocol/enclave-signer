@@ -121,7 +121,7 @@ fn rgb_lib_network(cfg: &BridgeConfig) -> BitcoinNetwork {
 ///
 /// The size bound runs before the bytes reach a scratch file or rgb-lib. A
 /// fascia holds a tx and its RGB data, so the PSBT size limit applies to it
-/// too (`memory.rs`), and it is what bounds the work of the MPC rebuild in
+/// too (`memory.rs`). It bounds the bytes, not the work of the MPC rebuild in
 /// [`inspect`].
 pub fn committed_transition(
     psbt: &Psbt,
@@ -175,11 +175,10 @@ fn assert_opret_host(tx: &Transaction) -> Result<()> {
 /// commitment carries, and refuses a concealed commitment that carries none.
 ///
 /// rgb-lib rebuilds the MPC tree of the bundles the file discloses. The tree
-/// is as wide as the smallest power of two that holds one leaf per bundle, and
-/// `root()` hashes every leaf of that width, so the work follows the bundle
-/// count. `max_psbt_bytes`, checked above, bounds that count: a bundle entry
-/// carries a contract id and a non-empty input map, so the limit admits far
-/// fewer bundles than the 65535 of rgb-lib's message map.
+/// grows until every contract id has a position of its own, and `root()`
+/// hashes every position of that width, taken or not. So the work follows the
+/// bundle count and the ids, which the host picks, and `max_psbt_bytes` does
+/// not bound it: a few thousand small bundles fit in 1 MiB.
 fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
     // rgb-lib parses the PSBT from its base64 form.
     let psbt = psbt.to_string();
