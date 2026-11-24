@@ -577,19 +577,15 @@ fn accepts_a_mint_beside_another_assets_state_moved_to_our_change() {
     }
 }
 
-/// M9 holds for another asset's bundle too: its state may not leave with the
-/// depositor's output.
+/// M9 binds the pinned asset only. Another asset's state may leave with the
+/// depositor's output: the enclave could not keep it by refusing.
 #[test]
-fn m9_refuses_a_mint_that_moves_another_assets_state_to_the_depositor() {
+fn signs_a_mint_that_moves_another_assets_state_to_the_depositor() {
     let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
     let (history, mint) = mint_beside_another_asset(witness, vec![depositor(WITNESS_SATS)], 1);
-    let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
-    assert!(bound.is_none(), "no deposit is read for a refused mint");
+    let (minted, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
+    assert_eq!(minted.unwrap(), MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
 /// The mint's transition in another tx, which spends another of our Colored
@@ -1032,28 +1028,24 @@ fn run_refill(
 }
 
 /// A refill's UTXO can hold other state too, which rgb-lib moves the same
-/// way. The refill is read beside a move to our own output, and refused
-/// beside one to an output that is not ours.
+/// way. The refill is read beside another asset's move wherever it lands: on
+/// our own output, or on vout 9, which the tx does not have.
 #[test]
-fn a_refill_takes_another_assets_state_only_to_our_own_output() {
+fn a_refill_takes_another_assets_state_wherever_it_moves() {
     let keys = fx::km();
-    let (mut history, rights) = seeded(&keys);
-    let refill = history.rights_transition(rights[0], &[1, 2, 3]);
-    let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
-    let made = beside_another_asset(rights[0], refill, 1, outputs);
-    let request = SignRightsRefillRequest {
-        psbt_bytes: made.psbt.serialize(),
-        asset_id: history.contract_id.to_string(),
-        fascia: made.fascia_bytes(),
-    };
-    let cfg = pinned(&history);
-    let read = |own: bool| validate_rights_refill(&request, &made.psbt, &cfg, &|_, _| own);
-    assert_eq!(read(true).unwrap(), vec![1, 2, 3]);
-    let err = read(false).unwrap_err().to_string();
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
+    for moved_to in [1, 9] {
+        let (mut history, rights) = seeded(&keys);
+        let refill = history.rights_transition(rights[0], &[1, 2, 3]);
+        let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
+        let made = beside_another_asset(rights[0], refill, moved_to, outputs);
+        let request = SignRightsRefillRequest {
+            psbt_bytes: made.psbt.serialize(),
+            asset_id: history.contract_id.to_string(),
+            fascia: made.fascia_bytes(),
+        };
+        let read = validate_rights_refill(&request, &made.psbt, &pinned(&history), &|_, _| true);
+        assert_eq!(read.unwrap(), vec![1, 2, 3], "moved to vout {moved_to}");
+    }
 }
 
 #[test]
@@ -1089,7 +1081,8 @@ fn refuses_a_refill_of_another_asset() {
     let err =
         validate_rights_refill(&request, &refill.psbt, &pinned(&other), &|_, _| false).unwrap_err();
     assert!(
-        err.to_string().contains("beside the pinned RGB_ASSET_ID"),
+        err.to_string()
+            .contains("no transition of the pinned RGB_ASSET_ID"),
         "{err}"
     );
 }

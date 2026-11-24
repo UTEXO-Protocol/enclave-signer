@@ -12,9 +12,10 @@
 //! there. It compares no type with the asset's schema, which a fascia does not
 //! carry, and it validates no operation. So the shape rules are the enclave's
 //! own, as are the rules around the inspection: the one transition of the
-//! pinned asset that the signer reads, every other transition a move of state
-//! to this enclave's own outputs, and an opret host the enclave can read. The
-//! rule ids (F3-F6, M9) are those of `docs/mint-flow.md` section 5.
+//! pinned asset that the signer reads, every other transition of that asset a
+//! move of state to this enclave's own outputs, and an opret host the enclave
+//! can read. The rule ids (F3-F6, M9) are those of `docs/mint-flow.md`
+//! section 5.
 
 use std::str::FromStr;
 
@@ -33,8 +34,7 @@ pub type OwnVout<'a> = &'a dyn Fn(&Psbt, u32) -> bool;
 
 /// The types rgb-lib moves the other allocations of a spent UTXO with. In the
 /// pinned contract a burn, a mint, an inflation or a link is therefore never a
-/// side transition. rgb-lib names the type from its number alone, as it knows
-/// no schema of another contract; M9 keeps the state there.
+/// side transition.
 const MOVE_TYPES: [TypeOfTransition; 4] = [
     TypeOfTransition::Transfer,
     TypeOfTransition::Propagate,
@@ -196,7 +196,12 @@ fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspec
 }
 
 /// F4-F6: the one transition of the pinned asset that the signer reads, under
-/// an opret proof, beside moves of state to this enclave's own outputs.
+/// an opret proof, beside moves of that asset's state to this enclave's own
+/// outputs.
+///
+/// A bundle of another contract is read past, whatever it assigns. The enclave
+/// does not see which state an input holds, so a refusal would not keep that
+/// state: the host can spend the UTXO without moving it at all.
 ///
 /// F3: rgb-lib verifies the commitment with the DBC proof of the fascia, so a
 /// tapret proof is refused here; F3 then makes the OP_RETURN the host that
@@ -234,17 +239,12 @@ fn pinned_transition(
     let mut signing = None;
     for operation in &inspection.operations {
         assert_fully_disclosed(operation, field)?;
+        if operation.asset_id != pinned {
+            continue;
+        }
         for transition in &operation.transitions {
             if is_own_move(transition, txid, psbt, own_vout) {
                 continue;
-            }
-            if operation.asset_id != pinned {
-                return refuse(format!(
-                    "discloses transition {} of asset {}, which is not a move of state to this \
-                     enclave's own outputs - beside the pinned RGB_ASSET_ID {pinned} the signer \
-                     takes only such moves",
-                    transition.opid, operation.asset_id
-                ));
             }
             if let Some(first) = signing.replace(transition) {
                 return refuse(format!(
@@ -291,13 +291,13 @@ fn assert_fully_disclosed(
     Ok(())
 }
 
-/// F6 and M9: a side transition, as rgb-lib moves any other allocation of a
-/// spent UTXO, of the pinned asset or of another. It is of a move type and
-/// assigns one seal for each input it closes, so it cannot turn one right
-/// into many. Every seal is revealed on an output of the tx being signed that
-/// this enclave derives on its Colored account and that carries sats, so the
-/// state stays in the wallet. Any other transition is one the enclave must
-/// read, and it reads exactly one.
+/// F6 and M9: a side transition, as rgb-lib moves any other allocation of the
+/// pinned asset on a spent UTXO. It is of a move type and assigns one seal for
+/// each input it closes, so it cannot turn one right into many. Every seal is
+/// revealed on an output of the tx being signed that this enclave derives on
+/// its Colored account and that carries sats, so the state stays in the
+/// wallet. Any other transition is one the enclave must read, and it reads
+/// exactly one.
 fn is_own_move(
     transition: &rgb_lib::no_wallet::RgbTransitionInfo,
     txid: bitcoin::Txid,

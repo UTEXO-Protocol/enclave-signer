@@ -747,8 +747,9 @@ deployed.
   holds. A compromised host can make it sign a mint or a refill that spends a
   Colored UTXO of the enclave with other state, such as a right, without
   moving that state or moving less than the UTXO holds, and that state is
-  lost. It cannot take the state: a mint may move it only to a Colored output
-  of the enclave (M9). A refill needs no deposit, and its
+  lost. It cannot take state of the pinned contract: a mint may move it only
+  to a Colored output of the enclave (M9). State of another contract it can
+  move anywhere, so the mint wallet must hold none of value. A refill needs no deposit, and its
   inputs can be any Colored UTXOs of the enclave that RR0 and RR10 allow, with
   fees from the enclave's Colored sats. The hourly refill limit is in memory
   and per process, not a total: a full mint wallet can lose its rights within

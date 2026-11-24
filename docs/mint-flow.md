@@ -234,9 +234,9 @@ rules around it are the enclave's.
   witness txid must be the PSBT's unsigned txid, which rgb-lib's inspection
   binds. The transition that the signer reads (F6) is of the contract that
   `RGB_ASSET_ID` names, and the request's `asset_id` must name that contract
-  too. A bundle of another contract is allowed when it only moves state
-  (F6): rgb-lib moves the state of every asset on the UTXO that it spends,
-  each asset in its own bundle.
+  too. A bundle of another contract is read past (F6): rgb-lib moves the
+  state of every asset on the UTXO that it spends, each asset in its own
+  bundle.
   The size limit bounds the bytes that the inspection reads. It does not
   bound the work of F5: the MPC tree grows until every contract id has a
   position of its own, and every position of that width is hashed, taken or
@@ -260,13 +260,12 @@ rules around it are the enclave's.
   The transaction may commit more than one transition. rgb-lib moves any
   other allocation of a spent UTXO by a transition of its own: in the same
   bundle for the same asset, in another contract's bundle for another asset.
-  Such a **side transition** is let be when it only moves state to the
-  enclave's own outputs:
+  In the pinned contract such a **side transition** is let be when it only
+  moves state to the enclave's own outputs:
   - Its type is one that rgb-lib moves state on with: `TS_TRANSFER`,
     `TS_PROPAGATE`, `TS_TRANSFER_INFLATION` or `TS_TRANSFER_LINK`. So in the
     pinned contract a second mint, a burn, an inflation or a link is never a
-    side transition. rgb-lib names the type from its number, as it knows no
-    schema of another contract; M9 keeps the state there.
+    side transition.
   - It assigns exactly one seal for each input that it closes, as rgb-lib
     moves each allocation on as one. So a side propagate cannot turn one
     right into many: only a refill does that.
@@ -276,13 +275,19 @@ rules around it are the enclave's.
 
   Every other transition is one the signer must read. It reads exactly one,
   and that one is of the pinned contract: the mint of a `Sign`, the propagate
-  of a refill. A transition of another contract that is no side transition is
-  refused.
+  of a refill.
+  A bundle of another contract is read past, whatever its transitions are
+  and whatever seals they assign. The enclave does not see which state an
+  input holds, so it cannot keep that state by refusing: the host can spend
+  the UTXO without moving it. And a host that puts state of other contracts
+  on the UTXO of a right could otherwise make every mint of that right
+  refused, until the issuer sends new rights. The mint wallet must hold
+  nothing of value outside the pinned contract.
   rgb-lib moves state to the new change output of the transaction first.
   Without a change output, or when it is full, rgb-lib moves the state to a
-  UTXO that the wallet already holds. That seal is on another transaction, so
-  the mint is refused, after the user's lock. The bridge must refuse such a
-  mint before the deposit.
+  UTXO that the wallet already holds. For state of the pinned contract that
+  seal is on another transaction, so the mint is refused, after the user's
+  lock. The bridge must refuse such a mint before the deposit.
   The enclave does not see what state a side transition spends, so it does
   not check that the state it assigns is all of it.
   The inspection also decodes every transition type, assignment type, global
@@ -346,10 +351,10 @@ needs a new image.
     refused here, after the user's lock. The attestation does not carry the
     value, so the deploy must compare the two before a release takes witness
     invoices.
-- **M9** State that a side transition moves stays in the wallet. Each output
-  that a side transition assigns state to (F6) must be a key-path output
-  that the enclave derives on the Colored account, at child path `[0, i]`,
-  the keychain rgb-lib scans, and must carry sats. So it is never the
+- **M9** State of the pinned contract that a side transition moves stays in
+  the wallet. Each output that a side transition assigns state to (F6) must
+  be a key-path output that the enclave derives on the Colored account, at
+  child path `[0, i]`, the keychain rgb-lib scans, and must carry sats. So it is never the
   `OP_RETURN`, a 0-sat output, a Vanilla output or the output of a witness
   recipient. It runs in the core, with F6: a transition that fails it is no
   side transition, so the signer must read it, and it reads exactly one.
@@ -617,12 +622,13 @@ missing check is a liveness limit only:
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,
-and it cannot move other state out of the wallet: besides the mint, the
-transaction may commit only side transitions, which move state to funded
-Colored outputs that the enclave derives (F2 - F6, M9). Such a transition is
-no more validated than the mint, so a malformed one makes its whole bundle
-invalid: again a mint that no receiver accepts, and no unbacked units. It can
-destroy other state. The mint signer does not see which RGB state the spent
+and it cannot move other state of the pinned contract out of the wallet:
+besides the mint, a bundle of that contract may commit only side
+transitions, which move state to funded Colored outputs that the enclave
+derives (F2 - F6, M9). Such a transition is no more validated than the mint,
+so a malformed one makes its whole bundle invalid: again a mint that no
+receiver accepts, and no unbacked units. It can move state of another
+contract anywhere, and it can destroy other state. The mint signer does not see which RGB state the spent
 UTXO holds, so a mint or a refill can spend a Colored UTXO that holds other
 state without moving it, or move less than it holds, and that state is lost
 (section 8).

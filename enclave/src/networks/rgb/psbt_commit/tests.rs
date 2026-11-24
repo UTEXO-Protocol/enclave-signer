@@ -316,66 +316,46 @@ fn read_owning_vout_2(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> Res
     committed_transition(&psbt, &bytes, "fascia", Pin::for_test(pin), &own)
 }
 
-/// Another contract's bundle is allowed when it only moves state to this
-/// enclave's own output: rgb-lib moves the state of every asset on the UTXO
-/// that it spends, each asset in its own bundle.
+/// Another contract's bundle is read past wherever it moves its state: to
+/// our output, to an output that is not ours, or as two rights made of one.
 #[test]
-fn reads_past_a_second_contract_bundle_that_moves_state_to_our_output() {
-    let (ours, _, tx, fascia) = two_contracts_moving(&[2]);
-    let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
-    assert_eq!(committed.transition.outputs.len(), 2);
-    // The same move to an output that is not ours.
-    let err = refusal(&tx, &fascia, ours.contract_id);
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
+fn reads_past_a_second_contract_bundle_wherever_it_moves_state() {
+    for their_vouts in [&[2][..], &[1], &[2, 2]] {
+        let (ours, _, tx, fascia) = two_contracts_moving(their_vouts);
+        let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
+        assert_eq!(committed.transition.outputs.len(), 2, "{their_vouts:?}");
+    }
 }
 
-/// A side transition moves each allocation on as one. A propagate that makes
-/// two rights of one is a refill, which nothing carries beside it.
+/// The seal rgb-lib assigns when the change is full: a blinded one, on a UTXO
+/// the wallet already holds.
 #[test]
-fn refuses_a_second_contract_bundle_that_makes_more_state_than_it_closes() {
-    let (ours, _, tx, fascia) = two_contracts_moving(&[2, 2]);
-    let err = read_owning_vout_2(&tx, &fascia, ours.contract_id)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
-}
-
-/// A move lands on an output of this tx that carries sats: a wallet does not
-/// track an empty one.
-#[test]
-fn refuses_a_second_contract_bundle_that_moves_state_to_an_empty_output() {
+fn reads_past_a_second_contract_bundle_that_moves_state_to_a_blinded_seal() {
     let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
     let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
     let our_send = send_of(&mut ours, our_rights[0]);
-    let their_move = theirs.rights_transition(their_rights[0], &[2]);
+    let held = GraphSeal::with_blinded_vout(0u32, 7).to_secret_seal();
+    let their_move = theirs
+        .transition("propagate")
+        .add_input(their_rights[0].opout, AllocatedState::Void)
+        .unwrap()
+        .add_rights("mintRight", rgbstd::BuilderSeal::Concealed(held))
+        .unwrap()
+        .complete_transition()
+        .unwrap();
     let inputs = vec![our_rights[0].outpoint, their_rights[0].outpoint];
-    let empty = TxOut {
-        value: Amount::ZERO,
-        ..p2tr(2)
-    };
-    let mut psbt = gen::witness_psbt(inputs, vec![p2tr(1), empty]);
-    psbt.push_rgb_transition(our_send).unwrap();
-    psbt.push_rgb_transition(their_move).unwrap();
-    let fascia = gen::rgb_commit(&mut psbt, 0, ENTROPY);
-    let err = read_owning_vout_2(&psbt.unsigned_tx, &fascia, ours.contract_id)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
+    let (tx, fascia) = crafted(inputs, |psbt| {
+        psbt.push_rgb_transition(our_send).unwrap();
+        psbt.push_rgb_transition(their_move).unwrap();
+    });
+    let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
+    assert_eq!(committed.transition.outputs.len(), 2);
 }
 
-/// Another contract's bundle that is no move, here a mint, is refused: the
-/// signer reads one transition, of the pinned asset.
+/// Another contract's bundle that is no move, here a mint, is read past too:
+/// the transition the signer reads is of the pinned asset.
 #[test]
-fn refuses_a_second_contract_bundle_that_is_not_a_move() {
+fn reads_past_a_second_contract_bundle_that_is_not_a_move() {
     let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
     let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
     let our_send = send_of(&mut ours, our_rights[0]);
@@ -400,13 +380,8 @@ fn refuses_a_second_contract_bundle_that_is_not_a_move() {
         psbt.push_rgb_transition(our_send).unwrap();
         psbt.push_rgb_transition(their_mint).unwrap();
     });
-    let err = read_owning_vout_2(&tx, &fascia, ours.contract_id)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("is not a move of state to this enclave's own outputs"),
-        "{err}"
-    );
+    let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
+    assert_eq!(committed.transition.outputs.len(), 2);
 }
 
 #[test]
@@ -414,7 +389,10 @@ fn refuses_bundle_of_unpinned_contract() {
     let (_, sent) = rights_send();
     let (other, _) = issued(0xB2, &[0xA1]);
     let err = refusal(&sent.tx, &sent.fascia, other.contract_id);
-    assert!(err.contains("beside the pinned RGB_ASSET_ID"), "{err}");
+    assert!(
+        err.contains("no transition of the pinned RGB_ASSET_ID"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -718,7 +696,10 @@ fn refuses_an_inspection_that_names_another_tx_or_asset() {
     let err = agrees(&other_asset, &committed, cid)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("beside the pinned RGB_ASSET_ID"), "{err}");
+    assert!(
+        err.contains("no transition of the pinned RGB_ASSET_ID"),
+        "{err}"
+    );
 }
 
 /// The densest fascia measured: one propagate of 43 681 rights that share an
