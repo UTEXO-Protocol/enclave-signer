@@ -224,7 +224,7 @@ if 'limits' in sys.argv and {refuse!r}:
             self.skipTest('bash 4.4 or later is needed for the start path')
         calls = self.limits_stub(refuse=False)
         limits = self.base / 'enclave-limits.conf'
-        limits.write_text('max_rgb_lib_ms=21000\n')
+        limits.write_text('evm_rpc_timeout_secs=21\n')
         for script in self.scripts():
             with self.subTest(script=script.name):
                 calls.write_text('')
@@ -249,7 +249,7 @@ if 'limits' in sys.argv and {refuse!r}:
                 self.assertNotIn(str(limits), result.stdout + result.stderr)
                 self.assertNotIn('image values', result.stdout + result.stderr)
 
-                limits.write_text('max_rgb_lib_ms=1\n')
+                limits.write_text('evm_rpc_timeout_secs=1\n')
                 calls.write_text('')
                 result = self.run_ctl(script, None, ENCLAVE_LIMITS_FILE=str(limits))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -265,7 +265,7 @@ if 'limits' in sys.argv and {refuse!r}:
             self.skipTest('bash 4.4 or later is needed for the start path')
         calls = self.limits_stub(refuse=False)
         unreadable = self.base / 'enclave-limits.conf'
-        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.write_text('evm_rpc_timeout_secs=21\n')
         unreadable.chmod(0)
         dangling = self.base / 'linked-limits.conf'
         dangling.symlink_to(self.base / 'absent-limits.conf')
@@ -290,7 +290,7 @@ if 'limits' in sys.argv and {refuse!r}:
                             HOST.read_text(), re.S)
         self.assertTrue(heredoc, 'enclave.env heredoc not found in deploy-host.sh')
         limits = self.base / 'operator-limits.conf'
-        limits.write_text('max_rgb_lib_ms=21000\n')
+        limits.write_text('evm_rpc_timeout_secs=21\n')
         names = set(re.findall(r'\$([A-Z_][A-Z0-9_]*)', heredoc.group(1)))
         subprocess.run(['bash', '-c', 'set -eu\ncat > "$OUT" <<EOF\n' + heredoc.group(1)],
                        env=dict({name: '' for name in names}, ENCLAVE_LIMITS_FILE=str(limits),
@@ -622,7 +622,7 @@ os.execv(shell, [shell, '-c', args[args.index('-c') + 1]])
         host = dict(GRPC_HOST='10.0.0.1', PARENT_TLS_DIR=str(self.base / 'tls'))
         # A link to no file counts as a file. Root reads a file of mode 0.
         unreadable = self.base / 'enclave-limits.conf'
-        unreadable.write_text('max_rgb_lib_ms=21000\n')
+        unreadable.write_text('evm_rpc_timeout_secs=21\n')
         unreadable.chmod(0)
         dangling = self.base / 'linked-limits.conf'
         dangling.symlink_to(self.base / 'absent-limits.conf')
@@ -638,7 +638,7 @@ os.execv(shell, [shell, '-c', args[args.index('-c') + 1]])
         # With no file, or with a file that ubuntu can read, the script goes on
         # to the mTLS files, the next check.
         readable = self.base / 'readable-limits.conf'
-        readable.write_text('max_rgb_lib_ms=21000\n')
+        readable.write_text('evm_rpc_timeout_secs=21\n')
         for path in (self.base / 'absent-limits.conf', readable):
             with self.subTest(path=path.name):
                 result = self.run_host(ENCLAVE_LIMITS_FILE=str(path), **host)

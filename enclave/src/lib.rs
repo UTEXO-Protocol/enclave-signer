@@ -68,6 +68,14 @@ compile_error!(
      mint path. Do not set direction cfgs by hand; `build.rs` derives them"
 );
 
+// The burn signer validates each consignment in a child process, over a Unix
+// socket pair.
+#[cfg(all(feature = "burn-signer", not(unix)))]
+compile_error!(
+    "burn-signer needs a Unix target: it runs RGB validation in a child process over a Unix \
+     socket pair"
+);
+
 // Only the mint signer has a persistent seed.
 #[cfg(all(feature = "kms-persistence", not(feature = "mint-signer")))]
 compile_error!(

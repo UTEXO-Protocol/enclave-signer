@@ -37,6 +37,7 @@ no split.
 | Backend and listener | Operator servers | Nothing | Build the `fundsOut` calldata. Send the request. |
 | Parent | EC2 host | Nothing. On public Signet: its Bitcoin headers. | Moves bytes. Sends Bitcoin headers to the enclave. |
 | Burn signer | Nitro Enclave | Checks and keys | Checks the burn. Signs the release and the gas transaction. |
+| Validator child | Nitro Enclave, a process of the burn signer's binary for one request | Its verdict on one consignment ([specification](tee-spec.md#validator-child-burn-signer)) | Runs rgb-lib on the consignment in Stage 2. Asks the burn signer for each resolver answer. |
 | `MultisigProxy` and Bridge | EVM | Quorum and replay | Count signatures. Use the nonce. Check `burnId` again. |
 
 The burn signer takes no claim of the request as evidence. It reads the
@@ -45,9 +46,9 @@ behind the burn from the mints in the history. It reads no Bitcoin indexer.
 It reads the EVM RPC only for an asset whose genesis names a reject list
 (Stage 3b).
 
-RGB consensus counts a witness transaction as mined only when a Merkle proof
-of the request places it at least `SPV_MIN_CONFIRMATIONS` deep in the
-enclave's own header chain. An unmined witness anywhere in the history fails
+RGB consensus counts a witness transaction as mined only when the SPV proof
+the consignment carries for it places it at least `SPV_MIN_CONFIRMATIONS`
+deep in the enclave's own header chain. An unmined witness anywhere in the history fails
 consensus. So two conflicting transfers of the same units cannot both back a
 burn: only one of them can be mined.
 
@@ -64,6 +65,7 @@ sequenceDiagram
     participant L as Listener
     participant P as Parent (untrusted)
     participant E as Burn signer (enclave)
+    participant V as Validator child (enclave)
     participant C as MultisigProxy + Bridge (EVM)
 
     U->>BT: burn transaction
@@ -73,7 +75,11 @@ sequenceDiagram
     L->>P: Sign(RgbSource -> EvmDestination)
     P->>E: forward over vsock
     E->>E: Stage 1: payload limits
-    E->>E: Stage 2: work caps, then rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
+    E->>V: Stage 2 in a validator child: consignment file, limits, safe height
+    V->>V: rgb-lib consensus: each mint bound to its<br/>derived deposit, each witness mined per its SPV proof, reject list
+    V->>E: resolver questions: asset bind, mint locks, headers, reject list
+    E-->>V: each answer, from the pins, the header chain and the EVM RPC
+    V-->>E: verdict, then the enclave reaps the child
     E->>E: Stage 3: SPV freshness, proof coverage, block pins
     E->>E: Stage 4: decode and check calldata
     E->>E: Stage 5: bind release to burn
@@ -109,7 +115,7 @@ The [sequence diagram in code order](diagrams/03-seq-sign-evm.md) and the
 | EIP-712 domain | `("MultisigProxy", "1", chainId, verifyingContract)` | Independent encoders and [protocol vectors](burn-vector-provenance.md) check its format. |
 
 `SPV_MIN_CONFIRMATIONS` is an image setting
-([configuration.md](configuration.md)). The size and work limits named below
+([configuration.md](configuration.md)). The size limits named below
 (`max_...`) are runtime limits ([runtime-limits.md](runtime-limits.md)). The
 other SPV constants are in the
 [specification](tee-spec.md#7-bitcoin-header-chain-spv).
@@ -120,9 +126,8 @@ If one check fails, the burn signer stops. It signs nothing. It returns an
 error.
 
 The stages group the checks by topic, in code order with these exceptions.
-B3.3 and B3.4 also run before Stage 2, for every proof of the request. Stage
-3b runs inside rgb-lib, so before B3.1, B3.2 and B3.5. The burn-type check
-of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
+Stage 3b runs inside rgb-lib, so before B3.1, B3.2 and B3.5. The burn-type
+check of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 [sequence in code order](diagrams/03-seq-sign-evm.md) shows the exact order.
 
 ### Stage 0 - Can this enclave do this request?
@@ -136,30 +141,32 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
 ### Stage 1 - Is the request within the limits?
 
 - **B1.1** The consignment must be at most `max_consignment_bytes`.
-- **B1.2** The request must carry at most `max_merkle_proofs` proofs, of at
-  most `max_total_proof_bytes` together.
-- **B1.3** `keccak256(consignment)` must equal `consignment_hash`. This check
+- **B1.2** `keccak256(consignment)` must equal `consignment_hash`. This check
   finds a damaged copy only. It is not a safety proof.
 
 ### Stage 2 - Is the RGB history valid, and is each mint backed?
 
+The rgb-lib part of Stage 2 runs in the validator child, a process of the
+burn signer's own binary that holds no key. The burn signer gives each
+resolver answer itself, ends the child before the request deadline and
+checks its verdict ([specification](tee-spec.md#validator-child-burn-signer)).
+
 - **B2.1** The bytes must be a V1 transfer file. Its genesis is the one the
   `RGB_ASSET_ID` pin names (B2.7), so its schema is BFA.
-- **B2.2** The contract id must pass the asset bind (B2.7) before the enclave
+- **B2.2** The contract id must pass the asset bind (B2.7) before the child
   reads where the genesis publishes its reject list (`GS_REJECT_LIST`), which
   must be an EVM contract; a URL list is refused. The enclave reaches that
   address over the network in Stage 3b, so a foreign genesis must not choose
   it. The reject-list reader is an input to validation, so the bind runs
   before rgb-lib; refusing a foreign asset there also spares rgb-lib the work,
-  which is all that ordering buys beyond the bind itself. Last, the enclave
-  bounds the work that rgb-lib would do on the transfer and refuses one above
-  a work cap ([section 10](#10-work-caps)).
+  which is all that ordering buys beyond the bind itself.
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules that rgb-lib's
-  pinned `rgb-schemas` compiles. rgb-lib asks three resolvers of the enclave: for each
-  witness (B2.9), for each mint (B2.4, B2.5) and for the reject list (Stage
-  3b). A resolver error refuses the request, and so does any rgb-lib warning.
-  rgb-lib must report the consignment that the enclave parsed.
+  pinned `rgb-schemas` compiles. rgb-lib asks three resolvers, and the burn
+  signer answers each question of the child: for each witness (B2.9), for
+  each mint (B2.4, B2.5) and for the reject list (Stage 3b). A resolver
+  error refuses the request, and so does any rgb-lib warning. rgb-lib must
+  report the consignment that the child parsed.
 - **B2.4** For each mint in the history, the burn signer derives the
   `operationId` of the one deposit that can back it:
   `keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, FUNDS_IN_CONTRACT,
@@ -219,10 +226,14 @@ of B2.8 runs after Stage 3. B4.8 and B4.9 run before B4.4. The
   found. What a bundle may conceal is therefore a transition the release does
   not pay for, and a concealed burn beside the settling one gets no release of
   its own.
-- **B2.9** The witness resolver counts a witness transaction as mined only
-  through the Merkle proof that the request carries for it. That proof must
-  pass B3.3 and B3.4 first. A witness with no such proof is unmined and fails
-  consensus. A proof inside the consignment is never used.
+- **B2.9** The witness resolver serves block headers of the enclave's own
+  chain and looks no transaction up. rgb-lib counts a witness transaction as
+  mined only when the SPV proof the consignment carries for it leads to the
+  Merkle root of the header at its height (B3.3), and the enclave serves a
+  header only at the required depth (B3.4), from one view of the chain for
+  the whole validation ([specification](tee-spec.md#7-bitcoin-header-chain-spv)).
+  A witness with no proof, or with a proof that does not hold, is unmined and
+  fails consensus.
 
 ### Stage 3 - Is the burn buried in Bitcoin?
 
@@ -232,14 +243,21 @@ gives the header rules and the limits of each network.
 
 - **B3.1** The chain tip must be at most `SPV_MAX_TIP_AGE_SECS` old and at
   most `SPV_MAX_TIP_FUTURE_SECS` in the future.
-- **B3.2** The Merkle proofs must be exactly the set of witness transactions
-  in the consignment. None missing. None extra. No duplicates.
-- **B3.3** Each Merkle path must be at most `MAX_MERKLE_PATH_DEPTH` levels.
-  Each proof must verify against the header that the enclave stores at that
-  height. The path must use up the transaction position, one bit per level.
-  No node hashed on the path may be a 64-byte transaction (CVE-2017-12842).
+- **B3.2** Validation must place every witness transaction of the
+  consignment in a block. None missing.
+- **B3.3** Each SPV proof must verify against the header that the enclave
+  stores at its height. rgb-lib makes this check: the path has at most 32
+  levels and must use up the transaction position, one bit per level. It does
+  not yet refuse a path node that is a 64-byte transaction (CVE-2017-12842);
+  that guard comes with the next rgb-ops release.
 - **B3.4** Each witness transaction must be at least `SPV_MIN_CONFIRMATIONS`
-  blocks deep.
+  blocks deep. Validation reads headers under short locks, so afterwards the
+  enclave confirms under one lock that every header a proof was checked
+  against is still in the chain at that depth. A block above the enclave's
+  tip, or one not yet that deep, is a wait and not a refusal: the enclave
+  answers with its own
+  [error code](tee-spec.md#6-requests), and the caller retries once the
+  signer has the headers.
 - **B3.5** The enclave records the heights, hashes and required depths that
   it used. Just before it uses the key, it checks that no hash changed and
   that no block is shallower than its check required.
@@ -449,32 +467,21 @@ globals. So the burn signer needs three proofs that agree:
 proves that they are the deposits behind this burn (B5.9). Each half needs
 the other.
 
-## 10. Work caps
+## 10. Validation time
 
-The request deadline does not stop a worker. So the burn signer bounds the
-work of rgb-lib on a consignment before rgb-lib runs (B2.2). Four runtime
-limits apply:
+No check bounds the work of rgb-lib on a consignment before it runs. The
+request deadline bounds it: the burn signer ends its validator child at the
+kill time, before the deadline, so rgb-lib never runs past it
+([specification](tee-spec.md#validator-child-burn-signer)).
 
-| Limit | What it bounds |
-|-------|----------------|
-| `max_witness_check_cost` | The checks of each transition against the witness transaction and the anchor of its bundle. |
-| `max_bundle_id_cost` | The hashing of bundle ids over the input map of each bundle. |
-| `max_reject_walk_cost` | For an asset with a reject list: the steps of the walk of B3.10. |
-| `max_rgb_lib_ms` | The modeled time of rgb-lib's validation and inspection: the file, its outputs, its operations, the genesis hashes and the three costs above. |
-
-The first two bound work of rgb-lib that grows faster than the file: an
-honest bundle has one or two transitions, and a forged bundle can have
-thousands. The third bounds a count of the reject walk, one walk for each
-origin. The time budget bounds the sum. A refusal states the cost that
-passed its limit and the value of the limit.
-
-An honest burn is far below the caps. The widest burn that the bridge
-expects, 2810 mints burned by one transition, uses about 6 percent of the
-witness cap and 4 percent of the bundle id cap, and it models at about a
-fifth of the time budget.
-
-The time budget can refuse an honest burn with a very long history. The
-operator can raise each limit on a running enclave
+A burn whose validation is ended this way is refused with error code 10
+([specification](tee-spec.md#63-errors)); a kill time that comes while the
+enclave reads the reject list gives the error of that read. The refusal says
+nothing about the consignment. The same consignment can pass a later request, when the enclave
+runs fewer validations at once. A consignment that one validation alone
+cannot finish within the deadline is refused on every request, until the
+operator raises `total_request_timeout_secs`
 ([runtime-limits.md](runtime-limits.md)).
-[validation-cost-model.md](validation-cost-model.md) has the model, its
-measurements and the honest shapes that it refuses.
+
+`max_consignment_bytes` bounds the file, and with it the memory of a
+validation ([runtime-limits.md](runtime-limits.md)).

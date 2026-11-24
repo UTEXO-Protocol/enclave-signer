@@ -20,7 +20,7 @@ use utexo_bridge_parent::{
     framing,
     grpc_proto::{
         parent_service_server::ParentServiceServer, sign_request, source_proof, EnrichedEvmPayload,
-        MerkleProofEntry, RgbSource, SignRequest, SourceProof,
+        RgbSource, SignRequest, SourceProof,
     },
     grpc_server::{EnclaveTarget, ParentAdapterService},
     request_shape::{ShapeLayer, MAX_OTHER_MESSAGE_SIZE, MAX_WIRE_ELEMENTS},
@@ -115,56 +115,41 @@ impl Decoder for ResponseDecoder {
     }
 }
 
-/// `SignRequest` with an RGB source of `entries` empty Merkle proof entries,
-/// written directly. Each entry is 2 bytes on the wire and a 56-byte struct
-/// after the decode.
-fn empty_entries(entries: usize) -> Vec<u8> {
-    let rgb_len = 2 * entries;
-    let mut source = vec![0x5a]; // SourceProof.rgb, field 11
-    prost::encoding::encode_varint(rgb_len as u64, &mut source);
-    source.extend(std::iter::repeat_n([0x2a, 0x00], entries).flatten()); // RgbSource field 5
-    let mut body = vec![0x0a, 0x00]; // SignRequest.common, empty
-    body.push(0x12); // SignRequest.source, field 2
-    prost::encoding::encode_varint(source.len() as u64, &mut body);
-    body.extend_from_slice(&source);
-    body
+/// `SignRequest` of `fields` empty `common` fields, written directly. Each is
+/// 2 bytes on the wire, and the decode merges them.
+fn empty_fields(fields: usize) -> Vec<u8> {
+    [0x0a, 0x00].repeat(fields)
 }
 
 /// The densest request that passes the shape check. It has as many empty
-/// proof entries as the element limit allows. A consignment fills the rest of
-/// the frame.
+/// `common` fields as the element limit allows. A consignment fills the rest
+/// of the frame.
 fn densest_passing(frame: usize) -> Vec<u8> {
-    let entries = MAX_WIRE_ELEMENTS - 8;
+    let fields = MAX_WIRE_ELEMENTS - 8;
+    let mut body = empty_fields(fields);
     let req = SignRequest {
         common: Some(Default::default()),
         source: Some(SourceProof {
             chain: Some(source_proof::Chain::Rgb(RgbSource {
-                consignment: vec![0x33; frame - 2 * entries - 64],
-                merkle_proofs: vec![MerkleProofEntry::default(); entries],
+                consignment: vec![0x33; frame - 2 * fields - 64],
                 ..Default::default()
             })),
             ..Default::default()
         }),
         data: Some(sign_request::Data::EvmData(EnrichedEvmPayload::default())),
     };
-    req.encode_to_vec()
+    body.extend(req.encode_to_vec());
+    body
 }
 
 /// A burn as large as the enclave takes: a consignment of `consignment`
-/// bytes and 16 384 proofs of 13 path elements.
+/// bytes.
 fn real_burn(consignment: usize) -> Vec<u8> {
-    let proof = MerkleProofEntry {
-        txid: vec![0x11; 32],
-        block_height: 900_000,
-        tx_position: 7,
-        merkle_path: vec![vec![0x22; 32]; 13],
-    };
     SignRequest {
         common: Some(Default::default()),
         source: Some(SourceProof {
             chain: Some(source_proof::Chain::Rgb(RgbSource {
                 consignment: vec![0x33; consignment],
-                merkle_proofs: vec![proof; 16_384],
                 ..Default::default()
             })),
             ..Default::default()
@@ -282,9 +267,8 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
     let addr = server().await;
     let frame = framing::MAX_MESSAGE_SIZE as usize;
 
-    // A frame of empty proof entries is refused before the decode. Its decode
-    // needs 65 times its size in heap.
-    let worst = empty_entries((frame - 16) / 2);
+    // A frame of more elements than the limit is refused before the decode.
+    let worst = empty_fields((frame - 16) / 2);
     let size = worst.len();
     let (outcomes, peak) = send(addr, SIGN, vec![worst]).await;
     let status = outcomes[0].as_ref().unwrap_err();
@@ -295,7 +279,7 @@ async fn large_sign_requests_stay_within_a_small_factor_of_their_size() {
             .contains(&format!("more than {MAX_WIRE_ELEMENTS} elements")),
         "{status}"
     );
-    println!("empty proof entries: {size} bytes, peak {} MiB", peak / MIB);
+    println!("empty fields: {size} bytes, peak {} MiB", peak / MIB);
     assert!(
         peak <= 4 * size,
         "peak {peak} for a request of {size} bytes"

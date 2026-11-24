@@ -106,10 +106,21 @@ and keep the quorum that the other signers need.
 `--memory` must be at least 4096 MiB, a whole number of GiB. The enclave
 needs 3072 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
 the root file system keep part of the launch value. A release enclave refuses
-to start with less, or when it cannot read its memory total. nitro-cli gives
-an enclave whole hugepages, 1 GiB pages first, so the deploy scripts refuse a
-value that is not a whole number of GiB. `ENCLAVE_MEMORY` sets the value for
-`deploy-host.sh`; its default is the minimum.
+to start with less, or when it cannot read its memory total. It also refuses
+to start when its limits in force need more, with a consignment scratch file
+and, on a burn signer, a validator child for each request: the refusal names
+the MiB they need. nitro-cli gives an enclave whole hugepages, 1 GiB pages
+first, so the deploy scripts refuse a value that is not a whole number of
+GiB. `ENCLAVE_MEMORY` sets the value for `deploy-host.sh`; its default is the
+minimum.
+
+A release burn signer also refuses to start when its probe validator child
+does not start or confine itself, or when the OOM settings of the kernel or
+the OOM score adjustment of the enclave process could end the enclave
+process before a validator child
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). It sets
+`vm.overcommit_memory` itself first, and refuses to start when it cannot. Its
+panic on the console names the reason. A start logs "validator child ready".
 
 The allocator pool. `memory_mib` in `/etc/nitro_enclaves/allocator.yaml`
 sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
@@ -240,6 +251,9 @@ command. Its exit code 1 means "not ready" or no answer: read the
 ## Restart and upgrade
 
 A restart removes the keys in memory. systemd restores only the processes.
+A fault of rgb-lib on a consignment ends only a validator child of the burn
+signer, not the enclave process, so it removes no key
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)).
 
 - A mint signer recovers its seed with `init`, through KMS. It needs the
   verified address pin ([kms-persistence.md](kms-persistence.md)).

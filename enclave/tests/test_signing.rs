@@ -123,7 +123,6 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             asset_id: "rgb:test".into(),
             consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
             consignment_hash: placeholder_consignment_hash(),
-            merkle_proofs: vec![],
             commission,
         })),
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
@@ -510,10 +509,10 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-/// A build without `rgb-validation` must refuse an RGB source, even with no
-/// merkle_proofs. It has no consensus code to check a consignment with. The
-/// refusal fires in RGB source validation, whose message names the missing
-/// `rgb-validation` feature.
+/// A build without `rgb-validation` must refuse an RGB source. It has no
+/// consensus code to check a consignment with. The refusal fires in RGB
+/// source validation, whose message names the missing `rgb-validation`
+/// feature.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn a_build_without_rgb_validation_refuses_rgb_sources() {
@@ -528,15 +527,7 @@ fn a_build_without_rgb_validation_refuses_rgb_sources() {
     };
     common::send_request(port, &init_req);
 
-    // A fundsOut request with no merkle_proofs. The refusal must still fire.
     let req = valid_sign_evm_request(1000, 50);
-    match &req.source_network {
-        Some(SourceNetwork::RgbSource(source)) => assert!(
-            source.merkle_proofs.is_empty(),
-            "test precondition: the request must carry no merkle_proofs"
-        ),
-        other => panic!("expected RGB source, got {other:?}"),
-    }
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(req)),
     };

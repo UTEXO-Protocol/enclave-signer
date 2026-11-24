@@ -10,6 +10,7 @@
 //! `#[path]`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use amplify::confinement::{Confined, U32};
 use amplify::{ByteArray, Bytes20, Bytes32};
@@ -22,7 +23,9 @@ use bitcoin::{TxIn, TxOut, Witness};
 use psrgbt::{
     RgbOutExt, RgbPsbtExt, PSBT_MPC_PREFIX, PSBT_OPRET_PREFIX, PSBT_RGB_PREFIX, PSBT_TAPRET_PREFIX,
 };
-use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, LockId, Transfer, WitnessBundle};
+use rgbstd::containers::{
+    ConsignmentVer, Fascia, FileContent, LockId, SpvProof, Transfer, WitnessBundle,
+};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -674,14 +677,16 @@ impl History {
         burn.complete_transition().unwrap()
     }
 
-    /// The consignment of the history.
+    /// The consignment of the history, every witness proven (see [`prove_witnesses`]).
     pub fn as_transfer(&self) -> Transfer {
-        Transfer {
+        let mut transfer = Transfer {
             version: ConsignmentVer::V1,
             transfer: true,
             genesis: self.genesis.clone(),
             bundles: Confined::try_from(self.bundles.clone()).unwrap(),
-        }
+        };
+        prove_witnesses(&mut transfer);
+        transfer
     }
 
     /// The TFR file bytes, as the bridge sends them.
@@ -712,6 +717,39 @@ pub fn rights_made(sent: &Committed, vouts: &[u32]) -> Vec<Utxo> {
             outpoint: OutPoint::new(txid, vout),
         })
         .collect()
+}
+
+/// The witness txids of `transfer` in display byte order, sorted, each once.
+/// A test chain mines them one per block in this order, from height 1.
+pub fn mined_order(transfer: &Transfer) -> Vec<[u8; 32]> {
+    let mut txids: Vec<[u8; 32]> = transfer
+        .bundles
+        .iter()
+        .map(|bundle| {
+            let mut txid = bundle.witness_id().to_byte_array();
+            txid.reverse();
+            txid
+        })
+        .collect();
+    txids.sort_unstable();
+    txids.dedup();
+    txids
+}
+
+/// Gives every witness the SPV proof of a block it is the only transaction
+/// of, at its [`mined_order`] height.
+pub fn prove_witnesses(transfer: &mut Transfer) {
+    let order = mined_order(transfer);
+    for bundle in transfer.bundles.iter_mut() {
+        let mut txid = bundle.witness_id().to_byte_array();
+        txid.reverse();
+        let height = order.iter().position(|mined| *mined == txid).unwrap() + 1;
+        bundle.spv_proof = Some(SpvProof {
+            block_height: NonZeroU32::new(u32::try_from(height).unwrap()).unwrap(),
+            pos: 0,
+            merkle: Confined::default(),
+        });
+    }
 }
 
 /// The TFR file bytes of `transfer`.

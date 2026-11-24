@@ -236,26 +236,28 @@ pub(super) fn dispatch(
     (response, reservation)
 }
 
-/// The most bytes of an error text that dispatch keeps before it adds the
-/// full length, in what it logs and returns. A text can quote request data,
-/// such as a declared asset id. The log formatter keeps a buffer as large as
-/// the longest line it wrote on each thread. So a long line would hold heap
+/// The most bytes of an error text that dispatch logs and returns, the full
+/// length after a cut included. A text can quote request data, such as a
+/// declared asset id. The log formatter keeps a buffer as large as the
+/// longest line it wrote on each thread. So a long line would hold heap
 /// after its request ends (`memory.rs`).
-const MAX_ERROR_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_ERROR_TEXT_BYTES: usize = 1024;
 
-/// The text of `e`, cut at [`MAX_ERROR_TEXT_BYTES`] with its full length
-/// after the cut.
+/// The text of `e`, as [`fit_error_text`] cuts it.
 fn error_text(e: &EnclaveError) -> String {
-    let mut text = e.to_string();
-    if text.len() > MAX_ERROR_TEXT_BYTES {
-        let len = text.len();
-        let mut end = MAX_ERROR_TEXT_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text.push_str(&format!("... ({len} bytes)"));
+    fit_error_text(e.to_string())
+}
+
+/// `text` within [`MAX_ERROR_TEXT_BYTES`]: a longer text is cut, never inside
+/// a character, and ends with its full length. A text that fits stays as it
+/// is, so a validator child cuts its refusal text with this too.
+pub(crate) fn fit_error_text(mut text: String) -> String {
+    if text.len() <= MAX_ERROR_TEXT_BYTES {
+        return text;
     }
+    let length = format!("... ({} bytes)", text.len());
+    text.truncate(text.floor_char_boundary(MAX_ERROR_TEXT_BYTES - length.len()));
+    text.push_str(&length);
     text
 }
 
@@ -275,8 +277,9 @@ fn error_response(code: u32, e: &EnclaveError) -> EnclaveResponse {
 mod error_text_tests {
     use super::*;
 
-    /// A long error text, here an asset id the request declares, is cut
-    /// before dispatch logs or returns it. A cut never splits a character.
+    /// A long error text, here an asset id the request declares, is cut to
+    /// its limit before dispatch logs or returns it. A cut never splits a
+    /// character, and a cut text stays as it is.
     #[test]
     fn a_long_error_text_is_cut_before_it_is_logged_or_returned() {
         let short = EnclaveError::CrossCheck("contract_id mismatch".into());
@@ -298,16 +301,13 @@ mod error_text_tests {
                 panic!("not an error response");
             };
             assert_eq!(code, 3);
-            assert!(
-                message.len() <= MAX_ERROR_TEXT_BYTES + 32,
-                "{}",
-                message.len()
-            );
+            assert!(message.len() <= MAX_ERROR_TEXT_BYTES, "{}", message.len());
             assert!(
                 message.ends_with(&format!("... ({} bytes)", e.to_string().len())),
                 "{} bytes",
                 message.len()
             );
+            assert_eq!(fit_error_text(message.clone()), message);
         }
     }
 }

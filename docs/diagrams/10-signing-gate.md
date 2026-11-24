@@ -4,32 +4,29 @@ Step-by-step text: [burn flow](../burn-flow.md).
 
 ```mermaid
 flowchart TD
-    start([After role, endpoint and key checks<br/>RgbSource + EvmDestination:<br/>consignment, merkle_proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
+    start([After role, endpoint and key checks<br/>RgbSource + EvmDestination:<br/>consignment with its SPV proofs, call_data,<br/>nonce, deadline, chain_id, proxy_contract, ...])
 
     subgraph P1 ["1 — RGB source (validate_source)"]
         p1w["cheap payload gate first:<br/>consignment bytes present, size caps,<br/>keccak256 == consignment_hash,<br/>asset_id declared"]
         p1w --> p1wq{pass?}
         p1wq -->|no| p1wr[REFUSE — payload gate]:::refuse
-        p1wq -->|yes| p1sp{"every proof before rgb-lib:<br/>merkle path ≤ 32, inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS?"}
-        p1sp -->|no| p1spr[REFUSE - SPV failure]:::refuse
-        p1sp -->|yes| p1a["Transfer::load: V1 TFR, BFA genesis"]
+        p1wq -->|yes| p1s["validator child: this binary, no key, one request.<br/>It runs the checks below to the verdict and asks<br/>the enclave for each resolver answer. The enclave<br/>ends it RESPONSE_MARGIN before the request deadline."]
+        p1s --> p1a["Transfer::load: V1 TFR, BFA genesis"]
         p1a --> p1c{"contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)?"}
         p1c -->|no| p1cr[REFUSE - asset mismatch]:::refuse
         p1c -->|yes| p1l{"reject list, if named,<br/>is an EVM contract?"}
         p1l -->|no| p1lr[REFUSE - not an EVM reject list]:::refuse
-        p1l -->|yes| p1k{"work caps (cost.rs): witness checks,<br/>bundle ids, reject walk if listed,<br/>and their modeled time with the file,<br/>validation and inspection - within?"}
-        p1k -->|no| p1kr[REFUSE - work cap]:::refuse
-        p1k -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only through its verified SPV proof<br/>(depth ≥ SPV_MIN_CONFIRMATIONS); listed asset:<br/>reject list over the terminal operations"]
-        p1b --> p1q{valid?}
-        p1q -->|no| p1r[REFUSE — invalid consignment]:::refuse
+        p1l -->|yes| p1b["one rgb-lib validate_consignment_with_resolver:<br/>phase 1 (BFA rules); phase 2: each mint anchor<br/>confirmed only against its derived lock<br/>(pinned bridge, no RPC); each witness Mined<br/>only when the SPV proof in the consignment holds<br/>against an enclave header served at<br/>depth ≥ SPV_MIN_CONFIRMATIONS, no tx lookup; listed asset:<br/>reject list over the terminal operations"]
+        p1b --> p1q{"valid, within the kill time,<br/>no crash, verdict checks pass?"}
+        p1q -->|no| p1r[REFUSE — invalid consignment, crash or timeout]:::refuse
     end
     start --> p1w
 
     subgraph P3 ["2 — SPV / Bitcoin anchoring"]
         p3stale{"chain tip fresh?<br/>≤ 2 h old, ≤ 2 h future"}
         p3stale -->|no| p3sr[REFUSE — chain stale, frozen feed]:::refuse
-        p3stale -->|yes| p3v["for EVERY witness txid:<br/>exact proof set-equality,<br/>merkle path ≤ 32,<br/>position consumed, no 64-byte-tx node,<br/>inclusion vs stored header,<br/>depth ≥ SPV_MIN_CONFIRMATIONS"]
-        p3v --> p3q{all proofs pass?}
+        p3stale -->|yes| p3v["for EVERY witness txid:<br/>placed in a block by validation,<br/>the header its proof was checked against<br/>still in the chain,<br/>depth ≥ SPV_MIN_CONFIRMATIONS"]
+        p3v --> p3q{all blocks confirmed?}
         p3q -->|no| p3qr[REFUSE — SPV failure]:::refuse
     end
     p1q -->|yes| p3stale
@@ -102,6 +99,11 @@ flowchart TD
   ids derived from the mint ancestry.
 - LayerZero route: the recipient is the LayerZero `recipient`. Only a V1
   burn can use it: its record binds `dstEid` and `destinationChainId`.
+- Step 1 from `Transfer::load` to the verdict runs in the validator child
+  of the burn signer. The enclave answers each resolver question, keeps its
+  own error when it refuses one, and checks the verdict against the asset
+  bind, the network, the mint locks it bound and its safe height
+  ([specification](../tee-spec.md#validator-child-burn-signer)).
 - A burn signer reads no Bitcoin indexer. It reads the EVM RPC only for
   an asset whose genesis names a reject list (burn-flow B3.7 - B3.10), after
   the asset bind. It derives the lock of each mint in the history inside

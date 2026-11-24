@@ -35,7 +35,6 @@ requests and relays bytes; it is outside the enclave trust boundary.
 | Burn seed cloning | `enclave/src/cloning.rs`, the parent `clone` command | [Cloning](docs/cloning.md) |
 | Parent transport and authorization | `parent/src/` | [Parent mTLS](docs/parent-mtls.md) |
 | Runtime limits | `enclave/src/limits.rs`, `enclave/src/memory.rs`, `parent/src/limits.rs` | [Runtime limits](docs/runtime-limits.md) |
-| Work caps of consignment validation | `enclave/src/networks/rgb/validation/cost.rs` | [Cost model](docs/validation-cost-model.md) |
 | Wire schema | `enclave-proto/`, `parent/Cargo.toml` | [Proto provenance and sync procedure](enclave-proto/README.md) |
 | Build, CI and deployment | `build/`, `deploy/`, `.github/workflows/` | [Building](docs/building.md), [configuration](docs/configuration.md), [operations](docs/operations.md), [stage profile](build/profiles/README.md) |
 | Architecture and request sequences | Related handlers and adapters | [Diagram index](docs/diagrams/README.md) |
@@ -293,6 +292,9 @@ report that conflict and keep it visible until the implementation is fixed.
 - Validate a consignment only with rgb-lib's
   `validate_consignment_with_resolver`, and confirm a mint claim only against a
   lock the enclave bound. Refuse on a resolver error or an rgb-lib warning.
+  The burn signer runs rgb-lib's validation and inspection only in its
+  validator child, and the enclave process gives each resolver answer
+  ([validator child](docs/tee-spec.md#validator-child-burn-signer)).
   Prove what a mint or refill transaction commits only with rgb-lib's
   `inspect_fascia`, and refuse what it refuses; the enclave's own rules around
   it select the asset, the one transition to read and what a side transition
@@ -320,10 +322,12 @@ report that conflict and keep it visible until the implementation is fixed.
   caps, sighash rules or output-key checks.
   Keep market-fee selection separate from deterministic signing limits. Do
   not use live fee estimates: they can strand an already funded request.
-- Verify Merkle inclusion and position of every witness, enforce path-depth
-  limits and refuse a path node that is a 64-byte transaction. Check header
-  ancestry, network rules, difficulty, chainwork, timestamps, confirmations and
-  freshness as required by that network. Test reorgs and boundary cases.
+- Place every witness only from the SPV proof its consignment carries,
+  checked by rgb-lib against a header of the enclave's own chain. Look no
+  transaction up, and serve no header short of the confirmation depth. Check
+  header ancestry, network rules, difficulty, chainwork, timestamps,
+  confirmations and freshness as required by that network. Test reorgs and
+  boundary cases.
 - The SPV checkpoint is a trust anchor. A release build uses only the
   compiled-in value. The parent and the operator must not be able to set it.
 - Preserve the validated chain view until key use, or revalidate under the
@@ -340,24 +344,14 @@ report that conflict and keep it visible until the implementation is fixed.
 - Bound frame bytes, field sizes, collection counts and aggregate work before
   allocation, decoding or expensive validation. Check arithmetic used for caps.
 - Account for all simultaneously live copies: encoded input, decoded objects,
-  queues, worker concurrency, caches and temporary files. Enclave scratch
-  files can use RAM. A per-field cap is not a process-memory bound.
+  queues, worker concurrency, caches, temporary files and child processes.
+  Enclave scratch files can use RAM, and each validator child of the burn
+  signer holds memory of its own. A per-field cap is not a process-memory
+  bound.
 - Bound request-controlled text before it reaches a log line or an error reply.
   A long log line can hold heap after its request ends.
-- Measure a cost model or memory model again when the code or dependency it
-  describes changes.
-- For every rgb-lib or rgb-consensus pin change, rerun the release-mode
-  consignment validation and inspection timings on the CPU used by the burn
-  enclaves. Follow [the cost-model measurement procedure](docs/validation-cost-model.md#when-to-measure-again):
-  measure every documented shape, compare validation plus inspection with its
-  model, and record the source and dependency revisions, compiler, CPU, load,
-  concurrency and repeated results. A passing test on another CPU is not this
-  measurement. If all admitted shapes fit, no change is needed for that CPU
-  and load. Keep allowances for other hardware or concurrency separate from
-  measured results, and round planned timeouts up to five seconds. If a shape
-  exceeds its model, document the observed ratio and either account for it in
-  runtime limits or recalibrate the model. Coefficient changes require an EIF
-  rebuild and new PCR expectations; runtime limit changes do not.
+- Measure the memory model again when the code or dependency it describes
+  changes.
 - Carry a request deadline through queueing, connection setup, reads, writes,
   RPC retries and expensive work. A socket timeout alone does not cancel a
   handler or prove that signing stopped.

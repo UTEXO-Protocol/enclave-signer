@@ -9,8 +9,12 @@ use crate::networks::rgb::spv::Network;
 use crate::networks::rgb::spv::{
     resolve_checkpoint, CheckpointSource, HeaderChain, CHECKPOINT_ENV,
 };
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+use crate::networks::rgb::validation::ChildReport;
 #[cfg(feature = "rgb-validation")]
 use crate::networks::rgb::validation::RgbValidator;
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+use crate::policy::BuildContext;
 use crate::policy::SecurityPolicy;
 #[cfg(feature = "rgb-validation")]
 use crate::policy::{EvmDataSource, EvmRpcTlsPin};
@@ -22,6 +26,30 @@ use crate::state::EnclaveState;
 pub fn init_tracing() {
     let filter = alloy_http_off(tracing_subscriber::EnvFilter::from_default_env());
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// Runs this process as a validator child of the burn signer when its one
+/// argument is `CHILD_ARG`. Returns the child's exit code, or `None` for the
+/// enclave. The host passes the enclave no argument, so it cannot pick this.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn validator_child() -> Option<i32> {
+    use crate::networks::rgb::validation::{serve_validator_child, CHILD_ARG};
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (Some(arg), None) if arg == CHILD_ARG => Some(serve_validator_child()),
+        _ => None,
+    }
+}
+
+/// Install the tracing subscriber of a validator child: the filter of
+/// [`init_tracing`], written to stderr, as the child's stdout goes nowhere.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn init_child_tracing() {
+    let filter = alloy_http_off(tracing_subscriber::EnvFilter::from_default_env());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 /// `filter` with Alloy HTTP logging forced off.
@@ -173,6 +201,142 @@ pub fn log_policy(policy: &SecurityPolicy) {
     }
 }
 
+/// Refuses to start a release burn signer whose validator child does not
+/// start or confine itself, or whose kernel could end the enclave instead of
+/// a child when memory runs out. A release build first sets
+/// [`OVERCOMMIT_SYSCTL`]. A debug build logs a warning. `main` panics on the
+/// refusal.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+pub fn check_validator_child(build: &BuildContext) -> Result<(), String> {
+    use crate::networks::rgb::validation::{probe_validator_child, ChildProgram};
+    let set = overcommit_for(build, std::path::Path::new(OVERCOMMIT_SYSCTL));
+    let report = ChildProgram::this_binary()
+        .and_then(|program| probe_validator_child(&program, crate::conn::IO_IDLE_TIMEOUT));
+    judge_validator_child(set.and_then(|()| kernel_oom_policy()), report, build)
+}
+
+/// The `vm.overcommit_memory` sysctl.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+const OVERCOMMIT_SYSCTL: &str = "/proc/sys/vm/overcommit_memory";
+
+/// The `vm.overcommit_memory` value that grants each allocation
+/// (`OVERCOMMIT_ALWAYS` in `include/uapi/linux/mman.h`).
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+const OVERCOMMIT_ALWAYS: u64 = 1;
+
+/// Writes [`OVERCOMMIT_ALWAYS`] to the sysctl at `path` in a release build.
+/// A debug build leaves the setting of its host as it is.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn overcommit_for(build: &BuildContext, path: &std::path::Path) -> Result<(), String> {
+    if build.debug_or_test {
+        return Ok(());
+    }
+    std::fs::write(path, OVERCOMMIT_ALWAYS.to_string())
+        .map_err(|e| format!("cannot set vm.overcommit_memory to {OVERCOMMIT_ALWAYS}: {e}"))
+}
+
+/// Judges the kernel policy and the report of a probe child for
+/// [`check_validator_child`].
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn judge_validator_child(
+    kernel: Result<(), String>,
+    report: crate::error::Result<ChildReport>,
+    build: &BuildContext,
+) -> Result<(), String> {
+    let mut problems = Vec::new();
+    if let Err(e) = kernel {
+        problems.push(format!(
+            "the kernel could end the enclave before a validator child: {e}"
+        ));
+    }
+    match &report {
+        Ok(report) if !report.confined => problems.push(format!(
+            "the validator child could not confine itself (OOM score adjustment {})",
+            report.oom_score_adj
+        )),
+        Ok(_) => {}
+        Err(e) => problems.push(format!("the validator child did not answer its probe: {e}")),
+    }
+    if !problems.is_empty() {
+        let problem = problems.join("; ");
+        if !build.debug_or_test {
+            return Err(problem);
+        }
+        tracing::warn!("{problem}; continuing in a debug build");
+    }
+    if let Ok(report) = report {
+        tracing::info!(
+            spawn_ms = report.spawn_ms,
+            confined = report.confined,
+            oom_score_adj = report.oom_score_adj,
+            vm_data_kib = report.vm_data_bytes / 1024,
+            vm_rss_kib = report.vm_rss_bytes / 1024,
+            "validator child ready"
+        );
+    }
+    Ok(())
+}
+
+/// Refuses kernel settings, and an OOM score adjustment of the enclave, under
+/// which an out-of-memory can end the enclave before a validator child, which
+/// has the highest OOM score. Only Linux has these values to read.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn kernel_oom_policy() -> Result<(), String> {
+    oom_policy(
+        |name| std::fs::read_to_string(format!("/proc/sys/vm/{name}")),
+        std::fs::read_to_string("/proc/self/oom_score_adj"),
+    )
+}
+
+/// [`kernel_oom_policy`] with `read` giving each `vm` sysctl by its name, and
+/// `enclave_adj` the OOM score adjustment of the enclave.
+#[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+fn oom_policy(
+    read: impl Fn(&str) -> std::io::Result<String>,
+    enclave_adj: std::io::Result<String>,
+) -> Result<(), String> {
+    let value = |name: &str| -> Result<u64, String> {
+        let text = read(name).map_err(|e| format!("cannot read vm.{name}: {e}"))?;
+        let text = text.trim();
+        text.parse()
+            .map_err(|e| format!("vm.{name} reads {text:?}: {e}"))
+    };
+    // Under any other value, the enclave kernel can fail an allocation of
+    // whichever process asks before it ends a child.
+    let overcommit = value("overcommit_memory")?;
+    if overcommit != OVERCOMMIT_ALWAYS {
+        return Err(format!(
+            "vm.overcommit_memory is {overcommit}, not {OVERCOMMIT_ALWAYS}: an allocation of the \
+             enclave can fail before the kernel ends a validator child"
+        ));
+    }
+    if value("panic_on_oom")? != 0 {
+        return Err("vm.panic_on_oom is set: an out-of-memory stops the whole kernel".into());
+    }
+    if value("oom_kill_allocating_task")? != 0 {
+        return Err(
+            "vm.oom_kill_allocating_task is set: the kernel ends the process that asked, not \
+             the one with the highest OOM score"
+                .into(),
+        );
+    }
+    // A child at the highest adjustment adds all of memory to its score, so it
+    // outscores an enclave at 0 or below at any size.
+    let text = enclave_adj
+        .map_err(|e| format!("cannot read the OOM score adjustment of the enclave: {e}"))?;
+    let text = text.trim();
+    let adj: i32 = text
+        .parse()
+        .map_err(|e| format!("the OOM score adjustment of the enclave reads {text:?}: {e}"))?;
+    if adj > 0 {
+        return Err(format!(
+            "the OOM score adjustment of the enclave is {adj}, above 0: a large enclave can \
+             score above a validator child"
+        ));
+    }
+    Ok(())
+}
+
 /// Dev fallback for the donor cloning secret, from `UTEXO_CLONING_SECRET`.
 ///
 /// Use the `InitializeKey` `cloning_secret` field instead: it never goes into
@@ -281,6 +445,148 @@ pub fn build_evm_rpc_client(
             tracing::error!("failed to init EVM RPC client: {e}");
             None
         }
+    }
+}
+
+/// The boot check of the validator child of the burn signer.
+#[cfg(all(test, feature = "rgb-validation", rgb_to_evm, unix))]
+mod validator_child_tests {
+    use super::{judge_validator_child, oom_policy, overcommit_for, OVERCOMMIT_ALWAYS};
+    use crate::error::EnclaveError;
+    use crate::networks::rgb::validation::ChildReport;
+    use crate::policy::BuildContext;
+
+    fn build(debug_or_test: bool) -> BuildContext {
+        BuildContext {
+            debug_or_test,
+            ..BuildContext::current()
+        }
+    }
+
+    fn report(confined: bool) -> crate::error::Result<ChildReport> {
+        Ok(ChildReport {
+            confined,
+            oom_score_adj: 1000,
+            vm_data_bytes: 1 << 20,
+            vm_rss_bytes: 1 << 20,
+            spawn_ms: 5,
+        })
+    }
+
+    /// A release burn signer starts only with a probe child that confined
+    /// itself and a kernel that ends a child first. A debug build starts.
+    #[test]
+    fn a_release_burn_signer_refuses_to_start_without_a_working_child() {
+        assert_eq!(
+            judge_validator_child(Ok(()), report(true), &build(false)),
+            Ok(())
+        );
+        type Case = (
+            fn() -> Result<(), String>,
+            fn() -> crate::error::Result<ChildReport>,
+            &'static str,
+        );
+        let cases: [Case; 3] = [
+            (|| Ok(()), || report(false), "could not confine itself"),
+            (
+                || Ok(()),
+                || {
+                    Err(EnclaveError::Internal(
+                        "cannot start the RGB validator".into(),
+                    ))
+                },
+                "did not answer its probe",
+            ),
+            (
+                || Err("vm.panic_on_oom is set".into()),
+                || report(true),
+                "vm.panic_on_oom is set",
+            ),
+        ];
+        for (kernel, child, what) in cases {
+            let err = judge_validator_child(kernel(), child(), &build(false)).unwrap_err();
+            assert!(err.contains(what), "{err}");
+            let debug = judge_validator_child(kernel(), child(), &build(true));
+            assert_eq!(debug, Ok(()), "{what}");
+        }
+    }
+
+    /// The kernel policy passes only settings, and an OOM score adjustment of
+    /// the enclave, under which the OOM killer ends the process with the
+    /// highest score, a validator child.
+    #[test]
+    fn a_kernel_that_could_end_the_enclave_first_is_refused() {
+        let policy = |overcommit: u8, on_oom: u8, kill_allocating: u8, enclave_adj: i32| {
+            let sysctl = |name: &str| -> std::io::Result<String> {
+                let value = match name {
+                    "overcommit_memory" => overcommit,
+                    "panic_on_oom" => on_oom,
+                    "oom_kill_allocating_task" => kill_allocating,
+                    other => panic!("no sysctl vm.{other}"),
+                };
+                Ok(format!("{value}\n"))
+            };
+            oom_policy(sysctl, Ok(format!("{enclave_adj}\n")))
+        };
+        assert_eq!(policy(1, 0, 0, 0), Ok(()));
+        assert_eq!(policy(1, 0, 0, -1000), Ok(()));
+        for (refused, what) in [
+            (policy(0, 0, 0, 0), "vm.overcommit_memory is 0, not 1"),
+            (policy(2, 0, 0, 0), "vm.overcommit_memory is 2, not 1"),
+            (policy(1, 1, 0, 0), "vm.panic_on_oom"),
+            (policy(1, 2, 0, 0), "vm.panic_on_oom"),
+            (policy(1, 0, 1, 0), "vm.oom_kill_allocating_task"),
+            (policy(1, 0, 0, 1), "adjustment of the enclave is 1,"),
+            (policy(1, 0, 0, 1000), "adjustment of the enclave is 1000,"),
+        ] {
+            assert!(refused.unwrap_err().contains(what), "{what}");
+        }
+        let zero = || -> std::io::Result<String> { Ok("0\n".into()) };
+        let sysctl = |name: &str| -> std::io::Result<String> {
+            let value = if name == "overcommit_memory" { 1 } else { 0 };
+            Ok(format!("{value}\n"))
+        };
+        let unreadable = oom_policy(|_| Err(std::io::ErrorKind::NotFound.into()), zero());
+        let err = unreadable.unwrap_err();
+        assert!(err.contains("cannot read vm.overcommit_memory"), "{err}");
+        let err = oom_policy(|_| Ok("many".into()), zero()).unwrap_err();
+        assert!(err.contains("reads \"many\""), "{err}");
+        let err = oom_policy(sysctl, Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
+        assert!(
+            err.contains("cannot read the OOM score adjustment of the enclave"),
+            "{err}"
+        );
+        let err = oom_policy(sysctl, Ok("high".into())).unwrap_err();
+        assert!(err.contains("enclave reads \"high\""), "{err}");
+    }
+
+    /// A release build sets the overcommit sysctl, and a refusal names it. A
+    /// debug build leaves the setting of its host as it is.
+    #[test]
+    fn a_release_burn_signer_sets_the_kernel_to_grant_each_allocation() {
+        let dir = std::env::temp_dir().join(format!("utexo-overcommit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sysctl = dir.join("overcommit_memory");
+        std::fs::write(&sysctl, "0\n").unwrap();
+        overcommit_for(&build(true), &sysctl).unwrap();
+        assert_eq!(std::fs::read_to_string(&sysctl).unwrap(), "0\n");
+        overcommit_for(&build(false), &sysctl).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&sysctl).unwrap(),
+            OVERCOMMIT_ALWAYS.to_string()
+        );
+        let missing = dir.join("no-such-dir").join("overcommit_memory");
+        let err = overcommit_for(&build(false), &missing).unwrap_err();
+        assert!(
+            err.contains("cannot set vm.overcommit_memory to 1"),
+            "{err}"
+        );
+        let refused = judge_validator_child(Err(err), report(true), &build(false)).unwrap_err();
+        assert!(
+            refused.contains("cannot set vm.overcommit_memory"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

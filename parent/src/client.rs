@@ -5,8 +5,8 @@ use crate::enclave_proto::{
     GetAttestedPublicKeyRequest, GetAttestedPublicKeyResponse, GetLastSavedBlockRequest,
     GetLastSavedBlockResponse, GetLimitsRequest, GetPublicKeyRequest, HealthRequest,
     HealthResponse, InitializeKeyRequest, InitializeKeyResponse, InitiateCloningRequest,
-    InitiateCloningResponse, Limits, LimitsResponse, MerkleProofEntry, PublicKeysResponse,
-    SetCloneRequest, SetEndpointsRequest, SetLimitsRequest, SignedPsbtResponse,
+    InitiateCloningResponse, Limits, LimitsResponse, PublicKeysResponse, SetCloneRequest,
+    SetEndpointsRequest, SetLimitsRequest, SignedPsbtResponse,
 };
 use crate::error::{ParentError, Result};
 use crate::framing;
@@ -34,7 +34,6 @@ pub struct SignEvmRequest {
     pub calldata_commission: u64,
     pub consignment: Vec<u8>,
     pub consignment_hash: Vec<u8>,
-    pub merkle_proofs: Vec<MerkleProofEntry>,
     /// LZ fields for `lzFundsOutCall` releases. `None` for `fundsOutCall`.
     /// When set, the enclave uses the `TeeLzFundsOut` EIP-712 digest and
     /// checks these fields against the decoded calldata.
@@ -355,7 +354,6 @@ impl EnclaveClient {
                                 consignment: req.consignment,
                                 consignment_hash: req.consignment_hash,
                                 commission: req.calldata_commission,
-                                merkle_proofs: req.merkle_proofs,
                             },
                         ),
                     ),

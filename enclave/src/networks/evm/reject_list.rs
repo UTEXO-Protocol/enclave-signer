@@ -11,6 +11,7 @@ use alloy_sol_types::{sol, SolCall};
 use attestation_verify::EvmFinalityTag;
 
 use super::events::EvmReceiptProvider;
+use crate::conn::RESPONSE_MARGIN;
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::{OpoutKey, RejectListEntry};
 
@@ -26,9 +27,6 @@ sol! {
     function length() external view returns (uint256);
     function entries(uint256 start, uint256 end) external view returns (Entry[] memory page);
 }
-
-/// Kept free before the request deadline to write the response.
-const RESPONSE_MARGIN: Duration = Duration::from_secs(2);
 
 /// The list as of the latest block, and how many leading entries are
 /// finalized.

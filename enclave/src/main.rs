@@ -11,6 +11,11 @@ use utexo_bridge_enclave::state::EnclaveState;
 /// The boot sequence, in order. Each step is one call into
 /// [`utexo_bridge_enclave::bootstrap`]; nothing here does work itself.
 fn main() {
+    // A validator child of the burn signer runs its one job and no boot step.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+    if let Some(code) = bootstrap::validator_child() {
+        std::process::exit(code);
+    }
     bootstrap::init_tracing();
     tracing::info!("starting utexo-bridge-enclave");
 
@@ -40,8 +45,16 @@ fn main() {
         panic!("{msg}");
     }
     // Fail closed: a release build with too little memory for the largest
-    // requests does not start. See `memory.rs`.
-    if let Err(msg) = utexo_bridge_enclave::memory::check_at_boot(&build_ctx) {
+    // requests at the limits in force does not start. See `memory.rs`.
+    let limits = utexo_bridge_enclave::limits::in_force(&bridge_config);
+    if let Err(msg) = utexo_bridge_enclave::memory::check_at_boot(&limits, &build_ctx) {
+        panic!("{msg}");
+    }
+    // Fail closed: a release burn signer whose validator child does not start
+    // or confine itself, or whose kernel could end the enclave instead of a
+    // child when memory runs out, does not start.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm, unix))]
+    if let Err(msg) = bootstrap::check_validator_child(&build_ctx) {
         panic!("{msg}");
     }
 

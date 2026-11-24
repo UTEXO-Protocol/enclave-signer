@@ -96,7 +96,6 @@ fn validated_with_last(
         settling_transition: Some(transition),
         settling_witness_txid: None,
         settling_op_id,
-        non_mined_witness_txids: vec![],
         transitions_by_witness: vec![],
         ..Default::default()
     }
@@ -387,10 +386,10 @@ mod transfer {
 
     #[test]
     fn witnesses_confirmed_rejects_non_mined() {
-        // A tentative/ignored witness in the RGB -> EVM direction is an
-        // anomaly: the unlock settles a confirmed transfer.
+        // A witness validation placed in no block is an anomaly in the
+        // RGB -> EVM direction: the unlock settles a confirmed transfer.
         let mut validated = validated_with_last(source_transition(1000));
-        validated.non_mined_witness_txids = vec![[0xABu8; 32]];
+        validated.witness_txids = vec![[0xABu8; 32]];
         let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
         assert!(
             err.to_string().contains("mined"),
@@ -453,7 +452,6 @@ mod transfer {
             settling_transition: None,
             settling_witness_txid: None,
             settling_op_id: None,
-            non_mined_witness_txids: vec![],
             transitions_by_witness: vec![],
             ..Default::default()
         };
@@ -855,6 +853,7 @@ mod btc_relay {
     use super::*;
     use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
+    use crate::networks::rgb::validation::WitnessBlock;
     use crate::test_support::ANY_HEADER_CLOCK;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -1026,30 +1025,26 @@ mod btc_relay {
         )
     }
 
-    /// A consignment anchored by [`WITNESS_TXID`], plus the SPV proof
-    /// placing it at `height`. The block at [`ANCHOR_HEIGHT`] holds only
-    /// that tx, so the path is empty and the position is 0.
-    fn anchored_at(height: u32) -> (ValidatedConsignment, Vec<MerkleProofEntry>) {
+    /// A consignment anchored by [`WITNESS_TXID`], which validation placed
+    /// in the block `chain` holds at `height`.
+    fn anchored_at(chain: &HeaderChain, height: u32) -> ValidatedConsignment {
         let mut internal = WITNESS_TXID;
         internal.reverse();
-        let validated = ValidatedConsignment {
+        ValidatedConsignment {
             contract_id: "rgb:test".into(),
             chain_net: "bc".into(),
             witness_txids: vec![WITNESS_TXID],
             settling_transition: None,
             settling_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
             settling_op_id: None,
-            non_mined_witness_txids: vec![],
+            witness_blocks: vec![WitnessBlock {
+                txid: WITNESS_TXID,
+                height,
+                hash: chain.hash_at(height).unwrap_or_default(),
+            }],
             transitions_by_witness: vec![],
             ..Default::default()
-        };
-        let proofs = vec![MerkleProofEntry {
-            txid: WITNESS_TXID.to_vec(),
-            block_height: height,
-            tx_position: 0,
-            merkle_path: vec![],
-        }];
-        (validated, proofs)
+        }
     }
 
     /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`],
@@ -1075,11 +1070,10 @@ mod btc_relay {
         anchor_height: u32,
         mode: BtcRelayMode,
     ) -> Result<()> {
-        let (validated, proofs) = anchored_at(anchor_height);
+        let validated = anchored_at(chain, anchor_height);
         verify_btc_relay_agreement(
             &params_of(cd),
             &validated,
-            &proofs,
             chain,
             &ChainPins::new(),
             mode,
@@ -1246,6 +1240,14 @@ mod btc_relay {
             err.to_string().contains("no header at latest block height"),
             "got: {err}"
         );
+        assert!(
+            err.to_string().ends_with(&format!(
+                "[needs tip {}, has tip {TIP_HEIGHT}]",
+                TIP_HEIGHT + 1
+            )),
+            "got: {err}"
+        );
+        assert_eq!(err.error_code(), 9, "the enclave is behind: a wait");
     }
 
     #[test]
@@ -1342,7 +1344,10 @@ mod btc_relay {
     fn rejects_when_tee_has_no_header_at_anchor_height() {
         let (chain, hashes) = chain();
         let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
-        assert!(err.to_string().contains("not in sync"), "got: {err}");
+        assert!(
+            err.to_string().contains("no header at height 99"),
+            "got: {err}"
+        );
     }
 
     /// Depth is also checked again: an anchor at the tip has 1 confirmation,
@@ -1358,21 +1363,20 @@ mod btc_relay {
     }
 
     #[test]
-    fn rejects_when_no_merkle_proof_covers_the_settling_witness_tx() {
+    fn rejects_when_no_block_holds_the_settling_witness_tx() {
         let (chain, hashes) = chain();
-        let (validated, mut proofs) = anchored_at(ANCHOR_HEIGHT);
-        proofs[0].txid = vec![0x01; 32];
+        let mut validated = anchored_at(&chain, ANCHOR_HEIGHT);
+        validated.witness_blocks.clear();
         let err = verify_btc_relay_agreement(
             &params_of(&good_calldata(&hashes)),
             &validated,
-            &proofs,
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
             MIN_CONFIRMATIONS,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        assert!(err.to_string().contains("in no block"), "got: {err}");
     }
 
     // -- The chain can move after the last check.
@@ -1438,11 +1442,10 @@ mod btc_relay {
     /// Runs the last check and returns what it pinned.
     fn check_pinning(chain: &HeaderChain, hashes: &[[u8; 32]]) -> ChainPins {
         let pins = ChainPins::new();
-        let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let validated = anchored_at(chain, ANCHOR_HEIGHT);
         verify_btc_relay_agreement(
             &params_of(&good_calldata(hashes)),
             &validated,
-            &proofs,
             chain,
             &pins,
             BtcRelayMode::Required,
@@ -1521,12 +1524,11 @@ mod btc_relay {
             latest,
             hashes[latest as usize],
         );
-        let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let validated = anchored_at(&chain, ANCHOR_HEIGHT);
         let pins = ChainPins::new();
         verify_btc_relay_agreement(
             &params_of(&cd),
             &validated,
-            &proofs,
             &chain,
             &pins,
             BtcRelayMode::Required,
@@ -1737,12 +1739,11 @@ mod btc_relay {
     #[test]
     fn rejects_when_consignment_has_no_witness_bundle() {
         let (chain, hashes) = chain();
-        let (mut validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let mut validated = anchored_at(&chain, ANCHOR_HEIGHT);
         validated.settling_witness_txid = None;
         let err = verify_btc_relay_agreement(
             &params_of(&good_calldata(&hashes)),
             &validated,
-            &proofs,
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,

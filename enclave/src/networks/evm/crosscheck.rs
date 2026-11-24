@@ -11,23 +11,17 @@ use crate::networks::rgb::spv::HeaderChain;
 use crate::networks::rgb::spv_crosscheck;
 use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::networks::rgb::validation::ValidatedConsignment;
-use crate::proto::MerkleProofEntry;
 
 /// Defense-in-depth for RGB -> EVM `fundsOut`: each consignment witness tx must
-/// be mined. `non_mined_witness_txids` comes from the rgbstd per-witness
-/// ordinal map, filled from verified SPV proofs.
+/// be mined. `witness_blocks` names the block validation proved each one in.
 pub fn assert_witnesses_confirmed(validated: &ValidatedConsignment) -> Result<()> {
-    if !validated.non_mined_witness_txids.is_empty() {
-        let list: Vec<String> = validated
-            .non_mined_witness_txids
-            .iter()
-            .map(hex::encode)
-            .collect();
+    let placed = validated.witness_blocks.iter().map(|block| &block.txid);
+    if !placed.eq(validated.witness_txids.iter()) {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut requires every consignment witness tx to be mined, but rgbstd classified \
-             {} witness(es) as not-yet-confirmed (tentative/ignored): {} - refusing to sign",
-            list.len(),
-            list.join(", ")
+            "fundsOut requires every consignment witness tx to be mined, but validation placed \
+             {} of {} witness(es) in a block - refusing to sign",
+            validated.witness_blocks.len(),
+            validated.witness_txids.len()
         )));
     }
     Ok(())
@@ -287,8 +281,8 @@ struct ProofBlock {
 /// BtcRelay agreement and consignment source-block bind (spec P8).
 /// Before a `fundsOut` is signed:
 ///
-/// 1. Find the block of the settling burn's witness tx from its SPV Merkle
-///    proof, not from the calldata.
+/// 1. Find the block of the settling burn's witness tx from where validation
+///    placed it, not from the calldata.
 /// 2. Require a header there. This proves the TEE is in sync.
 /// 3. Require the calldata `proof` to name that height.
 /// 4. Require both commitment words to equal the relay record that the
@@ -316,13 +310,12 @@ struct ProofBlock {
 /// Steps 1-3 run in both modes. No build flag affects the choice.
 ///
 /// Order is cheapest first. The calldata decode and `latest` checks run
-/// before the anchor resolution, which reads the chain and verifies a Merkle
-/// proof again. The commitment checks run last, because they sum the work of
+/// before the anchor resolution, which reads the chain and confirms the
+/// witness block again. The commitment checks run last, because they sum the work of
 /// each header above the checkpoint.
 pub fn verify_btc_relay_agreement(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
-    merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
     pins: &ChainPins,
     mode: BtcRelayMode,
@@ -358,7 +351,7 @@ pub fn verify_btc_relay_agreement(
         )));
     }
 
-    let anchor = resolve_consignment_anchor(validated, merkle_proofs, chain, min_confirmations)?;
+    let anchor = resolve_consignment_anchor(validated, chain, min_confirmations)?;
     pins.pin(chain, anchor.height, min_confirmations)?;
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
@@ -497,18 +490,17 @@ struct ConsignmentAnchor {
 }
 
 /// Finds that block from trusted evidence only: the txid from the consignment
-/// that validation accepted, the height from the tx SPV proof, and the hash
-/// from the enclave header chain. Nothing comes from the calldata. If no header
-/// is at that height, the enclave is behind, so it refuses.
+/// that validation accepted, the height its SPV proof was checked at, and the
+/// hash from the enclave header chain. Nothing comes from the calldata. If no
+/// header is at that height, the enclave is behind, so it refuses.
 ///
-/// The proof is verified again here. The earlier `validate_source_chain` pass
+/// The block is confirmed again here. The earlier `validate_source_chain` pass
 /// held a different header-chain lock. A concurrent `SubmitHeaders` reorg can
 /// replace the header between the two: it goes up to `MAX_REORG_DEPTH`
 /// blocks, which can be more than `SPV_MIN_CONFIRMATIONS`. Inclusion and
 /// header hash must come from one view.
 fn resolve_consignment_anchor(
     validated: &ValidatedConsignment,
-    merkle_proofs: &[MerkleProofEntry],
     chain: &HeaderChain,
     min_confirmations: u32,
 ) -> Result<ConsignmentAnchor> {
@@ -521,46 +513,31 @@ fn resolve_consignment_anchor(
                 .into(),
         )
     })?;
-    // `MerkleProofEntry.txid` is display order; `Txid::to_byte_array` is internal.
+    // `WitnessBlock.txid` is display order; `Txid::to_byte_array` is internal.
     let mut txid: [u8; 32] = witness_txid.to_byte_array();
     txid.reverse();
 
-    // `validate_spv_proofs` enforced set equality with `witness_txids`, so a
-    // miss means the two views disagree. Fail closed.
-    let proof = merkle_proofs
+    // Validation places every witness, so a miss means two views disagree.
+    let block = validated
+        .witness_blocks
         .iter()
-        .find(|p| p.txid.as_slice() == txid)
+        .find(|block| block.txid == txid)
         .ok_or_else(|| {
             EnclaveError::Spv(format!(
-                "fundsOut source block: no merkle proof for the witness tx {} of the settling \
-                 burn - cannot determine the block that anchors it",
+                "fundsOut source block: validation placed the witness tx {} of the settling \
+                 burn in no block - cannot determine the block that anchors it",
                 hex::encode(txid)
             ))
         })?;
 
-    let commitment = display_hash_at(chain, proof.block_height).ok_or_else(|| {
-        EnclaveError::Spv(format!(
-            "fundsOut source block: enclave holds no header at height {} (chain tip = {}) for the \
-             witness tx {} of the settling burn - the TEE header chain is not in sync with \
-             the block that anchors this consignment",
-            proof.block_height,
-            chain.tip_height(),
-            hex::encode(txid)
-        ))
-    })?;
-
-    // Verify inclusion and depth again under this lock guard (see the reorg
-    // note above). Use the full set validator on one element, so its path-depth
-    // and txid bounds also apply.
-    spv_crosscheck::validate_spv_proofs(
-        chain,
-        &[txid],
-        std::slice::from_ref(proof),
-        min_confirmations,
-    )?;
+    // The same header the proof was checked against, at depth, under this
+    // lock guard (see the reorg note above).
+    spv_crosscheck::confirm_witness_block(chain, block, min_confirmations)?;
+    let mut commitment = block.hash;
+    commitment.reverse();
 
     Ok(ConsignmentAnchor {
-        height: proof.block_height,
+        height: block.height,
         commitment,
         txid,
     })
@@ -582,13 +559,23 @@ fn assert_header_present(chain: &HeaderChain, block: &ProofBlock, label: &str) -
     display_hash_at(chain, block.height)
         .map(|_| ())
         .ok_or_else(|| {
-            EnclaveError::Spv(format!(
+            let tip = chain.tip_height();
+            let detail = format!(
                 "fundsOut BtcRelay check: no header at {label} block height {} \
-                 (chain tip = {}) - the enclave is behind the chain and cannot confirm the \
+                 (chain tip = {tip}) - the enclave is behind the chain and cannot confirm the \
                  block the calldata names",
-                block.height,
-                chain.tip_height()
-            ))
+                block.height
+            );
+            // At or below the checkpoint no header comes, so only above the tip is a wait.
+            if block.height > tip {
+                EnclaveError::HeadersPending {
+                    required_tip: block.height,
+                    tip,
+                    detail,
+                }
+            } else {
+                EnclaveError::Spv(detail)
+            }
         })
 }
 

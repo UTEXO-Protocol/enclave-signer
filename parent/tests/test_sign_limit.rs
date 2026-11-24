@@ -18,8 +18,7 @@ use utexo_bridge_parent::{
     framing,
     grpc_proto::{
         parent_service_client::ParentServiceClient, parent_service_server::ParentServiceServer,
-        sign_request, source_proof, EnrichedEvmPayload, MerkleProofEntry, RgbSource, SignRequest,
-        SourceProof,
+        sign_request, source_proof, EnrichedEvmPayload, RgbSource, SignRequest, SourceProof,
     },
     grpc_server::{EnclaveTarget, ParentAdapterService},
     request_shape::ShapeLayer,
@@ -102,12 +101,6 @@ fn burn() -> SignRequest {
         source: Some(SourceProof {
             chain: Some(source_proof::Chain::Rgb(RgbSource {
                 consignment: vec![0x33; 4096],
-                merkle_proofs: vec![MerkleProofEntry {
-                    txid: vec![0x11; 32],
-                    block_height: 900_000,
-                    tx_position: 7,
-                    merkle_path: vec![vec![0x22; 32]; 13],
-                }],
                 ..Default::default()
             })),
             ..Default::default()

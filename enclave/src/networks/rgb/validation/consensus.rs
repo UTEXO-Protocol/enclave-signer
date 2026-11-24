@@ -1,17 +1,23 @@
 //! Validates consignments through rgb-lib's `validate_consignment_with_resolver`.
 //!
-//! This is the only path from raw bytes to [`super::types::ValidatedConsignment`].
-//! It binds the asset and checks work limits before using these resolvers:
+//! This is the only code that turns a consignment file into a
+//! [`super::types::ValidatedConsignment`]. The burn signer runs it in a
+//! validator child (`child.rs`) and rebuilds the result from the child's
+//! verdict (`runner.rs`). It decodes the file and binds the asset before using
+//! these resolvers:
 //!
-//! - `OnChainResolver` feeds the SPV-verified witness positions.
+//! - `HeadersOnlyResolver` feeds the SPV-verified witness positions.
 //! - [`AnchorBinder`] binds each mint claim to its lock, without RPC.
 //! - The enclave's reader supplies the asset's reject list.
 //!
 //! Every validation warning rejects the consignment. The burn summary is read
 //! from the same file only after validation succeeds.
 
-use std::collections::BTreeSet;
-use std::io::Cursor;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::BufReader;
+use std::num::NonZeroU32;
+use std::path::Path;
 
 use rgb_lib::no_wallet::{
     validate_consignment_with_resolver, ConsignmentValidation, ResolveRejectList,
@@ -20,59 +26,72 @@ use rgb_lib::no_wallet::{
 use rgb_lib::BitcoinNetwork;
 use rgb_lib::{ConsignmentExt, FileContent, ResolveClaim, RgbTransfer as Transfer};
 
+#[cfg(test)]
 use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::extract_transition_summary;
-use super::cost::assert_bounded_for_rgb_lib;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
 use super::schema::reject_list;
+use super::types::WitnessBlock;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
-use super::witness::{ConfirmedWitnesses, OnChainResolver};
+use super::witness::{BuriedHeaders, HeadersOnlyResolver};
 use rgb_lib::TypeOfTransition;
 
 use crate::error::{EnclaveError, Result};
 
 impl RgbValidator {
-    /// Validates raw consignment bytes and returns the extracted data.
+    /// Validates the consignment in the file at `path` and returns the
+    /// extracted data.
     ///
-    /// `bind` is required for histories containing mints. `witnesses` gives the
-    /// verified witness positions; `lists` binds the asset and supplies its
-    /// reject list.
-    pub fn validate_consignment(
+    /// `bind` is required for histories containing mints. `headers` is the
+    /// enclave chain the consignment's SPV proofs are checked against; `lists`
+    /// binds the asset and supplies its reject list.
+    // Only the validator child of the burn signer calls it.
+    #[cfg_attr(not(all(rgb_to_evm, unix)), allow(dead_code))]
+    pub(super) fn validate_consignment_file(
         &self,
-        consignment_bytes: &[u8],
+        path: &Path,
         bind: Option<AnchorBinder<'_>>,
-        witnesses: &dyn ConfirmedWitnesses,
+        headers: &dyn BuriedHeaders,
         lists: &ListAccess<'_>,
     ) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
-        tracing::info!(
-            bytes_len = consignment_bytes.len(),
-            "starting RGB consignment validation"
-        );
-
-        let (transfer, list) = load_bounded(consignment_bytes, lists)?;
+        let (transfer, list, bytes_len) = load_bounded(path, lists)?;
         let resolvers = Resolvers {
-            witnesses: OnChainResolver::new(&transfer, self.chain_net, witnesses),
+            witnesses: HeadersOnlyResolver::new(self.chain_net, headers),
             anchors: bind.map(BindingResolver::new),
             list: list
                 .zip(lists.read)
                 .map(|(l, read)| ListResolver::new(l, read)),
         };
-        let (validation, transitions_by_witness) =
-            self.run_rgb_lib(consignment_bytes, &resolvers, list.as_ref(), &transfer)?;
+        let path = path.to_str().ok_or_else(|| {
+            EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
+        })?;
+        let (validation, transitions_by_witness) = self.run_rgb_lib(
+            path,
+            &resolvers,
+            list.as_ref(),
+            &transfer,
+            headers.safe_height(),
+        )?;
+        let witness_blocks = witness_blocks(&validation, &resolvers.witnesses)?;
         let mint_locks = match resolvers.anchors {
             Some(anchors) => anchors.into_locks()?,
             None => Vec::new(),
         };
 
         let mint_anchors = mint_locks.len();
-        let non_mined = non_mined_witnesses(&validation)?;
-        let validated = summarize(&transfer, transitions_by_witness, mint_locks, non_mined)?;
+        let validated = summarize(
+            &transfer,
+            transitions_by_witness,
+            mint_locks,
+            witness_blocks,
+        )?;
         tracing::info!(
             contract_id = %validated.contract_id,
             chain_net = %validated.chain_net,
+            bytes_len,
             witness_txids_count = validated.witness_txids.len(),
             mint_anchors,
             elapsed_ms = start.elapsed().as_millis() as u64,
@@ -81,14 +100,29 @@ impl RgbValidator {
         Ok(validated)
     }
 
-    /// Validates the file before inspecting it. The SPV positions already have
-    /// their depth checked, so rgb-lib gets no safe height.
+    /// [`Self::validate_consignment_file`] of `bytes`, through a scratch file.
+    #[cfg(test)]
+    pub fn validate_consignment(
+        &self,
+        bytes: &[u8],
+        bind: Option<AnchorBinder<'_>>,
+        headers: &dyn BuriedHeaders,
+        lists: &ListAccess<'_>,
+    ) -> Result<ValidatedConsignment> {
+        with_scratch_file("consignment", bytes, |path| {
+            self.validate_consignment_file(path, bind, headers, lists)
+        })
+    }
+
+    /// Validates the file before inspecting it. A witness above `safe_height`
+    /// is a warning, and every warning refuses.
     fn run_rgb_lib(
         &self,
-        consignment_bytes: &[u8],
+        path: &str,
         resolvers: &Resolvers<'_>,
         list: Option<&RejectListContract>,
         transfer: &Transfer,
+        safe_height: Option<NonZeroU32>,
     ) -> Result<(ConsignmentValidation, Summary)> {
         let options = ValidationOptions {
             bitcoin_network: BitcoinNetwork::try_from(self.chain_net).map_err(|e| {
@@ -96,23 +130,18 @@ impl RgbValidator {
             })?,
             offchain_txid: None,
         };
-        with_scratch_file("consignment", consignment_bytes, |path| {
-            let path = path.to_str().ok_or_else(|| {
-                EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
-            })?;
-            let validation = validate_consignment_with_resolver(
-                path,
-                &resolvers.witnesses,
-                resolvers.anchors.as_ref().map(|a| a as &dyn ResolveClaim),
-                resolvers.list.as_ref().map(|l| l as &dyn ResolveRejectList),
-                None,
-                &options,
-            );
-            let validation = resolver_failure_first(validation, resolvers.take_failure(), list)?;
-            check_validation(&validation, transfer)?;
-            // Only what validation passed; the gate counted the inspection too.
-            Ok((validation, extract_transition_summary(path)?))
-        })
+        let validation = validate_consignment_with_resolver(
+            path,
+            &resolvers.witnesses,
+            resolvers.anchors.as_ref().map(|a| a as &dyn ResolveClaim),
+            resolvers.list.as_ref().map(|l| l as &dyn ResolveRejectList),
+            safe_height,
+            &options,
+        );
+        let validation = resolver_failure_first(validation, resolvers.take_failure(), list)?;
+        check_validation(&validation, transfer)?;
+        // Only what validation passed.
+        Ok((validation, extract_transition_summary(path)?))
     }
 }
 
@@ -129,18 +158,21 @@ pub(super) fn resolver_failure_first<T>(
     }
 }
 
-/// Parses the transfer and runs every check that needs no resolver, so a
-/// foreign or oversized history never reaches rgb-lib. Returns its list.
+/// Parses the transfer in the file at `path` and runs every check that needs
+/// no resolver, so a foreign history never reaches rgb-lib.
+/// Returns its list and the length of the file.
 fn load_bounded(
-    bytes: &[u8],
+    path: &Path,
     lists: &ListAccess<'_>,
-) -> Result<(Transfer, Option<RejectListContract>)> {
+) -> Result<(Transfer, Option<RejectListContract>, usize)> {
+    let file = File::open(path).map_err(|e| file_error(path, e))?;
+    // Saturates where a length has no `usize`.
+    let bytes_len = file.metadata().map_err(|e| file_error(path, e))?.len();
+    let bytes_len = usize::try_from(bytes_len).unwrap_or(usize::MAX);
+    tracing::info!(bytes_len, "starting RGB consignment validation");
     // TFR only: a validated copy (VTF), a contract (CON) and V0 fail here.
-    let decoded = Transfer::load(Cursor::new(bytes)).map_err(|e| {
-        tracing::warn!(
-            bytes_len = bytes.len(),
-            "consignment deserialization failed: {e}"
-        );
+    let decoded = Transfer::load(BufReader::new(file)).map_err(|e| {
+        tracing::warn!(bytes_len, "consignment deserialization failed: {e}");
         EnclaveError::CrossCheck(format!("consignment deserialization failed: {e}"))
     })?;
     // The decoder doubles a list when it grows, so a decoded list can take
@@ -155,13 +187,20 @@ fn load_bounded(
     // one schema. Refusing here also spares rgb-lib the work.
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
     let list = reject_list(&transfer.genesis)?;
-    assert_bounded_for_rgb_lib(&transfer, bytes.len(), list.is_some())?;
-    Ok((transfer, list))
+    Ok((transfer, list, bytes_len))
+}
+
+/// An enclave fault: the enclave wrote the file it reads.
+fn file_error(path: &Path, e: std::io::Error) -> EnclaveError {
+    EnclaveError::Internal(format!(
+        "could not read the consignment file {}: {e}",
+        path.display()
+    ))
 }
 
 /// The three resolvers rgb-lib asks, over one parsed transfer.
 struct Resolvers<'a> {
-    witnesses: OnChainResolver<'a>,
+    witnesses: HeadersOnlyResolver<'a>,
     anchors: Option<BindingResolver<'a>>,
     list: Option<ListResolver<'a>>,
 }
@@ -175,6 +214,7 @@ impl Resolvers<'_> {
                 .as_ref()
                 .and_then(BindingResolver::take_failure)
         })
+        .or_else(|| self.witnesses.take_failure())
     }
 }
 
@@ -208,9 +248,9 @@ fn summarize(
     transfer: &Transfer,
     transitions_by_witness: Summary,
     mint_locks: Vec<bfa::VerifiedLock>,
-    non_mined_witness_txids: Vec<[u8; 32]>,
+    witness_blocks: Vec<WitnessBlock>,
 ) -> Result<ValidatedConsignment> {
-    // Display-order bytes, deduplicated and sorted, as the SPV proofs carry them.
+    // Display-order bytes, deduplicated and sorted.
     let witness_txids: Vec<[u8; 32]> = transfer
         .bundles
         .iter()
@@ -222,6 +262,16 @@ fn summarize(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+
+    // Every witness is placed in a block: the chain checks read these.
+    let placed: Vec<[u8; 32]> = witness_blocks.iter().map(|block| block.txid).collect();
+    if placed != witness_txids {
+        return Err(EnclaveError::CrossCheck(format!(
+            "rgb-lib placed {} witness tx(s) in a block, the consignment has {} - refusing to sign",
+            placed.len(),
+            witness_txids.len()
+        )));
+    }
 
     let settling = settling_summary(&transitions_by_witness)?;
     let settling_op_id = settling
@@ -240,20 +290,26 @@ fn summarize(
         settling_witness_txid,
         settling_transition,
         settling_op_id,
-        non_mined_witness_txids,
+        witness_blocks,
         transitions_by_witness,
         mint_locks,
     })
 }
 
-/// Witnesses rgb-lib did not see mined, in display order. A passing validation
-/// leaves none: `OnChainResolver` refuses each witness without a proven position.
-fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32]>> {
-    let mut txids = BTreeSet::new();
+/// The block of every witness, sorted by display-order txid. A witness rgb-lib
+/// did not see mined, or mined where no header was served, refuses.
+fn witness_blocks(
+    validation: &ConsignmentValidation,
+    resolver: &HeadersOnlyResolver<'_>,
+) -> Result<Vec<WitnessBlock>> {
+    let mut blocks = BTreeMap::new();
     for witness in &validation.witnesses {
-        if matches!(witness.status, WitnessValidationStatus::Mined { .. }) {
-            continue;
-        }
+        let WitnessValidationStatus::Mined { height, .. } = witness.status else {
+            return Err(EnclaveError::CrossCheck(format!(
+                "rgb-lib validated witness tx {} as {:?}, not mined - refusing to sign",
+                witness.txid, witness.status
+            )));
+        };
         let txid: [u8; 32] = hex::decode(&witness.txid)
             .ok()
             .and_then(|bytes| bytes.try_into().ok())
@@ -263,9 +319,16 @@ fn non_mined_witnesses(validation: &ConsignmentValidation) -> Result<Vec<[u8; 32
                     witness.txid
                 ))
             })?;
-        txids.insert(txid);
+        let hash = resolver.served_hash(height).ok_or_else(|| {
+            EnclaveError::CrossCheck(format!(
+                "rgb-lib placed witness tx {} at height {height}, where the enclave served no \
+                 header - refusing to sign",
+                witness.txid
+            ))
+        })?;
+        blocks.insert(txid, WitnessBlock { txid, height, hash });
     }
-    Ok(txids.into_iter().collect())
+    Ok(blocks.into_values().collect())
 }
 
 /// The settling transition and the witness tx that anchors it: the one burn of

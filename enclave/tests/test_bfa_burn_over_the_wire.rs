@@ -133,8 +133,22 @@ fn refuses_a_burn_with_an_invalid_spv_inclusion_proof() {
     let Some(SourceNetwork::RgbSource(source)) = &mut request.source_network else {
         unreachable!()
     };
-    source.merkle_proofs[1].merkle_path.push(vec![0x99; 32]);
-    assert_refusal(exchange(&fixture.ctx, request), "!= header root");
+    // One more sibling on the burn's proof: it no longer leads to the header root.
+    let mut transfer = <rgbstd::containers::Transfer as rgbstd::containers::FileContent>::load(
+        std::io::Cursor::new(&source.consignment),
+    )
+    .unwrap();
+    let proof = transfer.bundles.iter_mut().nth(1).unwrap();
+    proof
+        .spv_proof
+        .as_mut()
+        .unwrap()
+        .merkle
+        .push(bitcoin::TxMerkleNode::from_byte_array([0x99; 32]))
+        .unwrap();
+    source.consignment = bfa_consignment::save(&transfer);
+    source.consignment_hash = alloy_primitives::keccak256(&source.consignment).to_vec();
+    assert_refusal(exchange(&fixture.ctx, request), "not proven on chain");
 }
 
 #[test]

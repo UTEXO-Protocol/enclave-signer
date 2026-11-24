@@ -3,7 +3,6 @@
 //! its fascia. Then parity with the consensus path on the same fixtures.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 
 use amplify::confinement::SmallBlob;
 use bitcoin::bip32::ChildNumber;
@@ -1128,18 +1127,8 @@ fn consensus(
         std::io::Cursor::new(bytes),
     )
     .unwrap();
-    let chain: BTreeMap<bitcoin::Txid, rgbstd::vm::WitnessPos> = transfer
-        .bundles
-        .iter()
-        .zip(100u32..)
-        .map(|(wb, height)| {
-            let height = std::num::NonZeroU32::new(height).unwrap();
-            (
-                wb.witness_id(),
-                rgbstd::vm::WitnessPos::bitcoin(height, 1_700_000_000).unwrap(),
-            )
-        })
-        .collect();
+    let witnesses: Vec<bitcoin::Txid> = transfer.bundles.iter().map(|wb| wb.witness_id()).collect();
+    let chain = crate::test_support::MinedBlocks::of(&witnesses);
     let anchors = RefCell::new(Vec::new());
     let bind = |seen: &[validation::MintAnchor]| {
         anchors.borrow_mut().extend_from_slice(seen);
