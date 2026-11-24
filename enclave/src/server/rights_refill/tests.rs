@@ -278,7 +278,7 @@ fn signs_a_refill_with_one_unclosed_fee_input() {
     });
 }
 
-/// Rule C holds on either account, so only RR9 stops this one.
+/// The output is the enclave's own on either account, so only RR9 stops this one.
 #[test]
 fn refuses_a_right_on_a_vanilla_output() {
     let err = refusal(Shape {
@@ -288,7 +288,7 @@ fn refuses_a_right_on_a_vanilla_output() {
     assert!(err.contains("not a Colored key-path output"), "{err}");
 }
 
-/// Rule C refuses these paths, so the sats gate refuses first.
+/// The ownership check refuses these paths, so the sats gate refuses first.
 #[test]
 fn refuses_a_right_on_a_colored_key_rgb_lib_never_scans() {
     let hardened = ChildNumber::from_hardened_idx(1).unwrap();
@@ -372,7 +372,10 @@ fn a_refusal_past_the_gate_counts_against_the_rate_limit() {
     let ctx = context(&other.contract_id.to_string());
     for _ in 0..MAX_REFILLS_PER_HOUR {
         let err = sign(&ctx, request(&history, &refill)).unwrap_err();
-        assert!(err.to_string().contains("not of the pinned"), "{err}");
+        assert!(
+            err.to_string().contains("beside the pinned RGB_ASSET_ID"),
+            "{err}"
+        );
     }
     let err = sign(&ctx, request(&history, &refill)).unwrap_err();
     assert!(err.to_string().contains("rate limit"), "{err}");

@@ -220,7 +220,7 @@ enum LimitsAction {
     Show,
     /// Change limits. Limits that are not named keep their values
     Set {
-        /// NAME=VALUE pairs, for example max_rgb_lib_ms=24000. `limits show`
+        /// NAME=VALUE pairs, for example evm_rpc_timeout_secs=24. `limits show`
         /// lists the names.
         pairs: Vec<String>,
         /// Read NAME=VALUE lines from this file. A pair on the command line
@@ -551,7 +551,6 @@ fn main() {
                 proxy_contract: proxy,
                 calldata_amount,
                 calldata_commission,
-                merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
                 lz_release: None,
@@ -663,8 +662,12 @@ fn main() {
                         std::fs::read_to_string(&path)
                             .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
                     });
-                    let values = utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
-                        .unwrap_or_else(|e| fail(e));
+                    let (values, skipped) =
+                        utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
+                            .unwrap_or_else(|e| fail(e));
+                    for note in skipped {
+                        eprintln!("note: {note}");
+                    }
                     client.set_limits(values, reset)
                 }
             };

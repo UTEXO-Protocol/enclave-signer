@@ -394,6 +394,17 @@ impl ParentAdapterService {
                 "evm event pending finality: 1 signer node(s) have not seen the deposit finalized yet ({})",
                 err.message
             )),
+            // Stable wire prefix of a Bitcoin header wait. The message ends with the two
+            // tips, `[needs tip N, has tip M]`; the wording before them may change.
+            9 => Status::failed_precondition(format!(
+                "bitcoin headers pending: {}",
+                err.message
+            )),
+            // Stable wire prefix of a validation the enclave ended at its kill time.
+            10 => Status::failed_precondition(format!(
+                "rgb validation timed out: {}",
+                err.message
+            )),
             _ => Status::internal(format!(
                 "enclave error (code {}): {}",
                 err.code, err.message
@@ -402,13 +413,13 @@ impl ParentAdapterService {
     }
 
     /// Copies only `common`. A copy of the whole request would also copy the
-    /// source with every Merkle proof.
+    /// source with its consignment.
     fn common_sign_request(req: &grpc_proto::SignRequest) -> Result<CommonSignRequest, Status> {
         req.common
             .ok_or_else(|| Status::invalid_argument("SignRequest.common is missing"))
     }
 
-    /// Moves the source out of the request, so that its Merkle proofs exist
+    /// Moves the source out of the request, so that its consignment exists
     /// once.
     fn source_proof(req: &mut grpc_proto::SignRequest) -> Result<SourceProof, Status> {
         req.source
@@ -433,17 +444,6 @@ impl ParentAdapterService {
         match hex::decode(hex) {
             Ok(bytes) => bytes,
             Err(_) => value.into_bytes(),
-        }
-    }
-
-    fn enclave_merkle_proof(
-        proof: grpc_proto::MerkleProofEntry,
-    ) -> enclave_proto::MerkleProofEntry {
-        enclave_proto::MerkleProofEntry {
-            txid: proof.txid,
-            block_height: proof.block_height,
-            tx_position: proof.tx_position,
-            merkle_path: proof.merkle_path,
         }
     }
 
@@ -480,11 +480,6 @@ impl ParentAdapterService {
                     consignment: rgb.consignment,
                     consignment_hash: rgb.consignment_hash,
                     commission: source.commission,
-                    merkle_proofs: rgb
-                        .merkle_proofs
-                        .into_iter()
-                        .map(Self::enclave_merkle_proof)
-                        .collect(),
                 }),
             ),
             None => Err(Status::invalid_argument(
@@ -813,9 +808,9 @@ impl ParentService for ParentAdapterService {
             DataType::BtcUtxo => {
                 // Plain-BTC signing, with no source proof or consignment. The
                 // Listener sends the PSBT in `EnrichedBtcPayload.psbt_bytes`.
-                // The enclave signs on the vanilla BIP-86 account. Outputs that
-                // do not pay back to its own scripts must fit `BTC_MAX_UNOWNED_SATS`,
-                // the inputs `BTC_MAX_TOTAL_SATS`, and the fee the fee policy.
+                // The enclave signs on the vanilla BIP-86 account. Every output
+                // that carries sats must be one the enclave derives, the inputs
+                // must fit `BTC_MAX_TOTAL_SATS`, and the fee the fee policy.
                 let payload = match inner.data {
                     Some(sign_request::Data::BtcData(payload)) => payload,
                     _ => {

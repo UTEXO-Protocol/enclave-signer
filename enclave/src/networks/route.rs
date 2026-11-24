@@ -48,6 +48,11 @@ pub struct ValidationContext<'a> {
     /// keys are not held across I/O. `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
+    /// Tells whether a vout is an output of this enclave's Colored account,
+    /// from enclave keys. The mint reader needs it to tell a transfer of the
+    /// wallet's own units from one that pays anyone else.
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    pub own_colored_vout: Option<crate::networks::rgb::psbt_commit::OwnVout<'a>>,
     /// Binds each BFA mint anchor of a consignment to an EVM lock. With
     /// `None`, a consignment with a mint anchor is refused.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -55,6 +60,10 @@ pub struct ValidationContext<'a> {
     /// Reads the asset's reject list.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     pub reject_list_reader: Option<crate::networks::rgb::validation::RejectListReader<'a>>,
+    /// The request deadline. Burn validation ends its validator child
+    /// before it.
+    #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+    pub deadline: std::time::Instant,
 }
 
 /// Result of source validation: the route proof and, for an RGB source on an

@@ -72,8 +72,7 @@ pub(crate) fn our_key_at(
 }
 
 /// Gives output `index` our key-path script at `child` below `account`,
-/// with the rule (C) metadata that names it.
-#[cfg(feature = "rgb-validation")]
+/// with the metadata that names its key path.
 pub(crate) fn claim_output(
     psbt: &mut Psbt,
     index: usize,
@@ -222,24 +221,87 @@ fn make_input_ours(psbt: &mut Psbt, keys: &KeyManager) -> ScriptBuf {
 }
 
 fn owned(psbt: &Psbt, keys: &KeyManager) -> bool {
-    let inputs = self_controlled_input_scripts_scoped(psbt, keys, Some(AccountType::Vanilla));
-    output_is_self_owned(psbt, 0, &inputs) || output_is_self_derived(psbt, 0, keys, None)
+    output_is_self_derived(psbt, 0, keys, None)
 }
 
-// === Rule (A): repaying an input we control ===
+/// The scripts of the inputs the custody resolver finds on `account`, or on
+/// either account for `None`.
+fn controlled_scripts(
+    psbt: &Psbt,
+    keys: &KeyManager,
+    account: Option<AccountType>,
+) -> HashSet<Vec<u8>> {
+    find_controlled_taproot_inputs(psbt, keys.master_fingerprint(), keys)
+        .iter()
+        .filter(|job| account.is_none_or(|want| job.account_type == want))
+        .filter_map(|job| psbt.inputs.get(job.input_index))
+        .filter_map(|input| input.witness_utxo.as_ref())
+        .map(|utxo| utxo.script_pubkey.as_bytes().to_vec())
+        .collect()
+}
 
+// === The script of a spent input proves nothing ===
+
+/// An output that pays back to the script of an input we control, with no
+/// output metadata, is not proven ours: ownership comes from the key path the
+/// output names, and the wallet never pays to an address twice.
 #[test]
-fn accepts_output_repaying_a_controlled_input() {
+fn an_output_repaying_a_controlled_input_is_not_owned_without_its_key_path() {
     let keys = km();
     let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
     let spk = make_input_ours(&mut psbt, &keys);
-    // Pay back to the input script, with no output metadata.
     psbt.unsigned_tx.output[0].script_pubkey = spk;
+    psbt.unsigned_tx.output[0].value = Amount::from_sat(40_000);
+
+    assert!(!owned(&psbt, &keys));
+    assert_eq!(unowned_output_sats(&psbt, &keys), Some(40_000));
+}
+
+/// The same output is ours once it names the key path of that script.
+#[test]
+fn an_output_repaying_a_controlled_input_is_owned_with_its_key_path() {
+    let keys = km();
+    let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+    let spk = make_input_ours(&mut psbt, &keys);
+    let child = [
+        ChildNumber::Normal { index: 0 },
+        ChildNumber::Normal { index: 0 },
+    ];
+    claim_output(&mut psbt, 0, &keys, AccountType::Vanilla, &child);
+
+    assert_eq!(psbt.unsigned_tx.output[0].script_pubkey, spk);
     assert!(owned(&psbt, &keys));
 }
 
-/// Rule (A) uses only inputs we can sign. A foreign input gives no sign
-/// job, so an output to its script proves nothing.
+// === The script comparison of the witness mint refusal ===
+
+/// The refusal needs no output metadata: the script of an input the enclave
+/// controls is recognised as it is.
+#[test]
+fn the_script_of_a_controlled_input_is_recognised_without_metadata() {
+    let keys = km();
+    let mut psbt = psbt_with(ScriptBuf::new(), ScriptBuf::new());
+    let spk = make_input_ours(&mut psbt, &keys);
+    psbt.unsigned_tx.output[0].script_pubkey = spk;
+
+    let inputs = controlled_input_scripts(&psbt, &keys);
+    assert!(output_repays_controlled_input(&psbt, 0, &inputs));
+    assert_eq!(inputs, controlled_scripts(&psbt, &keys, None));
+}
+
+/// Only inputs the enclave can sign count. A foreign input gives no sign job,
+/// so an output on its script is not recognised.
+#[test]
+fn the_script_of_a_foreign_input_is_not_recognised() {
+    let keys = km();
+    let foreign_spk = foreign_address(0xB1);
+    let psbt = psbt_with(foreign_spk.clone(), foreign_spk);
+
+    let inputs = controlled_input_scripts(&psbt, &keys);
+    assert!(inputs.is_empty());
+    assert!(!output_repays_controlled_input(&psbt, 0, &inputs));
+}
+
 #[test]
 fn rejects_output_repaying_an_input_we_do_not_control() {
     let keys = km();
@@ -248,8 +310,7 @@ fn rejects_output_repaying_an_input_we_do_not_control() {
     assert!(!owned(&psbt, &keys));
 }
 
-/// This path signs Vanilla only, so an output to a Colored input script
-/// with no metadata proves nothing. A Colored destination needs rule (C).
+/// An output to a Colored input script with no metadata proves nothing.
 #[test]
 fn rejects_bare_output_repaying_a_colored_input() {
     let keys = km();
@@ -261,8 +322,6 @@ fn rejects_bare_output_repaying_a_colored_input() {
 }
 
 // === Metadata is not a proof of control ===
-//
-// Rule (C) proves our own key-path outputs directly.
 
 /// A leaf that names our key, in a tree we do not control.
 #[test]
@@ -291,7 +350,7 @@ fn a_leaf_mentioning_our_key_is_not_ownership() {
     );
 }
 
-// === Rule (C): a BIP-86 key-path output of one of our accounts ===
+// === A BIP-86 key-path output of one of our accounts ===
 //
 // The metadata only names a path. The proof: our key at that path, tweaked
 // with an empty tree, gives the output script.
@@ -333,8 +392,8 @@ fn accepts_change_on_vanilla_keychain_one() {
     assert!(owned(&psbt, &keys));
 }
 
-/// `create_utxo` allocations are on the Colored account. Their scripts
-/// never equal a Vanilla input script, so rule (C) proves them.
+/// `create_utxo` allocations are on the Colored account, and the derivation
+/// proves them as it proves Vanilla change.
 #[test]
 fn accepts_an_allocation_output_on_the_colored_account() {
     let keys = km();
@@ -451,10 +510,10 @@ fn rejects_a_derived_claim_whose_script_does_not_match() {
     assert!(!owned(&psbt, &keys));
 }
 
-/// A rule (C) output has no foreign spend path, so the budget exempts it
-/// in full, not only up to the input value.
+/// An output the enclave derives has no foreign spend path, so none of its
+/// sats count as unowned, whatever the inputs hold.
 #[test]
-fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
+fn a_derived_output_counts_no_unowned_sat() {
     let keys = km();
     let secp = Secp256k1::new();
     let (our, path) = our_key(&keys, 0, 3);
@@ -468,8 +527,7 @@ fn a_derived_output_is_exempt_in_full_from_the_unowned_budget() {
         .tap_key_origins
         .insert(our, (vec![], (*keys.master_fingerprint(), path)));
 
-    let inputs = self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla));
-    assert_eq!(unowned_output_sats(&psbt, &inputs, &keys), Some(0));
+    assert_eq!(unowned_output_sats(&psbt, &keys), Some(0));
 }
 
 // === custody must not depend on merge progress ===
@@ -480,19 +538,17 @@ struct Gates {
     btc: Option<String>,
 }
 
-/// The budget is pinned, so the permissive unset branch never runs. The
-/// plain-BTC gate applies to the Vanilla account only.
+/// The plain-BTC gate applies to the Vanilla account only.
 fn gates(psbt: &Psbt, keys: &KeyManager, account: AccountType) -> Gates {
     let btc_cfg = BridgeConfig {
         btc_max_total_sats: 1_000_000,
-        btc_max_unowned_sats: 5_000,
         ..Default::default()
     };
     let req = SignBtcRequest {
         psbt_bytes: psbt.serialize(),
     };
     Gates {
-        owned: self_controlled_input_scripts_scoped(psbt, keys, None),
+        owned: controlled_scripts(psbt, keys, None),
         btc: (account == AccountType::Vanilla)
             .then(|| validate_btc_request(&req, &btc_cfg, keys).err())
             .flatten()
@@ -559,24 +615,16 @@ struct MergeScenario {
     unverified: Vec<String>,
 }
 
-/// Two inputs A and B on `account`, change back to each script, and one
-/// foreign dust output. Merges our signature on A only and records every
+/// Two inputs A and B on `account`, and change back to each script. Merges
+/// our signature on A only and records every
 /// gate before and after. It does not assert the result, so both accounts
 /// always run.
 fn merge_scenario(account: AccountType) -> MergeScenario {
     let keys = km();
     let a_spk = our_address(&keys, account, 0, 0);
     let b_spk = our_address(&keys, account, 0, 1);
-    let foreign = foreign_address(0xB1);
     assert_ne!(a_spk, b_spk);
-    let mut psbt = psbt_with_n(
-        2,
-        &[
-            (a_spk.clone(), 90_000),
-            (b_spk.clone(), 90_000),
-            (foreign, 1_000),
-        ],
-    );
+    let mut psbt = psbt_with_n(2, &[(a_spk.clone(), 90_000), (b_spk.clone(), 90_000)]);
     assert_eq!(
         anchor_input(&mut psbt, 0, &keys, account, 0, 0, 100_000),
         a_spk
@@ -585,6 +633,16 @@ fn merge_scenario(account: AccountType) -> MergeScenario {
         anchor_input(&mut psbt, 1, &keys, account, 0, 1, 100_000),
         b_spk
     );
+    // The change outputs name their key paths, as the wallet's own outputs do.
+    for index in 0..2u32 {
+        let child = [
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index },
+        ];
+        claim_output(&mut psbt, index as usize, &keys, account, &child);
+    }
+    assert_eq!(psbt.unsigned_tx.output[0].script_pubkey, a_spk);
+    assert_eq!(psbt.unsigned_tx.output[1].script_pubkey, b_spk);
 
     let before = gates(&psbt, &keys, account);
     let tx_before = psbt.unsigned_tx.clone();
@@ -650,10 +708,9 @@ fn bfa_ownership_is_independent_of_merge_progress() {
         // nothing else changed.
         let both = HashSet::from([s.a_spk.to_bytes(), s.b_spk.to_bytes()]);
         assert_eq!(s.before.owned, both, "{tag}: owned before");
-        // Two outputs pay our own scripts and the foreign one fits the
-        // unowned budget, so the plain-BTC gate passes. It runs on the
-        // Vanilla account only, so the Colored run has no gate result.
-        // This test makes sure the set does not change on a
+        // Both outputs are our own key-path outputs, so the plain-BTC gate
+        // passes. It runs on the Vanilla account only, so the Colored run has
+        // no gate result. This test makes sure the set does not change on a
         // merge.
         assert_eq!(s.before.btc, None, "{tag}: plain-BTC gate before");
         assert_eq!(s.jobs_after, vec![1], "{tag}: only B outstanding");
@@ -712,9 +769,8 @@ fn custody_is_invariant_under_every_signature_subset() {
         );
     }
 
-    let owned_all = self_controlled_input_scripts_scoped(&unsigned, &keys, None);
-    let owned_vanilla =
-        self_controlled_input_scripts_scoped(&unsigned, &keys, Some(AccountType::Vanilla));
+    let owned_all = controlled_scripts(&unsigned, &keys, None);
+    let owned_vanilla = controlled_scripts(&unsigned, &keys, Some(AccountType::Vanilla));
     let txid = unsigned.unsigned_tx.compute_txid();
     assert_eq!(owned_all.len(), 3);
     assert_eq!(owned_vanilla.len(), 2);
@@ -734,12 +790,12 @@ fn custody_is_invariant_under_every_signature_subset() {
         }
 
         assert_eq!(
-            self_controlled_input_scripts_scoped(&psbt, &keys, None),
+            controlled_scripts(&psbt, &keys, None),
             owned_all,
             "subset {mask:03b}: controlled scripts moved"
         );
         assert_eq!(
-            self_controlled_input_scripts_scoped(&psbt, &keys, Some(AccountType::Vanilla)),
+            controlled_scripts(&psbt, &keys, Some(AccountType::Vanilla)),
             owned_vanilla,
             "subset {mask:03b}: Vanilla-scoped scripts moved"
         );

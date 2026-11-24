@@ -753,9 +753,65 @@ pub fn check_node_chain_id(provider: &dyn EvmReceiptProvider, pinned: u64) -> Re
     Ok(node)
 }
 
-/// The time for one EVM JSON-RPC round-trip (`evm_rpc_timeout_secs`).
-fn rpc_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(crate::limits::get().evm_rpc_timeout_secs)
+std::thread_local! {
+    /// When each EVM JSON-RPC call of this thread must end, if
+    /// [`with_calls_ending_by`] set it.
+    static CALLS_END: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Runs `work` with each EVM JSON-RPC call of this thread ending by `end`: a
+/// call still open then fails as a request out of time. A burn signer answers
+/// the questions of its validator child so.
+pub fn with_calls_ending_by<T>(end: std::time::Instant, work: impl FnOnce() -> T) -> T {
+    /// Sets the end of the calls back, also on an unwinding panic.
+    struct Restore(Option<std::time::Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CALLS_END.set(self.0);
+        }
+    }
+    let _restore = Restore(CALLS_END.replace(Some(end)));
+    work()
+}
+
+/// The time one EVM JSON-RPC call may take: `evm_rpc_timeout_secs`, or less
+/// when the calls of this thread end sooner.
+struct CallTime {
+    timeout: std::time::Duration,
+    /// The end of the calls of this thread, not the RPC timeout, sets it.
+    cut: bool,
+}
+
+impl CallTime {
+    fn now() -> Self {
+        let timeout = std::time::Duration::from_secs(crate::limits::get().evm_rpc_timeout_secs);
+        let left = CALLS_END
+            .get()
+            .map(|end| end.saturating_duration_since(std::time::Instant::now()));
+        match left {
+            Some(left) if left < timeout => Self {
+                timeout: left,
+                cut: true,
+            },
+            _ => Self {
+                timeout,
+                cut: false,
+            },
+        }
+    }
+
+    /// The error of a call of `method` that took all its time: the RPC
+    /// timeout's own `error`, or a timeout of the request.
+    fn elapsed(&self, method: &str, error: impl FnOnce() -> EnclaveError) -> EnclaveError {
+        if !self.cut {
+            return error();
+        }
+        EnclaveError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("evm-rpc: {method} did not end before the request deadline"),
+        ))
+    }
 }
 
 /// Production [`EvmReceiptProvider`]: an alloy JSON-RPC client over the
@@ -817,21 +873,23 @@ impl AlloyEvmClient {
         number: alloy::rpc::types::BlockNumberOrTag,
     ) -> Result<Option<BlockData>> {
         use alloy::providers::Provider;
-        let timeout = rpc_timeout();
+        let time = CallTime::now();
         let block = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(timeout, async {
+                tokio::time::timeout(time.timeout, async {
                     self.provider.get_block_by_number(number).await
                 })
                 .await
             })
             .map_err(|_elapsed| {
-                EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_getBlockByNumber({number:?}) timed out after {}s \
-                     (host RPC path stalled) - refusing to sign",
-                    timeout.as_secs()
-                ))
+                time.elapsed("eth_getBlockByNumber", || {
+                    EnclaveError::CrossCheck(format!(
+                        "evm-rpc: eth_getBlockByNumber({number:?}) timed out after {}s \
+                         (host RPC path stalled) - refusing to sign",
+                        time.timeout.as_secs()
+                    ))
+                })
             })?
             .map_err(|_| {
                 // Transport errors can contain the RPC URL and its API key.
@@ -850,7 +908,7 @@ impl EvmReceiptProvider for AlloyEvmClient {
     fn get_transaction_receipt(&self, tx_hash: &[u8; 32]) -> Result<Option<ReceiptData>> {
         use alloy::providers::Provider;
         let hash = alloy::primitives::B256::from_slice(tx_hash);
-        let timeout = rpc_timeout();
+        let time = CallTime::now();
         // Outer `?`: the deadline passed (fail closed, free the worker). Inner
         // `?`: the RPC failed. Build the `timeout` future INSIDE the async
         // block. As a `block_on` argument it panics with "there is no reactor
@@ -858,17 +916,22 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let receipt = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(timeout, self.provider.get_transaction_receipt(hash)).await
+                tokio::time::timeout(time.timeout, self.provider.get_transaction_receipt(hash))
+                    .await
             })
             .map_err(|_elapsed| {
-                EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path stalled) \
-                     - refusing to sign",
-                    timeout.as_secs()
-                ))
+                time.elapsed("eth_getTransactionReceipt", || {
+                    EnclaveError::CrossCheck(format!(
+                        "evm-rpc: eth_getTransactionReceipt timed out after {}s (host RPC path \
+                         stalled) - refusing to sign",
+                        time.timeout.as_secs()
+                    ))
+                })
             })?
             .map_err(|_| {
-                EnclaveError::CrossCheck("evm-rpc: eth_getTransactionReceipt failed (RPC error details redacted)".into())
+                EnclaveError::CrossCheck(
+                    "evm-rpc: eth_getTransactionReceipt failed (RPC error details redacted)".into(),
+                )
             })?;
         receipt.map(map_alloy_receipt).transpose()
     }
@@ -888,14 +951,18 @@ impl EvmReceiptProvider for AlloyEvmClient {
 
     fn get_chain_id(&self) -> Result<u64> {
         use alloy::providers::Provider;
-        let timeout = rpc_timeout();
+        let time = CallTime::now();
         self.runtime
-            .block_on(async { tokio::time::timeout(timeout, self.provider.get_chain_id()).await })
+            .block_on(async {
+                tokio::time::timeout(time.timeout, self.provider.get_chain_id()).await
+            })
             .map_err(|_elapsed| {
-                EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
-                    timeout.as_secs()
-                ))
+                time.elapsed("eth_chainId", || {
+                    EnclaveError::CrossCheck(format!(
+                        "evm-rpc: eth_chainId timed out after {}s - refusing to sign",
+                        time.timeout.as_secs()
+                    ))
+                })
             })?
             .map_err(|_| {
                 EnclaveError::CrossCheck(
@@ -911,11 +978,11 @@ impl EvmReceiptProvider for AlloyEvmClient {
         let request = TransactionRequest::default()
             .to(Address::from(*to))
             .input(Bytes::copy_from_slice(data).into());
-        let timeout = rpc_timeout();
+        let time = CallTime::now();
         let out = self
             .runtime
             .block_on(async {
-                tokio::time::timeout(timeout, async {
+                tokio::time::timeout(time.timeout, async {
                     self.provider
                         .call(request)
                         .block(BlockId::number(block))
@@ -924,10 +991,12 @@ impl EvmReceiptProvider for AlloyEvmClient {
                 .await
             })
             .map_err(|_elapsed| {
-                EnclaveError::CrossCheck(format!(
-                    "evm-rpc: eth_call timed out after {}s - refusing to sign",
-                    timeout.as_secs()
-                ))
+                time.elapsed("eth_call", || {
+                    EnclaveError::CrossCheck(format!(
+                        "evm-rpc: eth_call timed out after {}s - refusing to sign",
+                        time.timeout.as_secs()
+                    ))
+                })
             })?
             .map_err(|_| {
                 EnclaveError::CrossCheck(

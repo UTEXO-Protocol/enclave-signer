@@ -192,7 +192,7 @@ pub struct GetAttestedPublicKeyResponse {
     #[prost(bytes="vec", tag="3")]
     pub attested_policy: ::prost::alloc::vec::Vec<u8>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignRequest {
     #[prost(uint64, tag="1")]
     pub amount: u64,
@@ -203,7 +203,7 @@ pub struct SignRequest {
 }
 /// Nested message and enum types in `SignRequest`.
 pub mod sign_request {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum SourceNetwork {
         #[prost(message, tag="2")]
         EvmSource(super::EvmSource),
@@ -244,7 +244,7 @@ pub struct EvmSource {
     #[prost(bytes="vec", tag="7")]
     pub funds_in_operation_id: ::prost::alloc::vec::Vec<u8>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RgbSource {
     /// Listener result. The enclave ignores it and validates the consignment itself.
     #[prost(bool, tag="1")]
@@ -258,9 +258,6 @@ pub struct RgbSource {
     /// keccak256(consignment).
     #[prost(bytes="vec", tag="5")]
     pub consignment_hash: ::prost::alloc::vec::Vec<u8>,
-    /// SPV proofs for witness transactions.
-    #[prost(message, repeated, tag="6")]
-    pub merkle_proofs: ::prost::alloc::vec::Vec<MerkleProofEntry>,
     /// Commission reported by the source event. The enclave does not use it.
     #[prost(uint64, tag="7")]
     pub commission: u64,
@@ -344,21 +341,6 @@ pub struct RgbDestination {
     /// Strict-encoded rgb-lib fascia of psbt_bytes' tx: its bundles and MPC merkle block with the entropy.
     #[prost(bytes="vec", tag="9")]
     pub fascia: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct MerkleProofEntry {
-    /// 32-byte transaction ID in display byte order.
-    #[prost(bytes="vec", tag="1")]
-    pub txid: ::prost::alloc::vec::Vec<u8>,
-    /// Height of the block containing the transaction.
-    #[prost(uint32, tag="2")]
-    pub block_height: u32,
-    /// Transaction position in the block.
-    #[prost(uint32, tag="3")]
-    pub tx_position: u32,
-    /// 32-byte sibling hashes from leaf to Merkle root, in display byte order.
-    #[prost(bytes="vec", repeated, tag="4")]
-    pub merkle_path: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EvmSignatureResponse {
@@ -590,24 +572,12 @@ pub struct Limits {
     pub io_idle_timeout_secs: u64,
     #[prost(uint64, tag="3")]
     pub first_bytes_timeout_secs: u64,
-    #[prost(uint64, tag="6")]
-    pub max_rgb_lib_ms: u64,
-    #[prost(uint64, tag="7")]
-    pub max_witness_check_cost: u64,
-    #[prost(uint64, tag="8")]
-    pub max_bundle_id_cost: u64,
-    #[prost(uint64, tag="9")]
-    pub max_reject_walk_cost: u64,
     #[prost(uint64, tag="10")]
     pub max_message_bytes: u64,
     #[prost(uint64, tag="11")]
     pub max_wire_elements: u64,
     #[prost(uint64, tag="12")]
     pub max_consignment_bytes: u64,
-    #[prost(uint64, tag="13")]
-    pub max_merkle_proofs: u64,
-    #[prost(uint64, tag="14")]
-    pub max_total_proof_bytes: u64,
     #[prost(uint64, tag="15")]
     pub max_psbt_bytes: u64,
     #[prost(uint64, tag="16")]

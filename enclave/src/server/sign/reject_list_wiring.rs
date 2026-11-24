@@ -43,7 +43,7 @@ fn sign_listed(entries: Vec<RejectListEntry>) -> (String, Vec<[u8; 4]>) {
             txid
         })
         .collect();
-    let (chain, merkle_proofs) = crate::test_support::chain_with_witnesses(&witnesses, 5);
+    let chain = crate::test_support::chain_with_witnesses(&witnesses, 5);
     let cfg = BridgeConfig {
         funds_in_contract: BRIDGE,
         token_contract: [0x7e; 20],
@@ -67,7 +67,6 @@ fn sign_listed(entries: Vec<RejectListEntry>) -> (String, Vec<[u8; 4]>) {
                 consignment_hash: Keccak256::digest(&consignment).to_vec(),
                 consignment,
                 asset_id: history.contract_id.to_string(),
-                merkle_proofs,
                 ..Default::default()
             })),
             destination_network: Some(

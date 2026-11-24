@@ -11,6 +11,7 @@ use alloy_sol_types::{sol, SolCall};
 use attestation_verify::EvmFinalityTag;
 
 use super::events::EvmReceiptProvider;
+use crate::conn::RESPONSE_MARGIN;
 use crate::error::{EnclaveError, Result};
 use crate::networks::rgb::validation::{OpoutKey, RejectListEntry};
 
@@ -26,9 +27,6 @@ sol! {
     function length() external view returns (uint256);
     function entries(uint256 start, uint256 end) external view returns (Entry[] memory page);
 }
-
-/// Kept free before the request deadline to write the response.
-const RESPONSE_MARGIN: Duration = Duration::from_secs(2);
 
 /// The list as of the latest block, and how many leading entries are
 /// finalized.
@@ -91,13 +89,18 @@ struct Budgeted<'a> {
 
 impl Budgeted<'_> {
     /// Runs one RPC call if the slowest call so far still fits the deadline.
+    /// The read is the last step of a validation, so a call that no longer
+    /// fits is that validation out of time: the list and the provider are not
+    /// at fault, and a later request can pass.
     fn run<T>(&mut self, call: impl FnOnce(&dyn EvmReceiptProvider) -> Result<T>) -> Result<T> {
         let started = Instant::now();
         if started + self.slowest + RESPONSE_MARGIN > self.deadline {
-            return Err(list_error(
-                self.contract,
-                "read exceeded the request budget (list too long or EVM RPC too slow)".into(),
-            ));
+            tracing::warn!(
+                contract = %hex::encode(self.contract),
+                slowest_ms = self.slowest.as_millis() as u64,
+                "the reject-list read no longer fits the request deadline"
+            );
+            return Err(EnclaveError::RgbValidationTimedOut);
         }
         let out = call(self.provider);
         self.slowest = self.slowest.max(started.elapsed());

@@ -1,19 +1,17 @@
 //! Plain-BTC (`SignBtc`) signing cross-check.
 //!
 //! Authorization gate for plain-BTC bridge ops: no RGB consignment and no EVM
-//! correlation (`create_utxo`, plain BTC withdrawals). It is a separate request
-//! type from `Sign` with an RGB destination. A request without bridge fields cannot
-//! reach this path.
+//! correlation (`create_utxo`). It is a separate request type from `Sign` with
+//! an RGB destination. A request without bridge fields cannot reach this path.
 //!
 //! Funds-safety layers:
 //!
 //!   * Account scope, in the signer: the handler calls
 //!     `sign_psbt_scoped(.., Some(Vanilla))`. Only Vanilla inputs are
 //!     co-signed, never a Colored (RGB-allocated) one.
-//!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): outputs
-//!     must pay back to a script this enclave co-controls, proven from the PSBT
-//!     and our own derivation. Unproven outputs must fit the pinned
-//!     `BTC_MAX_UNOWNED_SATS` budget. Both BIP-86 accounts count, because
+//!   * Output self-ownership ([`crate::networks::rgb::btc_ownership`]): every
+//!     output that carries sats must be one the enclave derives, proven from
+//!     the PSBT and our own derivation. Both BIP-86 accounts count, because
 //!     `create_utxo` funds Colored UTXOs from vanilla inputs.
 //!   * Fee policy ([`crate::networks::rgb::psbt_validation::check_psbt_fee`]):
 //!     the pinned maximum fee rate and absolute fee of the mint path. All
@@ -24,20 +22,19 @@
 //!   * Amount cap (`BTC_MAX_TOTAL_SATS`) on total input value, not output
 //!     value, so it also bounds value sent to miner fees.
 //!
-//! This path can fund enclave outputs or unproven outputs within the configured
-//! budget. It does not verify bridge evidence for a withdrawal recipient.
+//! This path funds enclave outputs only. It cannot pay an address outside the
+//! enclave's wallet.
 //!
-//! Fail-closed: the fee policy and the witness_utxo rule need no config and run
-//! in every build. The amount cap and the unowned budget are operator values.
+//! Fail-closed: the ownership rule, the fee policy and the witness_utxo rule
+//! need no config and run in every build. The amount cap is an operator value.
 //! Non-test builds with `rgb-validation`, and every release build, require a
-//! non-zero total-input cap.
-//! A zero unowned-output budget rejects unproven outputs but permits self-pay.
-//! Unit tests and debug builds without `rgb-validation` skip these checks.
+//! non-zero total-input cap. Unit tests and debug builds without
+//! `rgb-validation` skip the cap.
 
 use crate::config::BridgeConfig;
 use crate::error::{EnclaveError, Result};
 use crate::keys::{AccountType, KeyManager};
-use crate::networks::rgb::btc_ownership::{controlled_input_scripts, unowned_output_sats};
+use crate::networks::rgb::btc_ownership::unowned_output_sats;
 use crate::networks::rgb::psbt_validation;
 use crate::networks::rgb::signing::taproot::find_controlled_taproot_inputs;
 use crate::proto::SignBtcRequest;
@@ -79,48 +76,23 @@ pub fn validate_btc_request(
         ));
     }
 
-    // 3. Output self-ownership on the unsigned tx outputs, which the segwit
-    //    sighash commits to. Unproven value must fit `btc_max_unowned_sats`.
-    //    The controlled-input lookup (BIP32 derivation and tap tweak) runs
-    //    once and step 4 uses it again.
-    let jobs = find_controlled_taproot_inputs(&psbt, keys.master_fingerprint(), keys);
-    let input_scripts = controlled_input_scripts(&psbt, &jobs, Some(AccountType::Vanilla));
-    let unowned_sat = unowned_output_sats(&psbt, &input_scripts, keys).ok_or_else(|| {
+    // 3. Every sat stays on outputs the enclave derives. The check reads the
+    //    unsigned tx outputs, which the segwit sighash commits to.
+    let unowned_sat = unowned_output_sats(&psbt, keys).ok_or_else(|| {
         EnclaveError::CrossCheck("plain-BTC unowned output value overflow".into())
     })?;
-
     if unowned_sat > 0 {
-        if cfg.btc_max_unowned_sats == 0 {
-            // Unset never means "no limit".
-            #[cfg(all(any(feature = "rgb-validation", not(debug_assertions)), not(test)))]
-            {
-                return Err(EnclaveError::CrossCheck(format!(
-                    "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove \
-                     pay back into the same custody, and BTC_MAX_UNOWNED_SATS is not pinned - \
-                     refusing to sign"
-                )));
-            }
-            #[cfg(not(all(any(feature = "rgb-validation", not(debug_assertions)), not(test))))]
-            tracing::warn!(
-                unowned_sat,
-                "plain-BTC signing: no BTC_MAX_UNOWNED_SATS pinned (non-production build) - \
-                 skipping the unowned-output budget"
-            );
-        } else if unowned_sat > cfg.btc_max_unowned_sats {
-            return Err(EnclaveError::CrossCheck(format!(
-                "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove pay \
-                 back into the same custody, over the pinned budget of {} sats - refusing to \
-                 sign. An output is proven when its script equals that of an input this enclave \
-                 co-signs (address reuse for change) or when it is a BIP-86 key-path output of \
-                 one of the enclave's own accounts; a redirect is neither.",
-                cfg.btc_max_unowned_sats
-            )));
-        }
+        return Err(EnclaveError::CrossCheck(format!(
+            "plain-BTC PSBT pays {unowned_sat} sats to outputs the enclave cannot prove its own \
+             - refusing to sign. An output is proven when it is a BIP-86 key-path output of one \
+             of the enclave's own accounts and the PSBT names its key path; a redirect is not."
+        )));
     }
 
     // 4. Pinned fee policy (same as the mint path). It runs before the amount cap,
     //    because the cap's dev fallback returns early. Key-path sizing uses the
     //    Vanilla account, which the signer co-signs on this path.
+    let jobs = find_controlled_taproot_inputs(&psbt, keys.master_fingerprint(), keys);
     let key_path_inputs = psbt_validation::fee_key_path_inputs_of(&jobs, AccountType::Vanilla);
     psbt_validation::check_psbt_fee(&psbt, &key_path_inputs, "plain-BTC")?;
 

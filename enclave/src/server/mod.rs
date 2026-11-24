@@ -9,7 +9,7 @@ mod bfa;
 #[cfg(not(feature = "kms-persistence"))]
 mod cloning;
 mod context;
-mod dispatch;
+pub(crate) mod dispatch;
 mod endpoints;
 mod health;
 mod keys;

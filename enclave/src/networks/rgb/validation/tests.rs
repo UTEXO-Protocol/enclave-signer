@@ -2,16 +2,14 @@
 //! the generated consignments (`test_support::bfa_consignment`).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 
-use amplify::{ByteArray, Wrapper};
+use amplify::ByteArray;
 use bitcoin::hashes::Hash as _;
 use bitcoin::OutPoint;
 use rgb_lib::no_wallet::{RgbOutputInfo, RgbTransitionInfo};
 use rgb_lib::{Assignment, TypeOfTransition};
 use rgbstd::containers::FileContent;
 use rgbstd::contract::AllocatedState;
-use rgbstd::vm::WitnessPos;
 use rgbstd::{BuilderSeal, GraphSeal, RevealedValue};
 #[cfg(rgb_to_evm)]
 use sha3::{Digest, Keccak256};
@@ -28,13 +26,15 @@ use super::validator::*;
 use super::witness::*;
 use crate::config::BridgeConfig;
 use crate::error::Result;
+use crate::networks::rgb::bfa_schema;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
+use crate::test_support::MinedBlocks;
 
 /// The Bridge the generated assets name, and its chain.
 const BRIDGE: [u8; 20] = [0xB1; 20];
 const EVM_CHAIN_ID: u64 = 42161;
 /// The burner's EVM payout address.
-const PAYEE: [u8; 20] = [0x43; 20];
+pub(super) const PAYEE: [u8; 20] = [0x43; 20];
 const MINTED: u64 = 100_000;
 
 /// The outpoint of the genesis mint right.
@@ -55,19 +55,79 @@ fn minted() -> (History, Utxo) {
 }
 
 /// A mint, then a burn of `burned` with the rest as change.
-fn burn_history(burned: Option<u64>, reason: Option<[u8; 32]>) -> (History, gen::Committed) {
+pub(super) fn burn_history(
+    burned: Option<u64>,
+    reason: Option<[u8; 32]>,
+) -> (History, gen::Committed) {
     let (mut history, units) = minted();
     let burn = history.burn(units, MINTED, burned, reason);
     (history, burn)
 }
 
-fn burn_bytes() -> Vec<u8> {
+/// The bundle of `witness`, exported as `rgb-ops` exports a history: only the
+/// transition the later history needs stays disclosed
+/// (`TransitionBundle::to_concealed_except`). The bundle still commits every
+/// transition, since its input map is untouched.
+fn conceal_except(history: &mut History, witness: bitcoin::Txid, keep: rgbstd::OpId) {
+    let bundle = history
+        .bundles
+        .iter_mut()
+        .find(|wb| wb.witness_id() == witness)
+        .expect("a bundle of that witness");
+    bundle.bundle = bundle
+        .bundle
+        .to_concealed_except(keep)
+        .expect("the bundle holds the transition to keep");
+}
+
+/// A wallet burns part of its units, then burns what the first burn's bundle
+/// left. A `TS_BURN` has no owned state: the change is an output of the
+/// `TS_TRANSFER` that splits the input before it. Exporting the second burn's
+/// history keeps that transfer, which its units descend from, and conceals the
+/// burn beside it, so the bundle commits two transitions and discloses one.
+/// The second burn must still pay out.
+#[test]
+fn accepts_a_burn_of_the_change_an_earlier_split_left() {
+    let (mut history, units) = minted();
+    let reason = gen::burn_reason_for(PAYEE);
+    let (first, change) = history.burn_keeping_change(units, MINTED, 60_000, Some(reason));
+    let rest = MINTED - 60_000;
+    history.burn(change, rest, Some(rest), Some(reason));
+    // `change.opout.op` is the split transfer, the transition the later
+    // history descends from and the only one its export discloses.
+    conceal_except(&mut history, first.tx.compute_txid(), change.opout.op);
+
+    let validated = validate(&history.consignment()).expect("the second burn is valid");
+    let last = validated.settling_transition.expect("the settling burn");
+    assert_eq!(last.burned_asset_amount, Some(rest));
+    assert_eq!(last.burn_reason, Some(reason));
+}
+
+/// The other half: concealing a transition the later history descends from is
+/// refused, by consensus rather than by any rule of the enclave. Here the
+/// first bundle keeps its burn and conceals the split, so the second burn's
+/// units have no disclosed origin.
+#[test]
+fn refuses_a_burn_whose_origin_the_history_conceals() {
+    let (mut history, units) = minted();
+    let reason = gen::burn_reason_for(PAYEE);
+    let (first, change) = history.burn_keeping_change(units, MINTED, 60_000, Some(reason));
+    let rest = MINTED - 60_000;
+    history.burn(change, rest, Some(rest), Some(reason));
+    // Keep the burn, conceal the split the second burn's units come from.
+    conceal_except(&mut history, first.tx.compute_txid(), first.opid);
+
+    let err = error_of(validate(&history.consignment()));
+    assert!(err.contains("cannot be found"), "{err}");
+}
+
+pub(super) fn burn_bytes() -> Vec<u8> {
     burn_history(Some(60_000), Some(gen::burn_reason_for(PAYEE)))
         .0
         .consignment()
 }
 
-fn validator() -> RgbValidator {
+pub(super) fn validator() -> RgbValidator {
     RgbValidator::new("regtest").unwrap()
 }
 
@@ -81,9 +141,9 @@ fn lock_for(anchor: &MintAnchor) -> VerifiedLock {
 }
 
 /// Binds every anchor to a lock with its own `(lockId, amount)`.
-fn bind_all(bridge: &BfaBridge, anchors: &[MintAnchor]) -> Result<BoundAnchors> {
+pub(super) fn bind_all(anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
-        evm_chain_id: bridge.chain_id,
+        evm_chain_id: EVM_CHAIN_ID,
         locks: anchors.iter().map(lock_for).collect(),
     })
 }
@@ -97,7 +157,7 @@ fn empty_list(_: &RejectListContract) -> Result<Decisions> {
 }
 
 /// Any asset binds, and a listed one reads an empty list.
-fn open_lists() -> ListAccess<'static> {
+pub(super) fn open_lists() -> ListAccess<'static> {
     ListAccess {
         bind_asset: &any_asset,
         read: Some(&empty_list),
@@ -115,22 +175,28 @@ fn validate_bound(bytes: &[u8], bind: Option<AnchorBinder<'_>>) -> Result<Valida
 }
 
 /// The witness txids of `bytes`, in bundle order. Empty if they do not load.
-fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
+pub(super) fn witness_ids(bytes: &[u8]) -> Vec<bitcoin::Txid> {
     rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes))
         .map(|t| t.bundles.iter().map(|wb| wb.witness_id()).collect())
         .unwrap_or_default()
 }
 
-/// `txids` mined deep enough, at increasing heights.
-fn mined(txids: &[bitcoin::Txid]) -> BTreeMap<bitcoin::Txid, WitnessPos> {
-    txids
-        .iter()
-        .zip(100u32..)
-        .map(|(txid, height)| {
-            let height = std::num::NonZeroU32::new(height).unwrap();
-            (*txid, WitnessPos::bitcoin(height, 1_700_000_000).unwrap())
-        })
-        .collect()
+/// `txids` mined deep enough, one per block, as the generator proves them.
+pub(super) fn mined(txids: &[bitcoin::Txid]) -> MinedBlocks {
+    MinedBlocks::of(txids)
+}
+
+/// Every field the enclave reads after validation is the same.
+#[cfg(all(rgb_to_evm, unix))]
+pub(super) fn assert_same(got: &ValidatedConsignment, want: &ValidatedConsignment) {
+    assert_eq!(got.contract_id, want.contract_id);
+    assert_eq!(got.chain_net, want.chain_net);
+    assert_eq!(got.witness_txids, want.witness_txids);
+    assert_eq!(got.witness_blocks, want.witness_blocks);
+    assert_eq!(got.settling_witness_txid, want.settling_witness_txid);
+    assert_eq!(got.settling_op_id, want.settling_op_id);
+    assert_eq!(got.settling_transition, want.settling_transition);
+    assert_eq!(got.mint_locks, want.mint_locks);
 }
 
 fn error_of(result: Result<ValidatedConsignment>) -> String {
@@ -176,15 +242,6 @@ fn rejects_other_containers() {
     }
 }
 
-/// BFA is the only schema the enclave validates.
-#[test]
-fn rejects_a_non_bfa_schema() {
-    let mut transfer = issue().as_transfer();
-    transfer.genesis.schema_id = schemata::CFA_SCHEMA_ID;
-    let err = error_of(validate(&gen::save(&transfer)));
-    assert!(err.contains("validates only the bridged fungible"), "{err}");
-}
-
 // ===== reject list =====
 
 const LIST: [u8; 20] = [0x4e; 20];
@@ -199,7 +256,7 @@ fn listed() -> History {
 
 /// A listed asset: a mint, then a burn of 60_000 with change. Returns the
 /// genesis right, the minted units and the burn.
-fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
+pub(super) fn listed_burn() -> (History, Utxo, Utxo, gen::Committed) {
     let mut history = listed();
     let right = history.genesis_right(0, right_utxo());
     let units = history.mint_owned(right, MINTED, 90);
@@ -343,14 +400,14 @@ fn split_change(history: &History) -> rgbstd::Opout {
     let outputs = split
         .transition
         .assignments
-        .get(&schemata::OS_ASSET)
+        .get(&bfa_schema::OS_ASSET)
         .unwrap()
         .as_fungible();
     let no = outputs
         .iter()
         .position(|a| a.as_state().as_u64() == MINTED - 60_000)
         .expect("the split's change");
-    rgbstd::Opout::new(split.opid, schemata::OS_ASSET, u16::try_from(no).unwrap())
+    rgbstd::Opout::new(split.opid, bfa_schema::OS_ASSET, u16::try_from(no).unwrap())
 }
 
 /// A listed mint, then a transfer that splits the units into two halves on
@@ -393,7 +450,7 @@ fn a_rejected_line_in_a_companion_transfer_refuses_the_burn() {
 fn an_allowed_opout_shields_only_its_own_branch() {
     let (mut history, halves) = listed_halves();
     let units = history.bundles[0].bundle.known_transitions[0].opid;
-    let units = rgbstd::Opout::new(units, schemata::OS_ASSET, 0);
+    let units = rgbstd::Opout::new(units, bfa_schema::OS_ASSET, 0);
     let mut burn = history.transition("burn");
     for half in &halves {
         burn = burn
@@ -613,17 +670,19 @@ mod reject_list_rules {
     }
 }
 
-/// A rev bump that changes the schema id forces a reissue and a new PCR0, so
-/// it must fail loudly here. rgb-lib 567e5b8 `SCHEMA_ID_BFA`.
+/// The pinned asset admits one genesis, under the schema that `rgb-schemas`
+/// compiles. A rev bump that changes the schema id therefore changes the
+/// consensus rules the pinned asset validates under, which needs a reissue and
+/// a new PCR0. It must fail loudly here.
 #[test]
 fn bfa_schema_id_is_pinned() {
     assert_eq!(
-        schemata::BFA_SCHEMA_ID.to_string(),
+        bfa_schema::BFA_SCHEMA_ID.to_string(),
         "rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album"
     );
     use rgbstd::contract::IssuerWrapper;
     let rules = schemata::BridgedFungibleAsset::schema_rules();
-    assert_eq!(rules.schema().schema_id(), schemata::BFA_SCHEMA_ID);
+    assert_eq!(rules.schema().schema_id(), bfa_schema::BFA_SCHEMA_ID);
 }
 
 // ===== a burn, end to end =====
@@ -638,28 +697,17 @@ fn validates_rgb_libs_split_burn_shape() {
     assert_eq!(validated.contract_id, history.contract_id.to_string());
     assert_eq!(validated.chain_net, "bcrt");
     assert_eq!(validated.witness_txids.len(), 2);
+    assert_eq!(validated.settling_op_id, Some(gen::opid_bytes(burn.opid)));
     assert_eq!(
-        validated.last_transfer_op_id,
-        Some(gen::opid_bytes(burn.opid))
-    );
-    assert_eq!(validated.last_witness_txid, Some(burn.tx.compute_txid()));
-    assert_eq!(
-        validated.last_transfer_witness_prevouts,
-        burn.tx
-            .input
-            .iter()
-            .map(|i| i.previous_output)
-            .collect::<Vec<_>>()
+        validated.settling_witness_txid,
+        Some(burn.tx.compute_txid())
     );
 
     let last = validated
-        .last_transition
+        .settling_transition
         .as_ref()
         .expect("the settling burn");
-    assert_eq!(
-        rgbstd::TransitionType::with(last.transition_type),
-        schemata::TS_BURN
-    );
+    assert_eq!(last.transition_type, TypeOfTransition::Burn);
     assert_eq!(last.op_id, burn.opid.to_string());
     assert_eq!(last.burned_asset_amount, Some(60_000));
     assert_eq!(last.burn_reason, Some(gen::burn_reason_for(PAYEE)));
@@ -670,11 +718,8 @@ fn validates_rgb_libs_split_burn_shape() {
     assert_eq!(last.asset_output_amount, 0);
 
     let group = validated.transitions_committed_by(burn.tx.compute_txid());
-    let types: Vec<u16> = group.iter().map(|t| t.transition_type).collect();
-    assert_eq!(
-        types,
-        [schemata::TS_TRANSFER, schemata::TS_BURN].map(|t| t.to_inner())
-    );
+    let types: Vec<TypeOfTransition> = group.iter().map(|t| t.transition_type).collect();
+    assert_eq!(types, [TypeOfTransition::Transfer, TypeOfTransition::Burn]);
     let change = TransitionOutput {
         amount: 40_000,
         seal: OutputSeal::Revealed {
@@ -721,13 +766,81 @@ fn a_burn_after_a_rights_send_binds_only_its_mint() {
     assert_eq!(locked, vec![history.mints[0].lock_id()]);
 }
 
+/// rgb-lib inspects the bundles holding a terminal operation. The rights send
+/// and the mint are spent by what follows them, so only the burn's bundle is
+/// read. Validation is what covers the two it skips.
+#[test]
+fn inspects_the_terminal_bundle_alone() {
+    let mut history = issue();
+    let right = history.genesis_right(0, right_utxo());
+    let rights = history.duplicate_right(right, 3);
+    let units = history.mint_owned(rights[2], MINTED, 90);
+    let burn = history.burn(
+        units,
+        MINTED,
+        Some(MINTED),
+        Some(gen::burn_reason_for(PAYEE)),
+    );
+    let validated = validate(&history.consignment()).expect("the burn is valid");
+
+    assert_eq!(
+        validated.witness_txids.len(),
+        3,
+        "the rights send, the mint and the burn"
+    );
+    let inspected: Vec<bitcoin::Txid> = validated
+        .transitions_by_witness
+        .iter()
+        .map(|(txid, _)| *txid)
+        .collect();
+    assert_eq!(inspected, vec![burn.tx.compute_txid()]);
+    assert!(
+        validated
+            .transitions_committed_by(history.mints[0].witness_id)
+            .is_empty(),
+        "the mint's bundle is not inspected"
+    );
+    assert_eq!(
+        validated.settling_transition.map(|t| t.op_id),
+        Some(burn.opid.to_string()),
+        "the settling burn comes from the one inspected bundle"
+    );
+}
+
+/// A burn and a later transfer of what it left are both terminal, so both
+/// bundles are inspected. The burn settles, with its own witness: the order of
+/// the bundles does not decide it.
+#[test]
+fn settles_the_burn_before_a_terminal_transfer() {
+    let (mut history, [burned, kept]) = minted_in_halves();
+    let half = MINTED / 2;
+    let burn = history.burn(burned, half, Some(half), Some(gen::burn_reason_for(PAYEE)));
+    let sent = history.transfer(kept, half);
+    assert_ne!(sent.outpoint.txid, burn.tx.compute_txid());
+
+    let validated = validate(&history.consignment()).expect("the burn is valid");
+    assert_eq!(
+        validated.transitions_by_witness.len(),
+        2,
+        "the burn and the transfer are both terminal"
+    );
+    assert_eq!(
+        validated.settling_witness_txid,
+        Some(burn.tx.compute_txid())
+    );
+    let settling = validated.settling_transition.expect("the settling burn");
+    assert_eq!(settling.transition_type, TypeOfTransition::Burn);
+    assert_eq!(settling.burned_asset_amount, Some(half));
+    assert_eq!(settling.op_id, burn.opid.to_string());
+}
+
 /// The enclave and consignment-utils (which the bridge uses) read the same
 /// burn facts from the same bytes.
 #[test]
 fn burn_facts_agree_with_the_bridge_parser() {
     let bytes = burn_bytes();
     let validated = validate(&bytes).unwrap();
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
 
     let rgb_consignment::ConsignmentInfo::Transfer(info) = rgb_consignment::parse(&bytes).unwrap()
     else {
@@ -738,7 +851,7 @@ fn burn_facts_agree_with_the_bridge_parser() {
     assert_eq!(burn.op_id, last.op_id);
     assert_eq!(
         Some(anchor.txid.parse::<bitcoin::Txid>().unwrap()),
-        validated.last_witness_txid
+        validated.settling_witness_txid
     );
     let global = |ty: u16| {
         let entry = burn.globals.iter().find(|g| g.global_type == ty).unwrap();
@@ -756,7 +869,7 @@ fn a_burn_without_burn_reason_validates_with_no_reason() {
     let (history, _) = burn_history(Some(MINTED), None);
     let last = validate(&history.consignment())
         .unwrap()
-        .last_transition
+        .settling_transition
         .unwrap();
     assert_eq!(last.burn_reason, None);
     assert_eq!(last.burned_asset_amount, Some(MINTED));
@@ -805,15 +918,15 @@ fn split_in_halves(mut history: History, units: Utxo) -> (History, [Utxo; 2]) {
         vec![gen::dust(1), gen::dust(2)],
     );
     let half_at = |no: u16| Utxo {
-        opout: rgbstd::Opout::new(split_opid, schemata::OS_ASSET, no),
+        opout: rgbstd::Opout::new(split_opid, bfa_schema::OS_ASSET, no),
         outpoint: OutPoint::new(tx.compute_txid(), u32::from(no) + 1),
     };
     (history, [half_at(0), half_at(1)])
 }
 
-/// Two burns in the settling bundle: only one could ever be released.
+/// Two burns in one bundle: only one could ever be released.
 #[test]
-fn refuses_two_burns_in_the_last_bundle() {
+fn refuses_two_burns_of_one_consignment() {
     let (mut history, halves) = minted_in_halves();
     let half = MINTED / 2;
     let burns = halves
@@ -857,7 +970,7 @@ fn settles_the_burn_beside_a_companion_transfer_in_either_order() {
 
         let validated = validate(&history.consignment()).expect("burn and transfer");
         let last = validated
-            .last_transition
+            .settling_transition
             .clone()
             .expect("the settling burn");
         assert_eq!(
@@ -867,10 +980,7 @@ fn settles_the_burn_beside_a_companion_transfer_in_either_order() {
         );
         assert_eq!(last.burned_asset_amount, Some(half));
         assert_eq!(last.burn_reason, Some(gen::burn_reason_for(PAYEE)));
-        assert_eq!(
-            validated.last_transfer_op_id,
-            Some(gen::opid_bytes(burn_opid))
-        );
+        assert_eq!(validated.settling_op_id, Some(gen::opid_bytes(burn_opid)));
         assert_eq!(
             validated.transitions_committed_by(tx.compute_txid()).len(),
             2
@@ -931,9 +1041,9 @@ fn reads_a_mint_and_its_anchor() {
     let bytes = history.consignment();
 
     let seen = RefCell::new(Vec::new());
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let record = |anchors: &[MintAnchor]| {
         seen.borrow_mut().extend_from_slice(anchors);
-        bind_all(bridge, anchors)
+        bind_all(anchors)
     };
     let validated = validate_bound(&bytes, Some(&record)).expect("the mint is valid");
 
@@ -946,11 +1056,8 @@ fn reads_a_mint_and_its_anchor() {
             before_block: 90,
         }]
     );
-    assert!(validated.last_bundle_fully_disclosed);
-    assert_eq!(validated.last_closed_seals, vec![right_utxo()]);
-    assert!(validated.last_mint_rights.is_empty());
-    let last = validated.last_transition.unwrap();
-    assert!(is_mint_transition(last.transition_type));
+    let last = validated.settling_transition.unwrap();
+    assert_eq!(last.transition_type, TypeOfTransition::Mint);
     assert_eq!(last.asset_output_amount, MINTED);
     assert!(matches!(
         last.outputs[0].seal,
@@ -994,29 +1101,9 @@ fn refuses_a_mint_witness_tx_that_does_not_spend_the_mint_right() {
 fn a_mint_witness_tx_may_spend_any_fee_input() {
     let right = issue().genesis_right(0, right_utxo());
     for fee in [gen::outpoint(0xF1, 0), gen::outpoint(0xF2, 3)] {
-        let validated = validate(&mint_spending(right, vec![fee]).consignment())
+        validate(&mint_spending(right, vec![fee]).consignment())
             .expect("a different fee input keeps the mint valid");
-        assert_eq!(validated.last_closed_seals, vec![right_utxo()]);
     }
-}
-
-/// The genesis names the bridge the binder checks.
-#[test]
-fn the_binder_sees_the_genesis_bridge() {
-    let bytes = burn_bytes();
-    let seen = RefCell::new(None);
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        *seen.borrow_mut() = Some(*bridge);
-        bind_all(bridge, anchors)
-    };
-    validate_bound(&bytes, Some(&record)).unwrap();
-    assert_eq!(
-        *seen.borrow(),
-        Some(BfaBridge {
-            chain_id: EVM_CHAIN_ID,
-            address: BRIDGE,
-        })
-    );
 }
 
 /// A build with no binder refuses any mint ancestry; it never confirms an
@@ -1032,14 +1119,14 @@ fn refuses_mint_anchors_without_a_binder() {
 #[test]
 fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
     let bytes = burn_bytes();
-    let none = |bridge: &BfaBridge, _: &[MintAnchor]| {
+    let none = |_: &[MintAnchor]| {
         Ok(BoundAnchors {
-            evm_chain_id: bridge.chain_id,
+            evm_chain_id: EVM_CHAIN_ID,
             locks: vec![],
         })
     };
-    let extra = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        let mut bound = bind_all(bridge, anchors)?;
+    let extra = |anchors: &[MintAnchor]| {
+        let mut bound = bind_all(anchors)?;
         if let Some(anchor) = anchors.first() {
             bound.locks.push(VerifiedLock {
                 lock_id: [0x77; 32],
@@ -1048,8 +1135,8 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
         }
         Ok(bound)
     };
-    let other_amount = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
-        let mut bound = bind_all(bridge, anchors)?;
+    let other_amount = |anchors: &[MintAnchor]| {
+        let mut bound = bind_all(anchors)?;
         if let Some(lock) = bound.locks.first_mut() {
             lock.minted += 1;
         }
@@ -1065,9 +1152,9 @@ fn refuses_locks_that_do_not_match_the_anchors_one_for_one() {
 /// Binds every anchor to a lock keyed by `key` instead of its lockId.
 fn bind_keyed_by(
     key: impl Fn(&MintAnchor) -> [u8; 32],
-) -> impl Fn(&BfaBridge, &[MintAnchor]) -> Result<BoundAnchors> {
-    move |bridge, anchors| {
-        let mut bound = bind_all(bridge, anchors)?;
+) -> impl Fn(&[MintAnchor]) -> Result<BoundAnchors> {
+    move |anchors| {
+        let mut bound = bind_all(anchors)?;
         for (lock, anchor) in bound.locks.iter_mut().zip(anchors) {
             lock.lock_id = key(anchor);
         }
@@ -1125,11 +1212,11 @@ fn lock_id_matches_the_upstream_vectors() {
 #[test]
 fn refuses_locks_bound_on_another_chain() {
     let asked = RefCell::new(0);
-    let other_chain = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let other_chain = |anchors: &[MintAnchor]| {
         *asked.borrow_mut() += anchors.len();
         Ok(BoundAnchors {
             evm_chain_id: 1,
-            ..bind_all(bridge, anchors)?
+            ..bind_all(anchors)?
         })
     };
     let err = error_of(validate_bound(&burn_bytes(), Some(&other_chain)));
@@ -1141,10 +1228,8 @@ fn refuses_locks_bound_on_another_chain() {
     assert_eq!(*asked.borrow(), 0, "no anchor is bound on the wrong chain");
 }
 
-/// rgb-lib asks the binder once with no anchor, for the pins and the chain
-/// id, then once for each mint of the history.
-#[test]
-fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+/// Two mints on two genesis rights, then one burn of both.
+fn burn_of_two_mints() -> History {
     let outpoints = vec![right_utxo(), gen::outpoint(0xA1, 0)];
     let mut history = History::issue(Issue::new(EVM_CHAIN_ID, BRIDGE, outpoints.clone()));
     let rights = [0, 1].map(|no| history.genesis_right(no, outpoints[usize::from(no)]));
@@ -1165,11 +1250,18 @@ fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
         .unwrap();
     let inputs = units.iter().map(|unit| unit.outpoint).collect();
     history.commit(vec![burn], inputs, vec![gen::dust(4)]);
+    history
+}
 
+/// rgb-lib asks the binder once with no anchor, for the pins and the chain
+/// id, then once for each mint of the history.
+#[test]
+fn the_binder_is_asked_once_for_the_pins_and_once_per_mint() {
+    let history = burn_of_two_mints();
     let calls = RefCell::new(Vec::new());
-    let record = |bridge: &BfaBridge, anchors: &[MintAnchor]| {
+    let record = |anchors: &[MintAnchor]| {
         calls.borrow_mut().push(anchors.to_vec());
-        bind_all(bridge, anchors)
+        bind_all(anchors)
     };
     let validated = validate_bound(&history.consignment(), Some(&record)).unwrap();
     let calls = calls.into_inner();
@@ -1213,13 +1305,48 @@ fn check_bijection_refuses_a_missing_extra_or_repeated_lock() {
 
 // ===== the flat summary =====
 
+/// The settling transition is the one burn the terminal bundles hold, with the
+/// witness of its own bundle, whichever bundle that is. Two burns are refused,
+/// and without a burn the last transition read settles, which the flow check
+/// then refuses.
 #[test]
-fn settling_index_takes_the_burn_beside_a_transfer() {
-    let burn = |t: &u16| *t == 8010;
-    assert_eq!(settling_index(&[8010u16, 10000], burn), Some(0));
-    assert_eq!(settling_index(&[10000u16, 8010], burn), Some(1));
-    assert_eq!(settling_index(&[10000u16, 8013], burn), Some(1));
-    assert_eq!(settling_index::<u16>(&[], burn), None);
+fn settling_summary_takes_the_one_burn_of_the_terminal_bundles() {
+    use super::consensus::settling_summary;
+    let txid = |b: u8| bitcoin::Txid::from_byte_array([b; 32]);
+    let of = |ty| transition_summary(&inspected_transition(ty, vec![]), WITNESS, "bcrt:").unwrap();
+    let transfer = of(TypeOfTransition::Transfer);
+    let burn = of(TypeOfTransition::Burn);
+
+    assert!(settling_summary(&[]).unwrap().is_none());
+
+    for burn_first in [true, false] {
+        let groups = if burn_first {
+            vec![
+                (txid(1), vec![burn.clone()]),
+                (txid(2), vec![transfer.clone()]),
+            ]
+        } else {
+            vec![
+                (txid(1), vec![transfer.clone()]),
+                (txid(2), vec![burn.clone()]),
+            ]
+        };
+        let (witness, settling) = settling_summary(&groups).unwrap().unwrap();
+        assert_eq!(settling.transition_type, TypeOfTransition::Burn);
+        assert_eq!(witness, txid(if burn_first { 1 } else { 2 }));
+    }
+
+    let two_burns = vec![(txid(1), vec![burn.clone()]), (txid(2), vec![burn.clone()])];
+    let err = settling_summary(&two_burns).unwrap_err().to_string();
+    assert!(err.contains("2 burns"), "{err}");
+
+    let no_burn = vec![
+        (txid(1), vec![transfer.clone()]),
+        (txid(2), vec![transfer.clone(), transfer.clone()]),
+    ];
+    let (witness, settling) = settling_summary(&no_burn).unwrap().unwrap();
+    assert_eq!(settling.transition_type, TypeOfTransition::Transfer);
+    assert_eq!(witness, txid(2));
 }
 
 /// The display-order txid of the witness the inspected transitions sit in.
@@ -1281,19 +1408,18 @@ fn transition_summary_refuses_an_overflowing_total() {
 #[test]
 fn transition_summary_keeps_the_schema_transition_type() {
     for ty in [
-        schemata::TS_TRANSFER,
-        schemata::TS_INFLATION,
-        schemata::TS_BURN,
-        schemata::TS_LINK,
-        schemata::TS_MINT,
-        schemata::TS_PROPAGATE,
-        schemata::TS_TRANSFER_INFLATION,
-        schemata::TS_TRANSFER_LINK,
+        bfa_schema::TS_TRANSFER,
+        bfa_schema::TS_INFLATION,
+        bfa_schema::TS_BURN,
+        bfa_schema::TS_LINK,
+        bfa_schema::TS_MINT,
+        bfa_schema::TS_PROPAGATE,
+        bfa_schema::TS_TRANSFER_INFLATION,
+        bfa_schema::TS_TRANSFER_LINK,
     ] {
-        let inspected = TypeOfTransition::try_from(ty).unwrap();
-        let t = inspected_transition(inspected, vec![]);
+        let t = inspected_transition(bfa_schema::type_of(ty), vec![]);
         let summary = transition_summary(&t, WITNESS, "bcrt:").unwrap();
-        assert_eq!(summary.transition_type, ty.to_inner(), "{ty}");
+        assert_eq!(summary.transition_type, bfa_schema::type_of(ty), "{ty}");
     }
 }
 
@@ -1326,14 +1452,19 @@ fn transition_summary_refuses_a_seal_it_cannot_read_exactly() {
     assert!(err.contains("without a txid and vout"), "{err}");
 }
 
-/// A BFA `mint` is the only mint shape. It is a signing shape only in the
-/// mint/burn flow.
+/// A BFA `mint` is the only mint shape, and a signing shape only in the
+/// mint/burn flow. The ids are the schema's, which `bfa_schema::tests` pins.
 #[test]
 fn mint_transitions_are_the_only_mint_shape() {
-    assert!(is_mint_transition(8013));
-    assert!(!is_mint_transition(10000));
-    assert!(!is_mint_transition(8010));
-    assert!(super::super::flow::is_signing_transition(8013));
+    assert_eq!(bfa_schema::type_of(8013), TypeOfTransition::Mint);
+    assert_eq!(bfa_schema::type_of(10000), TypeOfTransition::Transfer);
+    assert_eq!(bfa_schema::type_of(8010), TypeOfTransition::Burn);
+    assert!(super::super::flow::is_signing_transition(
+        rgb_lib::TypeOfTransition::Mint
+    ));
+    assert!(!super::super::flow::is_signing_transition(
+        rgb_lib::TypeOfTransition::Propagate
+    ));
 }
 
 // ===== the validator =====
@@ -1412,51 +1543,16 @@ fn an_rgb_lib_report_of_another_file_or_with_a_warning_is_refused() {
     }
 }
 
-/// The burn's last bundle as validation reads it, and rgb-lib's inspection.
-fn settling_readings() -> (LastBundle, Vec<(bitcoin::Txid, Vec<TransitionSummary>)>) {
-    let bytes = burn_bytes();
-    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes[..])).unwrap();
-    let last = read_last_bundle(&transfer).unwrap().unwrap();
-    (last, summary::inspected(&bytes).unwrap())
-}
-
-/// The settling transition must be in the last inspected bundle: else the
-/// binds would read the fields of another transition.
+/// The split-burn shape has one terminal bundle, and its burn settles.
 #[test]
-fn a_settling_transition_missing_from_the_inspected_last_bundle_is_refused() {
+fn the_settling_transition_is_the_burn_of_the_terminal_bundle() {
     use super::consensus::settling_summary;
-    let (last, inspected) = settling_readings();
-    let settling = settling_summary(&inspected, Some(&last)).unwrap().unwrap();
+    let inspected = summary::terminal_bundles(&burn_bytes()).unwrap();
+    assert_eq!(inspected.len(), 1, "the burn is the one terminal operation");
+    let (witness, settling) = settling_summary(&inspected).unwrap().unwrap();
+    assert_eq!(settling.transition_type, TypeOfTransition::Burn);
     assert_eq!(settling.burned_asset_amount, Some(60_000));
-    let mut without_it = inspected.clone();
-    let (_, summaries) = without_it.last_mut().unwrap();
-    summaries.retain(|t| t.op_id != settling.op_id);
-    let mut under_another_witness = inspected.clone();
-    under_another_witness.last_mut().unwrap().0 = inspected[0].0;
-    for by_witness in [without_it, under_another_witness] {
-        let err = settling_summary(&by_witness, Some(&last))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("missing from the inspected last bundle"),
-            "{err}"
-        );
-    }
-}
-
-/// The inspection must read the settling transition as the type validation did.
-#[test]
-fn a_settling_transition_the_inspection_types_otherwise_is_refused() {
-    use super::consensus::settling_summary;
-    let (last, mut inspected) = settling_readings();
-    let (_, summaries) = inspected.last_mut().unwrap();
-    for t in summaries.iter_mut() {
-        t.transition_type = schemata::TS_TRANSFER.to_inner();
-    }
-    let err = settling_summary(&inspected, Some(&last))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("disagrees with the inspected type"), "{err}");
+    assert_eq!(witness, inspected[0].0);
 }
 
 /// The rgb-lib refusals no resolver of ours can raise still read as what they
@@ -1565,11 +1661,27 @@ fn mint_after_a_rights_send() -> Vec<u8> {
     history.consignment()
 }
 
-/// Every witness but `unmined` mined.
-fn validate_without(bytes: &[u8], unmined: bitcoin::Txid) -> Result<ValidatedConsignment> {
-    let mut chain = mined(&witness_ids(bytes));
-    chain.remove(&unmined);
-    validator().validate_consignment(bytes, Some(&bind_all), &chain, &open_lists())
+/// `bytes` with each bundle's SPV proof passed through `change`.
+fn reproven(
+    bytes: &[u8],
+    mut change: impl FnMut(bitcoin::Txid, &mut Option<rgbstd::validation::SpvProof>),
+) -> Vec<u8> {
+    let mut transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(bytes)).unwrap();
+    for bundle in transfer.bundles.iter_mut() {
+        change(bundle.witness_id(), &mut bundle.spv_proof);
+    }
+    gen::save(&transfer)
+}
+
+/// Every witness is mined, but the consignment proves all except `unproven`.
+fn validate_without(bytes: &[u8], unproven: bitcoin::Txid) -> Result<ValidatedConsignment> {
+    let chain = mined(&witness_ids(bytes));
+    let bytes = reproven(bytes, |txid, proof| {
+        if txid == unproven {
+            *proof = None;
+        }
+    });
+    validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists())
 }
 
 #[cfg(rgb_to_evm)]
@@ -1584,7 +1696,20 @@ fn a_fully_mined_history_passes() {
     let bytes = burn_after_transfer();
     let validated = validate(&bytes).expect("every witness is mined");
     assert_eq!(validated.witness_txids.len(), 3);
-    assert!(validated.non_mined_witness_txids.is_empty());
+    // Each witness is placed in the block the generator proved it in.
+    let chain = mined(&witness_ids(&bytes));
+    let mut heights = Vec::new();
+    for (block, txid) in validated
+        .witness_blocks
+        .iter()
+        .zip(&validated.witness_txids)
+    {
+        assert_eq!(block.txid, *txid);
+        let header = chain.headers[&block.height];
+        assert_eq!(block.hash, header.block_hash().to_byte_array());
+        heights.push(block.height);
+    }
+    assert_eq!(heights, vec![1, 2, 3]);
 }
 
 /// Two conflicting off-chain transfers are each valid alone. Only the mined
@@ -1594,7 +1719,7 @@ fn burn_path_refuses_an_unmined_transfer_in_the_history() {
     let bytes = burn_after_transfer();
     let transfer = witness_ids(&bytes)[1];
     let err = error_of(validate_without(&bytes, transfer));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains("not proven on chain"), "{err}");
     assert!(err.contains(&transfer.to_string()), "{err}");
 }
 
@@ -1602,64 +1727,93 @@ fn burn_path_refuses_an_unmined_transfer_in_the_history() {
 #[test]
 fn accepts_a_mint_on_a_right_from_a_rights_send() {
     let validated = validate(&mint_after_a_rights_send()).expect("the history is valid");
-    assert!(validated.last_mint_rights.is_empty());
     assert_eq!(validated.mint_locks.len(), 1);
 }
 
 /// The burn itself needs its proof too: the burn path allows no unmined tx.
 #[test]
-fn burn_path_refuses_an_unmined_last_witness() {
+fn burn_path_refuses_an_unmined_burn_witness() {
     let bytes = burn_bytes();
     let burn = *witness_ids(&bytes).last().unwrap();
     let err = error_of(validate_without(&bytes, burn));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+    assert!(err.contains("not proven on chain"), "{err}");
 }
 
-/// A proof the consignment carries does not stand in for the enclave's own:
-/// the resolver serves no headers, so a witness it cannot prove is refused.
+/// The enclave checks a proof only against a header of its own chain.
 #[test]
-fn a_consignment_spv_proof_does_not_prove_a_witness() {
+fn a_proof_at_a_height_the_enclave_has_no_header_for_is_refused() {
+    let bytes = burn_bytes();
+    let chain = mined(&witness_ids(&bytes));
+    let burn = *witness_ids(&bytes).last().unwrap();
+    let bytes = reproven(&bytes, |txid, proof| {
+        if txid == burn {
+            proof.as_mut().unwrap().block_height = std::num::NonZeroU32::new(900_000).unwrap();
+        }
+    });
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("no header at height 900000"), "{err}");
+}
+
+/// A proof that does not lead to the enclave's header proves nothing, and the
+/// enclave looks no transaction up in its place.
+#[test]
+fn a_proof_that_does_not_hold_against_the_enclave_header_is_refused() {
     use bitcoin::hashes::Hash;
-    let (mut history, _) = burn_history(Some(MINTED), Some(gen::burn_reason_for(PAYEE)));
-    for bundle in &mut history.bundles {
-        bundle.spv_proof = Some(rgbstd::validation::SpvProof {
-            block_height: std::num::NonZeroU32::new(900_000).unwrap(),
-            pos: 1,
-            merkle: amplify::confinement::Confined::try_from(vec![
+    let bytes = burn_bytes();
+    let chain = mined(&witness_ids(&bytes));
+    let burn = *witness_ids(&bytes).last().unwrap();
+    let bytes = reproven(&bytes, |txid, proof| {
+        if txid == burn {
+            let proof = proof.as_mut().unwrap();
+            proof.pos = 1;
+            proof.merkle = amplify::confinement::Confined::try_from(vec![
                 bitcoin::TxMerkleNode::from_byte_array([0x5a; 32]),
             ])
-            .unwrap(),
-        });
-    }
-    let bytes = history.consignment();
-    let burn = *witness_ids(&bytes).last().unwrap();
-    let err = error_of(validate_without(&bytes, burn));
-    assert!(err.contains("not confirmed on chain"), "{err}");
+            .unwrap();
+        }
+    });
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("not proven on chain"), "{err}");
     assert!(err.contains(&burn.to_string()), "{err}");
-    // No header, so rgb-consensus never checks the carried proof itself.
-    use rgbstd::validation::{ResolveWitness, WitnessResolverError};
-    let transfer = rgbstd::containers::Transfer::load(std::io::Cursor::new(&bytes)).unwrap();
-    let chain = mined(&witness_ids(&bytes));
-    let resolver = OnChainResolver::new(&transfer, rgbstd::ChainNet::BitcoinRegtest, &chain);
-    let header = resolver.get_block_header(std::num::NonZeroU32::new(900_000).unwrap());
-    assert!(
-        matches!(header, Err(WitnessResolverError::NotSupported)),
-        "{header:?}"
-    );
 }
 
-/// A failing witness source, binder or list reader refuses with its own
+/// A header source that serves a block above its safe height: rgb-lib's own
+/// depth warning refuses the history.
+#[test]
+fn a_witness_above_the_safe_height_is_refused() {
+    struct Shallow(MinedBlocks);
+    impl BuriedHeaders for Shallow {
+        fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+            self.0.buried_header(height)
+        }
+        fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+            let safe = self.0.safe_height()?.get() - 1;
+            std::num::NonZeroU32::new(safe)
+        }
+    }
+    let bytes = burn_bytes();
+    let chain = Shallow(mined(&witness_ids(&bytes)));
+    let err =
+        error_of(validator().validate_consignment(&bytes, Some(&bind_all), &chain, &open_lists()));
+    assert!(err.contains("UnsafeHistory"), "{err}");
+}
+
+/// A failing header source, binder or list reader refuses with its own
 /// error; none of them is ever read as a pass.
 #[test]
 fn a_failing_resolver_refuses_with_its_own_error() {
     struct Down;
-    impl ConfirmedWitnesses for Down {
-        fn confirmed(&self, _: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-            Err("witness source down".into())
+    impl BuriedHeaders for Down {
+        fn buried_header(&self, _: u32) -> Result<bitcoin::block::Header> {
+            Err(not_ready("headers"))
+        }
+        fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+            None
         }
     }
-    let binder =
-        |_: &BfaBridge, _: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
+    let binder = |_: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
     let reader = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("reader")) };
     let read_failing = ListAccess {
         bind_asset: &any_asset,
@@ -1668,8 +1822,11 @@ fn a_failing_resolver_refuses_with_its_own_error() {
     let bytes = listed_burn().0.consignment();
     let chain = mined(&witness_ids(&bytes));
     let v = validator();
-    let err = error_of(v.validate_consignment(&bytes, Some(&bind_all), &Down, &open_lists()));
-    assert!(err.contains("witness source down"), "{err}");
+    let headers_down = v.validate_consignment(&bytes, Some(&bind_all), &Down, &open_lists());
+    assert_own_error(
+        headers_down.expect_err("the header source is down"),
+        "headers",
+    );
     let binder_down = v.validate_consignment(&bytes, Some(&binder), &chain, &open_lists());
     assert_own_error(binder_down.expect_err("the binder is down"), "binder");
     let reader_down = v.validate_consignment(&bytes, Some(&bind_all), &chain, &read_failing);
@@ -1687,22 +1844,26 @@ fn mint_after_two_rights_sends() -> Vec<u8> {
     history.consignment()
 }
 
-/// A witness source that records each witness it is asked about.
+/// A header source that records each height it is asked for.
 struct Recording<'a> {
-    chain: &'a BTreeMap<bitcoin::Txid, WitnessPos>,
-    asked: RefCell<Vec<bitcoin::Txid>>,
+    chain: &'a MinedBlocks,
+    asked: RefCell<Vec<u32>>,
 }
 
-impl ConfirmedWitnesses for Recording<'_> {
-    fn confirmed(&self, tx: &bitcoin::Transaction) -> std::result::Result<WitnessPos, String> {
-        self.asked.borrow_mut().push(tx.compute_txid());
-        self.chain.confirmed(tx)
+impl BuriedHeaders for Recording<'_> {
+    fn buried_header(&self, height: u32) -> Result<bitcoin::block::Header> {
+        self.asked.borrow_mut().push(height);
+        self.chain.buried_header(height)
+    }
+
+    fn safe_height(&self) -> Option<std::num::NonZeroU32> {
+        self.chain.safe_height()
     }
 }
 
-/// The burn path proves each witness itself: its proofs are checked anyway.
+/// The burn path places each witness from its own proof and header.
 #[test]
-fn burn_path_asks_about_every_witness() {
+fn burn_path_reads_a_header_for_every_witness() {
     let bytes = mint_after_two_rights_sends();
     let ids = witness_ids(&bytes);
     let chain = mined(&ids);
@@ -1714,9 +1875,8 @@ fn burn_path_asks_about_every_witness() {
         .validate_consignment(&bytes, Some(&bind_all), &source, &open_lists())
         .unwrap();
     let mut asked = source.asked.into_inner();
-    asked.sort();
-    let mut all = ids.clone();
-    all.sort();
+    asked.sort_unstable();
+    let all: Vec<u32> = (1..=u32::try_from(ids.len()).unwrap()).collect();
     assert_eq!(asked, all);
 }
 
@@ -1835,7 +1995,6 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
         asset_id: asset_id.into(),
         consignment_hash: keccak(&consignment),
         consignment,
-        merkle_proofs: vec![],
         commission: 0,
     }
 }
@@ -1843,10 +2002,7 @@ fn burn_source(asset_id: &str) -> crate::proto::RgbSource {
 #[cfg(rgb_to_evm)]
 mod source_payload {
     use super::*;
-    use crate::config::{
-        DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS, DEFAULT_MAX_TOTAL_PROOF_BYTES,
-    };
-    use crate::proto::MerkleProofEntry;
+    use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
 
     #[test]
     fn accepts_valid_consignment_hash() {
@@ -1890,40 +2046,6 @@ mod source_payload {
     }
 
     #[test]
-    fn rejects_too_many_merkle_proofs() {
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = (0..DEFAULT_MAX_MERKLE_PROOFS + 1)
-            .map(|_| MerkleProofEntry::default())
-            .collect();
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too many merkle proofs"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn rejects_aggregate_proof_bytes_over_budget() {
-        let per_proof = 32 + 32 * 32;
-        let n = DEFAULT_MAX_TOTAL_PROOF_BYTES / per_proof + 1;
-        assert!(
-            n <= DEFAULT_MAX_MERKLE_PROOFS,
-            "would trip the count cap first"
-        );
-        let proof = MerkleProofEntry {
-            txid: vec![0u8; 32],
-            block_height: 0,
-            tx_position: 0,
-            merkle_path: vec![vec![0u8; 32]; 32],
-        };
-        let mut source = burn_source("rgb:any");
-        source.merkle_proofs = vec![proof; n];
-        let err = validate_source_payload(&source, &BridgeConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too large in aggregate"), "unexpected: {err}");
-    }
-
-    #[test]
     fn rejects_empty_consignment_even_with_valid_flag() {
         let mut source = burn_source("rgb:any");
         source.consignment = vec![];
@@ -1943,8 +2065,8 @@ mod source_payload {
     }
 }
 
-/// The source path end to end: the SPV proofs, consensus over them, the asset
-/// bind, then proof coverage.
+/// The source path end to end: consensus over the consignment's SPV proofs,
+/// the asset bind, then the chain check of the witness blocks.
 #[cfg(rgb_to_evm)]
 mod source_path {
     use super::*;
@@ -1967,23 +2089,35 @@ mod source_path {
         ids.iter().copied().map(display_bytes).collect()
     }
 
-    /// Runs `source` with a proof, 6 deep, for every witness.
+    /// The chain with every witness of `consignment` mined, 6 deep.
+    fn chain_of(consignment: &[u8]) -> Mutex<HeaderChain> {
+        crate::test_support::chain_with_witnesses(&display(&witness_ids(consignment)), 5)
+    }
+
+    /// Runs `source` with every witness mined, 6 deep.
     fn run(
         source: &crate::proto::RgbSource,
         config: &BridgeConfig,
     ) -> Result<ValidatedConsignment> {
-        run_proving(source, config, &display(&witness_ids(&source.consignment)))
+        run_on(source, config, &chain_of(&source.consignment))
     }
 
-    /// Runs `source` with a proof, 6 deep, for each of `proven` only.
-    fn run_proving(
+    /// Runs `source` with every witness mined, 6 deep, and the proof of
+    /// `unproven` taken out of the consignment.
+    fn run_without_proof(
         source: &crate::proto::RgbSource,
         config: &BridgeConfig,
-        proven: &[[u8; 32]],
+        unproven: bitcoin::Txid,
     ) -> Result<ValidatedConsignment> {
-        let (chain, proofs) = crate::test_support::chain_with_witnesses(proven, 5);
+        let chain = chain_of(&source.consignment);
+        let consignment = reproven(&source.consignment, |txid, proof| {
+            if txid == unproven {
+                *proof = None;
+            }
+        });
         let source = crate::proto::RgbSource {
-            merkle_proofs: proofs,
+            consignment_hash: keccak(&consignment),
+            consignment,
             ..source.clone()
         };
         run_on(&source, config, &chain)
@@ -2003,6 +2137,27 @@ mod source_path {
         chain: &Mutex<HeaderChain>,
         reader: Option<RejectListReader<'_>>,
     ) -> Result<ValidatedConsignment> {
+        in_context(config, chain, reader, |ctx| validate_source(source, ctx))
+    }
+
+    /// The route proof of `source` on the burn path, every witness 6 deep.
+    fn route_proof(
+        source: &crate::proto::RgbSource,
+        config: &BridgeConfig,
+    ) -> Result<crate::networks::RouteProof> {
+        let chain = chain_of(&source.consignment);
+        in_context(config, &chain, None, |ctx| {
+            crate::networks::rgb::validate_source(source, ctx).map(|proof| proof.proof)
+        })
+    }
+
+    /// Runs `check` with the burn path's services and a child of this binary.
+    fn in_context<T>(
+        config: &BridgeConfig,
+        chain: &Mutex<HeaderChain>,
+        reader: Option<RejectListReader<'_>>,
+        check: impl FnOnce(&ValidationContext<'_>) -> Result<T>,
+    ) -> Result<T> {
         let validator = validator();
         let ctx = ValidationContext {
             bridge_config: config,
@@ -2011,8 +2166,9 @@ mod source_path {
             chain_pins: &crate::networks::rgb::spv_crosscheck::ChainPins::new(),
             anchor_binder: Some(&bind_all),
             reject_list_reader: reader,
+            deadline: crate::test_support::far_deadline(),
         };
-        validate_source(source, &ctx)
+        check(&ctx)
     }
 
     fn asset_id() -> String {
@@ -2024,20 +2180,23 @@ mod source_path {
         let id = asset_id();
         let validated = run(&burn_source(&id), &pinned_config(&id)).unwrap();
         assert_eq!(validated.contract_id, id);
-        assert!(validated.non_mined_witness_txids.is_empty());
+        assert_eq!(
+            validated.witness_blocks.len(),
+            validated.witness_txids.len()
+        );
     }
 
-    /// A history witness without a proof is unmined to consensus, which
-    /// refuses before any later check.
+    /// A history witness the consignment does not prove is unmined to
+    /// consensus, which refuses before any later check.
     #[test]
     fn refuses_a_history_witness_without_a_proof() {
         let id = asset_id();
         let source = burn_source(&id);
         let ids = witness_ids(&source.consignment);
-        let err = run_proving(&source, &pinned_config(&id), &display(&ids[1..]))
+        let err = run_without_proof(&source, &pinned_config(&id), ids[0])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not confirmed on chain"), "{err}");
+        assert!(err.contains("not proven on chain"), "{err}");
         assert!(err.contains(&ids[0].to_string()), "{err}");
     }
 
@@ -2052,10 +2211,10 @@ mod source_path {
             ..burn_source(&id)
         };
         let ids = witness_ids(&bytes);
-        let err = run_proving(&source, &pinned_config(&id), &display(&[ids[0], ids[2]]))
+        let err = run_without_proof(&source, &pinned_config(&id), ids[1])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not confirmed on chain"), "{err}");
+        assert!(err.contains("not proven on chain"), "{err}");
         assert!(err.contains(&ids[1].to_string()), "{err}");
     }
 
@@ -2092,10 +2251,9 @@ mod source_path {
     #[test]
     fn confirmation_depth_comes_from_the_config() {
         let id = asset_id();
-        let mut source = burn_source(&id);
+        let source = burn_source(&id);
         let witnesses = validate(&source.consignment).unwrap().witness_txids;
-        let (chain, proofs) = crate::test_support::chain_with_witnesses(&witnesses, 1);
-        source.merkle_proofs = proofs;
+        let chain = crate::test_support::chain_with_witnesses(&witnesses, 1);
 
         let mut config = pinned_config(&id);
         config.spv_min_confirmations = 2;
@@ -2112,6 +2270,39 @@ mod source_path {
         run(&burn_source(&id), &BridgeConfig::default()).unwrap();
     }
 
+    /// A transfer of the genesis alone validates in a validator child as in
+    /// this process, and the route refuses it with code 3 for its missing
+    /// transition.
+    #[test]
+    fn a_transfer_of_the_genesis_alone_is_refused_as_in_process() {
+        let id = asset_id();
+        let bytes = issue().consignment();
+        let source = crate::proto::RgbSource {
+            consignment_hash: keccak(&bytes),
+            consignment: bytes.clone(),
+            ..burn_source(&id)
+        };
+        let config = pinned_config(&id);
+        let here = validator()
+            .validate_consignment(
+                &bytes,
+                Some(&bind_all),
+                &mined(&witness_ids(&bytes)),
+                &open_lists(),
+            )
+            .unwrap();
+        let there = run(&source, &config).unwrap();
+        assert_same(&there, &here);
+        assert!(there.settling_transition.is_none(), "{there:?}");
+        let err = route_proof(&source, &config).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        assert!(
+            err.to_string()
+                .contains("RGB source requires a consignment with at least one transition"),
+            "{err}"
+        );
+    }
+
     /// The listed burn as a source, every witness proven 6 deep, its chain
     /// and its asset id.
     fn listed_source() -> (crate::proto::RgbSource, Mutex<HeaderChain>, String) {
@@ -2123,12 +2314,7 @@ mod source_path {
             consignment: bytes.clone(),
             ..burn_source(&id)
         };
-        let (chain, proofs) =
-            crate::test_support::chain_with_witnesses(&display(&witness_ids(&bytes)), 5);
-        let source = crate::proto::RgbSource {
-            merkle_proofs: proofs,
-            ..source
-        };
+        let chain = chain_of(&bytes);
         (source, chain, id)
     }
 
@@ -2160,7 +2346,7 @@ mod source_path {
     fn unrelated() -> rgbstd::Opout {
         rgbstd::Opout::new(
             rgbstd::OpId::copy_from_slice([0x99; 32]).unwrap(),
-            schemata::OS_ASSET,
+            bfa_schema::OS_ASSET,
             0,
         )
     }
@@ -2203,6 +2389,44 @@ mod source_path {
         let err = error_of(run_reading(&source, &config, &chain, None));
         assert!(err.contains("cannot read it"), "{err}");
     }
+
+    /// A running child keeps the limits of its start, so a list over them is
+    /// refused with code 3 after a raise; a retry under the raise passes.
+    #[test]
+    fn a_list_over_the_limit_its_validation_started_with_is_refused() {
+        let (started, raised, entries) = (1_000, 10_000, 6_000u32);
+        crate::limits::change_for_test(|l| l.max_reject_list_entries = started);
+        let unrelated: Vec<RejectListEntry> = (0..entries)
+            .map(|n| {
+                let mut op = [0x99; 32];
+                op[..4].copy_from_slice(&n.to_be_bytes());
+                RejectListEntry {
+                    opout: OpoutKey {
+                        op,
+                        ty: 4000,
+                        no: 0,
+                    },
+                    reject: n.is_multiple_of(12),
+                }
+            })
+            .collect();
+        let decided = decisions(&unrelated, unrelated.len());
+        // The raise lands after the child started, before the list read.
+        let read = |_: &RejectListContract| {
+            crate::limits::change_for_test(|l| l.max_reject_list_entries = raised);
+            Ok(decided.clone())
+        };
+        let (source, chain, id) = listed_source();
+        let config = pinned_config(&id);
+        let err = run_reading(&source, &config, &chain, Some(&read)).unwrap_err();
+        assert_eq!(err.error_code(), 3, "{err}");
+        let refusal = format!(
+            "holds at least {entries} entries, over the {started} in force when this validation \
+             started"
+        );
+        assert!(err.to_string().contains(&refusal), "{err}");
+        run_reading(&source, &config, &chain, Some(&read)).unwrap();
+    }
 }
 
 // ===== long histories =====
@@ -2222,15 +2446,16 @@ fn long_history(transfers: usize) -> History {
     history
 }
 
-/// Validates one small burn before a measurement, as `measure_dispatch` does.
-/// The one-time build of the schema rules then stays outside the meter. Boot
-/// builds them in production.
+/// Validates one small burn before a measurement. The one-time build of the
+/// schema rules then stays outside the meter: a validator child builds them
+/// once, and `memory::VALIDATOR_BASELINE_BYTES` counts them.
 fn warm_up() {
     validate(&burn_bytes()).unwrap();
 }
 
 /// The request memory model (`memory.rs`): validating a consignment stays
-/// within the memory factor. A history of 2_000 transfers is about 1 MiB.
+/// within the memory factor. A history of 2_000 transfers is about 1 MiB. The
+/// test runs in-process the code of a validator child.
 #[test]
 fn consignment_validation_stays_within_the_request_memory_factor() {
     use crate::memory::peak;
@@ -2282,7 +2507,7 @@ fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64)
     let send = send.complete_transition().unwrap();
     let index = send
         .assignments
-        .get(&schemata::OS_MINT)
+        .get(&bfa_schema::OS_MINT)
         .unwrap()
         .seals()
         .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == 2))
@@ -2294,7 +2519,7 @@ fn send_wide_rights(history: &mut History, input: Utxo, outputs: u16, salt: u64)
         vec![gen::dust(1), gen::dust(2)],
     );
     Utxo {
-        opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+        opout: rgbstd::Opout::new(opid, bfa_schema::OS_MINT, index),
         outpoint: OutPoint::new(tx.compute_txid(), 2),
     }
 }
@@ -2387,7 +2612,7 @@ fn dense_rights_burn(sends: u8, outputs: u16) -> History {
         let opid = opid_in(&mut send, 0xF0 - 13 * k..0xF0 - 13 * (k - 1));
         let index = send
             .assignments
-            .get(&schemata::OS_MINT)
+            .get(&bfa_schema::OS_MINT)
             .unwrap()
             .seals()
             .position(|seal| matches!(seal, BuilderSeal::Revealed(s) if s.vout.to_u32() == vout))
@@ -2399,7 +2624,7 @@ fn dense_rights_burn(sends: u8, outputs: u16) -> History {
             vec![gen::dust(1), gen::dust(2), gen::dust(3)],
         );
         right = Utxo {
-            opout: rgbstd::Opout::new(opid, schemata::OS_MINT, index),
+            opout: rgbstd::Opout::new(opid, bfa_schema::OS_MINT, index),
             outpoint: OutPoint::new(tx.compute_txid(), vout),
         };
     }
@@ -2449,8 +2674,8 @@ fn validation_peak(history: impl FnOnce() -> History) -> (usize, usize) {
 /// each worker holds. That request carries a consignment of the shape at
 /// `DEFAULT_MAX_CONSIGNMENT_BYTES` and the decoded elements. The read and
 /// decode of its frame of `MAX_MESSAGE_SIZE` take 3 times the frame. Then
-/// `read_request` releases the frame, so validation runs beside the decoded
-/// request, which is at most one frame.
+/// `read_request` releases the frame, so the validation in the child runs
+/// beside the decoded request in the enclave, which is at most one frame.
 #[test]
 fn the_densest_consignments_at_the_limit_fit_the_heap_each_worker_holds() {
     use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
@@ -2532,9 +2757,8 @@ fn consignment_validation_of_10_000_transfers_stays_within_the_factor() {
 }
 
 /// A burn with a history of 10_000 transfers and an SPV proof on every bundle
-/// passes with the default limits: consensus, the request limits
-/// (`MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`) and
-/// the frame. Each proof has 13 siblings, the depth of a full mainnet block.
+/// passes with the default limits: consensus, `MAX_CONSIGNMENT_BYTES` and the
+/// frame. Each proof has 13 siblings, the depth of a full mainnet block.
 ///
 /// Ignored by default because it is slow in a debug build.
 #[cfg(rgb_to_evm)]
@@ -2545,7 +2769,7 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     use crate::networks::evm::validation::MAX_FUNDS_OUT_CALL_DATA_LEN;
     use crate::proto::enclave_request::Request;
     use crate::proto::sign_request::{DestinationNetwork, SourceNetwork};
-    use crate::proto::{EnclaveRequest, EvmDestination, MerkleProofEntry, SignRequest};
+    use crate::proto::{EnclaveRequest, EvmDestination, SignRequest};
     use bitcoin::hashes::Hash;
 
     const TRANSFERS: usize = 10_000;
@@ -2581,17 +2805,6 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     let source = crate::proto::RgbSource {
         consignment_hash: keccak(&consignment),
         consignment: consignment.clone(),
-        merkle_proofs: validated
-            .witness_txids
-            .iter()
-            .enumerate()
-            .map(|(i, txid)| MerkleProofEntry {
-                txid: txid.to_vec(),
-                block_height: 900_000 + i as u32,
-                tx_position: 4_000,
-                merkle_path: vec![vec![0x5a; 32]; DEPTH],
-            })
-            .collect(),
         ..burn_source("rgb:any")
     };
     validate_source_payload(&source, &cfg).expect("the source passes the default caps");
@@ -2617,5 +2830,7 @@ fn a_history_of_10_000_transfers_fits_the_default_limits() {
     );
 }
 
-mod caps;
+#[cfg(all(rgb_to_evm, unix))]
+mod child;
+mod shapes;
 mod summary;

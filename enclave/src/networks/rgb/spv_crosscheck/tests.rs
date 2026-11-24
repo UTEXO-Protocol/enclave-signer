@@ -1,11 +1,10 @@
 use super::*;
 use crate::networks::rgb::spv::checkpoint::Checkpoint;
-use crate::networks::rgb::spv::HeaderChain;
-use crate::proto::MerkleProofEntry;
+use crate::networks::rgb::spv::{HeaderChain, Network};
 use crate::test_support::ANY_HEADER_CLOCK;
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::serialize;
-use bitcoin::hashes::{sha256d, Hash};
+use bitcoin::hashes::Hash;
 
 /// The depth these tests are written for: a target block and five burying blocks.
 const MIN_CONFIRMATIONS: u32 = 6;
@@ -56,72 +55,6 @@ fn synth_headers(count: u32) -> Vec<Header> {
     out
 }
 
-/// In a single-tx block, the Merkle root IS the txid (internal order). This
-/// gives a valid proof. Returns (display-order txid, MerkleProofEntry).
-fn single_tx_proof(header: &Header, block_height: u32) -> ([u8; 32], MerkleProofEntry) {
-    // Internal-order root == txid. Display order is the reverse.
-    let internal: [u8; 32] = header.merkle_root.to_byte_array();
-    let mut display = internal;
-    display.reverse();
-    let entry = MerkleProofEntry {
-        txid: display.to_vec(),
-        block_height,
-        tx_position: 0,
-        merkle_path: vec![],
-    };
-    (display, entry)
-}
-
-fn dsha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(left);
-    buf[32..].copy_from_slice(right);
-    sha256d::Hash::hash(&buf).to_byte_array()
-}
-
-/// Fixtures for a 2-tx block. A struct, not a 5-tuple, for clippy
-/// `type_complexity`.
-struct TwoTxBlock {
-    header: Header,
-    txid0_display: [u8; 32],
-    txid1_display: [u8; 32],
-    path_for_tx0: Vec<Vec<u8>>,
-    path_for_tx1: Vec<Vec<u8>>,
-}
-
-/// A 2-tx block: leaf0 + leaf1 -> root. The header commits to root.
-fn build_two_tx_block(
-    leaf0_internal: [u8; 32],
-    leaf1_internal: [u8; 32],
-    prev_blockhash: bitcoin::BlockHash,
-    time: u32,
-) -> TwoTxBlock {
-    let root_internal = dsha256_pair(&leaf0_internal, &leaf1_internal);
-    let header = Header {
-        version: Version::ONE,
-        prev_blockhash,
-        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root_internal),
-        time,
-        bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-        nonce: 0,
-    };
-    let mut txid0_display = leaf0_internal;
-    txid0_display.reverse();
-    let mut txid1_display = leaf1_internal;
-    txid1_display.reverse();
-    let mut sib1_display = leaf1_internal;
-    sib1_display.reverse();
-    let mut sib0_display = leaf0_internal;
-    sib0_display.reverse();
-    TwoTxBlock {
-        header,
-        txid0_display,
-        txid1_display,
-        path_for_tx0: vec![sib1_display.to_vec()],
-        path_for_tx1: vec![sib0_display.to_vec()],
-    }
-}
-
 /// Chain with `target_header` at height 1 and `depth_above` filler headers
 /// on top of it.
 fn chain_burying(target_header: Header, depth_above: u32) -> HeaderChain {
@@ -143,272 +76,6 @@ fn chain_burying(target_header: Header, depth_above: u32) -> HeaderChain {
     regtest_chain_with(headers)
 }
 
-#[test]
-fn happy_path_single_tx_block_with_six_confirmations() {
-    // 1 target block + 5 burying = 6 confirmations.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();
-}
-
-/// An anchor more than 2122 blocks below the tip verifies. Full retention
-/// keeps its header, so the proof does not fail with "no header at height H".
-#[test]
-fn deep_anchor_verifies_with_full_retention() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    // Make the proof before the target moves into the chain.
-    let (txid_display, proof) = single_tx_proof(&target, 1);
-    // Pruning to floor_2016(tip - 2122) would drop height 1 when
-    // tip >= 4138. 4200 is past that, so a pruning chain fails this test.
-    let chain = chain_burying(target, 4200);
-    let tip = chain.tip_height();
-    let depth = 100 + 2016 + 6;
-    let floor = (tip.saturating_sub(depth) / 2016) * 2016;
-    assert!(
-        floor >= 1,
-        "precondition: pruning to {floor} would drop the anchor at height 1 (tip={tip})"
-    );
-
-    validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap();
-}
-
-#[test]
-fn rejects_insufficient_confirmations() {
-    // Only 3 confirmations < 6.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 2);
-    let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(
-        err.to_string().contains("insufficient confirmations"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn rejects_block_height_beyond_tip() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-    proof.block_height = chain.tip_height() + 100;
-
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    // "no header at height" (nothing above tip) or "beyond chain tip"
-    // (underflow check). Both are valid.
-    let msg = err.to_string();
-    assert!(
-        msg.contains("no header") || msg.contains("beyond"),
-        "got: {msg}"
-    );
-}
-
-#[test]
-fn rejects_block_height_at_checkpoint_or_below() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-    proof.block_height = 0; // checkpoint height: header not stored
-
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(
-        err.to_string().contains("no header at height"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn rejects_extra_proof_for_unknown_txid() {
-    // ONE expected txid, but the proofs have a second unrelated one. The
-    // rule is set equality, so this fails.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let bogus_txid = [0xCC; 32];
-    let bogus_proof = MerkleProofEntry {
-        txid: bogus_txid.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![],
-    };
-
-    let err = validate_spv_proofs(
-        &chain,
-        &[txid_display],
-        &[proof, bogus_proof],
-        MIN_CONFIRMATIONS,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("does not match any"), "got: {err}");
-}
-
-#[test]
-fn rejects_missing_proof_for_expected_txid() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    // TWO expected txids, ZERO proofs.
-    let extra_txid = [0xEE; 32];
-    let err = validate_spv_proofs(&chain, &[txid_display, extra_txid], &[], MIN_CONFIRMATIONS)
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("missing merkle proofs"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn rejects_duplicate_proof() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let err = validate_spv_proofs(
-        &chain,
-        &[txid_display],
-        &[proof.clone(), proof],
-        MIN_CONFIRMATIONS,
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("duplicate merkle proof"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn rejects_bad_merkle_path() {
-    // 2-tx block with a wrong sibling: the root does not match.
-    let leaf0 = [0x10u8; 32];
-    let leaf1 = [0x20u8; 32];
-    let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
-    let block = build_two_tx_block(leaf0, leaf1, prev, 1_700_000_001);
-
-    let chain = chain_burying(block.header, 5);
-
-    // WRONG sibling: all zeros, not leaf1.
-    let proof = MerkleProofEntry {
-        txid: block.txid0_display.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![vec![0u8; 32]],
-    };
-
-    let err = validate_spv_proofs(&chain, &[block.txid0_display], &[proof], MIN_CONFIRMATIONS)
-        .unwrap_err();
-    assert!(err.to_string().contains("computed root"), "got: {err}");
-}
-
-#[test]
-fn happy_path_two_tx_block() {
-    let leaf0 = [0x10u8; 32];
-    let leaf1 = [0x20u8; 32];
-    let prev = bitcoin::BlockHash::from_byte_array([0u8; 32]);
-    let block = build_two_tx_block(leaf0, leaf1, prev, 1_700_000_001);
-
-    let chain = chain_burying(block.header, 5);
-
-    let proof0 = MerkleProofEntry {
-        txid: block.txid0_display.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: block.path_for_tx0,
-    };
-    let proof1 = MerkleProofEntry {
-        txid: block.txid1_display.to_vec(),
-        block_height: 1,
-        tx_position: 1,
-        merkle_path: block.path_for_tx1,
-    };
-
-    validate_spv_proofs(
-        &chain,
-        &[block.txid0_display, block.txid1_display],
-        &[proof0, proof1],
-        MIN_CONFIRMATIONS,
-    )
-    .unwrap();
-}
-
-#[test]
-fn rejects_short_txid_in_proof() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let bad_proof = MerkleProofEntry {
-        txid: vec![0u8; 16], // not 32 bytes
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![],
-    };
-
-    let err =
-        validate_spv_proofs(&chain, &[[0u8; 32]], &[bad_proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
-}
-
-#[test]
-fn rejects_short_merkle_path_entry() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let bad_proof = MerkleProofEntry {
-        txid: txid_display.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![vec![0u8; 16]], // not 32 bytes
-    };
-
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[bad_proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("must be 32 bytes"), "got: {err}");
-}
-
-#[test]
-fn rejects_overdeep_merkle_path() {
-    // A path deeper than any real block fails before Merkle hashing. The
-    // siblings are valid 32-byte hashes, so only the depth cap fails.
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (txid_display, _proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let bad_proof = MerkleProofEntry {
-        txid: txid_display.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![vec![0u8; 32]; MAX_MERKLE_PATH_DEPTH + 1],
-    };
-
-    let err =
-        validate_spv_proofs(&chain, &[txid_display], &[bad_proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("too deep"), "got: {err}");
-}
-
-#[test]
-fn assert_chain_net_accepts_matching_pair() {
-    // Literal prefixes, not `ChainNet::prefix()`: if an rgb-core upgrade
-    // changes the notation, this test must fail.
-    assert_chain_net("bc", Network::Mainnet).unwrap();
-    assert_chain_net("sb", Network::Signet).unwrap();
-    assert_chain_net("tb3", Network::Testnet3).unwrap();
-    assert_chain_net("tb4", Network::Testnet4).unwrap();
-    assert_chain_net("sbc", Network::SignetCustom).unwrap();
-    assert_chain_net("bcrt", Network::Regtest).unwrap();
-}
-
-#[test]
-fn assert_chain_net_tells_the_custom_signet_apart() {
-    assert!(assert_chain_net("sb", Network::SignetCustom).is_err());
-    assert!(assert_chain_net("sbc", Network::Signet).is_err());
-}
-
 /// Real testnet4 headers 155_233..=155_262 on the compiled checkpoint.
 fn testnet4_chain() -> HeaderChain {
     let raws: Vec<Vec<u8>> = include_str!("../spv/chain/testnet4_155233_155262.hex")
@@ -425,45 +92,260 @@ fn testnet4_chain() -> HeaderChain {
     chain
 }
 
+/// The block validation placed a witness in at `height` of `chain`.
+fn witness_block(chain: &HeaderChain, height: u32) -> WitnessBlock {
+    WitnessBlock {
+        txid: [0x11; 32],
+        height,
+        hash: chain.hash_at(height).unwrap(),
+    }
+}
+
+/// A validated consignment whose witnesses sit at `heights` of `chain`.
+fn validated_at(chain: &HeaderChain, heights: &[u32]) -> ValidatedConsignment {
+    ValidatedConsignment {
+        chain_net: Network::Regtest.chain_net().prefix().to_string(),
+        witness_blocks: heights
+            .iter()
+            .map(|height| witness_block(chain, *height))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+// ===== Headers served to consignment validation =====
+
+#[test]
+fn a_header_six_deep_is_served() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    let chain = chain_burying(target, 5);
+
+    assert_eq!(buried_header(&chain, 1, MIN_CONFIRMATIONS).unwrap(), target);
+    assert_eq!(
+        safe_height(&chain, MIN_CONFIRMATIONS),
+        NonZeroU32::new(1),
+        "the only block that deep"
+    );
+}
+
+/// A header more than 2122 blocks below the tip is served. Full retention
+/// keeps it, so the lookup does not fail with "no header at height H".
+#[test]
+fn a_deep_header_is_served_with_full_retention() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    // Pruning to floor_2016(tip - 2122) would drop height 1 when
+    // tip >= 4138. 4200 is past that, so a pruning chain fails this test.
+    let chain = chain_burying(target, 4200);
+    let tip = chain.tip_height();
+    let depth = 100 + 2016 + 6;
+    let floor = (tip.saturating_sub(depth) / 2016) * 2016;
+    assert!(
+        floor >= 1,
+        "precondition: pruning to {floor} would drop the header at height 1 (tip={tip})"
+    );
+
+    assert_eq!(buried_header(&chain, 1, MIN_CONFIRMATIONS).unwrap(), target);
+}
+
+#[test]
+fn a_header_short_of_the_depth_is_not_served() {
+    let target = synth_headers(1).into_iter().next().unwrap();
+    // 4 blocks above -> 5 confirmations < 6.
+    let chain = chain_burying(target, 4);
+
+    let err = buried_header(&chain, 1, MIN_CONFIRMATIONS).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "spv: witness proof: insufficient confirmations for block_height 1 (5 < 6) \
+         [needs tip 6, has tip 5]"
+    );
+    assert_eq!(err.error_code(), 9, "more headers cure it: a wait");
+    assert_eq!(safe_height(&chain, MIN_CONFIRMATIONS), None);
+}
+
+/// The caller waits for the signer's headers on the wire code, and reads the
+/// two tips that end the message.
+#[test]
+fn no_header_is_served_above_the_tip() {
+    let chain = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header(&chain, 8, MIN_CONFIRMATIONS).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "spv: witness proof: no header at height 8 (chain tip = 7) [needs tip 13, has tip 7]"
+    );
+    assert_eq!(err.error_code(), 9);
+}
+
+/// No header ever comes for a block at or below the checkpoint, so this is a
+/// refusal and not a wait.
+#[test]
+fn no_header_is_served_at_the_checkpoint() {
+    let chain = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header(&chain, 0, MIN_CONFIRMATIONS).unwrap_err();
+    assert!(
+        err.to_string().contains("no header at height 0"),
+        "got: {err}"
+    );
+    assert_eq!(err.error_code(), 3);
+}
+
 /// Min-difficulty blocks count on the testnets. The tip (155_262) is one, so
 /// 155_257 is exactly six deep and 155_258 is five.
 #[test]
 fn min_difficulty_blocks_make_a_witness_deep() {
     let chain = testnet4_chain();
-    let (txid, proof) = single_tx_proof(chain.header_at(155_257).unwrap(), 155_257);
-    validate_spv_proofs(&chain, &[txid], &[proof], MIN_CONFIRMATIONS).unwrap();
+    buried_header(&chain, 155_257, MIN_CONFIRMATIONS).unwrap();
+    assert_eq!(
+        safe_height(&chain, MIN_CONFIRMATIONS),
+        NonZeroU32::new(155_257)
+    );
 
-    let (txid, proof) = single_tx_proof(chain.header_at(155_258).unwrap(), 155_258);
-    let err = validate_spv_proofs(&chain, &[txid], &[proof], MIN_CONFIRMATIONS).unwrap_err();
+    let err = buried_header(&chain, 155_258, MIN_CONFIRMATIONS).unwrap_err();
     assert!(
         err.to_string().contains("insufficient confirmations"),
         "got: {err}"
     );
 }
 
-/// The depth is a parameter: the same proof passes at 1 and fails at 2.
+/// The depth is a parameter: the same header is served at 1 and not at 2.
 #[test]
 fn min_confirmations_is_a_parameter() {
     let target = synth_headers(1).into_iter().next().unwrap();
     let chain = chain_burying(target, 0);
-    let (txid, proof) = single_tx_proof(&target, 1);
-    validate_spv_proofs(&chain, &[txid], std::slice::from_ref(&proof), 1).unwrap();
-    let err = validate_spv_proofs(&chain, &[txid], &[proof], 2).unwrap_err();
+    buried_header(&chain, 1, 1).unwrap();
+    let err = buried_header(&chain, 1, 2).unwrap_err();
     assert!(err.to_string().contains("(1 < 2)"), "got: {err}");
 }
 
+/// A block arrives while a validation runs and buries one more block. rgb-lib
+/// still checks witnesses against the safe height read at the start, so that
+/// block is not served: the headers and the safe height are one view.
 #[test]
-fn assert_chain_net_rejects_mismatch() {
-    let err = assert_chain_net("bcrt", Network::Mainnet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
+fn a_block_buried_after_the_validation_began_is_not_served() {
+    let headers = synth_headers(7);
+    let at_start = regtest_chain_with(headers[..6].to_vec());
+    let safe = safe_height(&at_start, MIN_CONFIRMATIONS);
+    assert_eq!(safe, NonZeroU32::new(1));
+    let now = regtest_chain_with(headers.clone());
+    assert_eq!(
+        buried_header(&now, 2, MIN_CONFIRMATIONS).unwrap(),
+        headers[1]
+    );
 
-    let err = assert_chain_net("bc", Network::Signet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
+    let err = buried_header_within(&now, 2, safe, MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("when this validation began"), "{err}");
+    assert_eq!(
+        buried_header_within(&now, 1, safe, MIN_CONFIRMATIONS).unwrap(),
+        headers[0]
+    );
+}
 
-    // Consignments carry `"sb"` (`genesis.chain_net.prefix()`), not
-    // "bc:signet"-style notation.
-    let err = assert_chain_net("bc:signet", Network::Signet).unwrap_err();
-    assert!(err.to_string().contains("does not match"), "got: {err}");
+#[test]
+fn nothing_is_served_when_no_block_was_buried_at_the_start() {
+    let now = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header_within(&now, 1, None, MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("when this validation began"), "{err}");
+}
+
+/// A block that is still shallow keeps its own reason, which names the depth.
+#[test]
+fn a_block_still_shallow_keeps_its_own_reason() {
+    let now = regtest_chain_with(synth_headers(7));
+
+    let err = buried_header_within(&now, 3, NonZeroU32::new(2), MIN_CONFIRMATIONS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("insufficient confirmations"), "{err}");
+}
+
+#[test]
+fn the_safe_height_is_the_highest_block_at_the_depth() {
+    let chain = regtest_chain_with(synth_headers(10));
+
+    assert_eq!(safe_height(&chain, MIN_CONFIRMATIONS), NonZeroU32::new(5));
+    assert_eq!(safe_height(&chain, 1), NonZeroU32::new(10));
+    buried_header(&chain, 5, MIN_CONFIRMATIONS).unwrap();
+    buried_header(&chain, 6, MIN_CONFIRMATIONS).unwrap_err();
+}
+
+// ===== Witness blocks, confirmed in one view of the chain =====
+
+#[test]
+fn a_witness_block_still_in_the_chain_is_confirmed() {
+    let chain = regtest_chain_with(synth_headers(10));
+
+    confirm_witness_block(&chain, &witness_block(&chain, 3), MIN_CONFIRMATIONS).unwrap();
+}
+
+/// Validation read the header under another lock. A header replaced since
+/// then is not the one the SPV proof was checked against.
+#[test]
+fn a_witness_block_the_chain_replaced_is_refused() {
+    let chain = regtest_chain_with(synth_headers(10));
+    let mut block = witness_block(&chain, 3);
+    block.hash = [0xEE; 32];
+
+    let err = confirm_witness_block(&chain, &block, MIN_CONFIRMATIONS).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("the header chain changed during validation"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn a_witness_block_short_of_the_depth_is_refused() {
+    let chain = regtest_chain_with(synth_headers(10));
+
+    let err =
+        confirm_witness_block(&chain, &witness_block(&chain, 6), MIN_CONFIRMATIONS).unwrap_err();
+    assert!(err.to_string().contains("(5 < 6)"), "got: {err}");
+}
+
+#[test]
+fn the_source_check_pins_every_witness_block() {
+    let chain = regtest_chain_with(synth_headers(10));
+    let pins = ChainPins::new();
+
+    validate_source_chain(
+        &chain,
+        Some(&validated_at(&chain, &[2, 3])),
+        unix(1_700_000_100),
+        &pins,
+        MIN_CONFIRMATIONS,
+    )
+    .unwrap();
+
+    assert_eq!(pins.pinned_count(), 2);
+    pins.assert_unchanged(&chain).unwrap();
+}
+
+#[test]
+fn the_source_check_refuses_a_shallow_witness_block() {
+    let chain = regtest_chain_with(synth_headers(10));
+    let pins = ChainPins::new();
+
+    let err = validate_source_chain(
+        &chain,
+        Some(&validated_at(&chain, &[6])),
+        unix(1_700_000_100),
+        &pins,
+        MIN_CONFIRMATIONS,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("insufficient confirmations"),
+        "got: {err}"
+    );
+    assert_eq!(pins.pinned_count(), 0);
 }
 
 // ===== Staleness tests =====
@@ -575,75 +457,21 @@ fn staleness_uses_checkpoint_time_when_no_headers() {
     assert!(err.to_string().contains("too stale"), "got: {err}");
 }
 
-// ===== proven witnesses (what consensus sees as mined) =====
+// ===== Pins, checked again at signing =====
 
-#[test]
-fn proven_witnesses_carry_their_block_height_and_time() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (mut txid, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let proven = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap();
-
-    txid.reverse();
-    let pos = proven[&bitcoin::Txid::from_byte_array(txid)];
-    assert_eq!(pos.height().get(), 1);
-    assert_eq!(pos.timestamp(), i64::from(target.time));
-}
-
-#[test]
-fn proven_witnesses_refuse_a_proof_short_of_min_confirmations() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 4);
-    let (_, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let err = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(
-        err.to_string().contains("insufficient confirmations"),
-        "{err}"
-    );
-}
-
-#[test]
-fn proven_witnesses_refuse_a_tx_the_block_does_not_commit() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (_, mut proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-    proof.txid = vec![0x42; 32];
-
-    let err = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("computed root"), "{err}");
-}
-
-#[test]
-fn proven_witnesses_refuse_a_duplicate_proof() {
-    let target = synth_headers(1).into_iter().next().unwrap();
-    let chain = chain_burying(target, 5);
-    let (_, proof) = single_tx_proof(chain.header_at(1).unwrap(), 1);
-
-    let err = proven_witnesses(&chain, &[proof.clone(), proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("duplicate merkle proof"), "{err}");
-}
-
-/// The source check pins each proof block with the depth it required. A
-/// replacement chain of fewer, heavier blocks above the proof block keeps its
+/// The source check pins each witness block with the depth it required. A
+/// replacement chain of fewer, heavier blocks above the witness block keeps its
 /// hash, so only that depth refuses the signature. The test fails if the pin
 /// records depth 1.
 #[test]
-fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
+fn a_shorter_heavier_reorg_above_a_witness_block_refuses_at_signing() {
     let headers = synth_headers(10);
     let mut chain = regtest_chain_with(headers.clone());
-    let (txid, proof) = single_tx_proof(&headers[2], 3);
-    let validated = ValidatedConsignment {
-        chain_net: Network::Regtest.chain_net().prefix().to_string(),
-        witness_txids: vec![txid],
-        ..Default::default()
-    };
+    let validated = validated_at(&chain, &[3]);
     let pins = ChainPins::new();
     validate_source_chain(
         &chain,
         Some(&validated),
-        &[proof],
         unix(1_700_000_100),
         &pins,
         MIN_CONFIRMATIONS,
@@ -672,7 +500,7 @@ fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
     assert_eq!(
         chain.hash_at(3),
         Some(headers[2].block_hash().to_byte_array()),
-        "the proof block stays"
+        "the witness block stays"
     );
 
     let err = pins.assert_unchanged(&chain).unwrap_err();
@@ -680,162 +508,4 @@ fn a_shorter_heavier_reorg_above_a_proof_block_refuses_at_signing() {
         err.to_string().contains("fewer confirmations"),
         "got: {err}"
     );
-}
-
-// ===== Position binding and 64-byte transaction nodes =====
-
-/// A 64-byte legacy transaction X: one input with an empty scriptSig, one
-/// output with a 4-byte scriptPubKey (4 + 1 + 41 + 1 + 13 + 4 = 64).
-fn transaction_of_64_bytes() -> bitcoin::Transaction {
-    use bitcoin::{
-        absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, TxIn,
-        TxOut, Txid, Witness,
-    };
-    bitcoin::Transaction {
-        version: Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0x5C; 32]),
-                vout: 7,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x6a; 4]),
-        }],
-    }
-}
-
-fn display(internal: [u8; 32]) -> [u8; 32] {
-    let mut display = internal;
-    display.reverse();
-    display
-}
-
-/// The block at height 1 commits [X, t1, t2, t3]; 5 blocks bury it.
-/// Returns (chain, a, b, t1, n23, txid_x), all hashes in internal order.
-#[allow(clippy::type_complexity)]
-fn block_with_a_64_byte_tx() -> (
-    HeaderChain,
-    [u8; 32],
-    [u8; 32],
-    [u8; 32],
-    [u8; 32],
-    [u8; 32],
-) {
-    let tx = transaction_of_64_bytes();
-    let x = serialize(&tx);
-    assert_eq!(x.len(), 64, "X must serialize to exactly 64 bytes");
-    let a: [u8; 32] = x[..32].try_into().unwrap();
-    let b: [u8; 32] = x[32..].try_into().unwrap();
-    let txid_x = dsha256_pair(&a, &b);
-    assert_eq!(txid_x, tx.compute_txid().to_byte_array());
-
-    let t1 = [0x11u8; 32];
-    let t2 = [0x22u8; 32];
-    let t3 = [0x33u8; 32];
-    let n01 = dsha256_pair(&txid_x, &t1);
-    let n23 = dsha256_pair(&t2, &t3);
-    let root = dsha256_pair(&n01, &n23);
-    let header = Header {
-        version: Version::ONE,
-        prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
-        time: 1_700_000_001,
-        bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
-        nonce: 0,
-    };
-    (chain_burying(header, 5), a, b, t1, n23, txid_x)
-}
-
-/// The consignment's only witness txid is b, the second half of the mined
-/// 64-byte tx X, proven with path [a, t1, n23]. The gate
-/// (`validate_source_chain`) and the consensus input (`proven_witnesses`) both
-/// refuse it, and nothing is pinned.
-#[test]
-fn burn_gate_refuses_a_half_of_a_mined_64_byte_tx() {
-    let (chain, a, b, t1, n23, _) = block_with_a_64_byte_tx();
-    let b_display = display(b);
-    let proof = MerkleProofEntry {
-        txid: b_display.to_vec(),
-        block_height: 1,
-        tx_position: 1,
-        merkle_path: vec![
-            display(a).to_vec(),
-            display(t1).to_vec(),
-            display(n23).to_vec(),
-        ],
-    };
-    let validated = ValidatedConsignment {
-        chain_net: "bcrt".into(),
-        witness_txids: vec![b_display],
-        ..Default::default()
-    };
-    let now = UNIX_EPOCH + Duration::from_secs(u64::from(chain.tip_time()) + 60);
-    let pins = ChainPins::new();
-    let err = validate_source_chain(
-        &chain,
-        Some(&validated),
-        std::slice::from_ref(&proof),
-        now,
-        &pins,
-        MIN_CONFIRMATIONS,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("64-byte transaction"), "{err}");
-    assert!(
-        pins.none_pinned().unwrap(),
-        "no block may be pinned on a refusal"
-    );
-
-    let err = proven_witnesses(&chain, &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("64-byte transaction"), "{err}");
-}
-
-/// Honest proofs in the same block (X itself at position 0, t1 at position 1)
-/// pass: the node-shape rule refuses no real node.
-#[test]
-fn burn_gate_accepts_honest_proofs_in_a_block_with_a_64_byte_tx() {
-    let (chain, _, _, t1, n23, txid_x) = block_with_a_64_byte_tx();
-    let x_display = display(txid_x);
-    let t1_display = display(t1);
-    let proof_x = MerkleProofEntry {
-        txid: x_display.to_vec(),
-        block_height: 1,
-        tx_position: 0,
-        merkle_path: vec![t1_display.to_vec(), display(n23).to_vec()],
-    };
-    let proof_t1 = MerkleProofEntry {
-        txid: t1_display.to_vec(),
-        block_height: 1,
-        tx_position: 1,
-        merkle_path: vec![x_display.to_vec(), display(n23).to_vec()],
-    };
-    validate_spv_proofs(
-        &chain,
-        &[x_display, t1_display],
-        &[proof_x, proof_t1],
-        MIN_CONFIRMATIONS,
-    )
-    .unwrap();
-}
-
-/// Position 4 folds like position 0 under a two-sibling path (the low bits
-/// agree), so the root matches; the bit left over is refused.
-#[test]
-fn burn_gate_refuses_a_position_the_path_cannot_reach() {
-    let (chain, _, _, t1, n23, txid_x) = block_with_a_64_byte_tx();
-    let x_display = display(txid_x);
-    let proof = MerkleProofEntry {
-        txid: x_display.to_vec(),
-        block_height: 1,
-        tx_position: 4,
-        merkle_path: vec![display(t1).to_vec(), display(n23).to_vec()],
-    };
-    let err = validate_spv_proofs(&chain, &[x_display], &[proof], MIN_CONFIRMATIONS).unwrap_err();
-    assert!(err.to_string().contains("out of reach"), "{err}");
 }
