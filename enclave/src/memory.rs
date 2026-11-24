@@ -25,12 +25,12 @@
 //! - PSBTs, at most `max_psbt_bytes`: about 102 times for one input and
 //!   outputs that each carry two empty records. A request holds one parsed
 //!   PSBT at a time.
-//! - A fascia, under the same limit. A parse alone stays within the factor,
-//!   but the core of the mint signer also runs rgb-lib's fascia inspection,
-//!   which decodes a second copy and builds a record for each assignment. It
-//!   takes about 34 times the bytes of the widest fascia measured, one
-//!   propagate of 43 681 rights (`rgb::psbt_commit`). The core drops its own
-//!   fascia first, so only one decoded fascia is live at a time.
+//! - A fascia, at most `MAX_FASCIA_BYTES`. A parse alone stays within the
+//!   factor, but the core of the mint signer also runs rgb-lib's fascia
+//!   inspection, which decodes a second copy and builds a record for each
+//!   assignment. It takes about 31 times the bytes of the widest fascia
+//!   measured, one propagate of 4 400 rights (`rgb::psbt_commit`). The core
+//!   drops its own fascia first, so only one decoded fascia is live at a time.
 //! - Attestation documents, at most `attestation_verify::MAX_DOCUMENT_BYTES`:
 //!   about 48 times for a document of CBOR nulls.
 //! - Consignments, at most `max_consignment_bytes`: about 53 times for
@@ -70,7 +70,7 @@
 //!
 //! - the frame (`MAX_MESSAGE_SIZE`) and its elements (`MAX_WIRE_ELEMENTS`),
 //! - consignments (`max_consignment_bytes`),
-//! - PSBTs and fascias (`MAX_PSBT_BYTES`),
+//! - PSBTs (`MAX_PSBT_BYTES`) and fascias (`MAX_FASCIA_BYTES`),
 //! - gas transactions (`max_gas_tx_bytes`, `max_rlp_items`),
 //! - attestation documents (`attestation_verify::MAX_DOCUMENT_BYTES`),
 //! - fundsOut calldata (`max_funds_out_call_data_bytes`),
@@ -92,7 +92,7 @@
 //! The tests measure the frame, consignment, PSBT, fascia, gas transaction
 //! and attestation document parsers on the densest shapes measured. The
 //! fascia is measured twice: its parse against the factor, and the whole core
-//! against the request bound of a frame at the PSBT limit. The other
+//! against the request bound of a frame at the fascia limit. The other
 //! parsers have small size limits and refusal tests. The frame, PSBT,
 //! attestation document and gas transaction tests run at the limits. The
 //! consignment tests run histories of 2 000 and 10 000 transfers, and four
@@ -116,7 +116,7 @@
 //! takes each only from a file, so the enclave writes the bytes to a scratch
 //! file in `std::env::temp_dir()`. In the enclave, `/tmp` is a tmpfs, so the
 //! file takes up to `max_consignment_bytes` of RAM for a consignment and up to
-//! `max_psbt_bytes` for a fascia, and never more than the frame. The heap
+//! `MAX_FASCIA_BYTES` for a fascia, and never more than the frame. The heap
 //! meter does not count it. The file exists while the enclave keeps its
 //! decoded copy and rgb-lib decodes a second one, so it adds to the request
 //! peak. A request holds one such file at a time. A burn writes it before its
@@ -144,7 +144,7 @@ use crate::policy::{BuildContext, SignerRole};
 /// the frame. Consignment validation of a long history takes about 21 times
 /// the consignment, because rgb-lib decodes a second copy beside the one the
 /// checks read. A fascia of many rights parses at about 11 times its bytes,
-/// and the mint signer's whole fascia core at about 34 times. The
+/// and the mint signer's whole fascia core at about 31 times. The
 /// gas transaction parser stays under 0.1, and a PSBT whose bytes sit in
 /// large records about 1.5. A whole burn request through `dispatch` keeps no
 /// validation heap in the enclave, so it peaks at the read of its frame
@@ -616,7 +616,7 @@ mod tests {
     }
 
     /// Each worker can hold a scratch file of `max_consignment_bytes` or of
-    /// `max_psbt_bytes`, whichever is larger, beside its heap, and never more
+    /// `MAX_FASCIA_BYTES`, whichever is larger, beside its heap, and never more
     /// than its frame. So the image values need memory for them above the
     /// minimum. A mint signer runs no validator child, so only its files count.
     #[test]
@@ -642,31 +642,26 @@ mod tests {
         assert!(check_limits_against(&larger, Some(needed - 1), &mint).is_err());
         assert!(check_limits_against(&larger, Some(needed), &mint).is_ok());
 
-        // A fascia file over the consignment limit sets the bound instead.
-        let wide_psbt = Limits {
-            max_psbt_bytes: image.max_consignment_bytes + MIB as u64,
+        // Under the fascia limit, a fascia file sets the bound instead.
+        let fascia = crate::config::MAX_FASCIA_BYTES;
+        let small = Limits {
+            max_consignment_bytes: 1024,
             ..image
         };
-        assert!(check_limits_against(&wide_psbt, Some(needed - 1), &mint).is_err());
-        assert!(check_limits_against(&wide_psbt, Some(needed), &mint).is_ok());
+        let needed = MIN_ENCLAVE_MEMORY_BYTES + WORKER_THREADS * fascia;
+        assert!(check_limits_against(&small, Some(needed - 1), &mint).is_err());
+        assert!(check_limits_against(&small, Some(needed), &mint).is_ok());
 
         // A frame cannot carry a larger file.
         let frame = image.max_message_bytes;
         let needed = MIN_ENCLAVE_MEMORY_BYTES + WORKER_THREADS * frame as usize;
         for bytes in [frame, 2 * frame, 1 << 32] {
-            for limits in [
-                Limits {
-                    max_consignment_bytes: bytes,
-                    ..image
-                },
-                Limits {
-                    max_psbt_bytes: bytes,
-                    ..image
-                },
-            ] {
-                assert!(check_limits_against(&limits, Some(needed - 1), &mint).is_err());
-                assert!(check_limits_against(&limits, Some(needed), &mint).is_ok());
-            }
+            let limits = Limits {
+                max_consignment_bytes: bytes,
+                ..image
+            };
+            assert!(check_limits_against(&limits, Some(needed - 1), &mint).is_err());
+            assert!(check_limits_against(&limits, Some(needed), &mint).is_ok());
         }
     }
 

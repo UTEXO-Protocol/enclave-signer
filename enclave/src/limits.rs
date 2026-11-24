@@ -126,7 +126,7 @@ limits! {
     max_wire_elements: MAX_WIRE_ELEMENTS as u64, 1_024, 1 << 32;
     /// Size of one consignment.
     max_consignment_bytes: crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES as u64, KIB, 1 << 32;
-    /// Size of one PSBT or fascia.
+    /// Size of one PSBT.
     max_psbt_bytes: crate::config::MAX_PSBT_BYTES as u64, KIB, 1 << 32;
     /// Size of an unsigned gas transaction.
     max_gas_tx_bytes: 1024 * KIB, KIB, 1 << 32;
@@ -264,11 +264,11 @@ impl Limits {
 
     /// The most RAM the scratch file of one request can take (`memory.rs`).
     /// A request holds one file at a time: the consignment of a burn, or one
-    /// fascia of a mint or refill. So the larger limit sets the bound, and a
-    /// frame cannot carry more than itself.
+    /// fascia of a mint or refill. So the larger of the two limits sets the
+    /// bound, and a frame cannot carry more than itself.
     pub fn scratch_file_bytes(&self) -> u64 {
         self.max_consignment_bytes
-            .max(self.max_psbt_bytes)
+            .max(crate::config::MAX_FASCIA_BYTES as u64)
             .min(self.max_message_bytes)
     }
 

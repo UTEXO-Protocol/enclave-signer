@@ -119,10 +119,9 @@ fn rgb_lib_network(cfg: &BridgeConfig) -> BitcoinNetwork {
 /// commits exactly its bundles, and the bundle of the pinned contract discloses
 /// every transition it commits, one of which the signer reads.
 ///
-/// The size bound runs before the bytes reach a scratch file or rgb-lib. A
-/// fascia holds a tx and its RGB data, so the PSBT size limit applies to it
-/// too (`memory.rs`). It bounds the bytes, not the work of the MPC rebuild in
-/// [`inspect`].
+/// The size bound, `MAX_FASCIA_BYTES`, runs before the bytes reach a scratch
+/// file or rgb-lib. It bounds the bytes, and with them the bundles a fascia
+/// can hold, not the work of the MPC rebuild in [`inspect`].
 pub fn committed_transition(
     psbt: &Psbt,
     bytes: &[u8],
@@ -136,7 +135,7 @@ pub fn committed_transition(
              tx's fascia"
         )));
     }
-    crate::config::check_psbt_size(field, bytes)?;
+    crate::config::check_fascia_size(field, bytes)?;
     let txid = psbt.unsigned_tx.compute_txid();
     assert_opret_host(&psbt.unsigned_tx)?;
     let inspection = inspect(psbt, bytes, field, pin)?;
@@ -177,8 +176,8 @@ fn assert_opret_host(tx: &Transaction) -> Result<()> {
 /// rgb-lib rebuilds the MPC tree of the bundles the file discloses. The tree
 /// grows until every contract id has a position of its own, and `root()`
 /// hashes every position of that width, taken or not. So the work follows the
-/// bundle count and the ids, which the host picks, and `max_psbt_bytes` does
-/// not bound it: a few thousand small bundles fit in 1 MiB.
+/// bundle count and the ids, which the host picks, and not the bytes:
+/// `MAX_FASCIA_BYTES` still holds a few hundred small bundles.
 fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
     // rgb-lib parses the PSBT from its base64 form.
     let psbt = psbt.to_string();

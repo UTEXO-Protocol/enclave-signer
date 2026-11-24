@@ -206,12 +206,11 @@ fn refuses_a_fascia_of_a_sibling_tx_with_the_same_commitment() {
     assert!(err.contains("does not match PSBT TXID"), "{err}");
 }
 
-/// The size bound runs before the bytes reach a scratch file or rgb-lib: it
-/// is what bounds the work of the MPC rebuild.
+/// The size bound runs before the bytes reach a scratch file or rgb-lib.
 #[test]
-fn refuses_a_fascia_over_the_psbt_size_limit() {
+fn refuses_a_fascia_over_its_size_limit() {
     let (history, sent) = rights_send();
-    let bytes = vec![0u8; crate::config::MAX_PSBT_BYTES + 1];
+    let bytes = vec![0u8; crate::config::MAX_FASCIA_BYTES + 1];
     let err = read_bytes(&sent.tx, &bytes, history.contract_id)
         .unwrap_err()
         .to_string();
@@ -702,15 +701,15 @@ fn refuses_an_inspection_that_names_another_tx_or_asset() {
     );
 }
 
-/// The densest fascia measured: one propagate of 43 681 rights that share an
-/// output, about 14 bytes each.
+/// The densest fascia measured, just under its size limit: one propagate of
+/// 4 400 rights that share an output, about 14 bytes each.
 fn widest_fascia() -> (History, gen::Committed) {
     let (mut history, rights) = issued(0xB1, &[0xA0]);
     let mut send = history
         .transition("propagate")
         .add_input(rights[0].opout, AllocatedState::Void)
         .unwrap();
-    for no in 0..43_681u64 {
+    for no in 0..4_400u64 {
         let seal = GraphSeal::with_blinded_vout(1u32, 0x10_0000 + no);
         send = send.add_rights("mintRight", seal).unwrap();
     }
@@ -743,7 +742,7 @@ fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
             )
         },
     );
-    assert!(bytes.len() > 600_000, "the fascia is not wide");
+    assert!(bytes.len() > 60_000, "the fascia is not wide");
     committed.unwrap();
     println!(
         "fascia core: {} input bytes, peak heap {peak} bytes, factor {:.2}",
@@ -751,7 +750,7 @@ fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
         peak as f64 / bytes.len() as f64
     );
     // The peak grows with the fascia, so the bound is checked at the limit.
-    let limit = crate::config::MAX_PSBT_BYTES;
+    let limit = crate::config::MAX_FASCIA_BYTES;
     let at_limit = peak * limit / bytes.len();
-    peak::assert_within_request_bound("fascia core at the PSBT limit", limit, at_limit);
+    peak::assert_within_request_bound("fascia core at the fascia limit", limit, at_limit);
 }

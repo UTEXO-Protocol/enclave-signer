@@ -141,6 +141,7 @@ one of them and no fascia fails F4.
 | `MINT_INPUTS` | 1 | Inputs of a mint (F7). |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
+| `MAX_FASCIA_BYTES` | 65,536 | Size of a fascia (F4). Compiled in, not a runtime limit. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
 | MPC tree minimum depth | 3 | The least depth rgb-lib commits with, and rebuilds the tree at in F5. It grows until every contract id has a position of its own. |
 | Colored account | `m/86'/827166'/0'` on mainnet | The only account that signs a mint. |
@@ -228,7 +229,7 @@ rules around it are the enclave's.
   not P2TR. rgb-lib verifies the commitment with the DBC proof that the
   fascia carries, so the inspection must report the opret close method: a
   tapret proof commits in a P2TR output, which this rule does not read.
-- **F4** `fascia` must not be empty and must be at most `max_psbt_bytes`,
+- **F4** `fascia` must not be empty and must be at most `MAX_FASCIA_BYTES`,
   which the enclave checks before the bytes reach rgb-lib. It must then decode
   as rgb-lib reads its fascia file: strict encoding, nothing after it. Its
   witness txid must be the PSBT's unsigned txid, which rgb-lib's inspection
@@ -237,11 +238,15 @@ rules around it are the enclave's.
   too. A bundle of another contract is read past (F6): rgb-lib moves the
   state of every asset on the UTXO that it spends, each asset in its own
   bundle.
-  The size limit bounds the bytes that the inspection reads. It does not
-  bound the work of F5: the MPC tree grows until every contract id has a
-  position of its own, and every position of that width is hashed, taken or
-  not. So the cost follows the bundle count and the ids, which the host
-  picks, and a few thousand small bundles fit in 1 MiB.
+  The size limit bounds the bytes that the inspection reads. The operator
+  cannot raise it: the rules here set how large a valid fascia is, and the
+  widest is a refill of `MAX_REFILL_RIGHTS` rights. It does not bound the
+  work of F5: the MPC tree grows until every contract id has a position of
+  its own, and every position of that width is hashed, taken or not. So the
+  cost follows the bundle count and the ids, which the host picks, and the
+  limit still holds a few hundred small bundles. A bundle of another
+  contract counts toward the limit too, so state of other contracts on the
+  UTXO of a right can make its fascia too large to sign.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. The enclave passes no entropy of its own, so rgb-lib takes the
