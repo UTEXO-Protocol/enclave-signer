@@ -3,7 +3,7 @@
   "buildx_version": "0.29.1",
   "rustup_version": "1.28.2",
   "awscli_version": "2.31.17",
-  "rust_version": "1.96.1",
+  "rust_version": "1.100.0",
   "nitro_version": "1.4.5",
   "nitro_commit": "18a5f6f35f110c0f235f193ae3caff9434d64ee1",
   "docker_sha256": "5c0d19f31fece1accd0358bb8cff591fe25d7b6cba19f0fd412cbfdc07f75ff6",

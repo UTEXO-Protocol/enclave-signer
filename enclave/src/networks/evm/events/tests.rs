@@ -1169,14 +1169,7 @@ fn rgb_mint_deposit_id_binds_the_mint_and_its_amount() {
 #[test]
 fn a_stalled_call_ends_at_the_timeout_in_force() {
     let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let ca_hex = include_str!("../../../../tests/fixtures/evm_rpc_tls/ca_a.der.hex");
-    let client = AlloyEvmClient::with_pinned_tls(&crate::config::EvmRpcTls {
-        host: "rpc.test".into(),
-        ca_der: hex::decode(ca_hex.trim()).unwrap(),
-        tls_port: stalled.local_addr().unwrap().port(),
-        path: "/".into(),
-    })
-    .unwrap();
+    let client = crate::test_support::stalled_evm_client(&stalled);
 
     crate::limits::change_for_test(|l| l.evm_rpc_timeout_secs = 1);
     let started = std::time::Instant::now();
@@ -1187,4 +1180,41 @@ fn a_stalled_call_ends_at_the_timeout_in_force() {
         "took {:?}",
         started.elapsed()
     );
+}
+
+/// A call ends at the end of the calls of its thread when that comes before
+/// the RPC timeout, as a request out of time with code 1. Otherwise, and
+/// after the scope, the RPC timeout holds.
+#[test]
+fn a_stalled_call_ends_at_the_end_of_the_calls_of_its_thread() {
+    use std::time::{Duration, Instant};
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = crate::test_support::stalled_evm_client(&stalled);
+
+    let started = Instant::now();
+    let end = started + Duration::from_millis(300);
+    let err = with_calls_ending_by(end, || client.get_chain_id()).unwrap_err();
+    assert!(Instant::now() >= end);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(&err, EnclaveError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("eth_chainId did not end before the request deadline"),
+        "{err}"
+    );
+    assert_eq!(err.error_code(), 1);
+
+    crate::limits::change_for_test(|l| l.evm_rpc_timeout_secs = 1);
+    let later = Instant::now() + Duration::from_secs(60);
+    let err = with_calls_ending_by(later, || client.get_chain_id()).unwrap_err();
+    assert!(err.to_string().contains("timed out after 1s"), "{err}");
+    let err = client.get_chain_id().unwrap_err();
+    assert!(err.to_string().contains("timed out after 1s"), "{err}");
 }

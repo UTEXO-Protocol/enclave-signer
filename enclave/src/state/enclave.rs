@@ -193,7 +193,7 @@ impl EnclaveState {
         if cap > 0 {
             if let Err(used) =
                 self.seed_export_slots
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                         if used < cap {
                             Some(used + 1)
                         } else {

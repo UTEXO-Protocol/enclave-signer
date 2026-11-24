@@ -64,8 +64,6 @@ fn pinned_bridge_config() -> BridgeConfig {
 fn btc_capped_config(max_total_sats: u64) -> BridgeConfig {
     BridgeConfig {
         btc_max_total_sats: max_total_sats,
-        // Sized for `create_utxo` allocation dust (1000 sats x 5).
-        btc_max_unowned_sats: 5_000,
         ..Default::default()
     }
 }
@@ -125,7 +123,6 @@ fn valid_sign_evm_request(amount: u64, commission: u64) -> SignRequest {
             asset_id: "rgb:test".into(),
             consignment: PLACEHOLDER_CONSIGNMENT.to_vec(),
             consignment_hash: placeholder_consignment_hash(),
-            merkle_proofs: vec![],
             commission,
         })),
         destination_network: Some(DestinationNetwork::EvmDestination(EvmDestination {
@@ -301,8 +298,8 @@ fn foreign_xonly(b: u8) -> bitcoin::XOnlyPublicKey {
 }
 
 /// Build a plain-BTC PSBT that spends `input_sats` from an enclave address and
-/// pays `outputs`. Inputs carry key-path metadata, so the enclave sees an output
-/// to `from.spk` as self-pay without output metadata.
+/// pays `outputs`. Inputs carry key-path metadata; outputs carry none, so the
+/// enclave proves none of them its own.
 #[allow(dead_code)]
 fn btc_psbt(from: &OurAddress, input_sats: u64, outputs: &[(bitcoin::ScriptBuf, u64)]) -> Vec<u8> {
     btc_psbt_from(&[(from, input_sats)], outputs)
@@ -512,10 +509,10 @@ fn test_sign_evm_rejects_funds_out_without_validator() {
     }
 }
 
-/// A build without `rgb-validation` must refuse an RGB source, even with no
-/// merkle_proofs. It has no consensus code to check a consignment with. The
-/// refusal fires in RGB source validation, whose message names the missing
-/// `rgb-validation` feature.
+/// A build without `rgb-validation` must refuse an RGB source. It has no
+/// consensus code to check a consignment with. The refusal fires in RGB
+/// source validation, whose message names the missing `rgb-validation`
+/// feature.
 #[cfg(not(feature = "rgb-validation"))]
 #[test]
 fn a_build_without_rgb_validation_refuses_rgb_sources() {
@@ -530,15 +527,7 @@ fn a_build_without_rgb_validation_refuses_rgb_sources() {
     };
     common::send_request(port, &init_req);
 
-    // A fundsOut request with no merkle_proofs. The refusal must still fire.
     let req = valid_sign_evm_request(1000, 50);
-    match &req.source_network {
-        Some(SourceNetwork::RgbSource(source)) => assert!(
-            source.merkle_proofs.is_empty(),
-            "test precondition: the request must carry no merkle_proofs"
-        ),
-        other => panic!("expected RGB source, got {other:?}"),
-    }
     let sign_req = EnclaveRequest {
         request: Some(Request::Sign(req)),
     };
@@ -767,8 +756,8 @@ fn test_sign_btc_accepts_create_utxo_colored_output() {
     let ours = our_address(&wallet, 0, 0);
     let colored = our_colored_address(&wallet, 0, 0);
 
-    // Both outputs are key-path outputs of the enclave key. Rule (C) proves both
-    // from the output metadata, so neither counts against BTC_MAX_UNOWNED_SATS.
+    // Both outputs are key-path outputs of the enclave key. The enclave derives
+    // both from the output metadata, so both are its own.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&colored, 5_000), (&ours, 50_000)]),
@@ -807,10 +796,19 @@ fn test_sign_btc_second_pass_after_partial_merge_still_signs() {
         .response
     };
 
-    let original = btc_psbt_from(
+    // The change outputs name their key paths, as the wallet's own outputs do.
+    let mut original = Psbt::deserialize(&btc_psbt_from(
         &[(&a, 40_000), (&b, 40_000)],
         &[(a.spk.clone(), 39_000), (b.spk.clone(), 39_000)],
-    );
+    ))
+    .expect("psbt");
+    for (i, out) in [&a, &b].into_iter().enumerate() {
+        original.outputs[i].tap_internal_key = Some(out.xonly);
+        original.outputs[i]
+            .tap_key_origins
+            .insert(out.xonly, (vec![], (out.fingerprint, out.path.clone())));
+    }
+    let original = original.serialize();
 
     // Pass 1: both inputs are ours and unsigned.
     let signed = match sign(original.clone()) {
@@ -901,7 +899,7 @@ fn test_sign_btc_rejects_output_the_enclave_does_not_control() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(
-                e.message.contains("same custody"),
+                e.message.contains("cannot prove its own"),
                 "expected self-ownership rejection, got: {}",
                 e.message
             );
@@ -920,7 +918,7 @@ fn test_sign_btc_rejects_input_value_over_cap() {
     // A self-paying output at a sane fee, but the input value is over the cap.
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            psbt_bytes: btc_psbt(&ours, 200_000, &[(ours.spk.clone(), 190_000)]),
+            psbt_bytes: btc_psbt_to_ours(&ours, 200_000, &[(&ours, 190_000)]),
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -950,7 +948,7 @@ fn test_sign_btc_rejects_a_fee_that_burns_most_of_the_input() {
 
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            psbt_bytes: btc_psbt(&ours, 60_676, &[(ours.spk.clone(), 1_000)]),
+            psbt_bytes: btc_psbt_to_ours(&ours, 60_676, &[(&ours, 1_000)]),
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -979,7 +977,7 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
 
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
-            psbt_bytes: btc_psbt(&ours, 60_000, &[(ours.spk.clone(), 50_000)]),
+            psbt_bytes: btc_psbt_to_ours(&ours, 60_000, &[(&ours, 50_000)]),
         })),
     };
     let resp = common::send_request(port, &sign_req);
@@ -995,8 +993,8 @@ fn test_sign_btc_accepts_self_paying_psbt_under_cap() {
 
 /// A new change address on a script tree whose leaf names one of our keys.
 /// Only coordinator output metadata "proves" it. The leaf says nothing about
-/// the rest of the tree, so the enclave refuses it. Rule (C) proves key-path
-/// change of our own key.
+/// the rest of the tree, so the enclave refuses it. Only key-path change of our
+/// own key is proven.
 #[test]
 #[cfg(evm_to_rgb)]
 fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
@@ -1056,10 +1054,10 @@ fn test_sign_btc_rejects_fresh_change_address_proven_only_by_metadata() {
     };
     let resp = common::send_request(port, &sign_req);
 
-    // 50_000 sats is far over the unowned budget.
+    // The 50_000 sats are on an output the enclave cannot prove its own.
     match &resp.response {
         Some(Response::Error(e)) => assert!(
-            e.message.contains("same custody"),
+            e.message.contains("cannot prove its own"),
             "expected the custody rejection, got: {}",
             e.message
         ),
@@ -1145,12 +1143,11 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
         Psbt::deserialize(&build(true)).unwrap().unsigned_tx
     );
 
-    // Control: input 1 does not qualify, so the 55_000 sat output is over the
-    // 5_000 sat unowned budget.
+    // Control: the 55_000 sat output is not one the enclave derives.
     let control = sign(build(false));
     assert!(
         matches!(&control, Some(Response::Error(_))),
-        "the output is over the unowned budget, got {:?}",
+        "the output is not the enclave's own, got {:?}",
         control
     );
 
@@ -1159,7 +1156,7 @@ fn test_sign_btc_refuses_bridge_value_paid_to_a_foreign_input_script() {
         assert!(
             signed.inputs[0].tap_key_sig.is_none(),
             "the enclave signed the 60_000 sat bridge input while 55_000 sats go to a script \
-             with a foreign spend path; the unowned budget is 5_000 sats"
+             with a foreign spend path"
         );
     }
 }
@@ -1177,7 +1174,7 @@ fn test_sign_btc_uncapped_fails_closed_under_rgb_validation() {
     let sign_req = EnclaveRequest {
         request: Some(Request::SignBtc(SignBtcRequest {
             // Self-paying, so only the unset cap can fail.
-            psbt_bytes: btc_psbt(&ours, 10_000, &[(ours.spk.clone(), 9_000)]),
+            psbt_bytes: btc_psbt_to_ours(&ours, 10_000, &[(&ours, 9_000)]),
         })),
     };
     let resp = common::send_request(port, &sign_req);

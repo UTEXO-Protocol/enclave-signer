@@ -6,31 +6,16 @@
 //! `server/mod.rs` gates this module on `rgb-validation`.
 
 use super::context::ServerContext;
-use crate::error::{EnclaveError, Result};
+#[cfg(evm_to_rgb)]
+use crate::error::EnclaveError;
+use crate::error::Result;
 use crate::networks::evm::events::derived_lock;
 use crate::networks::rgb::validation::VerifiedLock;
 #[cfg(rgb_to_evm)]
 use crate::{
     config::BridgeConfig,
-    networks::rgb::validation::{BfaBridge, BoundAnchors, MintAnchor},
+    networks::rgb::validation::{BoundAnchors, MintAnchor},
 };
-
-/// The asset's genesis must name the pinned Bridge on the pinned chain. Only
-/// that contract's deposits can back a mint this federation signs.
-#[cfg(rgb_to_evm)]
-fn check_bridge(cfg: &BridgeConfig, bridge: &BfaBridge) -> Result<()> {
-    if bridge.chain_id != cfg.chain_id || bridge.address != cfg.funds_in_contract {
-        return Err(EnclaveError::CrossCheck(format!(
-            "asset bridge location 0x{} on chain {} is not the pinned funds-in contract 0x{} \
-             on EVM_CHAIN_ID {}",
-            hex::encode(bridge.address),
-            bridge.chain_id,
-            hex::encode(cfg.funds_in_contract),
-            cfg.chain_id
-        )));
-    }
-    Ok(())
-}
 
 /// The derived lock of each claim's lockId, in consignment order; no RPC read.
 #[cfg(rgb_to_evm)]
@@ -44,12 +29,7 @@ fn derive_all(cfg: &BridgeConfig, anchors: &[MintAnchor]) -> Result<Vec<Verified
 /// Binds a history the enclave does not sign a mint in (a burn, a transfer):
 /// every anchor to its derived lock. The chain id is the pin; no RPC is read.
 #[cfg(rgb_to_evm)]
-pub(super) fn derived_locks(
-    ctx: &ServerContext,
-    bridge: &BfaBridge,
-    anchors: &[MintAnchor],
-) -> Result<BoundAnchors> {
-    check_bridge(&ctx.bridge_config, bridge)?;
+pub(super) fn derived_locks(ctx: &ServerContext, anchors: &[MintAnchor]) -> Result<BoundAnchors> {
     Ok(BoundAnchors {
         evm_chain_id: ctx.bridge_config.chain_id,
         locks: derive_all(&ctx.bridge_config, anchors)?,

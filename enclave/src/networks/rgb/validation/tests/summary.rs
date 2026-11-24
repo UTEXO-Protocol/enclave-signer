@@ -2,16 +2,21 @@
 //! makes. A reference reading of the rgbstd `Transfer` pins each field, and
 //! rgb-lib's inspection must match it, as must the parser the bridge reads
 //! burns with (consignment-utils).
+//!
+//! The reference reading is this file's own: production reads a consignment
+//! only through rgb-lib's inspection, so an oracle that shared its code could
+//! not tell whether either reading is right.
 
 use amplify::Wrapper;
 use rgb_consignment::{ConsignmentInfo, SealInfo};
 use rgbstd::containers::Transfer;
 use rgbstd::contract::TransitionBuilder;
+use rgbstd::txout::TxoSeal;
 use rgbstd::{ChainNet, ContractId, Operation, TypedAssigns};
 
 use super::super::super::scratch::with_scratch_file;
-use super::super::transition::output_seal;
 use super::*;
+use crate::networks::rgb::bfa_schema;
 
 type Summary = Vec<(bitcoin::Txid, Vec<TransitionSummary>)>;
 
@@ -37,27 +42,52 @@ fn reference_transition(t: &rgbstd::Transition, opid: rgbstd::OpId) -> Transitio
     let outputs: Vec<TransitionOutput> = t
         .assignments
         .iter()
-        .filter(|(ty, _)| **ty == schemata::OS_ASSET)
+        .filter(|(ty, _)| **ty == bfa_schema::OS_ASSET)
         .flat_map(|(_, assigns)| match assigns {
             TypedAssigns::Fungible(vec) => vec.iter().map(reference_output).collect(),
             _ => Vec::new(),
         })
         .collect();
     let total = outputs.iter().map(|o| o.amount).sum();
+    let global = |ty| {
+        t.globals
+            .get(&ty)
+            .and_then(|values| values.first())
+            .map(|v| v.as_slice().to_vec())
+    };
     TransitionSummary {
         op_id: opid.to_string(),
-        transition_type: t.transition_type.to_inner(),
+        transition_type: bfa_schema::type_of(t.transition_type.to_inner()),
         asset_output_amount: total,
         outputs,
-        burned_asset_amount: None,
-        burn_reason: None,
+        burned_asset_amount: global(bfa_schema::GS_BURNED_ASSET)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+        burn_reason: global(bfa_schema::GS_BURN_REASON).map(|b| b.try_into().unwrap()),
     }
 }
 
 fn reference_output(a: &rgbstd::Assign<RevealedValue, GraphSeal>) -> TransitionOutput {
     TransitionOutput {
         amount: a.state.as_u64(),
-        seal: output_seal(&a.seal),
+        seal: reference_seal(&a.seal),
+    }
+}
+
+/// The seal as rgbstd holds it, in the shape the summary carries. A seal of
+/// the witness tx names no txid here, which is how rgbstd stores it.
+fn reference_seal(seal: &BuilderSeal<GraphSeal>) -> OutputSeal {
+    match seal {
+        BuilderSeal::Revealed(seal) => OutputSeal::Revealed {
+            txid: seal.txid().map(|txid| {
+                let mut bytes = <bitcoin::Txid as bitcoin::hashes::Hash>::to_byte_array(txid);
+                bytes.reverse();
+                bytes
+            }),
+            vout: seal.vout().into_u32(),
+        },
+        BuilderSeal::Concealed(secret) => OutputSeal::Confidential {
+            secret_seal: secret.to_string(),
+        },
     }
 }
 
@@ -141,7 +171,7 @@ fn burn_with_hidden_transition() -> History {
     let (mut history, units) = minted();
     let burn = history.burn_transition(units, MINTED, Some(MINTED), None);
     let mut bundle = gen::bundle_of(vec![burn]);
-    let hidden = rgbstd::Opout::new(rgbstd::OpId::from([0x99; 32]), schemata::OS_MINT, 0);
+    let hidden = rgbstd::Opout::new(rgbstd::OpId::from([0x99; 32]), bfa_schema::OS_MINT, 0);
     bundle
         .input_map
         .insert(hidden, rgbstd::OpId::from([0x98; 32]))
@@ -302,7 +332,7 @@ fn generated_shapes() -> Vec<(String, Vec<u8>)> {
     );
     push("split in halves", minted_in_halves().0);
     push(
-        "hidden transition in the last bundle",
+        "undisclosed transition in the last bundle",
         burn_with_hidden_transition(),
     );
     push("burn after a rights send", burn_after_rights_send());
@@ -350,7 +380,16 @@ fn reference_of(bytes: &[u8]) -> Summary {
 }
 
 /// The summary validation reads: rgb-lib's inspection of the file.
+/// Every bundle, so the comparisons below cover each one. Production reads the
+/// terminal bundles alone, by [`super::super::consignment`].
 pub(super) fn inspected(bytes: &[u8]) -> Result<Summary> {
+    with_scratch_file("consignment", bytes, |path| {
+        summary_of_every_bundle(path.to_str().unwrap())
+    })
+}
+
+/// The summary production reads: the terminal bundles of the file.
+pub(super) fn terminal_bundles(bytes: &[u8]) -> Result<Summary> {
     with_scratch_file("consignment", bytes, |path| {
         extract_transition_summary(path.to_str().unwrap())
     })
@@ -373,7 +412,7 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                     let outputs: Vec<TransitionOutput> = t
                         .fungible_allocations
                         .iter()
-                        .filter(|a| a.assignment_type == schemata::OS_ASSET.to_inner())
+                        .filter(|a| a.assignment_type == bfa_schema::OS_ASSET.to_inner())
                         .flat_map(|a| a.entries.iter())
                         .map(|e| TransitionOutput {
                             amount: e.amount,
@@ -391,13 +430,21 @@ fn bridge_summary(bytes: &[u8]) -> Summary {
                         })
                         .collect();
                     let total = outputs.iter().map(|o| o.amount).sum();
+                    let global = |ty: u16| {
+                        t.globals
+                            .iter()
+                            .find(|g| g.global_type == ty)
+                            .map(|g| hex::decode(&g.value_hex).unwrap())
+                    };
                     TransitionSummary {
                         op_id: t.op_id.clone(),
-                        transition_type: t.transition_type,
+                        transition_type: bfa_schema::type_of(t.transition_type),
                         asset_output_amount: total,
                         outputs,
-                        burned_asset_amount: None,
-                        burn_reason: None,
+                        burned_asset_amount: global(bfa_schema::GS_BURNED_ASSET.to_inner())
+                            .map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+                        burn_reason: global(bfa_schema::GS_BURN_REASON.to_inner())
+                            .map(|b| b.try_into().unwrap()),
                     }
                 })
                 .collect();

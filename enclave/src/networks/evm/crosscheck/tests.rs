@@ -1,3 +1,5 @@
+use rgb_lib::TypeOfTransition;
+
 use super::*;
 
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
@@ -73,13 +75,13 @@ fn mock_funds_out_calldata_identity(
     .abi_encode()
 }
 
-/// A `ValidatedConsignment` with only `transition` as its last transition.
-/// `last_transfer_op_id` gets the same OpId when it decodes as 32 bytes, as
+/// A `ValidatedConsignment` with only `transition` as its settling transition.
+/// `settling_op_id` gets the same OpId when it decodes as 32 bytes, as
 /// validation does. A malformed OpId leaves it `None`.
 fn validated_with_last(
     transition: crate::networks::rgb::validation::TransitionSummary,
 ) -> crate::networks::rgb::validation::ValidatedConsignment {
-    let last_transfer_op_id = hex::decode(
+    let settling_op_id = hex::decode(
         transition
             .op_id
             .strip_prefix("0x")
@@ -91,11 +93,9 @@ fn validated_with_last(
         contract_id: "rgb:test".into(),
         chain_net: "bc".into(),
         witness_txids: vec![],
-        last_transition: Some(transition),
-        last_witness_txid: None,
-        last_transfer_witness_prevouts: vec![],
-        last_transfer_op_id,
-        non_mined_witness_txids: vec![],
+        settling_transition: Some(transition),
+        settling_witness_txid: None,
+        settling_op_id,
         transitions_by_witness: vec![],
         ..Default::default()
     }
@@ -127,12 +127,11 @@ fn rejects_flat_encoding_zero_recipient() {
 }
 
 // Source-burn identity: `validate_funds_out_source_burn_tx_id`. The bind reads
-// only the last transition OpId, of any type. `validate_rgb_source_identity`
+// only the settling transition OpId, of any type. `validate_rgb_source_identity`
 // in `validation.rs` binds `sourceChainId` / `sourceAddress`.
 mod source_burn {
     use super::*;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     /// OpId as the consignment parser yields it: 64 lowercase hex chars.
     const OP_ID_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -144,7 +143,7 @@ mod source_burn {
     fn settling_transition(op_id: &str) -> TransitionSummary {
         TransitionSummary {
             op_id: op_id.into(),
-            transition_type: bfa_ids::TS_TRANSFER,
+            transition_type: TypeOfTransition::Transfer,
             asset_output_amount: 1000,
             outputs: Vec::new(),
             burned_asset_amount: None,
@@ -193,21 +192,22 @@ mod source_burn {
     fn rejects_a_consignment_with_no_transition() {
         let cd = calldata_with("", op_id_bytes());
         let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
-        validated.last_transition = None;
+        validated.settling_transition = None;
         assert!(validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).is_err());
     }
 
-    /// The bind reads the OpId that consensus validated, not the flat summary's
-    /// copy. A summary whose validated OpId differs from its own is refused
-    /// when the calldata cites the summary's value.
+    /// The bind reads `settling_op_id`, not the settling transition's own
+    /// `op_id` string. Validation decodes the one from the other, so the two
+    /// agree on any consignment it accepts; this pins the field the bind reads
+    /// if that ever stops being true.
     #[test]
-    fn binds_to_the_validated_op_id_not_the_summary_copy() {
+    fn binds_to_the_op_id_field_not_the_summary_string() {
         let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
         let mut other = op_id_bytes();
         other[0] ^= 0x80;
-        validated.last_transfer_op_id = Some(other);
+        validated.settling_op_id = Some(other);
 
-        // The calldata cites the flat summary's OpId.
+        // The calldata cites the settling transition's own id string.
         let cd = calldata_with("", op_id_bytes());
         let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
         assert!(err.to_string().contains("sourceBurnTxId mismatch"), "{err}");
@@ -222,7 +222,7 @@ mod source_burn {
     fn rejects_a_summary_without_a_validated_op_id() {
         let cd = calldata_with("", op_id_bytes());
         let mut validated = validated_with_last(settling_transition(OP_ID_HEX));
-        validated.last_transfer_op_id = None;
+        validated.settling_op_id = None;
         let err = validate_funds_out_source_burn_tx_id(&params_of(&cd), &validated).unwrap_err();
         assert!(err.to_string().contains("validated OpId"), "{err}");
     }
@@ -238,17 +238,17 @@ mod burn {
     use super::*;
     use crate::networks::evm::burn_destination::BurnDestinationRecord;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     const RECIPIENT: [u8; 20] = [0x42; 20];
 
     fn burn_transition(burned: Option<u64>, reason: Option<[u8; 32]>) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
+            asset_output_amount: 0,
+            outputs: Vec::new(),
             burned_asset_amount: burned,
             burn_reason: reason,
-            ..Default::default()
         }
     }
 
@@ -361,14 +361,13 @@ mod burn {
 mod transfer {
     use super::*;
     use crate::networks::rgb::validation::TransitionSummary;
-    use crate::test_support::bfa_ids;
 
     fn source_transition(amount: u64) -> TransitionSummary {
         TransitionSummary {
             op_id: "burn-op".into(),
             // The destroyed amount is the burnedAsset global, never the
             // outputs.
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(amount),
@@ -387,10 +386,10 @@ mod transfer {
 
     #[test]
     fn witnesses_confirmed_rejects_non_mined() {
-        // A tentative/ignored witness in the RGB -> EVM direction is an
-        // anomaly: the unlock settles a confirmed transfer.
+        // A witness validation placed in no block is an anomaly in the
+        // RGB -> EVM direction: the unlock settles a confirmed transfer.
         let mut validated = validated_with_last(source_transition(1000));
-        validated.non_mined_witness_txids = vec![[0xABu8; 32]];
+        validated.witness_txids = vec![[0xABu8; 32]];
         let err = super::super::assert_witnesses_confirmed(&validated).unwrap_err();
         assert!(
             err.to_string().contains("mined"),
@@ -426,15 +425,15 @@ mod transfer {
         );
     }
 
-    /// A last transition that is not a burn must be refused. `TS_MINT` is the
+    /// A settling transition that is not a burn must be refused. `TS_MINT` is the
     /// deposit shape of this flow, so the build refuses a consignment that
     /// settles on a mint: a mint destroys no units, so it cannot back a
     /// release.
     #[test]
-    fn rejects_when_last_transition_is_not_the_flow_shape() {
+    fn rejects_when_the_settling_transition_is_not_the_flow_shape() {
         let cd = mock_funds_out_calldata(500);
         let mut t = source_transition(500);
-        t.transition_type = bfa_ids::TS_MINT;
+        t.transition_type = TypeOfTransition::Mint;
         let validated = validated_with_last(t);
         let err = validate_funds_out_amount(&params_of(&cd), &validated).unwrap_err();
         assert!(
@@ -450,11 +449,9 @@ mod transfer {
             contract_id: "rgb:test".into(),
             chain_net: "bc".into(),
             witness_txids: vec![],
-            last_transition: None,
-            last_witness_txid: None,
-            last_transfer_witness_prevouts: vec![],
-            last_transfer_op_id: None,
-            non_mined_witness_txids: vec![],
+            settling_transition: None,
+            settling_witness_txid: None,
+            settling_op_id: None,
             transitions_by_witness: vec![],
             ..Default::default()
         };
@@ -627,7 +624,6 @@ mod lz_route {
     use crate::networks::evm::validation::{decode_lz_funds_out_params, lzFundsOutCall};
     use crate::networks::rgb::validation::TransitionSummary;
     use crate::networks::rgb::validation::VerifiedLock;
-    use crate::test_support::bfa_ids;
     use alloy_primitives::B256;
     use alloy_sol_types::SolValue;
 
@@ -658,7 +654,7 @@ mod lz_route {
     fn burn_with_reason(reason: [u8; 32]) -> ValidatedConsignment {
         validated_with_last(TransitionSummary {
             op_id: OP_ID_HEX.into(),
-            transition_type: bfa_ids::TS_BURN,
+            transition_type: TypeOfTransition::Burn,
             asset_output_amount: 0,
             outputs: Vec::new(),
             burned_asset_amount: Some(BURNED),
@@ -857,6 +853,7 @@ mod btc_relay {
     use super::*;
     use crate::networks::rgb::spv::checkpoint::{parse_checkpoint_spec, REGTEST_CHECKPOINT};
     use crate::networks::rgb::spv::{Checkpoint, HeaderChain, Network};
+    use crate::networks::rgb::validation::WitnessBlock;
     use crate::test_support::ANY_HEADER_CLOCK;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -1028,31 +1025,26 @@ mod btc_relay {
         )
     }
 
-    /// A consignment anchored by [`WITNESS_TXID`], plus the SPV proof
-    /// placing it at `height`. The block at [`ANCHOR_HEIGHT`] holds only
-    /// that tx, so the path is empty and the position is 0.
-    fn anchored_at(height: u32) -> (ValidatedConsignment, Vec<MerkleProofEntry>) {
+    /// A consignment anchored by [`WITNESS_TXID`], which validation placed
+    /// in the block `chain` holds at `height`.
+    fn anchored_at(chain: &HeaderChain, height: u32) -> ValidatedConsignment {
         let mut internal = WITNESS_TXID;
         internal.reverse();
-        let validated = ValidatedConsignment {
+        ValidatedConsignment {
             contract_id: "rgb:test".into(),
             chain_net: "bc".into(),
             witness_txids: vec![WITNESS_TXID],
-            last_transition: None,
-            last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
-            last_transfer_witness_prevouts: vec![],
-            last_transfer_op_id: None,
-            non_mined_witness_txids: vec![],
+            settling_transition: None,
+            settling_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+            settling_op_id: None,
+            witness_blocks: vec![WitnessBlock {
+                txid: WITNESS_TXID,
+                height,
+                hash: chain.hash_at(height).unwrap_or_default(),
+            }],
             transitions_by_witness: vec![],
             ..Default::default()
-        };
-        let proofs = vec![MerkleProofEntry {
-            txid: WITNESS_TXID.to_vec(),
-            block_height: height,
-            tx_position: 0,
-            merkle_path: vec![],
-        }];
-        (validated, proofs)
+        }
     }
 
     /// Run the check against a consignment anchored at [`ANCHOR_HEIGHT`],
@@ -1078,11 +1070,10 @@ mod btc_relay {
         anchor_height: u32,
         mode: BtcRelayMode,
     ) -> Result<()> {
-        let (validated, proofs) = anchored_at(anchor_height);
+        let validated = anchored_at(chain, anchor_height);
         verify_btc_relay_agreement(
             &params_of(cd),
             &validated,
-            &proofs,
             chain,
             &ChainPins::new(),
             mode,
@@ -1249,6 +1240,14 @@ mod btc_relay {
             err.to_string().contains("no header at latest block height"),
             "got: {err}"
         );
+        assert!(
+            err.to_string().ends_with(&format!(
+                "[needs tip {}, has tip {TIP_HEIGHT}]",
+                TIP_HEIGHT + 1
+            )),
+            "got: {err}"
+        );
+        assert_eq!(err.error_code(), 9, "the enclave is behind: a wait");
     }
 
     #[test]
@@ -1338,14 +1337,17 @@ mod btc_relay {
     }
 
     // -- Source-block bind: the calldata `source` pair must be the block
-    // -- anchoring the consignment's last witness tx.
+    // -- anchoring the witness tx of the consignment's settling burn.
 
     /// No header at the anchor height: refuse, and do not trust the calldata.
     #[test]
     fn rejects_when_tee_has_no_header_at_anchor_height() {
         let (chain, hashes) = chain();
         let err = check_at(&good_calldata(&hashes), &chain, 99).unwrap_err();
-        assert!(err.to_string().contains("not in sync"), "got: {err}");
+        assert!(
+            err.to_string().contains("no header at height 99"),
+            "got: {err}"
+        );
     }
 
     /// Depth is also checked again: an anchor at the tip has 1 confirmation,
@@ -1361,21 +1363,20 @@ mod btc_relay {
     }
 
     #[test]
-    fn rejects_when_no_merkle_proof_covers_the_last_witness_tx() {
+    fn rejects_when_no_block_holds_the_settling_witness_tx() {
         let (chain, hashes) = chain();
-        let (validated, mut proofs) = anchored_at(ANCHOR_HEIGHT);
-        proofs[0].txid = vec![0x01; 32];
+        let mut validated = anchored_at(&chain, ANCHOR_HEIGHT);
+        validated.witness_blocks.clear();
         let err = verify_btc_relay_agreement(
             &params_of(&good_calldata(&hashes)),
             &validated,
-            &proofs,
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
             MIN_CONFIRMATIONS,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no merkle proof"), "got: {err}");
+        assert!(err.to_string().contains("in no block"), "got: {err}");
     }
 
     // -- The chain can move after the last check.
@@ -1441,11 +1442,10 @@ mod btc_relay {
     /// Runs the last check and returns what it pinned.
     fn check_pinning(chain: &HeaderChain, hashes: &[[u8; 32]]) -> ChainPins {
         let pins = ChainPins::new();
-        let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let validated = anchored_at(chain, ANCHOR_HEIGHT);
         verify_btc_relay_agreement(
             &params_of(&good_calldata(hashes)),
             &validated,
-            &proofs,
             chain,
             &pins,
             BtcRelayMode::Required,
@@ -1524,12 +1524,11 @@ mod btc_relay {
             latest,
             hashes[latest as usize],
         );
-        let (validated, proofs) = anchored_at(ANCHOR_HEIGHT);
+        let validated = anchored_at(&chain, ANCHOR_HEIGHT);
         let pins = ChainPins::new();
         verify_btc_relay_agreement(
             &params_of(&cd),
             &validated,
-            &proofs,
             &chain,
             &pins,
             BtcRelayMode::Required,
@@ -1740,12 +1739,11 @@ mod btc_relay {
     #[test]
     fn rejects_when_consignment_has_no_witness_bundle() {
         let (chain, hashes) = chain();
-        let (mut validated, proofs) = anchored_at(ANCHOR_HEIGHT);
-        validated.last_witness_txid = None;
+        let mut validated = anchored_at(&chain, ANCHOR_HEIGHT);
+        validated.settling_witness_txid = None;
         let err = verify_btc_relay_agreement(
             &params_of(&good_calldata(&hashes)),
             &validated,
-            &proofs,
             &chain,
             &ChainPins::new(),
             BtcRelayMode::Required,
@@ -1753,7 +1751,7 @@ mod btc_relay {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("no last witness txid"),
+            err.to_string().contains("no settling witness txid"),
             "got: {err}"
         );
     }

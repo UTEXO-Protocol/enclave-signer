@@ -27,7 +27,6 @@ fn rgb_source() -> SourceNetwork {
         asset_id: "rgb:test-asset".into(),
         consignment: vec![0x01],
         consignment_hash: vec![0x02; 32],
-        merkle_proofs: vec![],
         commission: 20,
     })
 }

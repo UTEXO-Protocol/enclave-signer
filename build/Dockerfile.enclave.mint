@@ -3,7 +3,7 @@
 # Every dependency of the enclave workspace is public: the build takes no secret.
 # Example: docker build --build-arg RGB_ASSET_ID="$RGB_ASSET_ID" -f build/Dockerfile.enclave.mint .
 # Use the same Debian release for the builder and runtime.
-FROM rust:1.96.1-slim-trixie@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS builder
 
 # Pin packages to a signed snapshot over HTTPS.
 # Disable expiry checks so the fixed snapshot remains usable after Valid-Until.

@@ -154,7 +154,9 @@ message RgbSource {
   string asset_id = 3; // RGB asset identifier derived from the consignment.
   bytes consignment = 4; // Raw RGB consignment bytes.
   bytes consignment_hash = 5; // keccak256(consignment).
-  repeated MerkleProofEntry merkle_proofs = 6; // SPV proofs for witness transactions.
+  // 6 is reserved. Do not use it. The SPV proofs travel inside the consignment.
+  reserved 6;
+  reserved "merkle_proofs";
   uint64 commission = 7; // Commission reported by the source event. The enclave does not use it.
   // 8 is reserved. Do not use it.
   reserved 8;
@@ -225,13 +227,6 @@ message RgbDestination {
   reserved "parent_fascia";
 }
 
-message MerkleProofEntry {
-  bytes txid = 1; // 32-byte transaction ID in display byte order.
-  uint32 block_height = 2; // Height of the block containing the transaction.
-  uint32 tx_position = 3; // Transaction position in the block.
-  repeated bytes merkle_path = 4; // 32-byte sibling hashes from leaf to Merkle root, in display byte order.
-}
-
 message EvmSignatureResponse {
   // 65-byte signature: r (32) || s (32) || v (1). v is the raw recovery id,
   // 0 or 1, not 27 or 28.
@@ -248,11 +243,11 @@ message SignedPsbtResponse {
   uint32 inputs_signed = 2; // Number of inputs signed by the enclave.
 }
 
-// Plain-BTC PSBT signing (create_utxo / plain withdrawals). Only the mint signer
-// signs it. Unlike SignRequest, it carries no RGB consignment and no EVM
-// correlation. The enclave authorises it from the PSBT, never from a listener
-// flag. It derives which outputs pay back to scripts it co-controls; the rest
-// must fit the BTC_MAX_UNOWNED_SATS budget. Total input value must fit the
+// Plain-BTC PSBT signing (create_utxo). Only the mint signer signs it. Unlike
+// SignRequest, it carries no RGB consignment and no EVM correlation. The
+// enclave authorises it from the PSBT, never from a listener flag. Every
+// output that carries sats must be a BIP-86 key-path output that the enclave
+// derives at the path the output names. Total input value must fit the
 // BTC_MAX_TOTAL_SATS cap, and the fee must pass the fee policy. A production build
 // requires the cap. It signs only vanilla BIP-86 inputs, never a colored
 // (RGB-allocated) one. Response is a SignedPsbtResponse.
@@ -398,15 +393,15 @@ message Limits {
   // 4 and 5 are reserved. Do not use them.
   reserved 4, 5;
   reserved "electrum_timeout_secs", "esplora_timeout_secs";
-  uint64 max_rgb_lib_ms = 6;
-  uint64 max_witness_check_cost = 7;
-  uint64 max_bundle_id_cost = 8;
-  uint64 max_reject_walk_cost = 9;
+  // 6 to 9 are reserved. Do not use them.
+  reserved 6, 7, 8, 9;
+  reserved "max_rgb_lib_ms", "max_witness_check_cost", "max_bundle_id_cost", "max_reject_walk_cost";
   uint64 max_message_bytes = 10;
   uint64 max_wire_elements = 11;
   uint64 max_consignment_bytes = 12;
-  uint64 max_merkle_proofs = 13;
-  uint64 max_total_proof_bytes = 14;
+  // 13 and 14 are reserved. Do not use them.
+  reserved 13, 14;
+  reserved "max_merkle_proofs", "max_total_proof_bytes";
   uint64 max_psbt_bytes = 15;
   uint64 max_gas_tx_bytes = 16;
   uint64 max_rlp_items = 17;

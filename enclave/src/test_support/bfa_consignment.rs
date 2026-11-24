@@ -10,6 +10,7 @@
 //! `#[path]`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use amplify::confinement::{Confined, U32};
 use amplify::{ByteArray, Bytes20, Bytes32};
@@ -22,7 +23,9 @@ use bitcoin::{TxIn, TxOut, Witness};
 use psrgbt::{
     RgbOutExt, RgbPsbtExt, PSBT_MPC_PREFIX, PSBT_OPRET_PREFIX, PSBT_RGB_PREFIX, PSBT_TAPRET_PREFIX,
 };
-use rgbstd::containers::{ConsignmentVer, Fascia, FileContent, LockId, Transfer, WitnessBundle};
+use rgbstd::containers::{
+    ConsignmentVer, Fascia, FileContent, LockId, SpvProof, Transfer, WitnessBundle,
+};
 use rgbstd::contract::{AllocatedState, ContractBuilder, IssuerWrapper, TransitionBuilder};
 use rgbstd::opret::{OpretFirst, OpretProof};
 use rgbstd::rgbcore::commit_verify::mpc::{
@@ -365,7 +368,44 @@ impl History {
             .mint_transition(right, amount, before_block, to)
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
+        self.commit_mint(
+            vec![mint],
+            amount,
+            before_block,
+            right,
+            extra_inputs,
+            outputs,
+        )
+    }
+
+    #[cfg(evm_to_rgb)]
+    /// A [`Self::mint`] whose bundle also moves the right `beside` to `vout`, as
+    /// rgb-lib moves other state of the UTXO it spends. A fixture of the mint
+    /// wire test only.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn mint_moving_right(
+        &mut self,
+        right: Utxo,
+        amount: u64,
+        before_block: u64,
+        to: BuilderSeal<GraphSeal>,
+        beside: Utxo,
+        vout: u32,
+        outputs: Vec<TxOut>,
+    ) -> Committed {
+        let moved = self.rights_transition(beside, &[vout]);
+        let mint = self
+            .mint_transition(right, amount, before_block, to)
+            .complete_transition()
+            .unwrap();
+        self.commit_mint(
+            vec![moved, mint],
+            amount,
+            before_block,
+            right,
+            vec![],
+            outputs,
+        )
     }
 
     #[cfg(evm_to_rgb)]
@@ -387,7 +427,14 @@ impl History {
             .unwrap()
             .complete_transition()
             .unwrap();
-        self.commit_mint(mint, amount, before_block, right, extra_inputs, outputs)
+        self.commit_mint(
+            vec![mint],
+            amount,
+            before_block,
+            right,
+            extra_inputs,
+            outputs,
+        )
     }
 
     /// The mint of `amount` to `to` on `right`, still open for more outputs.
@@ -409,11 +456,11 @@ impl History {
             .unwrap()
     }
 
-    /// Commits `mint` in a tx that spends `right`, then `extra_inputs`, and
-    /// records its claim.
+    /// Commits `transitions`, the mint last, in a tx that spends `right`, then
+    /// `extra_inputs`, and records the mint's claim.
     fn commit_mint(
         &mut self,
-        mint: Transition,
+        transitions: Vec<Transition>,
         amount: u64,
         before_block: u64,
         right: Utxo,
@@ -423,7 +470,7 @@ impl History {
         let inputs = std::iter::once(right.outpoint)
             .chain(extra_inputs)
             .collect();
-        let minted = self.commit_psbt(vec![mint], inputs, outputs);
+        let minted = self.commit_psbt(transitions, inputs, outputs);
         self.mints.push(Mint {
             opid: minted.opid,
             witness_id: minted.tx.compute_txid(),
@@ -544,28 +591,25 @@ impl History {
         if change == 0 {
             return vec![self.burn_transition(input, held, burned, reason)];
         }
-        let (split, burnable) = self.split(input, held, change);
+        let (split, burnable, _) = self.split(input, held, change);
         let burn = self.burn_transition(burnable, held - change, burned, reason);
         vec![split, burn]
     }
 
     /// The split of a burn with change: `change` to vout 1, the rest to a seal
     /// on the outpoint the burn tx spends, as rgb-lib puts it.
-    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo) {
+    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo, GraphSeal) {
         let burnable_seal = GraphSeal::with_blinding(
             input.outpoint.txid,
             input.outpoint.vout,
             0x6000 + self.nonce,
         );
+        let change_seal = GraphSeal::with_blinded_vout(1u32, self.nonce);
         let split = self
             .transition("transfer")
             .add_input(input.opout, AllocatedState::from(RevealedValue::from(held)))
             .unwrap()
-            .add_fungible_state(
-                "assetOwner",
-                GraphSeal::with_blinded_vout(1u32, self.nonce),
-                change,
-            )
+            .add_fungible_state("assetOwner", change_seal, change)
             .unwrap()
             .add_fungible_state("assetOwner", burnable_seal, held - change)
             .unwrap()
@@ -578,7 +622,30 @@ impl History {
                 opout,
                 outpoint: input.outpoint,
             },
+            change_seal,
         )
+    }
+
+    /// [`Self::burn`] of `burned` out of `held`, and the change its split
+    /// leaves on vout 1. A `TS_BURN` has no owned state, so the change is an
+    /// output of the `TS_TRANSFER` that splits the input before it, and that
+    /// transfer is what a later burn of the rest spends.
+    pub fn burn_keeping_change(
+        &mut self,
+        input: Utxo,
+        held: u64,
+        burned: u64,
+        reason: Option<[u8; 32]>,
+    ) -> (Committed, Utxo) {
+        let (split, burnable, change_seal) = self.split(input, held, held - burned);
+        let (split_opid, change_index) = (split.id(), seal_index(&split, change_seal));
+        let burn = self.burn_transition(burnable, burned, Some(burned), reason);
+        let committed = self.commit_psbt(vec![split, burn], vec![input.outpoint], vec![dust(0x04)]);
+        let change = Utxo {
+            opout: Opout::new(split_opid, OS_ASSET, change_index),
+            outpoint: OutPoint::new(committed.tx.compute_txid(), 1),
+        };
+        (committed, change)
     }
 
     /// The burn of the whole of `input` (holding `held`), for a bundle the
@@ -610,14 +677,16 @@ impl History {
         burn.complete_transition().unwrap()
     }
 
-    /// The consignment of the history.
+    /// The consignment of the history, every witness proven (see [`prove_witnesses`]).
     pub fn as_transfer(&self) -> Transfer {
-        Transfer {
+        let mut transfer = Transfer {
             version: ConsignmentVer::V1,
             transfer: true,
             genesis: self.genesis.clone(),
             bundles: Confined::try_from(self.bundles.clone()).unwrap(),
-        }
+        };
+        prove_witnesses(&mut transfer);
+        transfer
     }
 
     /// The TFR file bytes, as the bridge sends them.
@@ -648,6 +717,39 @@ pub fn rights_made(sent: &Committed, vouts: &[u32]) -> Vec<Utxo> {
             outpoint: OutPoint::new(txid, vout),
         })
         .collect()
+}
+
+/// The witness txids of `transfer` in display byte order, sorted, each once.
+/// A test chain mines them one per block in this order, from height 1.
+pub fn mined_order(transfer: &Transfer) -> Vec<[u8; 32]> {
+    let mut txids: Vec<[u8; 32]> = transfer
+        .bundles
+        .iter()
+        .map(|bundle| {
+            let mut txid = bundle.witness_id().to_byte_array();
+            txid.reverse();
+            txid
+        })
+        .collect();
+    txids.sort_unstable();
+    txids.dedup();
+    txids
+}
+
+/// Gives every witness the SPV proof of a block it is the only transaction
+/// of, at its [`mined_order`] height.
+pub fn prove_witnesses(transfer: &mut Transfer) {
+    let order = mined_order(transfer);
+    for bundle in transfer.bundles.iter_mut() {
+        let mut txid = bundle.witness_id().to_byte_array();
+        txid.reverse();
+        let height = order.iter().position(|mined| *mined == txid).unwrap() + 1;
+        bundle.spv_proof = Some(SpvProof {
+            block_height: NonZeroU32::new(u32::try_from(height).unwrap()).unwrap(),
+            pos: 0,
+            merkle: Confined::default(),
+        });
+    }
 }
 
 /// The TFR file bytes of `transfer`.

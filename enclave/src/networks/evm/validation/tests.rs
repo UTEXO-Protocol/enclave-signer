@@ -105,6 +105,8 @@ fn with_ctx<T>(config: &BridgeConfig, f: impl FnOnce(&ValidationContext<'_>) -> 
         anchor_binder: None,
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         reject_list_reader: None,
+        #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
+        deadline: crate::test_support::far_deadline(),
     };
     f(&ctx)
 }

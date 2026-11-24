@@ -18,27 +18,19 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// value that variable may set. The wire frame
 /// ([`crate::framing::MAX_MESSAGE_SIZE`]) also limits it.
 ///
-/// The three proof and consignment defaults are sized for a history of
-/// 10_000 state transitions. A V1 consignment carries no schema or types.
-/// Each transition adds about 470 bytes, or 890 with an SPV proof of a full
-/// mainnet block. Measured: 10_002 transitions with a proof each are
-/// 8_932_069 bytes (`a_history_of_10_000_transfers_fits_the_default_limits`).
+/// The default is sized for a history of 10_000 state transitions. A V1
+/// consignment carries no schema or types. Each transition adds about 470
+/// bytes, or 890 with an SPV proof of a full mainnet block. Measured: 10_002
+/// transitions with a proof each are 8_932_069 bytes
+/// (`a_history_of_10_000_transfers_fits_the_default_limits`).
 ///
 /// The memory model caps the value here. Validating the densest consignment
-/// measured takes about 53 times its bytes. At this size a burn request fits
-/// the heap of a worker (`memory.rs`) with little room left. A larger image
-/// value stops the boot ([`parse_consignment_limit`]). `SetLimits` checks a
-/// runtime value (`limits.rs`).
+/// measured takes about 53 times its bytes. At this size a burn request, in
+/// the enclave and its validator child together, fits the heap of a worker
+/// (`memory.rs`) with little room left. A larger image value stops the boot
+/// ([`parse_consignment_limit`]). `SetLimits` checks a runtime value
+/// (`limits.rs`).
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
-
-/// Default cap on Merkle proofs per source (`MAX_MERKLE_PROOFS`). A burn needs
-/// one proof for each witness tx in its history.
-pub const DEFAULT_MAX_MERKLE_PROOFS: usize = 16_384;
-/// Default cap on total proof bytes, txids and Merkle siblings, in all proofs
-/// (`MAX_TOTAL_PROOF_BYTES`). Bounds the total Merkle hashing work. A proof in
-/// a full mainnet block has 13 siblings (448 bytes), and this cap fits
-/// [`DEFAULT_MAX_MERKLE_PROOFS`] such proofs.
-pub const DEFAULT_MAX_TOTAL_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// The most bytes a PSBT may have in the image, on every path that parses
 /// one. The operator can change it (`max_psbt_bytes`). A decoded input or
@@ -132,10 +124,6 @@ pub struct BridgeConfig {
     /// There is no output script allowlist: the scripts come from a seed that
     /// exists only after boot, and env is measured into PCR0.
     pub btc_max_total_sats: u64,
-    /// Budget in sats for plain-BTC outputs that the enclave cannot prove pay
-    /// back into the same custody (`BTC_MAX_UNOWNED_SATS`). `0` = unset: a
-    /// production build refuses a PSBT that pays any such output.
-    pub btc_max_unowned_sats: u64,
     /// Emitter of `FundsIn`/`BridgeFundsIn` (`FUNDS_IN_CONTRACT`), default
     /// `bridge_contract`. The bridge entry contract is not the MultisigProxy in
     /// this deployment, so set it explicitly.
@@ -156,13 +144,11 @@ pub struct BridgeConfig {
     /// `none` is for a local stand or a public-Signet image. Production does
     /// not boot on it ([`crate::policy::ProductionPolicy::check_invariants`]).
     pub btc_relay_mode: BtcRelayMode,
-    /// Image values of the RGB request size limits (`MAX_CONSIGNMENT_BYTES`,
-    /// `MAX_MERKLE_PROOFS`, `MAX_TOTAL_PROOF_BYTES`). Unset or 0 gives the `DEFAULT_*`
-    /// value. A consignment limit above its default stops the boot
-    /// ([`parse_consignment_limit`]). Not attested. `SetLimits` can change them.
+    /// Image value of the consignment size limit (`MAX_CONSIGNMENT_BYTES`).
+    /// Unset or 0 gives [`DEFAULT_MAX_CONSIGNMENT_BYTES`], and a larger value
+    /// stops the boot ([`parse_consignment_limit`]). Not attested. `SetLimits`
+    /// can change it.
     pub max_consignment_bytes: usize,
-    pub max_merkle_proofs: usize,
-    pub max_total_proof_bytes: usize,
     /// Min depth of each Bitcoin witness tx (`SPV_MIN_CONFIRMATIONS`, default
     /// [`DEFAULT_SPV_MIN_CONFIRMATIONS`], at least 1). Image env, so PCR0
     /// measures it, and attested.
@@ -243,15 +229,12 @@ impl Default for BridgeConfig {
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
-            btc_max_unowned_sats: 0,
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Finalized,
             token_contract: [0u8; 20],
             bitcoin_network: BitcoinNetwork::Mainnet,
             btc_relay_mode: BtcRelayMode::Required,
             max_consignment_bytes: DEFAULT_MAX_CONSIGNMENT_BYTES,
-            max_merkle_proofs: DEFAULT_MAX_MERKLE_PROOFS,
-            max_total_proof_bytes: DEFAULT_MAX_TOTAL_PROOF_BYTES,
             spv_min_confirmations: DEFAULT_SPV_MIN_CONFIRMATIONS,
             mint_witness_sat: DEFAULT_MINT_WITNESS_SAT,
             #[cfg(feature = "kms-persistence")]
@@ -348,11 +331,6 @@ impl BridgeConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let btc_max_unowned_sats = std::env::var("BTC_MAX_UNOWNED_SATS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
         let funds_in_contract = parse_funds_in_contract(
             std::env::var("FUNDS_IN_CONTRACT").ok().as_deref(),
             bridge_contract,
@@ -386,20 +364,9 @@ impl BridgeConfig {
             );
         }
 
-        // Unset, unparseable or zero gives the default.
-        let parse_cap = |name: &str, default: usize| -> usize {
-            std::env::var(name)
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0)
-                .unwrap_or(default)
-        };
         let max_consignment_bytes =
             parse_consignment_limit(std::env::var("MAX_CONSIGNMENT_BYTES").ok().as_deref())
                 .unwrap_or_else(|e| panic!("{e}"));
-        let max_merkle_proofs = parse_cap("MAX_MERKLE_PROOFS", DEFAULT_MAX_MERKLE_PROOFS);
-        let max_total_proof_bytes =
-            parse_cap("MAX_TOTAL_PROOF_BYTES", DEFAULT_MAX_TOTAL_PROOF_BYTES);
 
         let spv_min_confirmations =
             parse_spv_min_confirmations(std::env::var(SPV_MIN_CONFIRMATIONS_ENV).ok().as_deref())
@@ -419,15 +386,12 @@ impl BridgeConfig {
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,
             btc_max_total_sats,
-            btc_max_unowned_sats,
             funds_in_contract,
             evm_finality_tag,
             token_contract,
             bitcoin_network,
             btc_relay_mode,
             max_consignment_bytes,
-            max_merkle_proofs,
-            max_total_proof_bytes,
             spv_min_confirmations,
             mint_witness_sat,
             #[cfg(feature = "kms-persistence")]

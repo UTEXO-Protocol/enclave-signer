@@ -144,9 +144,8 @@ mint and burn sets too. `.github/workflows/ci.yml` has the full matrix.
 
 - The large-history tests are ignored by default. The burn-signer CI job
   runs them on every PR.
-- The release-mode timing tests are ignored. Run them with **Actions → CI →
-  Run workflow → run_stress**, or with the command in
-  [`docs/validation-cost-model.md`](docs/validation-cost-model.md#measurements).
+- **Actions → CI → Run workflow → run_stress** runs the ignored
+  large-history tests in release mode.
 - The live EVM event tests need an RPC and a known deposit. Set the variables
   that `enclave/tests/test_evm_event_live.rs` documents, and run its command
   with `-- --ignored`. An ordinary CI run reports them as ignored, not as

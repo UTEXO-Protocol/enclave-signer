@@ -6,13 +6,14 @@ use bitcoin::psbt::raw::ProprietaryKey;
 use bitcoin::psbt::Psbt;
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut};
 use psrgbt::{OpoutAndOpids, RgbPropKeyExt, RgbPsbtExt};
-use rgbstd::containers::SealWitness;
+use rgb_lib::TypeOfTransition;
+use rgbstd::containers::{Fascia, SealWitness};
 use rgbstd::contract::AllocatedState;
 use rgbstd::rgbcore::commit_verify::mpc::{
     MerkleBlock, MerkleTree, Message, MultiSource, ProtocolId,
 };
 use rgbstd::rgbcore::commit_verify::TryCommitVerify;
-use rgbstd::{GraphSeal, OpId};
+use rgbstd::{ContractId, GraphSeal, OpId, Operation, Transition, TransitionBundle};
 use strict_encoding::StrictSerialize;
 
 use super::*;
@@ -53,15 +54,27 @@ fn rights_send() -> (History, gen::Committed) {
 /// The core on `tx` and `fascia`, with the fascia sent over the wire as
 /// rgb-lib writes it. The fixtures build unsigned transactions, as rgb-lib
 /// commits one.
+/// No output of these fixtures is this enclave's: they carry no key origins,
+/// so a transfer beside the signing transition is never its own change here.
+/// [`super::super::route::tests`] covers the fascia with one.
+fn not_ours(_: &Psbt, _: u32) -> bool {
+    false
+}
+
 fn read(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> Result<Committed> {
     let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
     let bytes = gen::fascia_bytes(fascia);
-    let wire = parse_fascia(&bytes, "fascia")?;
-    committed_transition(&psbt, wire, &bytes, "fascia", Pin::for_test(pin))
+    committed_transition(&psbt, &bytes, "fascia", Pin::for_test(pin), &not_ours)
 }
 
 fn refusal(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> String {
     read(tx, fascia, pin).unwrap_err().to_string()
+}
+
+/// The core on `tx` and raw `bytes`, for the fascia bytes no fixture builds.
+fn read_bytes(tx: &Transaction, bytes: &[u8], pin: ContractId) -> Result<Committed> {
+    let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
+    committed_transition(&psbt, bytes, "fascia", Pin::for_test(pin), &not_ours)
 }
 
 /// A PSBT that spends `inputs`, with RGB data `craft` writes, then committed
@@ -104,8 +117,8 @@ fn reads_the_one_propagate_a_rights_send_commits() {
     let committed = read(&sent.tx, &sent.fascia, history.contract_id).unwrap();
     assert_eq!(committed.opid, sent.opid);
     assert_eq!(committed.txid, sent.tx.compute_txid());
-    assert_eq!(committed.transition.id(), sent.opid);
-    assert_eq!(committed.transition.transition_type, schemata::TS_PROPAGATE);
+    assert_eq!(committed.transition.opid, sent.opid.to_string());
+    assert_eq!(committed.transition.r#type, TypeOfTransition::Propagate);
 }
 
 /// rgb-lib strips every RGB key; the fascia alone carries the mint.
@@ -127,42 +140,43 @@ fn reads_a_mint_from_a_psbt_stripped_of_rgb_keys() {
     assert!(psbt.rgb_bundles().unwrap().is_empty());
     let committed = read(&psbt.unsigned_tx, &minted.fascia, history.contract_id).unwrap();
     assert_eq!(committed.opid, minted.opid);
-    assert_eq!(committed.transition.transition_type, schemata::TS_MINT);
-}
-
-#[test]
-fn decodes_the_fascia_bytes_rgb_lib_writes() {
-    let (_, sent) = rights_send();
-    let decoded = parse_fascia(&sent.fascia_bytes(), "fascia").unwrap();
-    assert_eq!(decoded, sent.fascia);
+    assert_eq!(committed.transition.r#type, TypeOfTransition::Mint);
 }
 
 // ===== the fascia itself =====
 
 #[test]
 fn refuses_an_empty_fascia() {
-    let err = parse_fascia(&[], "fascia").unwrap_err().to_string();
+    let (history, sent) = rights_send();
+    let err = read_bytes(&sent.tx, &[], history.contract_id)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("fascia required"), "{err}");
 }
 
-/// Junk, and a PSBT in place of the fascia.
+/// Junk, and a PSBT in place of the fascia. rgb-lib is the only decoder, so
+/// its refusal is the one the core reports.
 #[test]
 fn refuses_a_fascia_that_does_not_decode() {
-    let (_, sent) = rights_send();
+    let (history, sent) = rights_send();
     for bytes in [b"junk".to_vec(), sent.psbt.serialize()] {
-        let err = parse_fascia(&bytes, "fascia").unwrap_err().to_string();
-        assert!(err.contains("fascia is not an rgb-lib fascia"), "{err}");
+        let err = read_bytes(&sent.tx, &bytes, history.contract_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rgb-lib refused the fascia"), "{err}");
     }
 }
 
-/// rgb-lib reads the whole file; so does the enclave.
+/// rgb-lib reads the whole file, so a fascia with anything after it is not one.
 #[test]
 fn refuses_a_fascia_with_trailing_bytes() {
-    let (_, sent) = rights_send();
+    let (history, sent) = rights_send();
     let mut bytes = sent.fascia_bytes();
     bytes.push(0);
-    let err = parse_fascia(&bytes, "fascia").unwrap_err().to_string();
-    assert!(err.contains("not an rgb-lib fascia"), "{err}");
+    let err = read_bytes(&sent.tx, &bytes, history.contract_id)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("rgb-lib refused the fascia"), "{err}");
 }
 
 #[test]
@@ -192,10 +206,15 @@ fn refuses_a_fascia_of_a_sibling_tx_with_the_same_commitment() {
     assert!(err.contains("does not match PSBT TXID"), "{err}");
 }
 
+/// The size bound runs before the bytes reach a scratch file or rgb-lib: it
+/// is what bounds the work of the MPC rebuild.
 #[test]
 fn refuses_a_fascia_over_the_psbt_size_limit() {
+    let (history, sent) = rights_send();
     let bytes = vec![0u8; crate::config::MAX_PSBT_BYTES + 1];
-    let err = parse_fascia(&bytes, "fascia").unwrap_err().to_string();
+    let err = read_bytes(&sent.tx, &bytes, history.contract_id)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("the limit is"), "{err}");
 }
 
@@ -269,12 +288,13 @@ fn refuses_op_return_that_is_not_34_bytes() {
 
 // ===== F4: the pinned contract =====
 
-/// Our rights send and another contract's, in one PSBT and one commitment.
-fn two_contracts() -> (History, History, Transaction, Fascia) {
+/// Our rights send and another contract's right moved to `their_vouts`, in one
+/// PSBT and one commitment.
+fn two_contracts_moving(their_vouts: &[u32]) -> (History, History, Transaction, Fascia) {
     let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
     let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
     let our_send = send_of(&mut ours, our_rights[0]);
-    let their_send = send_of(&mut theirs, their_rights[0]);
+    let their_send = theirs.rights_transition(their_rights[0], their_vouts);
     let inputs = vec![our_rights[0].outpoint, their_rights[0].outpoint];
     let (tx, fascia) = crafted(inputs, |psbt| {
         psbt.push_rgb_transition(our_send).unwrap();
@@ -283,11 +303,110 @@ fn two_contracts() -> (History, History, Transaction, Fascia) {
     (ours, theirs, tx, fascia)
 }
 
+/// Our rights send and another contract's, to vouts 1 and 2.
+fn two_contracts() -> (History, History, Transaction, Fascia) {
+    two_contracts_moving(&[1, 2])
+}
+
+/// The core on `tx` with vout 2 this enclave's own output.
+fn read_owning_vout_2(tx: &Transaction, fascia: &Fascia, pin: ContractId) -> Result<Committed> {
+    let psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
+    let bytes = gen::fascia_bytes(fascia);
+    let own = |_: &Psbt, vout: u32| vout == 2;
+    committed_transition(&psbt, &bytes, "fascia", Pin::for_test(pin), &own)
+}
+
+/// Another contract's bundle is allowed when it only moves state to this
+/// enclave's own output: rgb-lib moves the state of every asset on the UTXO
+/// that it spends, each asset in its own bundle.
 #[test]
-fn refuses_second_contract_bundle() {
-    let (ours, _, tx, fascia) = two_contracts();
+fn reads_past_a_second_contract_bundle_that_moves_state_to_our_output() {
+    let (ours, _, tx, fascia) = two_contracts_moving(&[2]);
+    let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
+    assert_eq!(committed.transition.outputs.len(), 2);
+    // The same move to an output that is not ours.
     let err = refusal(&tx, &fascia, ours.contract_id);
-    assert!(err.contains("discloses 2 contract bundles"), "{err}");
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
+}
+
+/// A side transition moves each allocation on as one. A propagate that makes
+/// two rights of one is a refill, which nothing carries beside it.
+#[test]
+fn refuses_a_second_contract_bundle_that_makes_more_state_than_it_closes() {
+    let (ours, _, tx, fascia) = two_contracts_moving(&[2, 2]);
+    let err = read_owning_vout_2(&tx, &fascia, ours.contract_id)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
+}
+
+/// A move lands on an output of this tx that carries sats: a wallet does not
+/// track an empty one.
+#[test]
+fn refuses_a_second_contract_bundle_that_moves_state_to_an_empty_output() {
+    let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
+    let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
+    let our_send = send_of(&mut ours, our_rights[0]);
+    let their_move = theirs.rights_transition(their_rights[0], &[2]);
+    let inputs = vec![our_rights[0].outpoint, their_rights[0].outpoint];
+    let empty = TxOut {
+        value: Amount::ZERO,
+        ..p2tr(2)
+    };
+    let mut psbt = gen::witness_psbt(inputs, vec![p2tr(1), empty]);
+    psbt.push_rgb_transition(our_send).unwrap();
+    psbt.push_rgb_transition(their_move).unwrap();
+    let fascia = gen::rgb_commit(&mut psbt, 0, ENTROPY);
+    let err = read_owning_vout_2(&psbt.unsigned_tx, &fascia, ours.contract_id)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
+}
+
+/// Another contract's bundle that is no move, here a mint, is refused: the
+/// signer reads one transition, of the pinned asset.
+#[test]
+fn refuses_a_second_contract_bundle_that_is_not_a_move() {
+    let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
+    let (mut theirs, their_rights) = issued(0xB2, &[0xA1]);
+    let our_send = send_of(&mut ours, our_rights[0]);
+    let their_mint = theirs
+        .transition("mint")
+        .add_input(their_rights[0].opout, AllocatedState::Void)
+        .unwrap()
+        .add_metadata("beforeBlock", rgbstd::stl::BlockNumber::from(90u64))
+        .unwrap()
+        .add_global_state("issuedSupply", rgbstd::Amount::from(5_000u64))
+        .unwrap()
+        .add_fungible_state(
+            "assetOwner",
+            GraphSeal::with_blinded_vout(2u32, 7),
+            5_000u64,
+        )
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let inputs = vec![our_rights[0].outpoint, their_rights[0].outpoint];
+    let (tx, fascia) = crafted(inputs, |psbt| {
+        psbt.push_rgb_transition(our_send).unwrap();
+        psbt.push_rgb_transition(their_mint).unwrap();
+    });
+    let err = read_owning_vout_2(&tx, &fascia, ours.contract_id)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -295,7 +414,7 @@ fn refuses_bundle_of_unpinned_contract() {
     let (_, sent) = rights_send();
     let (other, _) = issued(0xB2, &[0xA1]);
     let err = refusal(&sent.tx, &sent.fascia, other.contract_id);
-    assert!(err.contains("not of the pinned RGB_ASSET_ID"), "{err}");
+    assert!(err.contains("beside the pinned RGB_ASSET_ID"), "{err}");
 }
 
 #[test]
@@ -375,7 +494,7 @@ fn refuses_a_fascia_whose_entropy_does_not_give_the_op_return() {
     assert!(err.contains("doesn't commit to"), "{err}");
 }
 
-// ===== F6: one disclosed transition, exactly the input map =====
+// ===== F6: one transition to read, moves beside it, exactly the input maps =====
 
 #[test]
 fn refuses_two_known_transitions() {
@@ -387,7 +506,10 @@ fn refuses_two_known_transitions() {
         psbt.push_rgb_transition(b).unwrap();
     });
     let err = refusal(&tx, &fascia, history.contract_id);
-    assert!(err.contains("discloses 2 transitions"), "{err}");
+    assert!(
+        err.contains("neither a move of state to this enclave's own outputs"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -425,7 +547,7 @@ fn refuses_input_map_extra_key() {
     });
     let err = refusal(&tx, &fascia, cid);
     assert!(
-        err.contains("input map that closes 2 seal(s), but transition"),
+        err.contains("closes 2 seal(s), but the transitions it discloses spend 1"),
         "{err}"
     );
 }
@@ -480,7 +602,36 @@ fn refuses_an_input_map_that_names_a_hidden_transition() {
             .unwrap();
     });
     let err = refusal(&tx, &fascia, cid);
-    assert!(err.contains("input map that names 2 transitions"), "{err}");
+    assert!(
+        err.contains("commits 2 transitions of asset") && err.contains("and discloses 1"),
+        "{err}"
+    );
+}
+
+/// A fascia must disclose every transition its bundle commits, unlike a
+/// consignment, whose export conceals the history a later holder does not
+/// need. It cannot do otherwise: `rgb_commit` builds the bundle from the input
+/// map, so a transition the map does not name is not in the bundle at all.
+/// Pushing one the map omits leaves the seals of F6 to refuse the fascia.
+#[test]
+fn refuses_a_fascia_whose_map_does_not_name_every_transition_pushed() {
+    let (mut history, rights) = issued(0xB1, &[0xA0, 0xA1]);
+    let first = send_of(&mut history, rights[0]);
+    let second = history.rights_transition(rights[1], &[1, 2]);
+    let cid = history.contract_id;
+    let (tx, fascia) = crafted(vec![rights[0].outpoint, rights[1].outpoint], |psbt| {
+        let only = first.id();
+        psbt.push_rgb_transition(first).unwrap();
+        psbt.push_rgb_transition(second).unwrap();
+        // Both seals filed under the first transition, so the map names one.
+        let map = BTreeMap::from([(rights[0].opout, only), (rights[1].opout, only)]);
+        psbt.proprietary.insert(
+            ProprietaryKey::rgb_consumed_by(cid),
+            OpoutAndOpids::new(map).serialize(),
+        );
+    });
+    let err = refusal(&tx, &fascia, cid);
+    assert!(err.contains("closes 2 seal(s)"), "{err}");
 }
 
 /// Another contract's transition filed under the pinned contract's bundle.
@@ -498,13 +649,13 @@ fn refuses_transition_of_other_contract() {
             .unwrap();
     });
     let err = refusal(&tx, &fascia, ours.contract_id);
-    assert!(err.contains("belongs to contract"), "{err}");
+    assert!(err.contains("is of contract"), "{err}");
 }
 
-// ===== the inspection the core reads against its own read =====
+// ===== the rules the core puts around the inspection =====
 
-/// rgb-lib's inspection of `sent`'s fascia, and what the core read from the
-/// same bytes. They agree, so each refusal below needs an edited inspection.
+/// rgb-lib's inspection of `sent`'s fascia, and what the core read from it.
+/// The core accepts it, so each refusal below needs an edited inspection.
 fn inspected(sent: &gen::Committed, pin: ContractId) -> (RgbInspection, Committed) {
     let bytes = sent.fascia_bytes();
     let psbt = Psbt::from_unsigned_tx(sent.tx.clone()).unwrap();
@@ -514,14 +665,22 @@ fn inspected(sent: &gen::Committed, pin: ContractId) -> (RgbInspection, Committe
 }
 
 fn agrees(inspection: &RgbInspection, committed: &Committed, pin: ContractId) -> Result<()> {
-    assert_inspects_as(
+    let psbt = Psbt::from_unsigned_tx(bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    })
+    .unwrap();
+    pinned_transition(
         inspection,
         "fascia",
         Pin::for_test(pin),
-        committed.opid,
-        &committed.transition,
         committed.txid,
+        &psbt,
+        &not_ours,
     )
+    .map(|_| ())
 }
 
 /// rgb-lib verifies the commitment with the DBC proof the fascia carries. A
@@ -540,10 +699,11 @@ fn refuses_a_close_method_that_is_not_opret() {
     assert!(err.contains("opret commitment only"), "{err}");
 }
 
-/// The two reads of one fascia must name the same tx, asset and transition.
-/// A disagreement is an rgb-lib change or a bug, so no rule may mix them.
+/// The inspection must be of the PSBT's tx and of the pinned asset. rgb-lib
+/// proves the commitment; which tx and which asset it may commit for is the
+/// enclave's rule, so it is checked on what the inspection reports.
 #[test]
-fn refuses_an_inspection_that_names_another_tx_asset_or_transition() {
+fn refuses_an_inspection_that_names_another_tx_or_asset() {
     let (history, sent) = rights_send();
     let cid = history.contract_id;
     let (inspection, committed) = inspected(&sent, cid);
@@ -558,17 +718,7 @@ fn refuses_an_inspection_that_names_another_tx_asset_or_transition() {
     let err = agrees(&other_asset, &committed, cid)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("not of the pinned RGB_ASSET_ID"), "{err}");
-
-    let mut other_opid = inspection.clone();
-    other_opid.operations[0].transitions[0].opid = OpId::from([0x77; 32]).to_string();
-    let err = agrees(&other_opid, &committed, cid)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains(&format!("not transition {}", committed.opid)),
-        "{err}"
-    );
+    assert!(err.contains("beside the pinned RGB_ASSET_ID"), "{err}");
 }
 
 /// The densest fascia measured: one propagate of 43 681 rights that share an
@@ -588,30 +738,12 @@ fn widest_fascia() -> (History, gen::Committed) {
     (history, sent)
 }
 
-/// The request memory model (`memory.rs`): a fascia is a parser of a request
-/// byte field. The decoder doubles a list of that length, so it takes twice
-/// its length. The parse stays within the factor.
-#[test]
-fn fascia_parsing_stays_within_the_request_memory_factor() {
-    use crate::memory::peak;
-
-    let (_, sent) = widest_fascia();
-    let (bytes, parsed, peak) = peak::measure(
-        || sent.fascia_bytes(),
-        |bytes| parse_fascia(bytes, "fascia").map(|_| ()),
-    );
-    parsed.unwrap();
-    assert!(bytes.len() > 600_000, "the fascia is not wide");
-    peak::assert_within_factor("fascia parse", bytes.len(), peak);
-}
-
-/// The whole core on that fascia: the enclave's parse and read, then rgb-lib's
-/// own parse and the inspection it builds, which holds a record for each
-/// right. The core drops its fascia before rgb-lib decodes one, so only one
-/// decoded fascia is live at a time. The peak is still above the request
-/// memory factor, so the check is the one `memory.rs` names for such a
-/// parser: a fascia at its size limit fits the request bound of a frame of
-/// that size.
+/// The whole core on that fascia: rgb-lib's parse of the scratch file and the
+/// inspection it builds, which holds a record for each right. Only rgb-lib
+/// decodes a fascia, so one decoded fascia is live at a time. The peak is
+/// above the request memory factor, so the check is the one `memory.rs` names
+/// for such a parser: a fascia at its size limit fits the request bound of a
+/// frame of that size.
 #[test]
 fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
     use crate::memory::peak;
@@ -620,17 +752,17 @@ fn the_fascia_core_stays_within_the_bound_of_its_size_limit() {
     let (bytes, committed, peak) = peak::measure(
         || sent.fascia_bytes(),
         |bytes| {
-            let fascia = parse_fascia(bytes, "fascia").unwrap();
             let psbt = Psbt::from_unsigned_tx(sent.tx.clone()).unwrap();
             committed_transition(
                 &psbt,
-                fascia,
                 bytes,
                 "fascia",
                 Pin::for_test(history.contract_id),
+                &not_ours,
             )
         },
     );
+    assert!(bytes.len() > 600_000, "the fascia is not wide");
     committed.unwrap();
     println!(
         "fascia core: {} input bytes, peak heap {peak} bytes, factor {:.2}",

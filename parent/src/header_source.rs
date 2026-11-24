@@ -183,7 +183,7 @@ impl Session {
             if n == 0 {
                 break;
             }
-            for chunk in raw.chunks_exact(80) {
+            for chunk in raw.as_chunks::<80>().0 {
                 out.push(deserialize(chunk).context("source header does not parse")?);
             }
         }

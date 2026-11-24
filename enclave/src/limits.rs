@@ -27,8 +27,8 @@
 //! validation takes longer as histories grow, and a new image costs a change of
 //! the PCR values. They only stop a typing error and an overflow. The checks
 //! across limits protect the enclave: they keep the request memory model
-//! (`memory.rs`), and they keep the time budget of rgb-lib and each per-call
-//! timeout within the request deadline.
+//! (`memory.rs`), and they keep each per-call timeout within the request
+//! deadline.
 
 use std::time::Duration;
 
@@ -112,26 +112,6 @@ limits! {
     /// work, so a few stalls can hold all the workers. The value of the image
     /// covers a healthy fetch through loopback, vsock and the RPC.
     evm_rpc_timeout_secs: 15, 1, 3_600;
-    /// Modeled time of rgb-lib on one consignment, validation and inspection
-    /// (`validation::cost`). A 12 MiB history of transfers takes rgb-lib 15 s
-    /// to validate alone, and the caps add up. The rgb-lib work runs on one
-    /// worker, and the deadline does not stop it. The value of the image passes
-    /// a history of 10 000 transfers with an SPV proof on each, with room left
-    /// in the model. On a real enclave, no shape took longer than the model
-    /// (`docs/runtime-limits.md`).
-    max_rgb_lib_ms: 30_000, 1_000, 86_400_000;
-    /// Steps to check transitions against their witness txs. Forged bundles at
-    /// the value of the image take rgb-lib 1.6 to 2.5 s. The burn of 2810 mints
-    /// costs far less (`validation/tests/caps.rs`, docs/burn-flow.md).
-    max_witness_check_cost: 128 * MIB, MIB, 1 << 50;
-    /// Steps to hash bundle ids. 512 transitions in one bundle take rgb-lib
-    /// 1.2 s, 2048 take 15.5 s. The burn of 2810 mints costs far less.
-    max_bundle_id_cost: 256 * KIB, KIB, 1 << 50;
-    /// Steps of the reject-list walk, counted per origin. One step of the
-    /// per-origin walk takes 45 to 73 ns, measured on rgb-lib 1ae1c160. The
-    /// value of the image keeps that walk to a few seconds. The burn of 2810
-    /// mints costs far less.
-    max_reject_walk_cost: 64 * MIB, MIB, 1 << 50;
     /// Entries of a reject list. Over this value the enclave refuses each
     /// request that reads the list. The list is append-only, so it cannot get
     /// shorter again. Each page takes one RPC call of the request deadline. At
@@ -146,10 +126,6 @@ limits! {
     max_wire_elements: MAX_WIRE_ELEMENTS as u64, 1_024, 1 << 32;
     /// Size of one consignment.
     max_consignment_bytes: crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES as u64, KIB, 1 << 32;
-    /// Merkle proofs of one request.
-    max_merkle_proofs: crate::config::DEFAULT_MAX_MERKLE_PROOFS as u64, 1, 1 << 32;
-    /// Size of all the Merkle proofs of one request.
-    max_total_proof_bytes: crate::config::DEFAULT_MAX_TOTAL_PROOF_BYTES as u64, KIB, 1 << 32;
     /// Size of one PSBT or fascia.
     max_psbt_bytes: crate::config::MAX_PSBT_BYTES as u64, KIB, 1 << 32;
     /// Size of an unsigned gas transaction.
@@ -193,22 +169,19 @@ limits! {
 const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 545;
 /// The heap of a PSBT at the densest rate measured. A request sets this rate too.
 const DENSE_PSBT_RATE: u64 = 103;
-/// The heap of one entry of a reject list, from the read to the set that
-/// rgb-lib walks with, with a margin on the rate measured
-/// (`networks::evm::reject_list::tests`). A request holds this beside the rest.
-/// The read reserves the length that the RPC reports, so only this limit stops a
-/// bad length.
+/// The heap of one entry of a reject list, from the read of the enclave to the
+/// set that rgb-lib walks with in the validator child, with a margin on the
+/// rate measured (`networks::rgb::validation::ipc::tests`). A request holds
+/// this beside the rest. The read reserves the length that the RPC reports, so
+/// only this limit stops a bad length.
 pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
 
 impl Limits {
-    /// The values of the image: the constants, and the request limits that
-    /// `MAX_CONSIGNMENT_BYTES`, `MAX_MERKLE_PROOFS` and `MAX_TOTAL_PROOF_BYTES`
-    /// can lower.
+    /// The values of the image: the constants, and the consignment limit that
+    /// `MAX_CONSIGNMENT_BYTES` can lower.
     pub fn image(cfg: &BridgeConfig) -> Self {
         Self {
             max_consignment_bytes: cfg.max_consignment_bytes as u64,
-            max_merkle_proofs: cfg.max_merkle_proofs as u64,
-            max_total_proof_bytes: cfg.max_total_proof_bytes as u64,
             ..Self::DEFAULTS
         }
     }
@@ -216,19 +189,11 @@ impl Limits {
     /// Refuses values outside their range, or that do not fit each other.
     pub fn check(&self) -> Result<(), String> {
         self.check_ranges()?;
-        // The enclave's own work on a request runs beside rgb-lib. A request
-        // past the deadline does all its work and then loses its reply.
-        if self.max_rgb_lib_ms * 4 > self.total_request_timeout_secs * 1000 * 3 {
-            return Err(format!(
-                "max_rgb_lib_ms is {}; it must be at most three quarters of \
-                 total_request_timeout_secs, {} s",
-                self.max_rgb_lib_ms, self.total_request_timeout_secs
-            ));
-        }
         // The deadline stops the reads and writes of the request socket, but
-        // not the network calls of the enclave. So a longer network timeout
-        // lets one stalled call hold a worker past the deadline, and the
-        // request loses its reply. A longer idle timeout never applies.
+        // not the network calls of the enclave, beside the EVM calls that
+        // answer a validator child. So a longer network timeout lets one
+        // stalled call hold a worker past the deadline, and the request loses
+        // its reply. A longer idle timeout never applies.
         for (name, secs) in self.per_call_timeouts() {
             if secs > self.total_request_timeout_secs {
                 return Err(format!(
@@ -316,11 +281,6 @@ impl Limits {
     pub fn io_idle_timeout(&self) -> Duration {
         Duration::from_secs(self.io_idle_timeout_secs)
     }
-
-    /// The modeled time of rgb-lib, in ns.
-    pub fn max_rgb_lib_ns(&self) -> u64 {
-        self.max_rgb_lib_ms * 1_000_000
-    }
 }
 
 #[cfg(not(test))]
@@ -403,6 +363,14 @@ pub fn apply(
         *stored = next;
         Ok(limits)
     })
+}
+
+/// Makes `values` the values in force of this process, as they are: a
+/// validator child takes the values the enclave holds in force. The enclave
+/// judged them against its own configuration, so they are not checked again.
+/// A zero keeps the image value.
+pub fn adopt(values: &Limits) {
+    store::update(|stored| *stored = *values);
 }
 
 #[cfg(test)]

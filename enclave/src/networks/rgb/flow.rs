@@ -6,8 +6,9 @@
 //! flow-specific: consignment parsing ([`super::validation`]), SPV anchoring,
 //! and the PSBT mechanics in [`super::psbt_validation`].
 
+use rgb_lib::TypeOfTransition;
+
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::is_mint_transition;
 #[cfg(rgb_to_evm)]
 use crate::networks::rgb::validation::TransitionSummary;
 
@@ -17,10 +18,10 @@ pub const FLOW_NAME: &str = "mint/burn";
 
 /// Returns true if a deposit PSBT can finalize this transition type.
 ///
-/// The signing shape of this flow is the mint shape. Thus it calls
-/// [`is_mint_transition`], so that no second list can drift from it.
-pub fn is_signing_transition(transition_type: u16) -> bool {
-    is_mint_transition(transition_type)
+/// The signing shape of this flow is the mint shape, and in BFA only a `mint`
+/// creates units.
+pub fn is_signing_transition(ty: TypeOfTransition) -> bool {
+    ty == TypeOfTransition::Mint
 }
 
 /// The minted units equal the net deposit (M5).
@@ -48,12 +49,12 @@ pub fn assert_group_amount(minted: u64, source_amount: u64, source_commission: u
 /// destroys no asset units, so it cannot back a release.
 #[cfg(rgb_to_evm)]
 pub fn funds_out_source_amount(last: &TransitionSummary) -> Result<u64> {
-    if rgbstd::TransitionType::with(last.transition_type) != schemata::TS_BURN {
+    if last.transition_type != TypeOfTransition::Burn {
         return Err(EnclaveError::CrossCheck(format!(
-            "fundsOut requires a burn transition (last transition_type = {}, want {}) - \
-             this enclave is built for the {FLOW_NAME} flow",
-            last.transition_type,
-            schemata::TS_BURN
+            "fundsOut requires a burn transition (the settling transition is a {:?}) - this \
+             enclave is \
+             built for the {FLOW_NAME} flow",
+            last.transition_type
         )));
     }
     last.burned_asset_amount.ok_or_else(|| {
