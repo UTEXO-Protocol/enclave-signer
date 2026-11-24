@@ -70,11 +70,23 @@ pub(super) fn handle_sign(
 
     // Binds each BFA mint claim of a consignment to the lock its lockId derives.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
-    let anchor_binder =
-        |bridge: &crate::networks::rgb::validation::BfaBridge,
-         anchors: &[crate::networks::rgb::validation::MintAnchor]| {
-            super::bfa::derived_locks(ctx, bridge, anchors)
-        };
+    let anchor_binder = |anchors: &[crate::networks::rgb::validation::MintAnchor]| {
+        super::bfa::derived_locks(ctx, anchors)
+    };
+
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    let own_colored_vout = |psbt: &bitcoin::psbt::Psbt, vout: u32| {
+        ctx.state
+            .with_keys(|keys| {
+                Ok(crate::networks::rgb::btc_ownership::output_is_self_derived(
+                    psbt,
+                    vout as usize,
+                    keys,
+                    Some(crate::keys::AccountType::Colored),
+                ))
+            })
+            .unwrap_or(false)
+    };
 
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
@@ -89,15 +101,18 @@ pub(super) fn handle_sign(
     };
     // M8 takes the witness amount from the pinned config, never the request.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-    let mint_outputs = |psbt: &bitcoin::psbt::Psbt,
-                        recipient: &crate::networks::rgb::psbt_validation::MintRecipient,
-                        moved_to: &[u32]| {
-        use crate::networks::rgb::psbt_validation as rules;
-        ctx.state.with_keys(|keys| {
-            rules::assert_mint_sats(psbt, keys, recipient, ctx.bridge_config.mint_witness_sat)?;
-            rules::assert_moved_state_kept(psbt, keys, moved_to)
-        })
-    };
+    let mint_sats =
+        |psbt: &bitcoin::psbt::Psbt,
+         recipient: &crate::networks::rgb::psbt_validation::MintRecipient| {
+            ctx.state.with_keys(|keys| {
+                crate::networks::rgb::psbt_validation::assert_mint_sats(
+                    psbt,
+                    keys,
+                    recipient,
+                    ctx.bridge_config.mint_witness_sat,
+                )
+            })
+        };
 
     // Records the Bitcoin blocks that the SPV checks use. Each check releases
     // the header-chain lock at return. `sign_with_chain_pins_unchanged` reads these
@@ -118,7 +133,9 @@ pub(super) fn handle_sign(
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
         mint_binder: Some(&mint_binder),
         #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-        mint_outputs: Some(&mint_outputs),
+        mint_sats: Some(&mint_sats),
+        #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+        own_colored_vout: Some(&own_colored_vout),
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
         anchor_binder: Some(&anchor_binder),
         #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
@@ -898,7 +915,7 @@ mod funds_out_depth {
         internal.reverse();
         let validated = ValidatedConsignment {
             witness_txids: vec![WITNESS],
-            last_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
+            settling_witness_txid: Some(bitcoin::Txid::from_byte_array(internal)),
             ..Default::default()
         };
         apply_funds_out_binding(

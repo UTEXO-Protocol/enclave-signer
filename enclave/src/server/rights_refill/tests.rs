@@ -372,7 +372,10 @@ fn a_refusal_past_the_gate_counts_against_the_rate_limit() {
     let ctx = context(&other.contract_id.to_string());
     for _ in 0..MAX_REFILLS_PER_HOUR {
         let err = sign(&ctx, request(&history, &refill)).unwrap_err();
-        assert!(err.to_string().contains("no bundle of the pinned"), "{err}");
+        assert!(
+            err.to_string().contains("beside the pinned RGB_ASSET_ID"),
+            "{err}"
+        );
     }
     let err = sign(&ctx, request(&history, &refill)).unwrap_err();
     assert!(err.to_string().contains("rate limit"), "{err}");

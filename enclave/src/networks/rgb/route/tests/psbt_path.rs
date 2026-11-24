@@ -12,21 +12,25 @@ use bitcoin::{Amount, ScriptBuf, TxOut};
 use psrgbt::RgbPsbtExt;
 use rgbstd::contract::{AllocatedState, TransitionBuilder};
 use rgbstd::{
-    BuilderSeal, GlobalValues, GraphSeal, MetaValue, Operation, Opout, RevealedData, RevealedValue,
-    SecretSeal, Transition,
+    BuilderSeal, GlobalValues, GraphSeal, MetaValue, RevealedData, SecretSeal, Transition,
 };
+use rgbstd::{Operation, RevealedValue};
 
 use super::*;
 use crate::config::{BridgeConfig, DEFAULT_MINT_WITNESS_SAT};
 use crate::keys::{AccountType, KeyManager};
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::btc_ownership::tests as fx;
 use crate::networks::rgb::psbt_validation::{
-    assert_mint_sats, assert_moved_state_kept, fee_key_path_inputs_scoped, MintFacts, MintRecipient,
+    assert_mint_sats, fee_key_path_inputs_scoped, MintFacts, MintRecipient,
 };
 use crate::networks::rgb::spv_crosscheck::ChainPins;
 use crate::proto::SignRightsRefillRequest;
 use crate::test_support::bfa_consignment::{self as gen, Committed as Made, History, Issue, Utxo};
 
+/// The EVM chain the fixture genesis names in its `bridgeLocation`. The anchor
+/// binder must report it: rgb-ops refuses a claim resolver on another chain.
+const GENESIS_CHAIN_ID: u64 = 42161;
 const MINTED: u64 = 100_000;
 const BEFORE_BLOCK: u64 = 110;
 /// Sats on each right's UTXO; they pay the mint's fee.
@@ -50,7 +54,11 @@ fn ours(keys: &KeyManager, index: u32, sats: u64) -> TxOut {
 /// vouts 1 and 2 (keys `[0, 1]`, `[0, 2]`). Returns the seed's rights.
 fn seeded(keys: &KeyManager) -> (History, Vec<Utxo>) {
     let genesis_right = gen::outpoint(0xA0, 0);
-    let mut history = History::issue(Issue::new(42161, [0xB1; 20], vec![genesis_right]));
+    let mut history = History::issue(Issue::new(
+        GENESIS_CHAIN_ID,
+        [0xB1; 20],
+        vec![genesis_right],
+    ));
     let right = history.genesis_right(0, genesis_right);
     let outputs = vec![ours(keys, 1, RIGHT_SATS), ours(keys, 2, RIGHT_SATS)];
     let seed = history.send_rights(right, &[1, 2], vec![], outputs);
@@ -68,7 +76,7 @@ fn our_input(psbt: &mut Psbt, keys: &KeyManager, index: u32) {
     fx::anchor_input(psbt, 0, keys, AccountType::Colored, 0, index, RIGHT_SATS);
 }
 
-/// The key-path metadata the wallet writes for our change at `[0, 99]` on `vout`.
+/// The rule C metadata the wallet writes for our change at `[0, 99]` on `vout`.
 fn claim_change(psbt: &mut Psbt, keys: &KeyManager, vout: usize) {
     let change = [ChildNumber::from(0), ChildNumber::from(99)];
     fx::claim_output(psbt, vout, keys, AccountType::Colored, &change);
@@ -154,9 +162,16 @@ fn route_mint(
             AccountType::Colored,
         ))
     };
-    let outputs = |psbt: &Psbt, recipient: &MintRecipient, moved_to: &[u32]| {
-        assert_mint_sats(psbt, &keys, recipient, cfg.mint_witness_sat)?;
-        assert_moved_state_kept(psbt, &keys, moved_to)
+    let own_vout = |psbt: &Psbt, vout: u32| {
+        crate::networks::rgb::btc_ownership::output_is_self_derived(
+            psbt,
+            vout as usize,
+            &keys,
+            Some(AccountType::Colored),
+        )
+    };
+    let sats = |psbt: &Psbt, recipient: &MintRecipient| {
+        assert_mint_sats(psbt, &keys, recipient, cfg.mint_witness_sat)
     };
     let binder = |mint: &MintFacts| {
         *bound.borrow_mut() = Some(mint.clone());
@@ -168,7 +183,8 @@ fn route_mint(
         chain_pins: &ChainPins::new(),
         psbt_fee_key_paths: Some(&key_paths),
         mint_binder: Some(&binder),
-        mint_outputs: Some(&outputs),
+        mint_sats: Some(&sats),
+        own_colored_vout: Some(&own_vout),
     };
     edit(&mut ctx);
     let result = validate_destination_anchor(destination, MINTED, commission, &ctx);
@@ -210,6 +226,34 @@ fn committed_bundle(history: &mut History, transitions: Vec<Transition>, right: 
     our_input(&mut made.psbt, &keys, 1);
     claim_change(&mut made.psbt, &keys, 1);
     made
+}
+
+/// A transfer of `amount` units, held on a seal of the outpoint the tx
+/// spends, to the blinded vout `to`: the shape rgb-lib gives the other
+/// allocations of a spent UTXO.
+fn sibling_transfer(history: &mut History, right: Utxo, amount: u64, to: u32) -> Transition {
+    let held = GraphSeal::with_blinding(right.outpoint.txid, right.outpoint.vout, 0x7700);
+    let units = history
+        .transition("transfer")
+        .add_input(right.opout, AllocatedState::Void)
+        .unwrap()
+        .add_fungible_state("assetOwner", held, amount)
+        .unwrap()
+        .complete_transition()
+        .unwrap();
+    let opout = rgbstd::Opout::new(units.id(), bfa_schema::OS_ASSET, 0);
+    history
+        .transition("transfer")
+        .add_input(opout, AllocatedState::from(RevealedValue::from(amount)))
+        .unwrap()
+        .add_fungible_state(
+            "assetOwner",
+            GraphSeal::with_blinded_vout(to, 0x7701),
+            amount,
+        )
+        .unwrap()
+        .complete_transition()
+        .unwrap()
 }
 
 /// A mint transition on `right` of `issued`, open for edits.
@@ -270,9 +314,11 @@ fn binds_a_valid_mint_to_its_deposit_and_recipient() {
     // M6 reads the lock of this mint in this exact tx.
     assert_eq!(bound.lock_id, mint.lock_id());
     assert_eq!((bound.issued, bound.before_block), (MINTED, BEFORE_BLOCK));
+    // rgb-lib renders a concealed seal as an invoice recipient id, which
+    // carries the chain-net prefix of the image.
     assert_eq!(
         bound.recipient,
-        MintRecipient::Blinded(recipient().to_string())
+        MintRecipient::Blinded(format!("bc:{}", recipient()))
     );
 }
 
@@ -304,10 +350,44 @@ fn a_mint_ignores_rgb_keys_left_in_its_psbt() {
     assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
-/// A propagate of another right in the mint's bundle, to our change: the right
-/// stays in the wallet, so the mint is signed.
+/// rgb-lib moves the other allocations of a spent UTXO by a transition of its
+/// own in the same bundle. A mint may come beside such a transfer when it pays
+/// this enclave's own output: the signer reads the mint and lets the transfer
+/// be.
 #[test]
-fn a_mint_moves_another_right_to_the_change() {
+fn accepts_a_mint_beside_a_transfer_of_our_own_units() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |m| m);
+    // vout 1 is the change `committed_bundle` claims at `[0, 99]`.
+    let ours = sibling_transfer(&mut history, rights[1], 5_000, 1);
+    let made = committed_bundle(&mut history, vec![ours, mint], rights[0]);
+    let (_, bound) = run_mint(&destination(&history, &made), &pinned(&history));
+    let mint = bound.expect("the mint is read beside our own transfer");
+    assert_eq!(mint.issued, MINTED);
+}
+
+/// The same bundle, with the transfer paying an output this enclave does not
+/// derive. The signer then has two transitions it must read and refuses.
+#[test]
+fn refuses_a_mint_beside_a_transfer_of_units_to_anyone_else() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |m| m);
+    // vout 2 is no output of this enclave: `committed_bundle` claims vout 1.
+    let theirs = sibling_transfer(&mut history, rights[1], 5_000, 2);
+    let made = committed_bundle(&mut history, vec![theirs, mint], rights[0]);
+    let err = mint_refusal(&destination(&history, &made), &history);
+    assert!(
+        err.contains("neither a move of state to this enclave's own outputs"),
+        "{err}"
+    );
+}
+
+/// A propagate of another right in the mint's bundle, to our change: the
+/// right stays in the wallet, so the mint is signed.
+#[test]
+fn accepts_a_mint_beside_a_move_of_another_right_to_our_change() {
     let keys = fx::km();
     let (mut history, rights) = seeded(&keys);
     let mint = mint_with(&mut history, rights[0], |mint| mint);
@@ -318,49 +398,62 @@ fn a_mint_moves_another_right_to_the_change() {
     assert_eq!(bound.unwrap().opid, gen::opid_bytes(made.opid));
 }
 
-/// Units beside the right.
-const UNITS: u64 = 500;
-
-/// Puts `UNITS` on the UTXO of `right`: a blinded receive from a mint on `other`.
-fn units_beside(history: &mut History, right: Utxo, other: Utxo, keys: &KeyManager) -> Opout {
-    let seal = GraphSeal::with_blinding(right.outpoint.txid, right.outpoint.vout, 9);
-    let to = BuilderSeal::from(seal);
-    let change = vec![ours(keys, 98, CHANGE_SATS)];
-    let receive = history.mint(other, UNITS, BEFORE_BLOCK, to, vec![], change);
-    Opout::new(receive.opid, schemata::OS_ASSET, 0)
+/// The same propagate making two rights of one: a refill, which a mint does
+/// not carry.
+#[test]
+fn refuses_a_mint_beside_a_propagate_that_makes_two_rights_of_one() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let mint = mint_with(&mut history, rights[0], |mint| mint);
+    let side = history.rights_transition(rights[1], &[1, 1]);
+    let made = committed_bundle(&mut history, vec![side, mint], rights[0]);
+    let err = mint_refusal(&destination(&history, &made), &history);
+    assert!(
+        err.contains("neither a move of state to this enclave's own outputs"),
+        "{err}"
+    );
 }
 
-/// The transfer of `units` to `vout` of its own tx.
-fn move_units(history: &mut History, units: Opout, vout: usize) -> Transition {
-    let seal = GraphSeal::with_blinded_vout(u32::try_from(vout).unwrap(), 10);
-    history
-        .transition("transfer")
-        .add_input(units, AllocatedState::from(RevealedValue::from(UNITS)))
+/// A link right and units beside the right, each moved to the change by its
+/// own transition: two side transitions on one output, as rgb-lib builds a
+/// UTXO that holds several allocations.
+#[test]
+fn accepts_a_mint_beside_moves_of_a_link_right_and_units_to_our_change() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let units = sibling_transfer(&mut history, rights[1], 5_000, 1);
+    let link = rgbstd::Opout::new(rights[1].opout.op, rgbstd::AssignmentType::with(4012), 0);
+    let linked = history
+        .transition("transferLink")
+        .add_input(link, AllocatedState::Void)
         .unwrap()
-        .add_fungible_state("assetOwner", seal, UNITS)
+        .add_rights("linkRight", GraphSeal::with_blinded_vout(1u32, 11))
         .unwrap()
         .complete_transition()
-        .unwrap()
+        .unwrap();
+    let mint = mint_with(&mut history, rights[0], |mint| mint);
+    let made = committed_bundle(&mut history, vec![units, linked, mint], rights[0]);
+    let (minted, bound) = run_mint(&destination(&history, &made), &pinned(&history));
+    assert_eq!(minted.unwrap(), MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(made.opid));
 }
 
-/// A mint of `MINTED` to `to` on seed right 0, whose UTXO also holds units. As
-/// rgb-lib does it, a second transition moves them: to `moved_to`, or to our
-/// change. The tx pays `paid` from vout 1, then that change.
-fn mint_moving_units(
+/// A mint of `MINTED` to `to` on seed right 0 beside a transfer of units to
+/// `moved_to`. The tx pays `paid` from vout 1, then our change at `[0, 99]`.
+fn mint_beside_transfer(
     to: BuilderSeal<GraphSeal>,
     paid: Vec<TxOut>,
-    moved_to: Option<usize>,
+    moved_to: u32,
 ) -> (History, Made) {
     let keys = fx::km();
     let (mut history, rights) = seeded(&keys);
-    let units = units_beside(&mut history, rights[0], rights[1], &keys);
+    let moved = sibling_transfer(&mut history, rights[1], 5_000, moved_to);
     let mint = mint_builder(&mut history, rights[0], MINTED)
         .add_fungible_state("assetOwner", to, MINTED)
         .unwrap()
         .complete_transition()
         .unwrap();
     let change = paid.len() + 1;
-    let moved = move_units(&mut history, units, moved_to.unwrap_or(change));
     let paid_sats: u64 = paid.iter().map(|o| o.value.to_sat()).sum();
     let change_sats = RIGHT_SATS - WITNESS_MINT_FEE - paid_sats;
     let outputs = [paid, vec![ours(&keys, 99, change_sats)]].concat();
@@ -370,32 +463,12 @@ fn mint_moving_units(
     (history, made)
 }
 
-fn blinded_recipient() -> BuilderSeal<GraphSeal> {
-    BuilderSeal::Concealed(recipient())
-}
-
-/// Units beside the right move to our change in the mint's tx, as rgb-lib
-/// builds it. They stay in the wallet, so the mint is signed.
+/// M9: moved state lands only on a funded Colored output of ours. Each output
+/// below passes M8, so only M9 keeps the units in the wallet.
 #[test]
-fn a_mint_moves_the_units_of_its_rights_utxo_to_the_change() {
-    let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
-    let cases = [
-        (blinded_recipient(), vec![]),
-        (witness, vec![depositor(WITNESS_SATS)]),
-    ];
-    for (to, paid) in cases {
-        let (history, mint) = mint_moving_units(to, paid, None);
-        let (minted, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
-        assert_eq!(minted.unwrap(), MINTED);
-        assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
-    }
-}
-
-/// M9: the moved units land only on a funded Colored output of ours. Each
-/// output below passes M8, so only M9 keeps the units in the wallet.
-#[test]
-fn m9_refuses_a_mint_that_moves_units_off_our_colored_outputs() {
+fn m9_refuses_a_mint_that_moves_units_off_our_funded_colored_outputs() {
     let keys = fx::km();
+    let blinded = || BuilderSeal::Concealed(recipient());
     let empty = ours(&keys, 98, 0);
     let vanilla = TxOut {
         value: Amount::from_sat(500),
@@ -403,48 +476,70 @@ fn m9_refuses_a_mint_that_moves_units_off_our_colored_outputs() {
     };
     let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
     type Claim = Option<(AccountType, u32)>;
-    let cases: [(BuilderSeal<GraphSeal>, Vec<TxOut>, usize, Claim); 5] = [
+    let cases: [(BuilderSeal<GraphSeal>, Vec<TxOut>, u32, Claim); 5] = [
         (witness, vec![depositor(WITNESS_SATS)], 1, None),
-        (blinded_recipient(), vec![], 0, None),
-        (blinded_recipient(), vec![], 9, None),
-        (
-            blinded_recipient(),
-            vec![empty],
-            1,
-            Some((AccountType::Colored, 98)),
-        ),
-        (
-            blinded_recipient(),
-            vec![vanilla],
-            1,
-            Some((AccountType::Vanilla, 7)),
-        ),
+        (blinded(), vec![], 0, None),
+        (blinded(), vec![], 9, None),
+        (blinded(), vec![empty], 1, Some((AccountType::Colored, 98))),
+        (blinded(), vec![vanilla], 1, Some((AccountType::Vanilla, 7))),
     ];
     for (to, paid, moved_to, claim) in cases {
-        let (history, mut mint) = mint_moving_units(to, paid, Some(moved_to));
+        let (history, mut mint) = mint_beside_transfer(to, paid, moved_to);
         if let Some((account, index)) = claim {
             let child = [ChildNumber::from(0), ChildNumber::from(index)];
             fx::claim_output(&mut mint.psbt, 1, &keys, account, &child);
         }
         let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
         let err = result.unwrap_err().to_string();
-        let want = format!("moves state to vout {moved_to}");
-        assert!(err.contains(&want), "{err}");
+        assert!(
+            err.contains("neither a move of state to this enclave's own outputs"),
+            "vout {moved_to}: {err}"
+        );
         assert!(bound.is_none(), "no deposit is read for a refused mint");
     }
+}
+
+/// A mint to a witness recipient beside the same transfer to our change.
+#[test]
+fn accepts_a_witness_mint_beside_a_transfer_of_our_own_units() {
+    let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
+    let (history, mint) = mint_beside_transfer(witness, vec![depositor(WITNESS_SATS)], 2);
+    let (minted, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
+    assert_eq!(minted.unwrap(), MINTED);
+    assert_eq!(bound.unwrap().opid, gen::opid_bytes(mint.opid));
 }
 
 /// A second contract with a right on the UTXO of `right`, and the propagate
 /// that moves it to `vout`: rgb-lib's extra transition for another asset.
 fn other_asset_moved(right: Utxo, vout: u32) -> Transition {
-    let mut other = History::issue(Issue::new(42161, [0xB2; 20], vec![right.outpoint]));
+    let issue = Issue::new(GENESIS_CHAIN_ID, [0xB2; 20], vec![right.outpoint]);
+    let mut other = History::issue(issue);
     let beside = other.genesis_right(0, right.outpoint);
     other.rights_transition(beside, &[vout])
 }
 
-/// A mint on seed right 0 to `paid`'s recipient `to`, in a tx that also moves
-/// another asset's state from the same UTXO to `moved_to`.
-fn mint_moving_another_asset(
+/// `main` on seed right 0 in a tx that also moves another asset's state from
+/// the same UTXO to `moved_to`. The tx pays `outputs` from vout 1.
+fn beside_another_asset(right: Utxo, main: Transition, moved_to: u32, outputs: Vec<TxOut>) -> Made {
+    let keys = fx::km();
+    let mut psbt = gen::witness_psbt(vec![right.outpoint], outputs);
+    let opid = main.id();
+    psbt.push_rgb_transition(main).unwrap();
+    psbt.push_rgb_transition(other_asset_moved(right, moved_to))
+        .unwrap();
+    let fascia = gen::rgb_commit(&mut psbt, 0, 0x7a11);
+    our_input(&mut psbt, &keys, 1);
+    Made {
+        opid,
+        tx: psbt.unsigned_tx.clone(),
+        psbt,
+        fascia,
+    }
+}
+
+/// A mint to `to` beside another asset's state moved to `moved_to`. The tx
+/// pays `paid` from vout 1, then our change.
+fn mint_beside_another_asset(
     to: BuilderSeal<GraphSeal>,
     paid: Vec<TxOut>,
     moved_to: u32,
@@ -460,34 +555,22 @@ fn mint_moving_another_asset(
     let paid_sats: u64 = paid.iter().map(|o| o.value.to_sat()).sum();
     let change_sats = RIGHT_SATS - WITNESS_MINT_FEE - paid_sats;
     let outputs = [paid, vec![ours(&keys, 99, change_sats)]].concat();
-    let mut psbt = gen::witness_psbt(vec![rights[0].outpoint], outputs);
-    let opid = mint.id();
-    psbt.push_rgb_transition(mint).unwrap();
-    psbt.push_rgb_transition(other_asset_moved(rights[0], moved_to))
-        .unwrap();
-    let fascia = gen::rgb_commit(&mut psbt, 0, 0x7a11);
-    our_input(&mut psbt, &keys, 1);
-    claim_change(&mut psbt, &keys, change);
-    let made = Made {
-        opid,
-        tx: psbt.unsigned_tx.clone(),
-        psbt,
-        fascia,
-    };
+    let mut made = beside_another_asset(rights[0], mint, moved_to, outputs);
+    claim_change(&mut made.psbt, &keys, change);
     (history, made)
 }
 
 /// Another asset's state on the right's UTXO moves to our change in its own
 /// bundle, as rgb-lib builds it. It stays in the wallet, so the mint is signed.
 #[test]
-fn a_mint_moves_another_assets_state_to_the_change() {
+fn accepts_a_mint_beside_another_assets_state_moved_to_our_change() {
     let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
     let cases = [
-        (blinded_recipient(), vec![], 1),
+        (BuilderSeal::Concealed(recipient()), vec![], 1),
         (witness, vec![depositor(WITNESS_SATS)], 2),
     ];
     for (to, paid, change) in cases {
-        let (history, mint) = mint_moving_another_asset(to, paid, change);
+        let (history, mint) = mint_beside_another_asset(to, paid, change);
         assert_eq!(mint.fascia.bundles().len(), 2);
         let (minted, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
         assert_eq!(minted.unwrap(), MINTED);
@@ -500,96 +583,14 @@ fn a_mint_moves_another_assets_state_to_the_change() {
 #[test]
 fn m9_refuses_a_mint_that_moves_another_assets_state_to_the_depositor() {
     let witness = BuilderSeal::from(GraphSeal::with_blinded_vout(1u32, 5));
-    let (history, mint) = mint_moving_another_asset(witness, vec![depositor(WITNESS_SATS)], 1);
+    let (history, mint) = mint_beside_another_asset(witness, vec![depositor(WITNESS_SATS)], 1);
     let (result, bound) = run_mint(&destination(&history, &mint), &pinned(&history));
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("moves state to vout 1"), "{err}");
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
     assert!(bound.is_none(), "no deposit is read for a refused mint");
-}
-
-/// A refill is the bridge's own tx: it commits its propagate and nothing else.
-#[test]
-fn refuses_a_refill_that_moves_another_assets_state() {
-    let keys = fx::km();
-    let (mut history, rights) = seeded(&keys);
-    let refill = history.rights_transition(rights[0], &[1, 2, 3]);
-    let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
-    let mut psbt = gen::witness_psbt(vec![rights[0].outpoint], outputs);
-    let opid = refill.id();
-    psbt.push_rgb_transition(refill).unwrap();
-    psbt.push_rgb_transition(other_asset_moved(rights[0], 1))
-        .unwrap();
-    let fascia = gen::rgb_commit(&mut psbt, 0, 0x7a11);
-    our_input(&mut psbt, &keys, 1);
-    let made = Made {
-        opid,
-        tx: psbt.unsigned_tx.clone(),
-        psbt,
-        fascia,
-    };
-    let request = SignRightsRefillRequest {
-        psbt_bytes: made.psbt.serialize(),
-        asset_id: history.contract_id.to_string(),
-        fascia: made.fascia_bytes(),
-    };
-    let err = run_refill(&made, &request, &history)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("1 transition(s) beside the main one - at most 0"),
-        "{err}"
-    );
-}
-
-/// The same for a side transition in the refill's own bundle: units of the
-/// right's UTXO moved to an output the refill rules do not read.
-#[test]
-fn refuses_a_refill_that_moves_units_in_its_own_bundle() {
-    let keys = fx::km();
-    let (mut history, rights) = seeded(&keys);
-    let units = units_beside(&mut history, rights[0], rights[1], &keys);
-    let moved = move_units(&mut history, units, 1);
-    let refill = history.rights_transition(rights[0], &[1, 2, 3]);
-    let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
-    let mut made = history.commit_psbt(vec![moved, refill], vec![rights[0].outpoint], outputs);
-    our_input(&mut made.psbt, &keys, 1);
-    let request = SignRightsRefillRequest {
-        psbt_bytes: made.psbt.serialize(),
-        asset_id: history.contract_id.to_string(),
-        fascia: made.fascia_bytes(),
-    };
-    let err = run_refill(&made, &request, &history)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("1 transition(s) beside the main one - at most 0"),
-        "{err}"
-    );
-}
-
-/// A link right and units beside the right, each moved to the change by its
-/// own transition: two side transitions on one output, as rgb-lib builds a
-/// UTXO that holds several allocations.
-#[test]
-fn a_mint_moves_a_link_right_and_units_to_the_change() {
-    let keys = fx::km();
-    let (mut history, rights) = seeded(&keys);
-    let units = units_beside(&mut history, rights[0], rights[1], &keys);
-    let moved = move_units(&mut history, units, 1);
-    let link = Opout::new(units.op, schemata::OS_LINK, 0);
-    let linked = history
-        .transition("transferLink")
-        .add_input(link, AllocatedState::Void)
-        .unwrap()
-        .add_rights("linkRight", GraphSeal::with_blinded_vout(1u32, 11))
-        .unwrap()
-        .complete_transition()
-        .unwrap();
-    let mint = mint_with(&mut history, rights[0], |mint| mint);
-    let made = committed_bundle(&mut history, vec![moved, linked, mint], rights[0]);
-    let (minted, bound) = run_mint(&destination(&history, &made), &pinned(&history));
-    assert_eq!(minted.unwrap(), MINTED);
-    assert_eq!(bound.unwrap().opid, gen::opid_bytes(made.opid));
 }
 
 /// The mint's transition in another tx, which spends another of our Colored
@@ -615,7 +616,7 @@ fn refuses_non_mint_type() {
     let mut send = history.send_rights(rights[0], &[1, 2], vec![], outputs);
     our_input(&mut send.psbt, &keys, 1);
     let err = mint_refusal(&destination(&history, &send), &history);
-    assert!(err.contains("discloses 0 transitions of type"), "{err}");
+    assert!(err.contains("not a mint"), "{err}");
 }
 
 #[test]
@@ -638,7 +639,7 @@ fn refuses_mint_without_one_mint_right_input() {
 fn refuses_mint_passing_a_right_on() {
     let seal = GraphSeal::with_blinded_vout(1u32, 3);
     let err = mint_refusal_of(|mint| mint.add_rights("mintRight", seal).unwrap(), |_| {});
-    assert!(err.contains("passes 1 mintRight"), "{err}");
+    assert!(err.contains("mint assigns [MintRight]"), "{err}");
 }
 
 #[test]
@@ -654,7 +655,7 @@ fn refuses_extra_global() {
     let err = edited_mint_refusal(|mint| {
         let value = GlobalValues::with(RevealedData::new(blob(&[0; 8])));
         mint.globals
-            .insert(schemata::GS_BURNED_ASSET, value)
+            .insert(bfa_schema::GS_BURNED_ASSET, value)
             .unwrap();
     });
     assert!(err.contains("issuedSupply and beforeBlock only"), "{err}");
@@ -680,7 +681,7 @@ fn refuses_issued_supply_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         let value = GlobalValues::with(RevealedData::new(blob(&[0xa0, 0x86, 0x01, 0, 0, 0, 0])));
         mint.globals
-            .insert(schemata::GS_ISSUED_SUPPLY, value)
+            .insert(bfa_schema::GS_ISSUED_SUPPLY, value)
             .unwrap();
     });
     assert!(err.contains("invalid issuedSupply global"), "{err}");
@@ -704,7 +705,7 @@ fn refuses_before_block_not_8_bytes() {
     let err = edited_mint_refusal(|mint| {
         mint.metadata
             .insert(
-                schemata::MS_BEFORE_BLOCK,
+                bfa_schema::MS_BEFORE_BLOCK,
                 MetaValue::from(blob(&[90, 0, 0, 0])),
             )
             .unwrap();
@@ -828,16 +829,16 @@ fn refuses_a_mint_without_a_deposit_binder() {
     assert!(err.to_string().contains("no deposit binder"), "{err}");
 }
 
-/// M8 and M9 need the enclave keys; without them the mint fails closed.
+/// M8 needs the enclave keys; without them the mint fails closed.
 #[test]
-fn refuses_a_mint_without_an_outputs_check() {
+fn refuses_a_mint_without_a_sats_check() {
     for (history, mint) in [valid_mint(), valid_witness_mint()] {
         let destination = destination(&history, &mint);
         let (result, bound) = route_mint(&destination, &pinned(&history), 0, |ctx| {
-            ctx.mint_outputs = None;
+            ctx.mint_sats = None;
         });
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("no outputs check"), "{err}");
+        assert!(err.to_string().contains("no sats check"), "{err}");
         assert!(bound.is_none(), "no deposit is read for a refused mint");
     }
 }
@@ -913,7 +914,7 @@ fn refuses_a_witness_seal_on_another_tx() {
     our_input(&mut mint.psbt, &keys, 1);
     claim_change(&mut mint.psbt, &keys, 2);
     let err = mint_refusal(&destination(&history, &mint), &history);
-    assert!(err.contains("vout 1 of another transaction"), "{err}");
+    assert!(err.contains("the transaction that makes it"), "{err}");
 }
 
 /// The OpId commits the seal's vout, not the script on it. One mint transition in a tx paying the user and in one paying
@@ -1028,7 +1029,32 @@ fn run_refill(
     request: &SignRightsRefillRequest,
     history: &History,
 ) -> Result<Vec<u32>> {
-    validate_rights_refill(request, &refill.psbt, &pinned(history))
+    validate_rights_refill(request, &refill.psbt, &pinned(history), &|_, _| false)
+}
+
+/// A refill's UTXO can hold other state too, which rgb-lib moves the same
+/// way. The refill is read beside a move to our own output, and refused
+/// beside one to an output that is not ours.
+#[test]
+fn a_refill_takes_another_assets_state_only_to_our_own_output() {
+    let keys = fx::km();
+    let (mut history, rights) = seeded(&keys);
+    let refill = history.rights_transition(rights[0], &[1, 2, 3]);
+    let outputs = (3..=5).map(|i| ours(&keys, i, 1_000)).collect();
+    let made = beside_another_asset(rights[0], refill, 1, outputs);
+    let request = SignRightsRefillRequest {
+        psbt_bytes: made.psbt.serialize(),
+        asset_id: history.contract_id.to_string(),
+        fascia: made.fascia_bytes(),
+    };
+    let cfg = pinned(&history);
+    let read = |own: bool| validate_rights_refill(&request, &made.psbt, &cfg, &|_, _| own);
+    assert_eq!(read(true).unwrap(), vec![1, 2, 3]);
+    let err = read(false).unwrap_err().to_string();
+    assert!(
+        err.contains("is not a move of state to this enclave's own outputs"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1061,10 +1087,10 @@ fn refuses_a_refill_of_another_asset() {
     let (mut history, rights) = seeded(&keys);
     let (refill, request) = refill_request(&mut history, rights[0]);
     let (other, ..) = seeded_other();
-    let err = validate_rights_refill(&request, &refill.psbt, &pinned(&other)).unwrap_err();
+    let err =
+        validate_rights_refill(&request, &refill.psbt, &pinned(&other), &|_, _| false).unwrap_err();
     assert!(
-        err.to_string()
-            .contains("no bundle of the pinned RGB_ASSET_ID"),
+        err.to_string().contains("beside the pinned RGB_ASSET_ID"),
         "{err}"
     );
 }
@@ -1072,7 +1098,7 @@ fn refuses_a_refill_of_another_asset() {
 /// A second asset, so its contract id differs.
 fn seeded_other() -> (History, Utxo) {
     let right = gen::outpoint(0xA9, 0);
-    let history = History::issue(Issue::new(42161, [0xB9; 20], vec![right]));
+    let history = History::issue(Issue::new(GENESIS_CHAIN_ID, [0xB9; 20], vec![right]));
     let utxo = history.genesis_right(0, right);
     (history, utxo)
 }
@@ -1115,10 +1141,10 @@ fn consensus(
         })
         .collect();
     let anchors = RefCell::new(Vec::new());
-    let bind = |bridge: &validation::BfaBridge, seen: &[validation::MintAnchor]| {
+    let bind = |seen: &[validation::MintAnchor]| {
         anchors.borrow_mut().extend_from_slice(seen);
         Ok(validation::BoundAnchors {
-            evm_chain_id: bridge.chain_id,
+            evm_chain_id: GENESIS_CHAIN_ID,
             locks: seen
                 .iter()
                 .map(|a| validation::VerifiedLock {
@@ -1150,11 +1176,11 @@ fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
     let [anchor] = anchors.as_slice() else {
         panic!("one mint anchor, got {anchors:?}");
     };
-    assert_eq!(validated.last_transfer_op_id, Some(from_fascia.opid));
+    assert_eq!(validated.settling_op_id, Some(from_fascia.opid));
     assert_eq!(anchor.opid, from_fascia.opid);
     assert_eq!(anchor.amount, from_fascia.issued);
     assert_eq!(anchor.before_block, from_fascia.before_block);
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
     assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
@@ -1163,9 +1189,6 @@ fn a_mint_reads_the_same_from_the_fascia_as_from_consensus() {
             secret_seal: recipient().to_string()
         }]
     );
-    assert!(validated.last_mint_rights.is_empty());
-    let spent = mint.psbt.unsigned_tx.input[0].previous_output;
-    assert_eq!(validated.last_closed_seals, vec![spent]);
 }
 
 #[test]
@@ -1180,7 +1203,7 @@ fn a_witness_mint_reads_the_same_from_the_fascia_as_from_consensus() {
         panic!("one mint anchor, got {anchors:?}");
     };
     assert_eq!(anchor.opid, from_fascia.opid);
-    let last = validated.last_transition.unwrap();
+    let last = validated.settling_transition.unwrap();
     assert_eq!(last.asset_output_amount, from_fascia.issued);
     let seals: Vec<_> = last.outputs.iter().map(|o| o.seal.clone()).collect();
     assert_eq!(
@@ -1199,32 +1222,29 @@ fn a_refill_reads_the_same_from_the_fascia_as_from_consensus() {
     let (refill, request) = refill_request(&mut history, rights[0]);
     let vouts = run_refill(&refill, &request, &history).unwrap();
     let bytes = refill.fascia_bytes();
-    let fascia = psbt_commit::parse_fascia(&bytes, "fascia").unwrap();
     let committed = psbt_commit::committed_transition(
         &refill.psbt,
-        fascia,
         &bytes,
         "fascia",
         psbt_commit::Pin::for_test(history.contract_id),
-        schemata::TS_PROPAGATE,
-        0,
+        &|_, _| false,
     )
     .unwrap();
-    // M1: the mint rules refuse a transition that is no mint.
-    let err = crate::networks::rgb::psbt_validation::mint_facts(&committed).unwrap_err();
-    assert!(err.to_string().contains("not a mint"), "{err}");
 
     let (validated, anchors) = consensus(&history.consignment());
     assert!(anchors.is_empty());
     assert_eq!(
-        validated.last_transfer_op_id,
+        validated.settling_op_id,
         Some(gen::opid_bytes(committed.opid))
     );
-    let from_consensus: Vec<u32> = validated
-        .last_mint_rights
-        .iter()
-        .map(|seal| psbt_commit::witness_vout(seal, "a right").unwrap())
-        .collect();
-    assert_eq!(from_consensus, vouts);
-    assert_eq!(validated.last_closed_seals, vec![rights[0].outpoint]);
+    assert_eq!(
+        validated.settling_transition.map(|t| t.transition_type),
+        Some(rgb_lib::TypeOfTransition::Propagate)
+    );
+    // The rights themselves are the mint signer's rule (RR8, RR9): a refill
+    // moves no units, so the burn path's summary carries no output for them.
+    assert_eq!(
+        vouts,
+        (1..=u32::try_from(vouts.len()).unwrap()).collect::<Vec<_>>()
+    );
 }

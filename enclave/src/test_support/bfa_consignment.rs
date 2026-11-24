@@ -588,28 +588,25 @@ impl History {
         if change == 0 {
             return vec![self.burn_transition(input, held, burned, reason)];
         }
-        let (split, burnable) = self.split(input, held, change);
+        let (split, burnable, _) = self.split(input, held, change);
         let burn = self.burn_transition(burnable, held - change, burned, reason);
         vec![split, burn]
     }
 
     /// The split of a burn with change: `change` to vout 1, the rest to a seal
     /// on the outpoint the burn tx spends, as rgb-lib puts it.
-    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo) {
+    fn split(&mut self, input: Utxo, held: u64, change: u64) -> (Transition, Utxo, GraphSeal) {
         let burnable_seal = GraphSeal::with_blinding(
             input.outpoint.txid,
             input.outpoint.vout,
             0x6000 + self.nonce,
         );
+        let change_seal = GraphSeal::with_blinded_vout(1u32, self.nonce);
         let split = self
             .transition("transfer")
             .add_input(input.opout, AllocatedState::from(RevealedValue::from(held)))
             .unwrap()
-            .add_fungible_state(
-                "assetOwner",
-                GraphSeal::with_blinded_vout(1u32, self.nonce),
-                change,
-            )
+            .add_fungible_state("assetOwner", change_seal, change)
             .unwrap()
             .add_fungible_state("assetOwner", burnable_seal, held - change)
             .unwrap()
@@ -622,7 +619,30 @@ impl History {
                 opout,
                 outpoint: input.outpoint,
             },
+            change_seal,
         )
+    }
+
+    /// [`Self::burn`] of `burned` out of `held`, and the change its split
+    /// leaves on vout 1. A `TS_BURN` has no owned state, so the change is an
+    /// output of the `TS_TRANSFER` that splits the input before it, and that
+    /// transfer is what a later burn of the rest spends.
+    pub fn burn_keeping_change(
+        &mut self,
+        input: Utxo,
+        held: u64,
+        burned: u64,
+        reason: Option<[u8; 32]>,
+    ) -> (Committed, Utxo) {
+        let (split, burnable, change_seal) = self.split(input, held, held - burned);
+        let (split_opid, change_index) = (split.id(), seal_index(&split, change_seal));
+        let burn = self.burn_transition(burnable, burned, Some(burned), reason);
+        let committed = self.commit_psbt(vec![split, burn], vec![input.outpoint], vec![dust(0x04)]);
+        let change = Utxo {
+            opout: Opout::new(split_opid, OS_ASSET, change_index),
+            outpoint: OutPoint::new(committed.tx.compute_txid(), 1),
+        };
+        (committed, change)
     }
 
     /// The burn of the whole of `input` (holding `held`), for a bundle the

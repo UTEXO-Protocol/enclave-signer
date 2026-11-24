@@ -50,7 +50,7 @@ pub fn validate_funds_out_amount(
 ) -> Result<()> {
     use crate::networks::rgb::flow;
 
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    let last = validated.settling_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "fundsOut requires a consignment with at least one transition".into(),
         )
@@ -83,7 +83,7 @@ pub fn validate_funds_out_burn_recipient(
     validated: &ValidatedConsignment,
     record: Option<&BurnDestinationRecord>,
 ) -> Result<()> {
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    let last = validated.settling_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "burn fundsOut requires a consignment with at least one transition".into(),
         )
@@ -165,15 +165,15 @@ pub fn validate_funds_out_source_burn_tx_id(
     release: &ReleaseIdentity,
     validated: &ValidatedConsignment,
 ) -> Result<()> {
-    if validated.last_transition.is_none() {
+    if validated.settling_transition.is_none() {
         return Err(EnclaveError::CrossCheck(
             "fundsOut requires a consignment with at least one transition".into(),
         ));
     }
-    // The OpId that RGB consensus validated, not the flat summary's copy.
-    // Validation fills it for a burn and refuses a consignment where the two
-    // walks disagree, so this bind cannot name one burn and pay another.
-    let expected = validated.last_transfer_op_id.ok_or_else(|| {
+    // The OpId of the settling transition, which validation decodes from the
+    // id the inspection reports for it, so this bind cannot name one burn and
+    // pay another.
+    let expected = validated.settling_op_id.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "fundsOut requires the validated OpId of the settling burn, but the consignment \
              summary carries none - refusing to sign"
@@ -287,8 +287,8 @@ struct ProofBlock {
 /// BtcRelay agreement and consignment source-block bind (spec P8).
 /// Before a `fundsOut` is signed:
 ///
-/// 1. Find the block of the last witness tx from its SPV Merkle proof, not
-///    from the calldata.
+/// 1. Find the block of the settling burn's witness tx from its SPV Merkle
+///    proof, not from the calldata.
 /// 2. Require a header there. This proves the TEE is in sync.
 /// 3. Require the calldata `proof` to name that height.
 /// 4. Require both commitment words to equal the relay record that the
@@ -363,8 +363,8 @@ pub fn verify_btc_relay_agreement(
     if source.height != anchor.height {
         return Err(EnclaveError::CrossCheck(format!(
             "fundsOut source block mismatch: calldata proof cites height {}, but the \
-             consignment's last witness tx {} is anchored at height {} (enclave header hash {}) \
-             - refusing to sign",
+             witness tx {} of the settling burn is anchored at height {} (enclave header hash \
+             {}) - refusing to sign",
             source.height,
             hex::encode(anchor.txid),
             anchor.height,
@@ -486,7 +486,7 @@ fn relay_record(chain: &HeaderChain, height: u32) -> Result<[u8; 160]> {
     Ok(record)
 }
 
-/// The Bitcoin block anchoring a consignment's last witness tx.
+/// The Bitcoin block anchoring the witness tx of a consignment's settling burn.
 #[derive(Debug, Clone, Copy)]
 struct ConsignmentAnchor {
     height: u32,
@@ -496,8 +496,8 @@ struct ConsignmentAnchor {
     txid: [u8; 32],
 }
 
-/// Finds that block from trusted evidence only: the txid from the
-/// rgbstd-validated consignment, the height from the tx SPV proof, and the hash
+/// Finds that block from trusted evidence only: the txid from the consignment
+/// that validation accepted, the height from the tx SPV proof, and the hash
 /// from the enclave header chain. Nothing comes from the calldata. If no header
 /// is at that height, the enclave is behind, so it refuses.
 ///
@@ -514,10 +514,10 @@ fn resolve_consignment_anchor(
 ) -> Result<ConsignmentAnchor> {
     use bitcoin::hashes::Hash as _;
 
-    let witness_txid = validated.last_witness_txid.ok_or_else(|| {
+    let witness_txid = validated.settling_witness_txid.ok_or_else(|| {
         EnclaveError::CrossCheck(
             "fundsOut requires a consignment with at least one witness bundle, but the validated \
-             consignment has no last witness txid - refusing to sign"
+             consignment has no settling witness txid - refusing to sign"
                 .into(),
         )
     })?;
@@ -532,8 +532,8 @@ fn resolve_consignment_anchor(
         .find(|p| p.txid.as_slice() == txid)
         .ok_or_else(|| {
             EnclaveError::Spv(format!(
-                "fundsOut source block: no merkle proof for the consignment's last witness tx {} \
-                 - cannot determine the block that anchors it",
+                "fundsOut source block: no merkle proof for the witness tx {} of the settling \
+                 burn - cannot determine the block that anchors it",
                 hex::encode(txid)
             ))
         })?;
@@ -541,7 +541,7 @@ fn resolve_consignment_anchor(
     let commitment = display_hash_at(chain, proof.block_height).ok_or_else(|| {
         EnclaveError::Spv(format!(
             "fundsOut source block: enclave holds no header at height {} (chain tip = {}) for the \
-             consignment's last witness tx {} - the TEE header chain is not in sync with \
+             witness tx {} of the settling burn - the TEE header chain is not in sync with \
              the block that anchors this consignment",
             proof.block_height,
             chain.tip_height(),

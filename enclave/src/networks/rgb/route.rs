@@ -65,7 +65,7 @@ fn route_proof_from_validated_consignment(
 ) -> Result<RouteProof> {
     use crate::error::EnclaveError;
 
-    let last = validated.last_transition.as_ref().ok_or_else(|| {
+    let last = validated.settling_transition.as_ref().ok_or_else(|| {
         EnclaveError::CrossCheck(
             "RGB source requires a consignment with at least one transition".into(),
         )
@@ -97,7 +97,7 @@ pub fn validate_destination_anchor(
     ))
 }
 
-/// The mint its PSBT and fascia commit, bound to the deposit (F1-F7, M1-M9).
+/// The mint its PSBT and fascia commit, bound to the deposit (F1-F7, M1-M8).
 /// Returns the minted units.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 pub fn validate_destination_anchor(
@@ -109,13 +109,19 @@ pub fn validate_destination_anchor(
     let psbt = psbt_validation::parse_psbt_shape(&destination.psbt_bytes)?;
     psbt_validation::assert_mint_shape(&psbt)?;
     psbt_validation::assert_txid_and_sighash_fixed(&psbt)?;
+    let own_vout = ctx.own_colored_vout.ok_or_else(|| {
+        crate::error::EnclaveError::CrossCheck(
+            "mint cannot be read: no owned-output resolver is wired in, so the enclave cannot \
+             tell which outputs are its own"
+                .into(),
+        )
+    })?;
     let committed = pinned_commitment(
         &psbt,
         &destination.fascia,
         &destination.asset_id,
         ctx.bridge_config,
-        schemata::TS_MINT,
-        psbt_commit::MAX_SIDE_TRANSITIONS,
+        own_vout,
     )?;
     let mint = psbt_validation::mint_facts(&committed)?;
     psbt_validation::assert_mints_net_deposit(&mint, source_amount, source_commission)?;
@@ -123,12 +129,12 @@ pub fn validate_destination_anchor(
     // Pinned fee policy, shared with the plain-BTC path. No fee estimate is
     // fetched: the host controls that egress.
     psbt_validation::check_psbt_fee(&psbt, &colored, "mint")?;
-    let mint_outputs = ctx.mint_outputs.ok_or_else(|| {
+    let mint_sats = ctx.mint_sats.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
-            "mint cannot be signed: no outputs check is wired in".into(),
+            "mint cannot be signed: no sats check is wired in".into(),
         )
     })?;
-    mint_outputs(&psbt, &mint.recipient, &committed.moved_to)?;
+    mint_sats(&psbt, &mint.recipient)?;
     // Last: the only network read on this path.
     let bind = ctx.mint_binder.ok_or_else(|| {
         crate::error::EnclaveError::CrossCheck(
@@ -140,21 +146,17 @@ pub fn validate_destination_anchor(
 }
 
 /// F3-F6 on the PSBT's tx and its `fascia` under the `RGB_ASSET_ID` pin, which
-/// `asset_id` must name too. Returns what the tx commits around its one
-/// transition of type `main`, with at most `max_side` side transitions.
+/// `asset_id` must name too. Returns the committed transition.
 #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
 fn pinned_commitment(
     psbt: &bitcoin::psbt::Psbt,
     fascia: &[u8],
     asset_id: &str,
     cfg: &BridgeConfig,
-    main: rgbstd::TransitionType,
-    max_side: usize,
+    own_vout: psbt_commit::OwnVout<'_>,
 ) -> Result<psbt_commit::Committed> {
     let pin = psbt_commit::Pin::of(cfg)?;
-    let parsed = psbt_commit::parse_fascia(fascia, "fascia")?;
-    let committed =
-        psbt_commit::committed_transition(psbt, parsed, fascia, "fascia", pin, main, max_side)?;
+    let committed = psbt_commit::committed_transition(psbt, fascia, "fascia", pin, own_vout)?;
     validation::assert_asset_binding(
         &pin.contract.to_string(),
         asset_id,
@@ -196,11 +198,10 @@ pub fn validate_rights_refill(
     req: &SignRightsRefillRequest,
     psbt: &bitcoin::psbt::Psbt,
     cfg: &BridgeConfig,
+    own_vout: psbt_commit::OwnVout<'_>,
 ) -> Result<Vec<u32>> {
     psbt_validation::assert_txid_and_sighash_fixed(psbt)?;
-    // RR3: a refill commits its propagate only.
-    let propagate = schemata::TS_PROPAGATE;
-    let committed = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg, propagate, 0)?;
+    let committed = pinned_commitment(psbt, &req.fascia, &req.asset_id, cfg, own_vout)?;
     psbt_validation::refill_rights(&committed)
 }
 

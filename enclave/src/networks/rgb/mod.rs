@@ -17,6 +17,9 @@
 
 // The PSBT checks (`SignBtc`, the mint PSBT bind) apply to the EVM -> RGB
 // direction only.
+/// Test vectors only: no signing path reads a number from it.
+#[cfg(all(test, feature = "rgb-validation"))]
+pub mod bfa_schema;
 #[cfg(evm_to_rgb)]
 pub mod btc_crosscheck;
 #[cfg(evm_to_rgb)]

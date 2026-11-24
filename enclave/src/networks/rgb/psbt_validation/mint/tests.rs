@@ -1,4 +1,4 @@
-//! M8 and M9 here; M1-M7 run end to end in `route/tests/psbt_path.rs`.
+//! M8 here; M1-M7 and M9 run end to end in `route/tests/psbt_path.rs`.
 
 use bitcoin::bip32::ChildNumber;
 use bitcoin::blockdata::opcodes::all::OP_RETURN;
@@ -6,7 +6,7 @@ use bitcoin::blockdata::script::Builder;
 use bitcoin::psbt::Psbt;
 use bitcoin::{Amount, ScriptBuf};
 
-use super::{assert_mint_sats, assert_moved_state_kept, MintRecipient};
+use super::{assert_mint_sats, MintRecipient};
 use crate::config::DEFAULT_MINT_WITNESS_SAT as W;
 use crate::keys::{AccountType, KeyManager};
 use crate::networks::rgb::btc_ownership::tests as fx;
@@ -269,20 +269,4 @@ fn refuses_a_mint_with_too_many_outputs() {
     }
     let err = super::assert_mint_shape(&psbt).unwrap_err().to_string();
     assert!(err.contains("outputs, at most"), "{err}");
-}
-
-// ===== M9: moved state stays on our funded Colored outputs =====
-
-/// Every vout is checked: the change passes, the depositor's output after it
-/// does not.
-#[test]
-fn m9_checks_every_output_that_state_moves_to() {
-    let keys = fx::km();
-    let psbt = witness_psbt(&keys, W, true);
-    assert_moved_state_kept(&psbt, &keys, &[]).unwrap();
-    assert_moved_state_kept(&psbt, &keys, &[2]).unwrap();
-    let err = assert_moved_state_kept(&psbt, &keys, &[2, 1])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("moves state to vout 1"), "{err}");
 }

@@ -483,7 +483,7 @@ struct Built {
 
 /// One deposit as the coordinator would hand it over: the PSBT rgb-lib
 /// committed, with the metadata it writes. The bridge's input is the seeded
-/// right's output; `aux`, if any, is appended. The change is our key-path output.
+/// right's output; `aux`, if any, is appended. The change is ours (rule C).
 fn build_on(
     aux: Option<&Aux>,
     reject_list: Option<RejectListLocation>,
@@ -1049,7 +1049,7 @@ fn refuses_a_mint_that_passes_its_right_on() {
         Shape::KeepsRight,
         Payee::Blinded,
     )));
-    assert!(refusal.contains("passes 1 mintRight"), "{refusal}");
+    assert!(refusal.contains("mint assigns [MintRight]"), "{refusal}");
 }
 
 /// Other state of the right's UTXO moves to the bridge change by a second
@@ -1070,8 +1070,8 @@ fn refuses_a_mint_that_moves_other_state_off_the_bridge_outputs() {
     for vout in [0, 1] {
         let built = build_on(None, None, Shape::MovesRightTo(vout), Payee::Witness);
         let refusal = refusal(&drive(&built));
-        let want = format!("moves state to vout {vout}");
-        assert!(refusal.contains(&want), "{refusal}");
+        let want = "neither a move of state to this enclave's own outputs";
+        assert!(refusal.contains(want), "vout {vout}: {refusal}");
     }
 }
 
@@ -1151,7 +1151,7 @@ fn refuses_a_witness_mint_paying_other_than_the_pinned_mint_witness_sat() {
 }
 
 /// M8 refuses a blinded mint that pays sats out: here the change without its
-/// key-path metadata.
+/// rule C metadata.
 #[test]
 fn refuses_a_mint_that_pays_sats_out_over_the_wire() {
     let mut native = build(None);

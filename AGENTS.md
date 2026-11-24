@@ -295,8 +295,8 @@ report that conflict and keep it visible until the implementation is fixed.
   lock the enclave bound. Refuse on a resolver error or an rgb-lib warning.
   Prove what a mint or refill transaction commits only with rgb-lib's
   `inspect_fascia`, and refuse what it refuses; the enclave's own rules around
-  it select the asset, the one main transition and what a side transition may
-  do.
+  it select the asset, the one transition to read and what a side transition
+  may do.
   `clippy.toml` bans the direct calls; update the bans when an RGB crate renames
   those methods.
 - Bind the asset before any external read that a consignment selects. A
@@ -423,9 +423,12 @@ report that conflict and keep it visible until the implementation is fixed.
   or migration plan for existing holders.
   Check Rust requirements and native-library compatibility between builder
   and runtime images too; a successful link does not prove the binary starts.
-- Keep the exact `=` pins of the RGB crates in `enclave/Cargo.toml` at the
-  versions the pinned rgb-lib resolves. Another version can change the RGB
-  consensus code the enclave runs.
+- An RGB crate version change can change the RGB consensus code the enclave
+  runs. `Cargo.lock` fixes every version, and the EIF builds pass `--locked`,
+  so review the lockfile diff of a pin bump: a crate the enclave does not name,
+  such as rgb-consensus or the VM, can move under a caret requirement. Keep the
+  `=` requirement of each RGB crate `enclave/Cargo.toml` does name at the
+  version the pinned rgb-lib resolves.
 - Keep the root and parent release profiles aligned where they intentionally
   match. Update related fixtures, schema IDs, scanners, CI helpers and docs
   together.

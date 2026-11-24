@@ -4,10 +4,14 @@ use bitcoin::blockdata::script::Builder;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf};
 use rgbstd::contract::AllocatedState;
-use rgbstd::{GlobalValues, GraphSeal, OpId, Operation, Opout, RevealedData, RevealedValue};
+use rgbstd::{GlobalValues, GraphSeal, OpId, Opout, RevealedData, RevealedValue, Transition};
+
+use rgb_lib::no_wallet::RgbOutputInfo;
+use rgb_lib::Assignment;
 
 use super::super::MAX_FEE_SATS;
 use super::*;
+use crate::networks::rgb::bfa_schema;
 use crate::networks::rgb::btc_ownership::tests as fx;
 use crate::test_support::bfa_consignment::{self as gen, History, Issue, Utxo};
 
@@ -244,15 +248,26 @@ fn refuses_a_right_past_the_last_output() {
 
 // ===== RR6-RR8 on the committed transition =====
 
-/// `transition` as the core reads it from a PSBT.
-fn committed(transition: Transition) -> Committed {
-    Committed {
-        txid: bitcoin::Txid::all_zeros(),
-        opid: transition.id(),
-        transition,
-        moved_to: vec![],
-    }
+/// `transition` as the core reads it: committed in a PSBT whose outputs cover
+/// the vouts its seals name, then read back through rgb-lib's inspection.
+/// rgb-lib refuses a shape its schemas cannot represent, so this returns the
+/// refusal instead of unwrapping: some rules are enforced inside rgb-lib.
+fn committed(history: &mut History, transition: Transition) -> Result<Committed> {
+    let outputs: Vec<_> = (0..OUTPUTS).map(|_| gen::dust(1)).collect();
+    let sent = history.commit_psbt(vec![transition], vec![gen::outpoint(0xF0, 0)], outputs);
+    let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(sent.tx.clone()).unwrap();
+    crate::networks::rgb::psbt_commit::committed_transition(
+        &psbt,
+        &sent.fascia_bytes(),
+        "fascia",
+        crate::networks::rgb::psbt_commit::Pin::for_test(history.contract_id),
+        &|_, _| false,
+    )
 }
+
+/// Outputs of the PSBTs these tests commit: the opret host on vout 0 and
+/// enough outputs for the vouts the fixture seals name.
+const OUTPUTS: usize = 4;
 
 /// An asset with one genesis right per tag, and those rights.
 fn issued(tags: &[u8]) -> (History, Vec<Utxo>) {
@@ -265,56 +280,76 @@ fn issued(tags: &[u8]) -> (History, Vec<Utxo>) {
     (history, rights)
 }
 
-/// A rights send of one genesis right to `vouts`.
-fn rights_send(vouts: &[u32]) -> Transition {
+/// A rights send of one genesis right to `vouts`, and the asset it is of.
+fn rights_send(vouts: &[u32]) -> (History, Transition) {
     let (mut history, rights) = issued(&[0xA0]);
-    history.rights_transition(rights[0], vouts)
+    let send = history.rights_transition(rights[0], vouts);
+    (history, send)
 }
 
-fn refusal_of(transition: Transition) -> String {
-    error_text(refill_rights(&committed(transition)))
+fn refusal_of(mut history: History, transition: Transition) -> String {
+    error_text(committed(&mut history, transition).and_then(|c| refill_rights(&c)))
 }
 
-fn on_witness(vout: u32) -> OutputSeal {
-    OutputSeal::Revealed { txid: None, vout }
+/// A right that rgb-lib reports as revealed on `txid`.
+fn on_witness(vout: u32, txid: bitcoin::Txid) -> RgbOutputInfo {
+    RgbOutputInfo {
+        txid: Some(txid.to_string()),
+        vout: Some(vout),
+        blinding: Some(0),
+        assignment: Assignment::MintRight,
+        is_concealed: false,
+        recipient_id: None,
+        is_ours: None,
+        is_terminal: None,
+    }
 }
 
 #[test]
 fn reads_one_right_sent_to_two_and_to_three() {
     for k in [2u32, 3] {
         let vouts: Vec<u32> = (1..=k).collect();
-        let send = rights_send(&vouts);
-        assert_eq!(refill_rights(&committed(send)).unwrap(), vouts);
+        let (mut history, send) = rights_send(&vouts);
+        let committed = committed(&mut history, send).unwrap();
+        assert_eq!(refill_rights(&committed).unwrap(), vouts);
     }
 }
 
 #[test]
 fn refuses_zero_one_and_256_rights() {
+    let txid = bitcoin::Txid::all_zeros();
     for k in [0u32, 1, 256] {
-        let seals: Vec<OutputSeal> = (1..=k).map(on_witness).collect();
-        let err = error_text(assert_refill_rights(&seals));
+        let seals: Vec<RgbOutputInfo> = (1..=k).map(|v| on_witness(v, txid)).collect();
+        let err = error_text(assert_refill_rights(&seals, txid));
         assert!(err.contains(&format!("makes {k} right(s)")), "{err}");
     }
 }
 
 #[test]
 fn refuses_a_right_on_a_blinded_seal() {
-    let host = OutputSeal::Confidential {
-        secret_seal: "utxob:host".into(),
+    let txid = bitcoin::Txid::all_zeros();
+    let host = RgbOutputInfo {
+        txid: None,
+        vout: None,
+        blinding: None,
+        is_concealed: true,
+        recipient_id: Some("utxob:host".into()),
+        ..on_witness(1, txid)
     };
-    let err = error_text(assert_refill_rights(&[on_witness(1), host]));
+    let err = error_text(assert_refill_rights(&[on_witness(1, txid), host], txid));
     assert!(err.contains("blinded seal utxob:host"), "{err}");
 }
 
 /// A right on an outpoint this PSBT spends is destroyed at broadcast.
 #[test]
 fn refuses_a_right_on_another_transaction() {
-    let elsewhere = OutputSeal::Revealed {
-        txid: Some([0x77; 32]),
-        vout: 0,
-    };
-    let err = error_text(assert_refill_rights(&[on_witness(1), elsewhere]));
-    assert!(err.contains("of another transaction"), "{err}");
+    let txid = bitcoin::Txid::all_zeros();
+    let elsewhere = on_witness(0, bitcoin::Txid::from_byte_array([0x77; 32]));
+    let err = error_text(assert_refill_rights(
+        &[on_witness(1, txid), elsewhere],
+        txid,
+    ));
+    assert!(err.contains("must be on an output of"), "{err}");
 }
 
 /// The same check on a transition: rights built on one vout.
@@ -331,16 +366,20 @@ fn refuses_a_transition_that_puts_two_rights_on_one_vout() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    assert!(refusal_of(send).contains("two rights on vout 1"));
+    assert!(refusal_of(history, send).contains("two rights on vout 1"));
 }
 
 /// Rights move only by propagate: TS_TRANSFER moves units only.
 #[test]
 fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
-    for transition_type in [schemata::TS_TRANSFER, schemata::TS_MINT, schemata::TS_BURN] {
-        let mut send = rights_send(&[1, 2]);
-        send.transition_type = transition_type;
-        let err = refusal_of(send);
+    for transition_type in [
+        bfa_schema::TS_TRANSFER,
+        bfa_schema::TS_MINT,
+        bfa_schema::TS_BURN,
+    ] {
+        let (history, mut send) = rights_send(&[1, 2]);
+        send.transition_type = rgbstd::TransitionType::with(transition_type);
+        let err = refusal_of(history, send);
         assert!(err.contains("requires a propagate transition"), "{err}");
     }
 }
@@ -348,7 +387,7 @@ fn refuses_a_transfer_a_mint_or_a_burn_as_the_refill() {
 #[test]
 fn refuses_an_asset_input() {
     let (mut history, _) = issued(&[0xA0]);
-    let units = Opout::new(OpId::from([0x55; 32]), schemata::OS_ASSET, 0);
+    let units = Opout::new(OpId::from([0x55; 32]), bfa_schema::OS_ASSET, 0);
     let send = history
         .transition("propagate")
         .add_input(units, AllocatedState::from(RevealedValue::from(5u64)))
@@ -359,7 +398,7 @@ fn refuses_an_asset_input() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    let err = refusal_of(send);
+    let err = refusal_of(history, send);
     assert!(err.contains("exactly one mintRight"), "{err}");
 }
 
@@ -378,7 +417,7 @@ fn refuses_two_rights_in() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    let err = refusal_of(send);
+    let err = refusal_of(history, send);
     assert!(err.contains("exactly one mintRight"), "{err}");
 }
 
@@ -397,11 +436,13 @@ fn refuses_units_on_the_propagate() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    let err = refusal_of(send);
+    let err = refusal_of(history, send);
     assert!(err.contains("moves rights only"), "{err}");
 }
 
 /// Consensus refuses a right with an amount, so the spent right would die.
+/// rgb-lib represents a `mintRight` only as a declarative assignment, so its
+/// inspection refuses this fascia before the refill rules read it.
 #[test]
 fn refuses_rights_that_carry_an_amount() {
     let (mut history, rights) = issued(&[0xA0]);
@@ -415,23 +456,23 @@ fn refuses_rights_that_carry_an_amount() {
         .unwrap()
         .complete_transition()
         .unwrap();
-    let legs = send.assignments.remove(&schemata::OS_ASSET).unwrap();
+    let legs = send.assignments.remove(&bfa_schema::OS_ASSET).unwrap();
     send.assignments
-        .insert(schemata::OS_MINT, legs.unwrap())
+        .insert(bfa_schema::OS_MINT, legs.unwrap())
         .unwrap();
-    let err = refusal_of(send);
-    assert!(err.contains("carry state"), "{err}");
+    let err = refusal_of(history, send);
+    assert!(err.contains("unknown assignment type: 4013"), "{err}");
 }
 
 #[test]
 fn refuses_a_global_on_the_propagate() {
-    let mut send = rights_send(&[1, 2]);
+    let (history, mut send) = rights_send(&[1, 2]);
     let value = GlobalValues::with(RevealedData::new(
         amplify::confinement::SmallBlob::try_from(vec![0u8; 8]).unwrap(),
     ));
     send.globals
-        .insert(schemata::GS_BURNED_ASSET, value)
+        .insert(bfa_schema::GS_BURNED_ASSET, value)
         .unwrap();
-    let err = refusal_of(send);
+    let err = refusal_of(history, send);
     assert!(err.contains("moves rights only"), "{err}");
 }

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use amplify::{ByteArray, Wrapper};
 use rgb_lib::no_wallet::{RejectList, RejectListSource, ResolveRejectList};
-use rgbstd::{AssignmentType, OpId, Opout};
+use rgb_lib::{AssignmentType, OpId, Opout};
 
 use crate::error::{EnclaveError, Result};
 

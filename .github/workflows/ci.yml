@@ -124,6 +124,14 @@ jobs:
       - name: Clippy (parent)
         run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
 
+      # The parent has no release-mode compilation otherwise: the step below
+      # that builds it in release expects the `insecure-dev` guard to fail it,
+      # and the EIF workflow takes no lint flags. So a `not(debug_assertions)`
+      # block or a binding used only by a `debug_assert!` would warn nowhere.
+      # The parent has neither today; this keeps it that way.
+      - name: Clippy release (parent)
+        run: cargo clippy --release --manifest-path parent/Cargo.toml -- -D warnings
+
       # Builds the library and both binaries too.
       - name: Test (parent)
         run: |
@@ -221,11 +229,15 @@ jobs:
           cargo test $ENCLAVE --features mint-signer --test test_public_signet --test test_bfa_mint_over_the_wire
           cargo test $ENCLAVE --features mint-signer --test test_signing test_sign_btc
 
-      # Both roles here, so the release-mode dependencies compile once.
+      # Both roles here, so the release-mode dependencies compile once. This is
+      # the only step that compiles the release-mode code of a role, so it
+      # denies warnings: a `not(debug_assertions)` block is invisible to the
+      # debug clippy above. `cargo check` takes no lint flags, so this is
+      # clippy. Without `--all-targets`, as the shipped image has no test code.
       - name: Check release (mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo check --release $ENCLAVE --features vsock,$role
+            cargo clippy --release $ENCLAVE --features vsock,$role -- -D warnings
           done
 
       # Unsupported feature sets must fail on their own `compile_error!`, not on

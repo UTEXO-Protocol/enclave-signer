@@ -44,10 +44,15 @@ pub struct ValidationContext<'a> {
     /// `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
     pub mint_binder: Option<crate::networks::rgb::psbt_validation::MintBinder<'a>>,
-    /// M8 and M9 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
+    /// M8 on the mint PSBT. A callback, as `psbt_fee_key_paths` is, so the
     /// keys are not held across I/O. `None` fails the mint closed.
     #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
-    pub mint_outputs: Option<crate::networks::rgb::psbt_validation::MintOutputsCheck<'a>>,
+    pub mint_sats: Option<crate::networks::rgb::psbt_validation::MintSatsCheck<'a>>,
+    /// Tells whether a vout is an output of this enclave's Colored account,
+    /// from enclave keys. The mint reader needs it to tell a transfer of the
+    /// wallet's own units from one that pays anyone else.
+    #[cfg(all(feature = "rgb-validation", evm_to_rgb))]
+    pub own_colored_vout: Option<crate::networks::rgb::psbt_commit::OwnVout<'a>>,
     /// Binds each BFA mint anchor of a consignment to an EVM lock. With
     /// `None`, a consignment with a mint anchor is refused.
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
