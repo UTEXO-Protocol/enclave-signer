@@ -485,6 +485,14 @@ fn exchange<S: Read + Write>(
             Ok(answer) => answer,
             Err(what) => break Ended::Protocol(what),
         };
+        // An answer still open at the kill time is the validation's timeout,
+        // not the fault of the call the kill time cut.
+        if Instant::now() >= kill_at {
+            if let Some(cut) = ex.kept.take() {
+                tracing::warn!("an answer to the RGB validator was cut at the kill time: {cut}");
+            }
+            break Ended::Deadline;
+        }
         ex.requests += 1;
         if let Err(e) = send(io, answer) {
             break io_end(&e, kill_at);

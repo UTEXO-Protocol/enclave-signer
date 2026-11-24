@@ -224,13 +224,15 @@ writes no scratch file, starts no child and refuses with a timeout, code 1. It
 checks the time again after it writes the file. Each read and write on the
 socket stops at the kill time. A timer thread of the worker sends `SIGKILL`
 at the kill time, also while the worker answers a question, and each EVM
-RPC call of an answer ends at the kill time too. A call that it ends gives
-a timeout, code 1. After the verdict, the end of the socket, the kill time
+RPC call of an answer ends at the kill time too. An answer still open at
+the kill time ends the validation as the kill time does, code 10, and the
+enclave logs the call it cut. After the verdict, the end of the socket, the kill time
 or a broken protocol, the enclave stops the timer, sends `SIGKILL` and
 reaps the child. Then it removes the scratch file and replies.
 
 **Codes.** The enclave decides the result after it reaps the child. An
-error that the enclave kept comes before any end of the child:
+error that the enclave kept before the kill time comes before any end of
+the child:
 
 | The validation ends with | Result | Code |
 |---|---|---|

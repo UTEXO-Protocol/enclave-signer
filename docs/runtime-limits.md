@@ -20,7 +20,7 @@ utexo-bridge-parent-cli --addr vsock://16:5000 limits show
 ```
 
 ```bash
-utexo-bridge-parent-cli --addr vsock://16:5000 limits set evm_rpc_timeout_secs=20 total_request_timeout_secs=120
+utexo-bridge-parent-cli --addr vsock://16:5000 limits set evm_rpc_timeout_secs=20 total_request_timeout_secs=60
 ```
 
 ```bash
@@ -51,9 +51,12 @@ reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has on
 `NAME=VALUE` on each line. The text after a `#` is a comment:
 
 ```text
-# Long histories.
-total_request_timeout_secs=120
+# Shorter calls to the EVM RPC.
+evm_rpc_timeout_secs=20
 ```
+
+A deadline above the image's 90 s is not a change of this file alone: raise
+the timeouts above the enclave first ([The parent](#the-parent)).
 
 `deploy-host.sh` and `utexo-enclave-ctl.sh` send this file at each launch, before
 `set-endpoints`. The file is optional: with no file, the launch sends nothing and
@@ -270,10 +273,13 @@ before the parent. If `GetLimits` gets no answer within `LIMITS_IO_TIMEOUT`
 deadline.
 
 Timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS` on
-the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` and
-`PARENT_ADAPTER_GRPC_TIMEOUT` on the signer node, and the timeout of the backend (2
-minutes). Each must stay above the deadline plus `ENCLAVE_WAIT_MARGIN_SECS`. A
-shorter one ends a slow request before the enclave answers, and a node retry then
+the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` (default 110 s) and
+`PARENT_ADAPTER_GRPC_TIMEOUT` (default 120 s) on the signer node, and the timeout of
+the backend (2 minutes). Each must stay above the deadline plus
+`ENCLAVE_WAIT_MARGIN_SECS`. The image's 90 s fits these defaults; a longer deadline
+needs every one of them raised first, the node's attempt timeout too. A
+shorter one ends a slow request before the enclave answers, so the refusal of a
+validation that ran out of time (code 10) never reaches the backend, and a node retry then
 makes the enclave validate the same release again.
 
 The parent refuses to start when `GRPC_REQUEST_TIMEOUT_SECS` does not exceed the image
