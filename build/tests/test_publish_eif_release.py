@@ -120,6 +120,52 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("Stage prerelease", notes)
         self.assertNotIn("Public Signet", notes)
 
+    def use_production(self):
+        self.use_mainnet()
+        for role in publisher.ROLES:
+            self.edit_both(role, "metadata.json", lambda data: dict(data, build_profile="prod-mainnet"))
+
+    def package_production(self):
+        publisher.package(self.bundles, self.references, self.output, SHA, RUN,
+                          "prod-mainnet-v1.0.0", REPO, "dev", "prod-mainnet", source_toolchain=TOOLCHAIN)
+
+    def test_production_notes_include_asset_and_no_stage_claims(self):
+        self.use_production()
+        self.package_production()
+        notes = (self.output / "notes.md").read_text()
+        self.assertIn("Production / Bitcoin Mainnet", notes)
+        self.assertIn("rgb:test-asset", notes)
+        self.assertNotIn("Stage", notes)
+
+    def test_production_rejects_weakened_mainnet_validation(self):
+        self.use_production()
+        self.edit_both("burn", "IMAGE-ENV.json", lambda data: [
+            item.replace("BTC_RELAY_MODE=required", "BTC_RELAY_MODE=none") for item in data])
+        with self.assertRaisesRegex(ValueError, "Mainnet requires"):
+            self.package_production()
+        self.assertFalse(self.output.exists())
+
+    def test_production_becomes_latest_only_after_verified_upload(self):
+        self.use_production()
+        self.package_production()
+        calls = []
+        def fake_run(*args):
+            calls.append(args)
+            if args[:3] == ("gh", "release", "download"):
+                destination = Path(args[args.index("--dir") + 1])
+                for path in (self.output / "assets").iterdir():
+                    shutil.copyfile(path, destination / path.name)
+            return ""
+        env = dict(GH_REPO=REPO, RELEASE_SHA=SHA, RELEASE_TAG="prod-mainnet-v1.0.0", BUILD_PROFILE="prod-mainnet")
+        with patch.dict(os.environ, env), patch.object(publisher, "OUTPUT", self.output), \
+                patch.object(publisher, "unused_tag"), patch.object(publisher, "run", side_effect=fake_run):
+            publisher.publish()
+        create = next(call for call in calls if call[:3] == ("gh", "release", "create"))
+        self.assertIn("--draft", create)
+        self.assertIn("--latest=false", create)
+        self.assertIn("--latest", calls[-1])
+        self.assertIn("--prerelease=false", calls[-1])
+
     def test_mainnet_rejects_signet_bundle(self):
         with self.assertRaisesRegex(ValueError, "Wrong burn metadata"):
             self.package_mainnet()

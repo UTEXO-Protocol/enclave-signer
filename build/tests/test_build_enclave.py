@@ -83,6 +83,42 @@ class BuildArgumentsTests(unittest.TestCase):
             capture_output=True, text=True,
         )
 
+    def production_inputs(self):
+        return dict(BUILD_PROFILE='prod-mainnet', PROD_MAINNET_RGB_ASSET_ID='rgb:prod-fixture',
+                    PROD_MAINNET_MULTISIG_CONTRACT='0x' + '44' * 20,
+                    PROD_MAINNET_BRIDGE_CONTRACT='0x' + '55' * 20,
+                    PROD_MAINNET_TOKEN_CONTRACT='0x' + '66' * 20,
+                    PROD_KMS_ALLOWED_ACCOUNT_IDS='222222222222',
+                    PROD_MAINNET_GAS_TX_ALLOWED_SELECTORS='0x12345678')
+
+    def test_production_measures_explicit_inputs_for_both_roles(self):
+        for role in ('mint', 'burn'):
+            result = self.invoke('Dockerfile.enclave.' + role, **self.production_inputs())
+            self.assertEqual(result.returncode, 42, result.stderr)
+            args = self.captured_build_args()
+            for value in ('BITCOIN_NETWORK=bitcoin', 'BTC_RELAY_MODE=required',
+                          'EVM_CHAIN_ID=42161', 'RGB_ASSET_ID=rgb:prod-fixture',
+                          'EVM_PROXY_CONTRACT_ADDRESS=0x' + '44' * 20,
+                          'FUNDS_IN_CONTRACT=0x' + '55' * 20,
+                          'RUST_LOG=info,alloy_transport_http=off'):
+                self.assertIn(value, args)
+            if role == 'mint':
+                self.assertIn('KMS_ALLOWED_ACCOUNT_IDS=222222222222', args)
+                self.assertNotIn('KMS_ALLOWED_ACCOUNT_IDS=' + ACCOUNTS, args)
+            else:
+                self.assertIn('GAS_TX_ALLOWED_TO=0x' + '44' * 20, args)
+
+    def test_production_refuses_missing_pins_despite_stage_defaults(self):
+        for key in self.production_inputs():
+            if key == 'BUILD_PROFILE': continue
+            role = 'mint' if key == 'PROD_KMS_ALLOWED_ACCOUNT_IDS' else 'burn'
+            inputs = dict(self.production_inputs(), **{key: ''},
+                          STAGE_MAINNET_RGB_ASSET_ID='rgb:stage-fixture', RGB_ASSET_ID='rgb:fallback')
+            result = self.invoke('Dockerfile.enclave.' + role, **inputs)
+            self.assertNotEqual(result.returncode, 42, result.stderr)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.argv.exists())
+
     def base_args(self, recipe):
         """Build args every RGB recipe gets. The mint recipe also pins the KMS accounts."""
         args = ['SOURCE_DATE_EPOCH=1700000000', 'RGB_ASSET_ID=rgb:test-bfa-asset']
