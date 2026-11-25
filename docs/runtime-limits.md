@@ -85,7 +85,7 @@ checks them at launch.
 | `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
 | `max_wire_elements` | 524288 | 1024 | 2^32 | Protobuf field occurrences in a request. |
 | `max_consignment_bytes` | 10485760 | 1024 | 2^32 | Size of a consignment. |
-| `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT or a fascia. |
+| `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT. A fascia has its own limit, `MAX_FASCIA_BYTES`, which is compiled in ([mint flow](mint-flow.md)). |
 | `max_gas_tx_bytes` | 1048576 | 1024 | 2^32 | Size of an unsigned gas transaction. |
 | `max_rlp_items` | 1024 | 16 | 2^20 | RLP items of a gas transaction. |
 | `max_funds_out_call_data_bytes` | 98304 | 1024 | 2^32 | Size of the calldata of a fundsOut. |
@@ -131,7 +131,7 @@ refuses the request and changes nothing.
   validator reserve for each request, and the baseline. rgb-lib reads a
   consignment, and a fascia, only from a file, and the enclave keeps that file
   in RAM. A consignment file takes up to `max_consignment_bytes` and a fascia
-  file up to `max_psbt_bytes`, and never more than `max_message_bytes`. A
+  file up to `MAX_FASCIA_BYTES`, and never more than `max_message_bytes`. A
   request holds one such file at a time. The enclave removes the file when
   rgb-lib ends, also after a refusal: the burn signer writes it before its
   validator child starts and removes it after it reaps the child. The reserve

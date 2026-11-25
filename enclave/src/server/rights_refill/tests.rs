@@ -373,7 +373,8 @@ fn a_refusal_past_the_gate_counts_against_the_rate_limit() {
     for _ in 0..MAX_REFILLS_PER_HOUR {
         let err = sign(&ctx, request(&history, &refill)).unwrap_err();
         assert!(
-            err.to_string().contains("beside the pinned RGB_ASSET_ID"),
+            err.to_string()
+                .contains("no transition of the pinned RGB_ASSET_ID"),
             "{err}"
         );
     }

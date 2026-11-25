@@ -12,9 +12,10 @@
 //! there. It compares no type with the asset's schema, which a fascia does not
 //! carry, and it validates no operation. So the shape rules are the enclave's
 //! own, as are the rules around the inspection: the one transition of the
-//! pinned asset that the signer reads, every other transition a move of state
-//! to this enclave's own outputs, and an opret host the enclave can read. The
-//! rule ids (F3-F6, M9) are those of `docs/mint-flow.md` section 5.
+//! pinned asset that the signer reads, every other transition of that asset a
+//! move of state to this enclave's own outputs, and an opret host the enclave
+//! can read. The rule ids (F3-F6, M9) are those of `docs/mint-flow.md`
+//! section 5.
 
 use std::str::FromStr;
 
@@ -33,8 +34,7 @@ pub type OwnVout<'a> = &'a dyn Fn(&Psbt, u32) -> bool;
 
 /// The types rgb-lib moves the other allocations of a spent UTXO with. In the
 /// pinned contract a burn, a mint, an inflation or a link is therefore never a
-/// side transition. rgb-lib names the type from its number alone, as it knows
-/// no schema of another contract; M9 keeps the state there.
+/// side transition.
 const MOVE_TYPES: [TypeOfTransition; 4] = [
     TypeOfTransition::Transfer,
     TypeOfTransition::Propagate,
@@ -119,10 +119,9 @@ fn rgb_lib_network(cfg: &BridgeConfig) -> BitcoinNetwork {
 /// commits exactly its bundles, and the bundle of the pinned contract discloses
 /// every transition it commits, one of which the signer reads.
 ///
-/// The size bound runs before the bytes reach a scratch file or rgb-lib. A
-/// fascia holds a tx and its RGB data, so the PSBT size limit applies to it
-/// too (`memory.rs`), and it is what bounds the work of the MPC rebuild in
-/// [`inspect`].
+/// The size bound, `MAX_FASCIA_BYTES`, runs before the bytes reach a scratch
+/// file or rgb-lib. It bounds the bytes, and with them the bundles a fascia
+/// can hold, not the work of the MPC rebuild in [`inspect`].
 pub fn committed_transition(
     psbt: &Psbt,
     bytes: &[u8],
@@ -136,7 +135,7 @@ pub fn committed_transition(
              tx's fascia"
         )));
     }
-    crate::config::check_psbt_size(field, bytes)?;
+    crate::config::check_fascia_size(field, bytes)?;
     let txid = psbt.unsigned_tx.compute_txid();
     assert_opret_host(&psbt.unsigned_tx)?;
     let inspection = inspect(psbt, bytes, field, pin)?;
@@ -175,11 +174,10 @@ fn assert_opret_host(tx: &Transaction) -> Result<()> {
 /// commitment carries, and refuses a concealed commitment that carries none.
 ///
 /// rgb-lib rebuilds the MPC tree of the bundles the file discloses. The tree
-/// is as wide as the smallest power of two that holds one leaf per bundle, and
-/// `root()` hashes every leaf of that width, so the work follows the bundle
-/// count. `max_psbt_bytes`, checked above, bounds that count: a bundle entry
-/// carries a contract id and a non-empty input map, so the limit admits far
-/// fewer bundles than the 65535 of rgb-lib's message map.
+/// grows until every contract id has a position of its own, and `root()`
+/// hashes every position of that width, taken or not. So the work follows the
+/// bundle count and the ids, which the host picks, and not the bytes. rgb-lib
+/// refuses a fascia over `MAX_FASCIA_BUNDLES` before the rebuild.
 fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
     // rgb-lib parses the PSBT from its base64 form.
     let psbt = psbt.to_string();
@@ -187,7 +185,17 @@ fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspec
         let path = path.to_str().ok_or_else(|| {
             EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
         })?;
-        inspect_fascia(psbt, path.to_string(), None, pin.network).map_err(|e| {
+        let max_bytes = crate::config::MAX_FASCIA_BYTES as u64;
+        let max_bundles = crate::config::MAX_FASCIA_BUNDLES;
+        let inspected = inspect_fascia(
+            psbt,
+            path.to_string(),
+            None,
+            max_bytes,
+            max_bundles,
+            pin.network,
+        );
+        inspected.map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "rgb-lib refused the {field} of this tx: {e} - refusing to sign state moves the \
                  enclave cannot see"
@@ -197,7 +205,12 @@ fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspec
 }
 
 /// F4-F6: the one transition of the pinned asset that the signer reads, under
-/// an opret proof, beside moves of state to this enclave's own outputs.
+/// an opret proof, beside moves of that asset's state to this enclave's own
+/// outputs.
+///
+/// A bundle of another contract is read past, whatever it assigns. The enclave
+/// does not see which state an input holds, so a refusal would not keep that
+/// state: the host can spend the UTXO without moving it at all.
 ///
 /// F3: rgb-lib verifies the commitment with the DBC proof of the fascia, so a
 /// tapret proof is refused here; F3 then makes the OP_RETURN the host that
@@ -235,17 +248,12 @@ fn pinned_transition(
     let mut signing = None;
     for operation in &inspection.operations {
         assert_fully_disclosed(operation, field)?;
+        if operation.asset_id != pinned {
+            continue;
+        }
         for transition in &operation.transitions {
             if is_own_move(transition, txid, psbt, own_vout) {
                 continue;
-            }
-            if operation.asset_id != pinned {
-                return refuse(format!(
-                    "discloses transition {} of asset {}, which is not a move of state to this \
-                     enclave's own outputs - beside the pinned RGB_ASSET_ID {pinned} the signer \
-                     takes only such moves",
-                    transition.opid, operation.asset_id
-                ));
             }
             if let Some(first) = signing.replace(transition) {
                 return refuse(format!(
@@ -292,13 +300,13 @@ fn assert_fully_disclosed(
     Ok(())
 }
 
-/// F6 and M9: a side transition, as rgb-lib moves any other allocation of a
-/// spent UTXO, of the pinned asset or of another. It is of a move type and
-/// assigns one seal for each input it closes, so it cannot turn one right
-/// into many. Every seal is revealed on an output of the tx being signed that
-/// this enclave derives on its Colored account and that carries sats, so the
-/// state stays in the wallet. Any other transition is one the enclave must
-/// read, and it reads exactly one.
+/// F6 and M9: a side transition, as rgb-lib moves any other allocation of the
+/// pinned asset on a spent UTXO. It is of a move type and assigns one seal for
+/// each input it closes, so it cannot turn one right into many. Every seal is
+/// revealed on an output of the tx being signed that this enclave derives on
+/// its Colored account and that carries sats, so the state stays in the
+/// wallet. Any other transition is one the enclave must read, and it reads
+/// exactly one.
 fn is_own_move(
     transition: &rgb_lib::no_wallet::RgbTransitionInfo,
     txid: bitcoin::Txid,

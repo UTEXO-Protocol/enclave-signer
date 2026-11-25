@@ -32,6 +32,18 @@ use attestation_verify::{BitcoinNetwork, EvmFinalityTag};
 /// (`limits.rs`).
 pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 
+/// The most bytes a fascia may have. The operator cannot change it: the rules
+/// of the image set how large a valid fascia is. The widest one is a refill of
+/// `MAX_REFILL_RIGHTS` rights, measured at about 60 bytes for each right, and
+/// a mint is under 1 KiB. So the limit leaves about four times that room for
+/// the bundles of other contracts that the tx moves.
+pub const MAX_FASCIA_BYTES: usize = 64 * 1024;
+
+/// The most bundles a fascia may hold, one for each contract the tx moves. It
+/// is the most allocations the connector's wallet keeps on one UTXO, so a mint
+/// or a refill of one right never holds more.
+pub const MAX_FASCIA_BUNDLES: u32 = 20;
+
 /// The most bytes a PSBT may have in the image, on every path that parses
 /// one. The operator can change it (`max_psbt_bytes`). A decoded input or
 /// output takes far more memory than its bytes. The densest shape measured
@@ -49,7 +61,15 @@ pub const MAX_PSBT_BYTES: usize = 1024 * 1024;
 /// Refuses `bytes` over `max_psbt_bytes`, the limit in force, before any
 /// parse. `what` names the field in the error.
 pub fn check_psbt_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
-    let max = crate::limits::get().max_psbt_bytes;
+    check_size(what, bytes, crate::limits::get().max_psbt_bytes)
+}
+
+/// Refuses a fascia over [`MAX_FASCIA_BYTES`], before any parse.
+pub fn check_fascia_size(what: &str, bytes: &[u8]) -> crate::error::Result<()> {
+    check_size(what, bytes, MAX_FASCIA_BYTES as u64)
+}
+
+fn check_size(what: &str, bytes: &[u8], max: u64) -> crate::error::Result<()> {
     if bytes.len() as u64 > max {
         return Err(crate::error::EnclaveError::CrossCheck(format!(
             "{what} is {} bytes; the limit is {max}",
