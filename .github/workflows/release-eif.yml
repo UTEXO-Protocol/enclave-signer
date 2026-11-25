@@ -198,4 +198,4 @@ jobs:
           echo "- signer: \`$SIGNER_ROLE\`, CID \`$ENCLAVE_CID\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- git_sha: \`$GIT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- bucket: \`${BUCKET:-not configured}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- NOTE: enclaves restarted -> identity wiped; run init/clone to bootstrap, then deploy/verify-identity.sh with a complete approved EXPECTED_EVM map to verify identities and write the attestation bundles." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Identity and traffic are not activated by deployment. Follow docs/role-rollout.md: recover/init/clone the intended identity, run deploy/verify-identity.sh with approved EVM and endpoint pins (plus both account xpubs and fingerprint for Mint), verify registration and genuine backend routing, then activate." >> "$GITHUB_STEP_SUMMARY"

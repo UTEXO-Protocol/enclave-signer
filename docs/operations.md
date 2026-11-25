@@ -50,7 +50,9 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ([building.md](building.md#workspaces)).
 
 Before an enclave takes traffic, check that a genuine request of its flow
-succeeds and that a request of the other flow is refused.
+succeeds and that a request of the other flow is refused. Complete
+[rollout acceptance](role-rollout.md) for the intended backend deployment;
+it covers attested identities, registration, routing and configuration.
 
 ### `deploy-host.sh`
 
@@ -71,8 +73,9 @@ the artifacts of that commit from S3.
   parent, the limits file, and the memory pool.
 - It does a cold deployment. It does not initialize keys, and it is not a
   rolling restart.
-- One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18` or
-  `20` selects another supported CID, with parents on ports 50051 to 50053.
+- One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18`,
+  `20` or `24` selects another supported CID. Parent ports are 50051, 50052,
+  50053 and 50055 respectively.
 
 Each CID has its own files, and a deploy changes only those:
 
@@ -266,6 +269,10 @@ signer, not the enclave process, so it removes no key
   starts from a new seed.
 - New launch values need a new launch of the same EIF. The PCR allowlists do
   not change.
+
+Follow [rollback and identity continuity](role-rollout.md#rollback-and-identity-continuity)
+for verifier/KMS approvals, retained burn donors and registration transitions.
+Do not stop the last compatible burn donor during an upgrade.
 
 ## Debug mode
 
