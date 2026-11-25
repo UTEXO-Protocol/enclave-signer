@@ -1,9 +1,12 @@
-# Stage EIF build profiles
+# EIF build profiles
 
-Choose `stage-signet` or `stage-mainnet` in **Build EIF**, or set
-`BUILD_PROFILE` with `build/build-enclave.sh`. Both profiles build Mint and Burn.
+Choose `stage-signet`, `stage-mainnet` or `prod-mainnet` in **Build EIF**, or set
+`BUILD_PROFILE` with `build/build-enclave.sh`. Each named profile builds Mint and Burn.
 Tag builds and the `default` profile use the recipe defaults.
 
+- `prod-mainnet`: Bitcoin mainnet and Arbitrum One, with explicit production
+  contracts, asset and Mint KMS account inputs. See
+  [production EIFs](../../docs/production-eif.md) for setup and workflow steps.
 - `stage-signet`: public Bitcoin Signet, SPV without proof-of-work checks,
   relay disabled, Development policy.
 - `stage-mainnet`: Bitcoin mainnet, SPV with proof-of-work checks, relay

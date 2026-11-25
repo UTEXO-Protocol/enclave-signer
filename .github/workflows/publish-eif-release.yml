@@ -6,12 +6,12 @@ on:
       build_profile:
         description: Profile of the existing build to publish
         type: choice
-        options: [stage-signet, stage-mainnet]
+        options: [stage-signet, stage-mainnet, prod-mainnet]
         default: stage-signet
       source_branch:
         description: Branch containing the approved build commit
         type: choice
-        options: [stage, dev]
+        options: [stage, dev, main]
         default: stage
       git_sha:
         description: Full 40-character SHA already built and uploaded to S3
@@ -36,8 +36,9 @@ concurrency:
 jobs:
   prepare:
     # Only reviewed workflow code can receive the S3 read role.
-    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/stage'
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/stage' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    environment: ${{ inputs.build_profile == 'prod-mainnet' && 'production' || '' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -53,7 +54,6 @@ jobs:
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       BUILD_PROFILE: ${{ inputs.build_profile }}
-      EIF_S3_BUCKET: ${{ vars.EIF_S3_BUCKET }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
@@ -61,21 +61,23 @@ jobs:
           persist-credentials: false
       - name: Validate source and successful build
         run: python3 build/publish-eif-release.py validate
-      - name: Check AWS publication settings
+      - name: Select AWS publication account
         env:
-          READ_ROLE: ${{ secrets.EIF_RELEASE_READ_ROLE_ARN }}
-          ACCOUNT_ID: ${{ vars.EIF_RELEASE_AWS_ACCOUNT_ID }}
-          REGION: ${{ vars.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          test -n "$READ_ROLE" && test -n "$REGION" && test -n "$EIF_S3_BUCKET"
-          [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          EIF_RELEASE_READ_ROLE_ARN: ${{ secrets.EIF_RELEASE_READ_ROLE_ARN }}
+          EIF_RELEASE_AWS_ACCOUNT_ID: ${{ vars.EIF_RELEASE_AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EIF_S3_BUCKET: ${{ vars.EIF_S3_BUCKET }}
+          PROD_EIF_RELEASE_READ_ROLE_ARN: ${{ secrets.PROD_EIF_RELEASE_READ_ROLE_ARN }}
+          PROD_AWS_ACCOUNT_ID: ${{ vars.PROD_AWS_ACCOUNT_ID }}
+          PROD_AWS_REGION: ${{ vars.PROD_AWS_REGION }}
+          PROD_EIF_S3_BUCKET: ${{ vars.PROD_EIF_S3_BUCKET }}
+        run: python3 build/eif-aws-settings.py publish
       - name: Read build artifacts from S3
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: ${{ secrets.EIF_RELEASE_READ_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.EIF_RELEASE_AWS_ACCOUNT_ID }}
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
       - name: Verify build, committed toolchain and package release
         run: python3 build/publish-eif-release.py prepare
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,8 +92,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Configure reviewers and restrict this environment to dev/stage.
-    environment: eif-release
+    # Configure reviewers and approved branches for the selected environment.
+    environment: ${{ inputs.build_profile == 'prod-mainnet' && 'production' || 'eif-release' }}
     permissions:
       contents: write
       actions: read
@@ -110,5 +112,5 @@ jobs:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: release-output
           merge-multiple: true
-      - name: Publish a complete Stage prerelease
+      - name: Publish the verified release
         run: python3 build/publish-eif-release.py publish

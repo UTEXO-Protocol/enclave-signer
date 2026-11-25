@@ -12,7 +12,7 @@ name: "Build EIF"
 # validates those tools before building; the profile and observed measurements
 # travel with each role's artifacts. Publication does not rebuild them.
 #
-# Required repo config (Settings -> Secrets and variables -> Actions):
+# Stage/default repo config (Settings -> Secrets and variables -> Actions):
 #   secrets.FEDERATED_SIGNER_PROTO_DEPLOY_KEY  parent proto access
 #   secrets.AWS_OIDC_ROLE_ARN                  IAM role to assume via OIDC for S3 upload
 #                                              (if unset, the S3 step is skipped and
@@ -22,13 +22,16 @@ name: "Build EIF"
 # No infra identifiers (account id, bucket, region) are hardcoded here — this is
 # a public repo; everything environment-specific comes from repo vars/secrets.
 
+# Production uses the protected environment and PROD_* settings documented in
+# docs/production-eif.md. Missing production upload configuration is an error.
+
 on:
   workflow_dispatch:
     inputs:
       build_profile:
-        description: 'Measured image profile (Stage Signet or Stage Bitcoin mainnet)'
+        description: 'Measured image profile'
         type: choice
-        options: [default, stage-signet, stage-mainnet]
+        options: [default, stage-signet, stage-mainnet, prod-mainnet]
         default: default
   push:
     tags: ["v*"]
@@ -37,14 +40,10 @@ permissions:
   contents: read
   id-token: write   # for AWS OIDC
 
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  # Hoisted to env because secrets can't be referenced directly in `if:`.
-  AWS_ROLE: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-
 jobs:
   build-eif:
     runs-on: ubuntu-22.04
+    environment: ${{ inputs.build_profile == 'prod-mainnet' && 'production' || '' }}
     env:
       BUILD_PROFILE: ${{ inputs.build_profile || 'default' }}
       STAGE_RGB_ASSET_ID: ${{ vars.STAGE_RGB_ASSET_ID }}
@@ -53,6 +52,12 @@ jobs:
       STAGE_MAINNET_RGB_ASSET_ID: ${{ vars.STAGE_MAINNET_RGB_ASSET_ID }}
       STAGE_MAINNET_TOKEN_CONTRACT: ${{ vars.STAGE_MAINNET_TOKEN_CONTRACT }}
       STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS: ${{ vars.STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS }}
+      PROD_MAINNET_RGB_ASSET_ID: ${{ vars.PROD_MAINNET_RGB_ASSET_ID }}
+      PROD_MAINNET_MULTISIG_CONTRACT: ${{ vars.PROD_MAINNET_MULTISIG_CONTRACT }}
+      PROD_MAINNET_BRIDGE_CONTRACT: ${{ vars.PROD_MAINNET_BRIDGE_CONTRACT }}
+      PROD_MAINNET_TOKEN_CONTRACT: ${{ vars.PROD_MAINNET_TOKEN_CONTRACT }}
+      PROD_MAINNET_GAS_TX_ALLOWED_SELECTORS: ${{ vars.PROD_MAINNET_GAS_TX_ALLOWED_SELECTORS }}
+      PROD_KMS_ALLOWED_ACCOUNT_IDS: ${{ vars.PROD_KMS_ALLOWED_ACCOUNT_IDS }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,16 +76,29 @@ jobs:
             s3_subpath: "rgb-burn/"
             artifact_suffix: "-burn"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
-      - name: Validate Stage release inputs
+      - name: Select AWS artifact account
+        env:
+          AWS_OIDC_ROLE_ARN: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EIF_S3_BUCKET: ${{ vars.EIF_S3_BUCKET }}
+          PROD_AWS_OIDC_ROLE_ARN: ${{ secrets.PROD_AWS_OIDC_ROLE_ARN }}
+          PROD_AWS_ACCOUNT_ID: ${{ vars.PROD_AWS_ACCOUNT_ID }}
+          PROD_AWS_REGION: ${{ vars.PROD_AWS_REGION }}
+          PROD_EIF_S3_BUCKET: ${{ vars.PROD_EIF_S3_BUCKET }}
+        run: python3 build/eif-aws-settings.py build
+
+      - name: Validate release inputs
         if: env.BUILD_PROFILE != 'default'
         env:
           DOCKERFILE: ${{ matrix.dockerfile }}
         run: |
           set -euo pipefail
           case "$BUILD_PROFILE" in
-            stage-signet|stage-mainnet) source "build/profiles/$BUILD_PROFILE.sh" ;;
+            stage-signet|stage-mainnet|prod-mainnet) source "build/profiles/$BUILD_PROFILE.sh" ;;
             *) echo 'Unknown build profile' >&2; exit 1 ;;
           esac
 
@@ -165,7 +183,7 @@ jobs:
           cat artifacts/metadata.json
 
       - name: Upload run artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: eif-${{ github.sha }}${{ matrix.artifact_suffix }}${{ env.BUILD_PROFILE != 'default' && format('-{0}', env.BUILD_PROFILE) || '' }}
           path: |
@@ -190,11 +208,12 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
 
       - name: Publish to S3 (immutable git_sha path)
         if: ${{ steps.aws.outcome == 'success' }}
         env:
-          BUCKET: ${{ vars.EIF_S3_BUCKET }}
+          BUCKET: ${{ env.EIF_S3_BUCKET }}
         run: |
           set -euxo pipefail
           [ -n "$BUCKET" ] || { echo "vars.EIF_S3_BUCKET is not set"; exit 1; }

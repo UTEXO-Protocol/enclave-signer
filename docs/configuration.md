@@ -14,6 +14,9 @@ the deploy script are in [operations.md](operations.md).
 A Nitro enclave takes no environment from the host. So an image setting
 cannot change after the build.
 
+The production profile requires explicit measured pins; see
+[production EIF configuration](production-eif.md).
+
 ## Image settings
 
 ### Bridge pins
