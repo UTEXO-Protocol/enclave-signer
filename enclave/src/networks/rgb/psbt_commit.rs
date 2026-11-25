@@ -176,8 +176,8 @@ fn assert_opret_host(tx: &Transaction) -> Result<()> {
 /// rgb-lib rebuilds the MPC tree of the bundles the file discloses. The tree
 /// grows until every contract id has a position of its own, and `root()`
 /// hashes every position of that width, taken or not. So the work follows the
-/// bundle count and the ids, which the host picks, and not the bytes:
-/// `MAX_FASCIA_BYTES` still holds a few hundred small bundles.
+/// bundle count and the ids, which the host picks, and not the bytes. rgb-lib
+/// refuses a fascia over `MAX_FASCIA_BUNDLES` before the rebuild.
 fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspection> {
     // rgb-lib parses the PSBT from its base64 form.
     let psbt = psbt.to_string();
@@ -185,7 +185,17 @@ fn inspect(psbt: &Psbt, bytes: &[u8], field: &str, pin: Pin) -> Result<RgbInspec
         let path = path.to_str().ok_or_else(|| {
             EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
         })?;
-        inspect_fascia(psbt, path.to_string(), None, pin.network).map_err(|e| {
+        let max_bytes = crate::config::MAX_FASCIA_BYTES as u64;
+        let max_bundles = crate::config::MAX_FASCIA_BUNDLES;
+        let inspected = inspect_fascia(
+            psbt,
+            path.to_string(),
+            None,
+            max_bytes,
+            max_bundles,
+            pin.network,
+        );
+        inspected.map_err(|e| {
             EnclaveError::CrossCheck(format!(
                 "rgb-lib refused the {field} of this tx: {e} - refusing to sign state moves the \
                  enclave cannot see"

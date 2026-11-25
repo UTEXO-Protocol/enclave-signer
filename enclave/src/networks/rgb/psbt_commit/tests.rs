@@ -217,6 +217,20 @@ fn refuses_a_fascia_over_its_size_limit() {
     assert!(err.contains("the limit is"), "{err}");
 }
 
+/// rgb-lib counts the bundles before it reads them or rebuilds the MPC tree.
+#[test]
+fn refuses_a_fascia_with_more_bundles_than_its_limit() {
+    let (history, sent) = rights_send();
+    let cid = history.contract_id;
+    let ours = bundle(&sent.fascia, cid);
+    let mut bundles = BTreeMap::from([(cid, ours.clone())]);
+    for tag in 0..crate::config::MAX_FASCIA_BUNDLES as u8 {
+        bundles.insert(ContractId::from([tag; 32]), ours.clone());
+    }
+    let err = refusal(&sent.tx, &with_bundles(&sent.fascia, bundles), cid);
+    assert!(err.contains("exceeds the maximum"), "{err}");
+}
+
 // ===== F3: the close method =====
 
 /// Inserts `out` before the OP_RETURN, then commits with the host on vout 1.
