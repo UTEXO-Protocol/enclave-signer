@@ -142,7 +142,7 @@ one of them and no fascia fails F4.
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
 | `MAX_FASCIA_BYTES` | 65,536 | Size of a fascia (F4). Compiled in, not a runtime limit. |
-| `MAX_FASCIA_BUNDLES` | 16 | Bundles in a fascia, one for each contract the tx moves (F4). Compiled in, not a runtime limit. |
+| `MAX_FASCIA_BUNDLES` | 20 | Bundles in a fascia, one for each contract the tx moves (F4). The most allocations the connector's wallet keeps on one UTXO. Compiled in, not a runtime limit. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
 | MPC tree minimum depth | 3 | The least depth rgb-lib commits with, and rebuilds the tree at in F5. It grows until every contract id has a position of its own. |
 | Colored account | `m/86'/827166'/0'` on mainnet | The only account that signs a mint. |
@@ -246,11 +246,11 @@ rules around it are the enclave's.
   its own, and every position of that width is hashed, taken or not. So the
   cost follows the bundle count and the ids, which the host picks. A second
   limit bounds that: rgb-lib refuses a fascia of more than
-  `MAX_FASCIA_BUNDLES` bundles before it reads them or rebuilds the tree. A
-  mint or a refill moves the pinned contract alone, so the rest of that
-  limit is room for other contracts. A bundle of another contract counts
-  toward both limits, so state of other contracts on the UTXO of a right can
-  make its fascia too large to sign.
+  `MAX_FASCIA_BUNDLES` bundles before it reads them or rebuilds the tree.
+  That limit is the most allocations the connector's wallet keeps on one
+  UTXO, so the tx of one right never holds more bundles. A bundle of another
+  contract counts toward the size limit too, so state of other contracts on
+  the UTXO of a right can make its fascia too large to sign.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. The enclave passes no entropy of its own, so rgb-lib takes the
@@ -611,8 +611,8 @@ transition is a commitment:
 
 **History decides whether a mint takes effect, never what it does.** A
 receiver validates the full history when it accepts the mint, so a bad
-history makes the mint invalid for everyone. It moves no other state out of
-the wallet and inflates nothing. So the enclave checks no history, and each
+history makes the mint invalid for everyone. It moves no other state of the
+pinned contract out of the wallet and inflates nothing. So the enclave checks no history, and each
 missing check is a liveness limit only:
 
 - No consensus over the history, and no genesis or schema check. The pinned

@@ -13,7 +13,7 @@ use rgbstd::rgbcore::commit_verify::mpc::{
     MerkleBlock, MerkleTree, Message, MultiSource, ProtocolId,
 };
 use rgbstd::rgbcore::commit_verify::TryCommitVerify;
-use rgbstd::{ContractId, GraphSeal, OpId, Operation, Transition, TransitionBundle};
+use rgbstd::{BuilderSeal, ContractId, GraphSeal, OpId, Operation, Transition, TransitionBundle};
 use strict_encoding::StrictSerialize;
 
 use super::*;
@@ -231,6 +231,31 @@ fn refuses_a_fascia_with_more_bundles_than_its_limit() {
     assert!(err.contains("exceeds the maximum"), "{err}");
 }
 
+/// A fascia of exactly the limit, every bundle a real one the tx commits.
+#[test]
+fn reads_a_fascia_with_as_many_bundles_as_its_limit() {
+    let (mut ours, our_rights) = issued(0xB1, &[0xA0]);
+    let our_send = send_of(&mut ours, our_rights[0]);
+    let mut inputs = vec![our_rights[0].outpoint];
+    let mut moves = vec![our_send];
+    for tag in 1..crate::config::MAX_FASCIA_BUNDLES as u8 {
+        let (mut theirs, their_rights) = issued(tag, &[tag]);
+        inputs.push(their_rights[0].outpoint);
+        moves.push(theirs.rights_transition(their_rights[0], &[1]));
+    }
+    let (tx, fascia) = crafted(inputs, |psbt| {
+        for transition in moves {
+            psbt.push_rgb_transition(transition).unwrap();
+        }
+    });
+    assert_eq!(
+        fascia.bundles().len(),
+        crate::config::MAX_FASCIA_BUNDLES as usize
+    );
+    let committed = read(&tx, &fascia, ours.contract_id).unwrap();
+    assert_eq!(committed.transition.outputs.len(), 2);
+}
+
 // ===== F3: the close method =====
 
 /// Inserts `out` before the OP_RETURN, then commits with the host on vout 1.
@@ -395,6 +420,56 @@ fn reads_past_a_second_contract_bundle_that_is_not_a_move() {
     });
     let committed = read_owning_vout_2(&tx, &fascia, ours.contract_id).unwrap();
     assert_eq!(committed.transition.outputs.len(), 2);
+}
+
+/// Our rights send beside a second right of ours that `side` moves.
+fn with_side_move(side: impl FnOnce(&mut History, Utxo) -> Transition) -> Result<Committed> {
+    let (mut ours, our_rights) = issued(0xB1, &[0xA0, 0xA1]);
+    let our_send = send_of(&mut ours, our_rights[0]);
+    let side_move = side(&mut ours, our_rights[1]);
+    let inputs = vec![our_rights[0].outpoint, our_rights[1].outpoint];
+    let (tx, fascia) = crafted(inputs, |psbt| {
+        psbt.push_rgb_transition(our_send).unwrap();
+        psbt.push_rgb_transition(side_move).unwrap();
+    });
+    read_owning_vout_2(&tx, &fascia, ours.contract_id)
+}
+
+/// A side move of a pinned right to `seal`.
+fn right_moved_to(history: &mut History, right: Utxo, seal: BuilderSeal<GraphSeal>) -> Transition {
+    history
+        .transition("propagate")
+        .add_input(right.opout, AllocatedState::Void)
+        .unwrap()
+        .add_rights("mintRight", seal)
+        .unwrap()
+        .complete_transition()
+        .unwrap()
+}
+
+/// M9: a side transition keeps a right of the pinned contract on an output of
+/// this tx that is the enclave's own.
+#[test]
+fn reads_past_a_pinned_right_moved_to_our_own_output() {
+    let committed = with_side_move(|history, right| history.rights_transition(right, &[2]));
+    assert_eq!(committed.unwrap().transition.outputs.len(), 2);
+}
+
+/// The enclave cannot see what a blinded seal or another tx's output pays.
+#[test]
+fn refuses_a_pinned_right_moved_to_a_blinded_seal_or_another_tx() {
+    let held = GraphSeal::with_blinded_vout(2u32, 7).to_secret_seal();
+    let elsewhere = gen::outpoint(0xC0, 0).txid;
+    let seals = [
+        BuilderSeal::Concealed(held),
+        BuilderSeal::from(GraphSeal::with_blinding(elsewhere, 2u32, 7)),
+    ];
+    for seal in seals {
+        let err = with_side_move(|history, right| right_moved_to(history, right, seal))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("the signer reads exactly one"), "{err}");
+    }
 }
 
 #[test]

@@ -39,10 +39,10 @@ pub const DEFAULT_MAX_CONSIGNMENT_BYTES: usize = 10 * 1024 * 1024;
 /// the bundles of other contracts that the tx moves.
 pub const MAX_FASCIA_BYTES: usize = 64 * 1024;
 
-/// The most bundles a fascia may hold, one for each contract the tx moves. A
-/// mint or a refill moves the pinned contract alone, so the rest is room for
-/// other contracts that have state on the UTXO of a right.
-pub const MAX_FASCIA_BUNDLES: u32 = 16;
+/// The most bundles a fascia may hold, one for each contract the tx moves. It
+/// is the most allocations the connector's wallet keeps on one UTXO, so a mint
+/// or a refill of one right never holds more.
+pub const MAX_FASCIA_BUNDLES: u32 = 20;
 
 /// The most bytes a PSBT may have in the image, on every path that parses
 /// one. The operator can change it (`max_psbt_bytes`). A decoded input or
