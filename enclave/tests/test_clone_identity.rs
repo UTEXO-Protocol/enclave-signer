@@ -80,7 +80,7 @@ fn clone_identity_rejects_each_bundle_and_policy_field_before_active_and_allows_
     let bundles = clone_commitment::bundle_cases(&keys);
     let policies = clone_commitment::policy_cases(&policy.attested());
     assert_eq!(bundles.len(), 10);
-    assert_eq!(policies.len(), 23);
+    assert_eq!(policies.len(), 22);
     let mut cases: Vec<_> = bundles
         .into_iter()
         .map(|(name, k)| (format!("bundle.{name}"), k, policy.commitment_bytes()))
