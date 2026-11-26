@@ -9,14 +9,13 @@
 //! little-endian.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 
 use bitcoin::hashes::Hash as _;
 use prost::bytes::Bytes;
 use rgb_lib::TypeOfTransition;
 
 use super::bfa::{MintAnchor, VerifiedLock};
-use super::reject_list::{self, OpoutKey};
+use super::reject_list::{OpoutKey, RejectListEntry, RejectListLog};
 use super::types::{ValidatedConsignment, WitnessBlock};
 use crate::error::EnclaveError;
 use crate::limits::Limits;
@@ -52,7 +51,7 @@ pub(super) mod to_child {
         Header(Vec<u8>),
         /// The answer to `RejectList`.
         #[prost(message, tag = "5")]
-        Decisions(super::Decisions),
+        Entries(super::Entries),
         /// The enclave refused the request and keeps the reason.
         #[prost(message, tag = "6")]
         Refused(super::Empty),
@@ -112,13 +111,16 @@ pub(super) struct Bound {
     pub locks: Vec<u8>,
 }
 
-/// The answer to `RejectList`: [`OPOUT_RECORD_BYTES`] records in each list.
+/// The answer to `RejectList`: the entries of the list as the enclave read
+/// them.
 #[derive(Clone, PartialEq, prost::Message)]
-pub(super) struct Decisions {
+pub(super) struct Entries {
+    /// [`ENTRY_RECORD_BYTES`] records, in append order.
     #[prost(bytes = "vec", tag = "1")]
-    pub reject: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub allow: Vec<u8>,
+    pub entries: Vec<u8>,
+    /// How many of the leading entries were appended in finalized blocks.
+    #[prost(uint64, tag = "2")]
+    pub finalized: u64,
 }
 
 /// One frame from the child to the enclave.
@@ -290,8 +292,10 @@ pub(super) const LOCK_RECORD_BYTES: usize =
 /// A mint anchor: OpId, lock id, amount, before block.
 pub(super) const ANCHOR_RECORD_BYTES: usize =
     ID_BYTES + ID_BYTES + size_of::<u64>() + size_of::<u64>();
-/// An opout: OpId, assignment type, output number.
-pub(super) const OPOUT_RECORD_BYTES: usize = ID_BYTES + size_of::<u16>() + size_of::<u16>();
+/// A list entry: OpId, assignment type, output number, then 1 to reject or 0
+/// to allow.
+pub(super) const ENTRY_RECORD_BYTES: usize =
+    ID_BYTES + size_of::<u16>() + size_of::<u16>() + size_of::<u8>();
 
 pub(super) fn pack_witness_blocks(blocks: &[WitnessBlock]) -> Vec<u8> {
     let mut out = Vec::with_capacity(blocks.len() * WITNESS_BLOCK_RECORD_BYTES);
@@ -377,46 +381,43 @@ pub(super) fn unpack_anchors(bytes: &[u8]) -> Result<Vec<MintAnchor>, String> {
     Ok(out)
 }
 
-pub(super) fn pack_opouts<'a>(opouts: impl Iterator<Item = &'a OpoutKey>) -> Vec<u8> {
-    // A set reports its exact length, so the list takes one allocation.
-    let mut out = Vec::with_capacity(opouts.size_hint().0.saturating_mul(OPOUT_RECORD_BYTES));
-    for opout in opouts {
-        out.extend_from_slice(&opout.op);
-        out.extend_from_slice(&opout.ty.to_le_bytes());
-        out.extend_from_slice(&opout.no.to_le_bytes());
+/// The answer to a reject-list read. The log drops once packed.
+pub(super) fn pack_entries(log: RejectListLog) -> Entries {
+    let mut entries = Vec::with_capacity(log.entries.len() * ENTRY_RECORD_BYTES);
+    for entry in &log.entries {
+        entries.extend_from_slice(&entry.opout.op);
+        entries.extend_from_slice(&entry.opout.ty.to_le_bytes());
+        entries.extend_from_slice(&entry.opout.no.to_le_bytes());
+        entries.push(u8::from(entry.reject));
     }
-    out
+    Entries {
+        entries,
+        finalized: log.finalized as u64,
+    }
 }
 
-pub(super) fn unpack_opouts(bytes: &[u8]) -> Result<BTreeSet<OpoutKey>, String> {
-    let records = records::<OPOUT_RECORD_BYTES>(bytes, "opout")?;
-    let mut out = BTreeSet::new();
+/// The log of an answer to a reject-list read. The packed list is freed once
+/// the log is built.
+pub(super) fn unpack_entries(answer: Entries) -> Result<RejectListLog, String> {
+    let records = records::<ENTRY_RECORD_BYTES>(&answer.entries, "reject-list entry")?;
+    let mut entries = Vec::with_capacity(records.len());
     for record in records {
         let mut f = Fields(record);
-        out.insert(OpoutKey {
+        let opout = OpoutKey {
             op: f.take()?,
             ty: u16::from_le_bytes(f.take()?),
             no: u16::from_le_bytes(f.take()?),
-        });
+        };
+        let reject = match f.take::<1>()? {
+            [0] => false,
+            [1] => true,
+            [other] => return Err(format!("a reject-list entry with the flag {other}")),
+        };
+        entries.push(RejectListEntry { opout, reject });
     }
-    Ok(out)
-}
-
-/// The answer to a reject-list read. The sets drop once packed.
-pub(super) fn pack_decisions(decisions: reject_list::Decisions) -> Decisions {
-    Decisions {
-        reject: pack_opouts(decisions.reject.iter()),
-        allow: pack_opouts(decisions.allow.iter()),
-    }
-}
-
-/// The decisions of an answer to a reject-list read. Each packed list is
-/// freed once its set is built.
-pub(super) fn unpack_decisions(answer: Decisions) -> Result<reject_list::Decisions, String> {
-    let unpack = |packed: Vec<u8>| unpack_opouts(&packed);
-    let reject = unpack(answer.reject)?;
-    let allow = unpack(answer.allow)?;
-    Ok(reject_list::Decisions { reject, allow })
+    let finalized = usize::try_from(answer.finalized)
+        .map_err(|_| format!("{} finalized entries", answer.finalized))?;
+    Ok(RejectListLog { entries, finalized })
 }
 
 /// The largest frame the enclave sends a child under `limits`: the answer to
@@ -425,7 +426,7 @@ pub(super) fn unpack_decisions(answer: Decisions) -> Result<reject_list::Decisio
 pub(super) fn enclave_frame_bytes(limits: &Limits) -> u64 {
     limits
         .max_reject_list_entries
-        .saturating_mul(OPOUT_RECORD_BYTES as u64)
+        .saturating_mul(ENTRY_RECORD_BYTES as u64)
         .saturating_add(VALIDATOR_FRAME_FIXED_BYTES as u64)
 }
 

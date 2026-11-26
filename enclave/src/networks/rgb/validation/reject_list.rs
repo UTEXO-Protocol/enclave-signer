@@ -1,16 +1,16 @@
-//! The BFA reject list, with rgb-lib 567e5b8 semantics (`api/evm.rs`
-//! `RejectListLog::decisions`).
+//! The BFA reject list.
 //!
 //! The genesis may name an `IRgbRejectList` contract. Each entry rejects or
-//! allows one opout. The server reads the list over the pinned EVM RPC, this
-//! module turns its entries into decisions, and rgb-lib walks the history
-//! with them (`validate_consignment_with_resolver`).
+//! allows one opout. rgb-lib reads the location from the genesis and asks the
+//! resolver for the entries (`validate_consignment_with_resolver`). The server
+//! reads them over the pinned EVM RPC. rgb-lib decides from them which opouts
+//! the list rejects and allows, and walks the history with that.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
 
 use amplify::{ByteArray, Wrapper};
-use rgb_lib::no_wallet::{RejectList, RejectListSource, ResolveRejectList};
+use rgb_lib::no_wallet::{EvmRejectList, EvmRejectListEntry, ResolveRejectList};
+use rgb_lib::EvmContract;
 use rgb_lib::{AssignmentType, OpId, Opout};
 
 use crate::error::{EnclaveError, Result};
@@ -64,40 +64,17 @@ pub struct RejectListEntry {
     pub reject: bool,
 }
 
-/// The opouts the list rejects and allows now. Disjoint.
+/// The entries of a list as of the latest block, in append order. The first
+/// `finalized` of them were appended in finalized blocks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Decisions {
-    pub reject: BTreeSet<OpoutKey>,
-    pub allow: BTreeSet<OpoutKey>,
+pub struct RejectListLog {
+    pub entries: Vec<RejectListEntry>,
+    pub finalized: usize,
 }
 
-/// Decisions from the entries in append order, the first `finalized` of them
-/// in finalized blocks. The latest finalized entry wins; a pending reject
-/// counts at once, a pending allow not at all.
-pub fn decisions(entries: &[RejectListEntry], finalized: usize) -> Decisions {
-    let (finalized, pending) = entries.split_at(finalized.min(entries.len()));
-    let latest: BTreeMap<OpoutKey, bool> = finalized.iter().map(|e| (e.opout, e.reject)).collect();
-    let mut out = Decisions {
-        reject: pending
-            .iter()
-            .filter(|e| e.reject)
-            .map(|e| e.opout)
-            .collect(),
-        allow: BTreeSet::new(),
-    };
-    for (opout, rejected) in latest {
-        if rejected {
-            out.reject.insert(opout);
-        } else if !out.reject.contains(&opout) {
-            out.allow.insert(opout);
-        }
-    }
-    out
-}
-
-/// Reads a list's current decisions. The server reads it over the pinned EVM
+/// Reads the entries of a list. The server reads them over the pinned EVM
 /// RPC; a build without one passes `None` and refuses an asset with a list.
-pub type RejectListReader<'a> = &'a dyn Fn(&RejectListContract) -> Result<Decisions>;
+pub type RejectListReader<'a> = &'a dyn Fn(&RejectListContract) -> Result<RejectListLog>;
 
 /// `bind_asset` runs on the genesis contract id before rgb-lib, so only the
 /// pinned asset's list is ever read; with no `read`er a listed asset refuses.
@@ -106,21 +83,28 @@ pub struct ListAccess<'a> {
     pub read: Option<RejectListReader<'a>>,
 }
 
-/// rgb-lib's reject-list resolver: it reads only the list of the genesis the
-/// asset bind passed, and keeps the reader's own error.
+/// rgb-lib's reject-list resolver. rgb-lib names the list: it decodes the
+/// location from the genesis it has validated, and the asset bind has
+/// already fixed that genesis. The resolver keeps the reader's own error.
 pub(super) struct ListResolver<'a> {
-    list: RejectListContract,
     read: RejectListReader<'a>,
+    /// The list rgb-lib asked for, for the refusal text.
+    asked: Cell<Option<RejectListContract>>,
     failure: RefCell<Option<EnclaveError>>,
 }
 
 impl<'a> ListResolver<'a> {
-    pub(super) fn new(list: RejectListContract, read: RejectListReader<'a>) -> Self {
+    pub(super) fn new(read: RejectListReader<'a>) -> Self {
         Self {
-            list,
             read,
+            asked: Cell::new(None),
             failure: RefCell::new(None),
         }
+    }
+
+    /// The EVM list rgb-lib asked for, if it asked for one.
+    pub(super) fn asked(&self) -> Option<RejectListContract> {
+        self.asked.get()
     }
 
     /// The reader's error, which rgb-lib would report as a network one.
@@ -133,34 +117,46 @@ impl<'a> ListResolver<'a> {
         *self.failure.borrow_mut() = Some(e);
         rgb_lib::Error::Network { details }
     }
-
-    fn contract(source: &RejectListSource) -> Option<RejectListContract> {
-        let RejectListSource::Evm(contract) = source else {
-            return None;
-        };
-        Some(RejectListContract {
-            chain_id: contract.chain_id,
-            address: contract.address.to_byte_array(),
-        })
-    }
 }
 
 impl ResolveRejectList for ListResolver<'_> {
-    fn get_reject_list(
+    /// The enclave has no egress to a URL, and its host would be untrusted.
+    fn get_url_reject_list(&self, _url: &str) -> std::result::Result<String, rgb_lib::Error> {
+        Err(self.fail(EnclaveError::CrossCheck(
+            "BFA genesis names a reject list that is not an EVM contract - this enclave reads \
+             only an EVM reject list, refusing to sign"
+                .into(),
+        )))
+    }
+
+    /// The entries as read. rgb-lib refuses a log that reports more finalized
+    /// entries than it holds.
+    fn get_evm_reject_list(
         &self,
-        source: &RejectListSource,
-    ) -> std::result::Result<RejectList, rgb_lib::Error> {
-        if Self::contract(source) != Some(self.list) {
-            return Err(self.fail(EnclaveError::CrossCheck(format!(
-                "rgb-lib asked for the reject list {source:?}, not the genesis list 0x{} on chain \
-                 {} - refusing to read it",
-                hex::encode(self.list.address),
-                self.list.chain_id
-            ))));
-        }
-        let decisions = (self.read)(&self.list).map_err(|e| self.fail(e))?;
-        let rejected = decisions.reject.into_iter().map(|o| (o.into(), false));
-        let allowed = decisions.allow.into_iter().map(|o| (o.into(), true));
-        Ok(RejectList::from_decisions(rejected.chain(allowed)))
+        contract: &EvmContract,
+    ) -> std::result::Result<EvmRejectList, rgb_lib::Error> {
+        let list = RejectListContract {
+            chain_id: contract.chain_id,
+            address: contract.address.to_byte_array(),
+        };
+        self.asked.set(Some(list));
+        let log = (self.read)(&list).map_err(|e| self.fail(e))?;
+        Ok(EvmRejectList {
+            entries: log
+                .entries
+                .into_iter()
+                .map(|e| {
+                    // Formatting doubles the buffer as it grows, and rgb-lib
+                    // holds every text while it decides.
+                    let mut opout = Opout::from(e.opout).to_string();
+                    opout.shrink_to_fit();
+                    EvmRejectListEntry {
+                        opout,
+                        reject: e.reject,
+                    }
+                })
+                .collect(),
+            finalized: log.finalized,
+        })
     }
 }

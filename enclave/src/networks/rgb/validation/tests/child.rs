@@ -76,7 +76,10 @@ fn a_burn_validated_in_the_child_reads_as_in_process() {
     let read = |list: &RejectListContract| {
         reads.set(reads.get() + 1);
         assert_eq!(list.address, LIST);
-        Ok(decisions(&unrelated, unrelated.len()))
+        Ok(RejectListLog {
+            entries: unrelated.to_vec(),
+            finalized: unrelated.len(),
+        })
     };
     let reading = ListAccess {
         bind_asset: &any_asset,
@@ -186,7 +189,12 @@ fn a_refusal_through_the_child_matches_the_refusal_in_process() {
         opout: key(right.opout),
         reject: true,
     }];
-    let read = |_: &RejectListContract| Ok(decisions(&rejected, rejected.len()));
+    let read = |_: &RejectListContract| {
+        Ok(RejectListLog {
+            entries: rejected.to_vec(),
+            finalized: rejected.len(),
+        })
+    };
     let lists = ListAccess {
         bind_asset: &any_asset,
         read: Some(&read),
@@ -219,10 +227,13 @@ fn a_reject_list_longer_than_a_request_frame_reaches_the_child() {
             }
         })
         .collect();
-    let decided = decisions(&unrelated, unrelated.len());
-    let packed = decided.reject.len() * super::super::ipc::OPOUT_RECORD_BYTES;
+    let packed = unrelated.len() * super::super::ipc::ENTRY_RECORD_BYTES;
     assert!(packed as u64 > MIB, "{packed} bytes of list");
-    let read = |_: &RejectListContract| Ok(decided.clone());
+    let log = RejectListLog {
+        finalized: unrelated.len(),
+        entries: unrelated,
+    };
+    let read = |_: &RejectListContract| Ok(log.clone());
     let lists = ListAccess {
         bind_asset: &any_asset,
         read: Some(&read),

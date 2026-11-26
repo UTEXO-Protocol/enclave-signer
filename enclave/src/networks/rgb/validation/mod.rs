@@ -16,8 +16,8 @@
 //! - `types.rs`: those shapes.
 //! - `asset_bind.rs`: bind the validated asset id to the operator pin.
 //! - `bfa.rs`: the BFA mint claims and their binding to EVM locks by lockId.
-//! - `schema.rs`: the reject list the genesis names.
-//! - `reject_list.rs`: the issuer's reject list decisions.
+//! - `reject_list.rs`: the entries of the issuer's reject list and the
+//!   resolver that reads the list rgb-lib names.
 //!
 //! The enclave does not trust the listener `consignment_valid` boolean.
 
@@ -32,7 +32,6 @@ mod ipc;
 mod reject_list;
 #[cfg(all(rgb_to_evm, unix))]
 mod runner;
-mod schema;
 mod source;
 mod types;
 mod validator;
@@ -48,8 +47,7 @@ pub use child::run_if_test_child;
 #[cfg(all(rgb_to_evm, unix))]
 pub use child::{serve as serve_validator_child, CHILD_ARG};
 pub use reject_list::{
-    decisions, Decisions, ListAccess, OpoutKey, RejectListContract, RejectListEntry,
-    RejectListReader,
+    ListAccess, OpoutKey, RejectListContract, RejectListEntry, RejectListLog, RejectListReader,
 };
 #[cfg(all(rgb_to_evm, unix))]
 pub use runner::{probe as probe_validator_child, ChildProgram, ChildReport};

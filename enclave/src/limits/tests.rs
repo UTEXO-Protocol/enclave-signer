@@ -204,11 +204,11 @@ fn the_size_limits_must_fit_the_heap_of_a_frame() {
 /// takes a smaller consignment or a larger frame budget.
 #[test]
 fn a_long_reject_list_must_fit_the_heap_of_a_frame() {
-    apply_to_defaults(|l| l.max_reject_list_entries = 30_000).unwrap();
-    let err = apply_to_defaults(|l| l.max_reject_list_entries = 40_000).unwrap_err();
-    assert!(err.contains("max_reject_list_entries is 40000"), "{err}");
+    apply_to_defaults(|l| l.max_reject_list_entries = 18_300).unwrap();
+    let err = apply_to_defaults(|l| l.max_reject_list_entries = 18_400).unwrap_err();
+    assert!(err.contains("max_reject_list_entries is 18400"), "{err}");
     apply_to_defaults(|l| {
-        l.max_reject_list_entries = 100_000;
+        l.max_reject_list_entries = 80_000;
         l.max_consignment_bytes = 10_000_000;
     })
     .unwrap();

@@ -568,9 +568,9 @@ fn answer(
                 chain_id: ask.chain_id,
                 address,
             };
-            read(&list).and_then(|decisions| {
+            read(&list).and_then(|log| {
                 // The reader caps the list under the limits in force now.
-                let entries = decisions.reject.len() + decisions.allow.len();
+                let entries = log.entries.len();
                 if entries as u64 > services.list_entries {
                     return Err(EnclaveError::CrossCheck(format!(
                         "reject list 0x{} holds at least {entries} entries, over the {} in force \
@@ -579,7 +579,7 @@ fn answer(
                         services.list_entries
                     )));
                 }
-                Ok(to_child::Body::Decisions(ipc::pack_decisions(decisions)))
+                Ok(to_child::Body::Entries(ipc::pack_entries(log)))
             })
         }
         to_enclave::Body::Verdict(_) | to_enclave::Body::Ready(_) => {

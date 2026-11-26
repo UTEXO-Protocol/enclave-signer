@@ -4865,7 +4865,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.7"
-source = "git+https://github.com/RGB-Tools/rgb-lib?rev=b754db77#b754db77ef07ba999ebc27412ca9f37e628f98c1"
+source = "git+https://github.com/RGB-Tools/rgb-lib?rev=f4971e01#f4971e0165c2ed35ca74e65e3fd0071e4eed7f2d"
 dependencies = [
  "amplify",
  "bitcoin",
@@ -6379,7 +6379,6 @@ dependencies = [
  "nix",
  "prost",
  "rgb-lib",
- "rgb-ops",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",

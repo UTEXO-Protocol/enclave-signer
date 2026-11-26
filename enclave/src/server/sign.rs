@@ -90,7 +90,7 @@ pub(super) fn handle_sign(
 
     #[cfg(all(feature = "rgb-validation", rgb_to_evm))]
     let reject_list_reader = |list: &crate::networks::rgb::validation::RejectListContract| {
-        super::reject_list::read_decisions(ctx, list, deadline)
+        super::reject_list::read_entries(ctx, list, deadline)
     };
 
     // The mint signer binds the mint its PSBT commits to this request's deposit.

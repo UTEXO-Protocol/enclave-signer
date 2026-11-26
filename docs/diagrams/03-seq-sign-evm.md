@@ -36,7 +36,6 @@ sequenceDiagram
     Child->>Rgb: BindAsset(contract_id), the first question
     Rgb->>Rgb: asset bind: contract_id == declared asset_id<br/>(== pinned RGB_ASSET_ID when configured)
     Rgb-->>Child: AssetBound
-    Child->>Child: reject list, if the genesis names one, must be an EVM contract
     Child->>Child: one rgb-lib validate_consignment_with_resolver:<br/>phase 1 under the BFA rules, phase 2 through three resolvers
     Child->>Rgb: anchor resolver: Anchors once with no anchor,<br/>then once per mint anchor
     Rgb->>Bind: AnchorBinder
@@ -50,9 +49,11 @@ sequenceDiagram
     Rgb-->>Child: the 80-byte header
     Child->>Child: no transaction lookup: a witness is Mined(height) only when<br/>the SPV proof in the consignment holds against that header
     opt genesis names a reject list
+        Child->>Child: reject-list resolver: the list rgb-lib names must be an EVM contract
         Child->>Rgb: RejectList(chain id, address), once, after the asset bind
         Rgb->>Srv: reject-list resolver: list on EVM_CHAIN_ID, eth_chainId == EVM_CHAIN_ID,<br/>length() at finalized and latest, entries pages at latest
-        Rgb-->>Child: Decisions
+        Rgb-->>Child: Entries (as read, and the finalized count)
+        Child->>Child: rgb-lib decides from the entries which opouts are rejected and allowed
         Child->>Child: rgb-lib: an input or output of a terminal operation<br/>reaches a rejected opout before an allowed one => REFUSE
     end
     Child->>Child: the bound locks are the anchors, one for one

@@ -18,7 +18,6 @@ use super::asset_bind::*;
 use super::bfa::*;
 use super::consignment::*;
 use super::reject_list::*;
-use super::schema::*;
 #[cfg(rgb_to_evm)]
 use super::source::*;
 use super::types::*;
@@ -152,8 +151,8 @@ fn any_asset(_: &str) -> Result<()> {
     Ok(())
 }
 
-fn empty_list(_: &RejectListContract) -> Result<Decisions> {
-    Ok(Decisions::default())
+fn empty_list(_: &RejectListContract) -> Result<RejectListLog> {
+    Ok(RejectListLog::default())
 }
 
 /// Any asset binds, and a listed one reads an empty list.
@@ -273,25 +272,6 @@ fn key(opout: rgbstd::Opout) -> OpoutKey {
     opout.into()
 }
 
-/// The hand decode of an EVM list location equals its strict encoding.
-#[test]
-fn evm_reject_list_decodes_as_its_strict_encoding() {
-    use strict_encoding::StrictSerialize;
-    let location = gen::evm_reject_list(0x0102_0304_0506_0708, LIST);
-    let bytes = location.to_strict_serialized::<64>().unwrap();
-    let mut expected = vec![1u8];
-    expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
-    expected.extend_from_slice(&LIST);
-    assert_eq!(bytes.as_slice(), expected.as_slice());
-    assert_eq!(
-        reject_list(&listed().genesis).unwrap(),
-        Some(RejectListContract {
-            chain_id: EVM_CHAIN_ID,
-            address: LIST
-        })
-    );
-}
-
 /// The enclave has no egress to a URL, and its host would be untrusted.
 #[test]
 fn url_reject_list_is_refused() {
@@ -322,8 +302,18 @@ fn validate_listed(
     let reads = RefCell::new(0);
     let read = |list: &RejectListContract| {
         *reads.borrow_mut() += 1;
-        assert_eq!(list.address, LIST);
-        Ok(decisions(&entries, finalized))
+        // rgb-lib names the list the genesis publishes.
+        assert_eq!(
+            *list,
+            RejectListContract {
+                chain_id: EVM_CHAIN_ID,
+                address: LIST
+            }
+        );
+        Ok(RejectListLog {
+            entries: entries.clone(),
+            finalized,
+        })
     };
     let lists = ListAccess {
         bind_asset: &any_asset,
@@ -383,6 +373,27 @@ fn a_pending_allow_does_not_shield_the_burn() {
     let (history, right, units, _) = listed_burn();
     let entries = [(right.opout, true), (units.opout, false)];
     assert_rejected(validate_listed(&history.consignment(), &entries, 1).0);
+}
+
+/// A pending reject counts at once, also over a finalized allow.
+#[test]
+fn a_pending_reject_overrides_a_finalized_allow() {
+    let (history, _, units, _) = listed_burn();
+    let entries = [(units.opout, false), (units.opout, true)];
+    assert_rejected(validate_listed(&history.consignment(), &entries, 1).0);
+    validate_listed(&history.consignment(), &entries[..1], 1)
+        .0
+        .expect("control: the finalized allow alone releases");
+}
+
+/// rgb-lib refuses a log that reports more finalized entries than it
+/// holds, whatever the entries say.
+#[test]
+fn a_log_with_too_many_finalized_entries_is_refused() {
+    let (history, ..) = listed_burn();
+    let err = error_of(validate_listed(&history.consignment(), &[], 1).0);
+    assert!(err.contains("Invalid reject list"), "{err}");
+    assert!(!err.contains(REJECT_LIST_REFUSAL), "{err}");
 }
 
 /// (d) The change stays on the split, which the burn spends, so the split is
@@ -507,7 +518,7 @@ fn the_list_is_read_only_for_a_listed_asset_after_the_bind() {
     let reads = RefCell::new(0);
     let read = |_: &RejectListContract| {
         *reads.borrow_mut() += 1;
-        Ok(Decisions::default())
+        Ok(RejectListLog::default())
     };
     let foreign = |_: &str| -> Result<()> {
         Err(crate::error::EnclaveError::CrossCheck(
@@ -539,7 +550,7 @@ fn the_list_is_read_only_for_a_listed_asset_after_the_bind() {
 fn a_listed_asset_is_refused_when_its_list_cannot_be_read() {
     let bytes = listed_burn().0.consignment();
     let chain = mined(&witness_ids(&bytes));
-    let failing = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("evm-rpc")) };
+    let failing = |_: &RejectListContract| -> Result<RejectListLog> { Err(not_ready("evm-rpc")) };
     let run = |read| {
         let lists = ListAccess {
             bind_asset: &any_asset,
@@ -571,103 +582,68 @@ fn assert_own_error(err: crate::error::EnclaveError, what: &str) {
     assert!(!text.contains("witness is not proven"), "{text}");
 }
 
-/// The resolver reads only the genesis list: any other source rgb-lib names
-/// is refused unread, and the refusal is ours.
+/// The resolver reads the EVM list rgb-lib names, keeps it for the refusal
+/// text and gives rgb-lib the entries as read: in order, with repeats, and
+/// the finalized count. A URL list is refused unread, and the refusal is ours.
 #[test]
-fn the_list_resolver_refuses_a_source_other_than_the_genesis_list() {
+fn the_list_resolver_reads_only_an_evm_list() {
     use rgb_lib::no_wallet::{RejectListSource, ResolveRejectList};
-    let reads = RefCell::new(0);
-    let read = |_: &RejectListContract| {
-        *reads.borrow_mut() += 1;
-        Ok(Decisions::default())
+    use std::str::FromStr;
+    let entry = |n: u8, reject| RejectListEntry {
+        opout: OpoutKey {
+            op: [n; 32],
+            ty: 4000 + u16::from(n),
+            no: u16::from(n),
+        },
+        reject,
     };
-    let genesis_list = RejectListContract {
-        chain_id: EVM_CHAIN_ID,
+    let log = RejectListLog {
+        entries: vec![entry(1, true), entry(2, false), entry(1, false)],
+        finalized: 2,
+    };
+    let asked = RefCell::new(Vec::new());
+    let read = |list: &RejectListContract| {
+        asked.borrow_mut().push(*list);
+        Ok(log.clone())
+    };
+    let resolver = ListResolver::new(&read);
+    assert!(resolver
+        .get_url_reject_list("https://example.com/list")
+        .is_err());
+    let failure = resolver
+        .take_failure()
+        .expect("our own refusal")
+        .to_string();
+    assert!(failure.contains("not an EVM contract"), "{failure}");
+    assert!(asked.borrow().is_empty());
+    assert_eq!(resolver.asked(), None);
+
+    let list = RejectListContract {
+        chain_id: 0x0102_0304_0506_0708,
         address: LIST,
     };
-    let resolver = ListResolver::new(genesis_list, &read);
-    for other in [
-        RejectListSource::from(gen::evm_reject_list(EVM_CHAIN_ID, [0x77; 20])),
-        RejectListSource::from(gen::evm_reject_list(1, LIST)),
-        RejectListSource::Url("https://example.com/list".into()),
-    ] {
-        assert!(resolver.get_reject_list(&other).is_err(), "{other:?}");
-        let failure = resolver
-            .take_failure()
-            .expect("our own refusal")
-            .to_string();
-        assert!(failure.contains("not the genesis list"), "{failure}");
-    }
-    assert_eq!(*reads.borrow(), 0);
-    let genesis = RejectListSource::from(gen::evm_reject_list(EVM_CHAIN_ID, LIST));
-    resolver
-        .get_reject_list(&genesis)
-        .expect("the genesis list is read");
-    assert_eq!(*reads.borrow(), 1);
-}
-
-/// The reject-list decisions, ported from rgb-lib `api/evm.rs`.
-mod reject_list_rules {
-    use super::*;
-    use std::collections::BTreeSet;
-
-    fn op(n: u8) -> OpoutKey {
-        OpoutKey {
-            op: [n; 32],
-            ty: 4000,
-            no: 0,
-        }
-    }
-
-    fn entry(n: u8, reject: bool) -> RejectListEntry {
-        RejectListEntry {
-            opout: op(n),
-            reject,
-        }
-    }
-
-    fn set(ns: &[u8]) -> BTreeSet<OpoutKey> {
-        ns.iter().map(|n| op(*n)).collect()
-    }
-
-    fn log(entries: &[(u8, bool)], finalized: usize) -> Decisions {
-        let entries: Vec<_> = entries.iter().map(|(n, r)| entry(*n, *r)).collect();
-        decisions(&entries, finalized)
-    }
-
-    #[test]
-    fn latest_finalized_entry_wins() {
-        let got = log(&[(1, true), (2, false), (3, false), (3, true)], 4);
-        assert_eq!(got.reject, set(&[1, 3]));
-        assert_eq!(got.allow, set(&[2]));
-        let got = log(
-            &[(1, false), (1, true), (1, false), (2, true), (2, false)],
-            5,
-        );
-        assert!(got.reject.is_empty());
-        assert_eq!(got.allow, set(&[1, 2]));
-    }
-
-    #[test]
-    fn pending_reject_overrides_finalized_allow() {
-        let got = log(&[(2, false), (1, true), (2, true)], 1);
-        assert_eq!(got.reject, set(&[1, 2]));
-        assert!(got.allow.is_empty());
-        // A later pending allow does not undo a pending reject.
-        let got = log(
-            &[(1, false), (1, true), (1, false), (2, true), (2, false)],
-            1,
-        );
-        assert_eq!(got.reject, set(&[1, 2]));
-        assert!(got.allow.is_empty());
-    }
-
-    #[test]
-    fn pending_allow_is_ignored() {
-        let got = log(&[(1, true), (2, false), (1, false)], 1);
-        assert_eq!(got.reject, set(&[1]));
-        assert!(got.allow.is_empty());
-    }
+    let RejectListSource::Evm(contract) =
+        RejectListSource::from(gen::evm_reject_list(list.chain_id, LIST))
+    else {
+        panic!("an EVM list location");
+    };
+    let got = resolver
+        .get_evm_reject_list(&contract)
+        .expect("an EVM list is read");
+    assert_eq!(*asked.borrow(), [list]);
+    assert_eq!(resolver.asked(), Some(list));
+    assert_eq!(got.finalized, log.finalized);
+    let crossed: Vec<RejectListEntry> = got
+        .entries
+        .iter()
+        .map(|e| RejectListEntry {
+            opout: rgbstd::Opout::from_str(&e.opout)
+                .expect("rgb-lib parses the opout")
+                .into(),
+            reject: e.reject,
+        })
+        .collect();
+    assert_eq!(crossed, log.entries);
 }
 
 /// The pinned asset admits one genesis, under the schema that `rgb-schemas`
@@ -1814,7 +1790,7 @@ fn a_failing_resolver_refuses_with_its_own_error() {
         }
     }
     let binder = |_: &[MintAnchor]| -> Result<BoundAnchors> { Err(not_ready("binder")) };
-    let reader = |_: &RejectListContract| -> Result<Decisions> { Err(not_ready("reader")) };
+    let reader = |_: &RejectListContract| -> Result<RejectListLog> { Err(not_ready("reader")) };
     let read_failing = ListAccess {
         bind_asset: &any_asset,
         read: Some(&reader),
@@ -2336,7 +2312,10 @@ mod source_path {
         let reader = |list: &RejectListContract| {
             *reads.borrow_mut() += 1;
             assert_eq!(list.address, LIST);
-            Ok(decisions(&entries, entries.len()))
+            Ok(RejectListLog {
+                entries: entries.clone(),
+                finalized: entries.len(),
+            })
         };
         let config = pinned_config(config_asset.unwrap_or(&id));
         let result = run_reading(&source, &config, &chain, Some(&reader));
@@ -2378,7 +2357,7 @@ mod source_path {
     #[test]
     fn burn_is_refused_when_the_list_cannot_be_read() {
         let (source, chain, id) = listed_source();
-        let failing = |_: &RejectListContract| -> Result<Decisions> {
+        let failing = |_: &RejectListContract| -> Result<RejectListLog> {
             Err(crate::error::EnclaveError::CrossCheck(
                 "evm-rpc: down".into(),
             ))
@@ -2410,11 +2389,14 @@ mod source_path {
                 }
             })
             .collect();
-        let decided = decisions(&unrelated, unrelated.len());
+        let log = RejectListLog {
+            finalized: unrelated.len(),
+            entries: unrelated,
+        };
         // The raise lands after the child started, before the list read.
         let read = |_: &RejectListContract| {
             crate::limits::change_for_test(|l| l.max_reject_list_entries = raised);
-            Ok(decided.clone())
+            Ok(log.clone())
         };
         let (source, chain, id) = listed_source();
         let config = pinned_config(&id);
