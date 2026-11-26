@@ -36,6 +36,8 @@ hand.
 | [production-eif.md](production-eif.md) | Production profile, protected environment and artifact publication. |
 | [configuration.md](configuration.md) | The settings: image settings, launch values, parent settings. |
 | [operations.md](operations.md) | Launch, launch check, readiness, restart. |
+| [mint-release.md](mint-release.md) | Per-CID Mint KMS/storage prerequisites and release configuration. |
+| [role-rollout.md](role-rollout.md) | Approved identities, registration, role-separated backend routing, configuration checks and rollback evidence. |
 | [runtime-limits.md](runtime-limits.md) | The limits that an operator can change on a running enclave. |
 | [parent-mtls.md](parent-mtls.md) | mTLS, client roles, and every path into the enclave. |
 | [kms-persistence.md](kms-persistence.md) | Seed custody of the mint signer, with AWS KMS and S3. |

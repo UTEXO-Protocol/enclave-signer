@@ -877,4 +877,4 @@ miss=(); for p in "${WANT_PORTS[@]}"; do printf '%s\n' "$LISTEN" | grep -qx "$p"
 log "all parent ports listening: ${WANT_PORTS[*]}"
 
 log "deploy OK (git_sha $GIT_SHA, CID $ENCLAVE_CID) — run init/clone to bootstrap identity"
-log "verify-identity.sh needs CIDS=$ENCLAVE_CID, CLUSTER_DIR=$DIR, ENCLAVE_ENV=/etc/utexo/enclave-$ENCLAVE_CID.env and the approved EXPECTED_EVM map before routing traffic"
+log "verify-identity.sh needs CIDS=$ENCLAVE_CID, CLUSTER_DIR=$DIR, ENCLAVE_ENV=/etc/utexo/enclave-$ENCLAVE_CID.env, approved EVM/endpoint pins and Mint account xpubs/fingerprint; follow docs/role-rollout.md before routing traffic"

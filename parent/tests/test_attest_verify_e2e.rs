@@ -467,6 +467,119 @@ async fn exported_bundle_round_trips_through_the_binaries() {
 }
 
 #[test]
+fn real_export_refuses_zero_pcrs_before_contacting_the_enclave() {
+    let dir = scratch("zero-pcrs");
+    let pcrs = dir.join("PCR.json");
+    let out = dir.join("attestation.json");
+    let cli = env!("CARGO_BIN_EXE_utexo-bridge-parent-cli");
+    for name in ["PCR0", "PCR1", "PCR2"] {
+        let mut values = serde_json::json!({
+            "PCR0": "ab".repeat(48), "PCR1": "cd".repeat(48), "PCR2": "ef".repeat(48),
+        });
+        values[name] = serde_json::Value::String("00".repeat(48));
+        std::fs::write(&pcrs, serde_json::to_vec(&values).unwrap()).unwrap();
+        let output = run(
+            cli,
+            &[
+                "--addr",
+                "127.0.0.1:0",
+                "export-attestation",
+                "--signer-role",
+                "mint",
+                "--pcr-file",
+                pcrs.to_str().unwrap(),
+                "--image-env",
+                "unused.json",
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!("nonzero {name}")),
+            "{output:?}"
+        );
+        assert!(!out.exists());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn exported_mint_accounts_must_match_each_approved_pin_before_writing() {
+    let cli = env!("CARGO_BIN_EXE_utexo-bridge-parent-cli");
+    let enclave = format!("127.0.0.1:{}", start_real_enclave());
+    let dir = scratch("mint-identity");
+    let expected = EnclaveState::new(bitcoin::Network::Bitcoin);
+    expected.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
+    let keys = expected.get_keys().unwrap();
+    let fingerprint = hex::encode(keys.master_fingerprint);
+    let evm = format!("0x{}", hex::encode(keys.evm_address));
+    for (index, vanilla, colored, master, error) in [
+        (
+            0,
+            &keys.account_xpub_vanilla,
+            &keys.account_xpub_colored,
+            fingerprint.as_str(),
+            None,
+        ),
+        (
+            1,
+            &keys.account_xpub_colored,
+            &keys.account_xpub_colored,
+            fingerprint.as_str(),
+            Some("account_xpub_vanilla"),
+        ),
+        (
+            2,
+            &keys.account_xpub_vanilla,
+            &keys.account_xpub_vanilla,
+            fingerprint.as_str(),
+            Some("account_xpub_colored"),
+        ),
+        (
+            3,
+            &keys.account_xpub_vanilla,
+            &keys.account_xpub_colored,
+            "00000000",
+            Some("master_fingerprint"),
+        ),
+    ] {
+        let file = dir.join(format!("{index}.json"));
+        let output = run(
+            cli,
+            &[
+                "--addr",
+                &enclave,
+                "export-attestation",
+                "--mock",
+                "--out",
+                file.to_str().unwrap(),
+                "--expect-evm-address",
+                &evm,
+                "--expect-account-xpub-vanilla",
+                vanilla,
+                "--expect-account-xpub-colored",
+                colored,
+                "--expect-master-fingerprint",
+                master,
+            ],
+        );
+        if let Some(error) = error {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(error),
+                "{output:?}"
+            );
+            assert!(!file.exists());
+        } else {
+            assert!(output.status.success(), "{output:?}");
+            assert!(file.exists());
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn verify_identity_writes_a_bundle_per_enclave_and_gates_on_the_attested_address() {
     let dir = scratch("verify-identity");
     let (p16, p18) = (start_real_enclave(), start_real_enclave());
@@ -497,16 +610,27 @@ exec {} "${{args[@]}}"
     std::fs::create_dir(&bin).unwrap();
     std::fs::write(
         bin.join("nitro-cli"),
-        "#!/bin/sh\necho '[{\"EnclaveCID\":16,\"State\":\"RUNNING\"},{\"EnclaveCID\":18,\"State\":\"RUNNING\"}]'\n",
+        "#!/bin/sh\necho '[{\"EnclaveCID\":16,\"State\":\"RUNNING\",\"Flags\":\"NONE\"},{\"EnclaveCID\":18,\"State\":\"RUNNING\",\"Flags\":\"NONE\"}]'\n",
     )
     .unwrap();
-    for f in [&wrapper, &bin.join("nitro-cli")] {
+    // GNU timeout is not available on every developer machine. This fixture
+    // exercises identity gating; timeout behavior has separate transport tests.
+    std::fs::write(bin.join("timeout"), "#!/bin/sh\nshift\nexec \"$@\"\n").unwrap();
+    for f in [&wrapper, &bin.join("nitro-cli"), &bin.join("timeout")] {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let env_file = dir.join("enclave.env");
+    let ca_file = dir.join("rpc-ca.der");
+    std::fs::write(&ca_file, b"fixture CA DER").unwrap();
+    use sha2::{Digest, Sha256};
+    let ca_hash = hex::encode(Sha256::digest(b"fixture CA DER"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let gate = |env: &str, expected_evm: &str| {
+    // Independently approved fixed test identity, never taken from a live response.
+    let expected = EnclaveState::new(bitcoin::Network::Bitcoin);
+    expected.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
+    let keys = expected.get_keys().unwrap();
+    let gate = |env: &str, expected_evm: &str, colored: Option<&str>| {
         std::fs::write(&env_file, env).unwrap();
         let out = std::process::Command::new("bash")
             .arg(concat!(
@@ -519,6 +643,29 @@ exec {} "${{args[@]}}"
             .env("CIDS", "16 18")
             .env("ENCLAVE_ENV", &env_file)
             .env("EXPECTED_EVM", expected_evm)
+            .env(
+                "EXPECTED_XPUB_VANILLA",
+                format!(
+                    "16={} 18={}",
+                    keys.account_xpub_vanilla, keys.account_xpub_vanilla
+                ),
+            )
+            .env(
+                "EXPECTED_XPUB_COLORED",
+                format!(
+                    "16={0} 18={0}",
+                    colored.unwrap_or(&keys.account_xpub_colored)
+                ),
+            )
+            .env(
+                "EXPECTED_MASTER_FINGERPRINT",
+                format!("16={0} 18={0}", hex::encode(keys.master_fingerprint)),
+            )
+            .env("EVM_RPC_ENV", "")
+            .env("EXPECTED_EVM_RPC_HOST", "rpc.test")
+            .env("EXPECTED_EVM_RPC_CA_SHA256", &ca_hash)
+            .env("EVM_RPC_HOST", "rpc.test")
+            .env("EVM_RPC_TLS_CA_DER_FILE", &ca_file)
             .output()
             .unwrap();
         (
@@ -529,23 +676,20 @@ exec {} "${{args[@]}}"
     let burn = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n";
     let bundle = |cid: u16| dir.join(format!("attestation-{cid}.json"));
 
-    // Approve the identity from the fixed test fixture, not the live export.
-    let expected = EnclaveState::new(bitcoin::Network::Bitcoin);
-    expected.initialize_from_mnemonic(TEST_MNEMONIC).unwrap();
     let evm = format!("0x{}", hex::encode(expected.evm_address().unwrap()));
 
     for incomplete in [String::new(), format!("16={evm}")] {
-        let (code, log) = gate(burn, &incomplete);
+        let (code, log) = gate(burn, &incomplete, None);
         assert_eq!(code, Some(2), "{log}");
         assert!(!bundle(16).exists() && !bundle(18).exists());
         assert!(!log.contains("PASS:"), "{log}");
     }
 
-    let (code, log) = gate(burn, &format!("16={evm} 18={evm}"));
+    let (code, log) = gate(burn, &format!("16={evm} 18={evm}"), None);
     assert_eq!(code, Some(0), "{log}");
     for cid in [16, 18] {
         assert!(
-            log.contains(&format!("CID {cid} attested EVM {evm} == registered")),
+            log.contains(&format!("CID {cid} attested EVM {evm} == approved")),
             "{log}"
         );
         let out = run(
@@ -556,7 +700,7 @@ exec {} "${{args[@]}}"
     }
 
     let other = "0x0000000000000000000000000000000000000001";
-    let (code, log) = gate(burn, &format!("16={evm} 18={other}"));
+    let (code, log) = gate(burn, &format!("16={evm} 18={other}"), None);
     assert_eq!(code, Some(1), "{log}");
     assert!(
         log.contains("CID 18 attested export failed: FAIL: evm_address mismatch"),
@@ -567,12 +711,29 @@ exec {} "${{args[@]}}"
     let (code, log) = gate(
         "IMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=burn\n",
         &format!("16={evm} 18={evm}"),
+        None,
     );
     assert_eq!(code, Some(2), "{log}");
 
     std::fs::remove_file(bundle(16)).unwrap();
-    let (code, log) = gate("SIGNER_ROLE=mint\n", &format!("16={evm} 18={evm}"));
+    let (code, log) = gate("SIGNER_ROLE=mint\n", &format!("16={evm} 18={evm}"), None);
+    assert_eq!(code, Some(2), "{log}");
+    assert!(!bundle(16).exists() && !bundle(18).exists());
+    let mint = "PCR_FILE=PCR.json\nIMAGE_ENV=IMAGE-ENV.json\nSIGNER_ROLE=mint\n";
+    let (code, log) = gate(mint, &format!("16={evm} 18={evm}"), None);
     assert_eq!(code, Some(0), "{log}");
+    assert!(bundle(16).exists() && bundle(18).exists());
+    // Keep EVM correct while substituting the other valid account xpub.
+    let (code, log) = gate(
+        mint,
+        &format!("16={evm} 18={evm}"),
+        Some(&keys.account_xpub_vanilla),
+    );
+    assert_eq!(code, Some(1), "{log}");
+    assert!(
+        log.contains("account_xpub_colored differs from the approved identity"),
+        "{log}"
+    );
     assert!(!bundle(16).exists() && !bundle(18).exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
