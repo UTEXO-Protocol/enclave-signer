@@ -1,5 +1,9 @@
 # Publish an EIF release for signers
 
+For `prod-mainnet`, production AWS roles and stable releases, follow
+[production EIFs](production-eif.md). The Stage instructions below retain their
+prerelease behavior.
+
 `Publish EIF Release` publishes an existing **Stage / Public Signet** or
 **Stage / Bitcoin Mainnet** build as a GitHub prerelease. Choose the same
 `build_profile` used by Build EIF. Both use **Arbitrum One (42161)**.

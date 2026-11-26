@@ -134,6 +134,8 @@ CLUSTER_DIR='/path/to/artifacts/enclave-18/<git_sha>/rgb-burn' \
 ENCLAVE_ENV=/etc/utexo/enclave-18.env \
 CIDS="18" \
 EXPECTED_EVM="18=0x<40-hex-address>" \
+EXPECTED_EVM_RPC_HOST='<approved-host>' \
+EXPECTED_EVM_RPC_CA_SHA256='<approved-64-hex-CA-hash>' \
 bash deploy/verify-identity.sh
 ```
 
@@ -145,16 +147,53 @@ bash deploy/verify-identity.sh
 - `EXPECTED_EVM` must have exactly one address for each listed CID. An empty
   or partial map, a duplicate or extra CID and a malformed address return
   exit 2 before any enclave is queried.
-- For a burn signer in normal mode, set `SIGNER_ROLE`, `PCR_FILE` and
-  `IMAGE_ENV` in `ENCLAVE_ENV`, with the launch values of the release. Each
-  export gets its approved address through `--expect-evm-address`. The
-  script reads the EVM RPC host and port from
-  `/etc/nitro_enclaves/vsock-proxy-evmrpc.env`.
-- For a mint signer, or in debug mode, the script compares the main address
-  from `get-keys`. That is a structural identity check, not an attestation. A
-  mint signer needs `SIGNER_ROLE` too.
-- The script compares the approvals that you supply. It does not read the
-  chain.
+- For both roles, set `SIGNER_ROLE`, `PCR_FILE` and `IMAGE_ENV` in the
+  approved, root-owned `ENCLAVE_ENV`, with the launch values of the release.
+  Every export uses a fresh nonce and verifies real attestation, the complete Production
+  policy, PCRs and the address supplied through `--expect-evm-address`.
+- Supply `EXPECTED_EVM_RPC_HOST` and `EXPECTED_EVM_RPC_CA_SHA256` from the
+  independent endpoint approval. The gate compares them with the launch host
+  and SHA-256 of `EVM_RPC_TLS_CA_DER_FILE` before querying the enclave. The
+  attestation then binds those endpoint values to the measured code.
+- The script also reads `/etc/nitro_enclaves/vsock-proxy-evmrpc.env` for the
+  launch host and port. `EVM_RPC_ENV` can select an approved alternative;
+  an explicitly empty value omits that file. When run as root, the gate
+  requires both files and their parent directories to be root-owned, not
+  writable by group/others, and free of symlinks. These files describe launch
+  values; the gate retains the caller's identity and endpoint approval maps
+  and CID selection before reading them.
+- Mint requires `EXPECTED_XPUB_VANILLA`, `EXPECTED_XPUB_COLORED` and
+  `EXPECTED_MASTER_FINGERPRINT`, each a complete `CID=value` map. The first
+  two values are the approved account xpubs; fingerprints are eight hex
+  characters. Missing, partial, duplicate or malformed maps fail before
+  an enclave is queried.
+- Debug mode cannot approve an identity. A Development policy, including
+  public Signet, cannot pass this Production gate. Use liveness only for
+  diagnostics; it does not approve traffic.
+- The script checks the approvals that you supply. It does not read the
+  contract signer set, register keys, check readiness or enable traffic.
+  Follow [rollout acceptance](role-rollout.md) for those steps.
+
+For a mint candidate, obtain its complete keyset from independently verified
+bootstrap evidence and approve it before configuring the gate:
+
+```bash
+CLUSTER_DIR='/path/to/artifacts/enclave-24/<git_sha>/rgb-mint' \
+ENCLAVE_ENV=/etc/utexo/enclave-24.env CIDS=24 \
+EXPECTED_EVM='24=0x<40-hex-address>' \
+EXPECTED_XPUB_VANILLA='24=<approved-account-xpub>' \
+EXPECTED_XPUB_COLORED='24=<approved-account-xpub>' \
+EXPECTED_MASTER_FINGERPRINT='24=<8-hex-fingerprint>' \
+EXPECTED_EVM_RPC_HOST='<approved-host>' \
+EXPECTED_EVM_RPC_CA_SHA256='<approved-64-hex-CA-hash>' \
+bash deploy/verify-identity.sh
+```
+
+The CLI's `export-attestation` accepts the same mint checks directly as
+`--expect-account-xpub-vanilla`, `--expect-account-xpub-colored` and
+`--expect-master-fingerprint`. Supply all three together. It compares them
+with the verified bundle before writing the file. The host CLI must be built
+from a revision that supports these flags; an older CLI fails the gate.
 
 Routing automation must run this default mode and require exit 0 for each
 CID, or for the full list of a shared configuration, with the other

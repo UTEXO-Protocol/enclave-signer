@@ -7,7 +7,7 @@
 # Dev image (debug, `insecure-dev`: plaintext gRPC, no mTLS):
 #   --build-arg CARGO_ARGS="--features insecure-dev" --build-arg PROFILE_DIR=debug
 # Builder glibc must stay compatible with the runtime stage below.
-FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
+FROM rust:1.100-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS builder
 
 # Builder-only tools: system Git and SSH for private dependencies.
 RUN apt-get update && apt-get install -y \

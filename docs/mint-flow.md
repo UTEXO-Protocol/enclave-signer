@@ -105,7 +105,7 @@ sequenceDiagram
     P->>E: forward over vsock
     E->>E: Stage 1: replay precheck
     E->>R: Stage 2: this deposit's receipt
-    E->>E: Stages 3-4: core on the fascia, mint rule, fee, M8 sats
+    E->>E: Stages 3-4: core on the fascia with M9, mint rule, fee, M8 sats
     E->>R: Stage 6: chain id, FundsIn of this mint, finality
     E->>E: Stage 6: route amount, replay reserve
     E->>E: Stage 7: sign
@@ -130,8 +130,9 @@ one of them and no fascia fails F4.
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `TS_MINT` | 8013 | Mint transition. The only transition a mint may commit. |
+| `TS_MINT` | 8013 | Mint transition. A mint commits exactly one, and beside it only side transitions (F6). |
 | `TS_PROPAGATE` | 8014 | Moves one mint right to new rights. The only transition a refill may commit (RR6). |
+| `TS_TRANSFER`, `TS_TRANSFER_INFLATION`, `TS_TRANSFER_LINK` | 10000, 8015, 8016 | With `TS_PROPAGATE`, the types a side transition may have: they move state on (F6). |
 | `OS_ASSET` | 4000 | Output that holds RGB units (u64). |
 | `OS_MINT` | 4013 | The mint right (`mintRight`). It holds no units. |
 | `GS_ISSUED_SUPPLY` | 2010 | Mint global: the units it issues. |
@@ -140,8 +141,10 @@ one of them and no fascia fails F4.
 | `MINT_INPUTS` | 1 | Inputs of a mint (F7). |
 | `MAX_FEE_RATE_SAT_VB` | 200 | Maximum fee rate, over the unsigned size. |
 | `MAX_FEE_SATS` | 100,000 | Maximum fee. |
+| `MAX_FASCIA_BYTES` | 65,536 | Size of a fascia (F4). Compiled in, not a runtime limit. |
+| `MAX_FASCIA_BUNDLES` | 20 | Bundles in a fascia, one for each contract the tx moves (F4). The most allocations the connector's wallet keeps on one UTXO. Compiled in, not a runtime limit. |
 | `MIN_FEE_RATE_SAT_VB` | 1 | Minimum fee rate, over the estimated signed size. |
-| MPC tree depth | 3 | The depth that rgb-lib commits with, and rebuilds the tree at in F5. |
+| MPC tree minimum depth | 3 | The least depth rgb-lib commits with, and rebuilds the tree at in F5. It grows until every contract id has a position of its own. |
 | Colored account | `m/86'/827166'/0'` on mainnet | The only account that signs a mint. |
 | Amount rule | `OS_ASSET == issuedSupply == amount - commission` | Exact. Not a minimum. |
 
@@ -156,7 +159,8 @@ If one check fails, the mint signer stops. It signs nothing. It returns an
 error.
 
 The stages group the checks by topic. The code order differs in places: F1
-runs before M0, and F7 and the fee check run after M1 - M5 and M7. Section 3
+runs before M0, M9 runs in the core with F6, and F7 and the fee check run
+after M1 - M5 and M7. Section 3
 and [diagram 04](diagrams/04-seq-sign-psbt.md) show the code order. The
 stage number 5 is not used: the mint signer does not read the transaction
 that made the spent right.
@@ -205,15 +209,16 @@ host. TLS ends inside the enclave. Each call has the timeout
   above the head, or missing tag data, refuses signing. A pending deposit can
   be retried once the head covers it.
 
-### Stage 3 - Does the PSBT commit exactly one transition of the asset?
+### Stage 3 - Which transition of the asset does the PSBT commit, and what beside it?
 
 The core. It reads the RGB data from the request's `fascia`, never from the
 PSBT: RGB keys left in a PSBT are ignored. rgb-lib's wallet-less fascia
-inspection (`inspect_fascia`) proves the commitments of F5 and F6; the rules
-around it are the enclave's.
+inspection (`inspect_fascia`) is the only reader of the fascia: it decodes it,
+proves the commitments of F5 and F6, and reports each transition typed. The
+rules around it are the enclave's.
 
 - **M0** The mint transaction has at most `mint_max_inputs` inputs and
-  `mint_max_outputs` outputs. The enclave checks this before it decodes a
+  `mint_max_outputs` outputs. The enclave checks this before it inspects a
   fascia.
 - **F1** The PSBT must parse and have at least one input.
 - **F2** Each input must have a `witness_utxo` with a native witness
@@ -225,11 +230,27 @@ around it are the enclave's.
   not P2TR. rgb-lib verifies the commitment with the DBC proof that the
   fascia carries, so the inspection must report the opret close method: a
   tapret proof commits in a P2TR output, which this rule does not read.
-- **F4** `fascia` must not be empty and must decode as rgb-lib reads its
-  fascia file: strict encoding, nothing after it, at most `max_psbt_bytes`.
-  Its witness txid must be the PSBT's unsigned txid, which rgb-lib's
-  inspection binds. It discloses exactly one bundle, of the contract that
-  `RGB_ASSET_ID` names. The request's `asset_id` must name it too.
+- **F4** `fascia` must not be empty and must be at most `MAX_FASCIA_BYTES`,
+  which the enclave checks before the bytes reach rgb-lib. It must then decode
+  as rgb-lib reads its fascia file: strict encoding, nothing after it. Its
+  witness txid must be the PSBT's unsigned txid, which rgb-lib's inspection
+  binds. The transition that the signer reads (F6) is of the contract that
+  `RGB_ASSET_ID` names, and the request's `asset_id` must name that contract
+  too. A bundle of another contract is read past (F6): rgb-lib moves the
+  state of every asset on the UTXO that it spends, each asset in its own
+  bundle.
+  The size limit bounds the bytes that the inspection reads. The operator
+  cannot raise it: the rules here set how large a valid fascia is, and the
+  widest is a refill of `MAX_REFILL_RIGHTS` rights. It does not bound the
+  work of F5: the MPC tree grows until every contract id has a position of
+  its own, and every position of that width is hashed, taken or not. So the
+  cost follows the bundle count and the ids, which the host picks. A second
+  limit bounds that: rgb-lib refuses a fascia of more than
+  `MAX_FASCIA_BUNDLES` bundles before it reads them or rebuilds the tree.
+  That limit is the most allocations the connector's wallet keeps on one
+  UTXO, so the tx of one right never holds more bundles. A bundle of another
+  contract counts toward the size limit too, so state of other contracts on
+  the UTXO of a right can make its fascia too large to sign.
 - **F5** The MPC tree of every bundle that the fascia discloses, under the
   entropy that the fascia carries, must give the 34-byte `OP_RETURN`
   commitment. The enclave passes no entropy of its own, so rgb-lib takes the
@@ -237,19 +258,56 @@ around it are the enclave's.
   that carries none. So the fascia shows exactly the bundles that the
   transaction commits: a hidden, extra or swapped bundle changes the
   commitment.
-- **F6** The bundle holds exactly one transition of the pinned contract,
-  stored under its own id, which rgb-lib recomputes. The input map must close
-  exactly the inputs of that transition: rgb-lib binds each input of the
-  transition to that id, and the inspected counts of transitions and of
-  closed seals in the input map must be one and the transition's own input
-  count, so the map names no transition the fascia hides. The two readings
-  must name the same transaction, asset and transition. rgb-lib moves any
-  other allocation of the spent UTXO by a transition of its own in the same
-  bundle. So a link right must not share a UTXO with mint rights: F6 refuses
-  that mint or refill.
-  The inspection also decodes every global and metadata entry of the
-  transition, so one that no schema defines, or a value of the wrong length,
-  is refused here, before M4 reads it.
+- **F6** Each bundle discloses every transition it commits
+  (`RgbOperationInfo::has_concealed_transitions`), each stored under its own
+  id, which rgb-lib recomputes, and of a contract that rgb-lib refuses to
+  inspect under any other id. Each input map must close exactly the inputs of
+  the transitions its bundle discloses, so it names none the inspection
+  hides. A fascia is the RGB data of the transaction being built, so it
+  carries everything its bundles commit; a consignment is the opposite, and
+  [burn-flow.md](burn-flow.md) says so at B2.9a.
+  The transaction may commit more than one transition. rgb-lib moves any
+  other allocation of a spent UTXO by a transition of its own: in the same
+  bundle for the same asset, in another contract's bundle for another asset.
+  In the pinned contract such a **side transition** is let be when it only
+  moves state to the enclave's own outputs:
+  - Its type is one that rgb-lib moves state on with: `TS_TRANSFER`,
+    `TS_PROPAGATE`, `TS_TRANSFER_INFLATION` or `TS_TRANSFER_LINK`. So in the
+    pinned contract a second mint, a burn, an inflation or a link is never a
+    side transition.
+  - It assigns exactly one seal for each input that it closes, as rgb-lib
+    moves each allocation on as one. So a side propagate cannot turn one
+    right into many: only a refill does that.
+  - Every seal that it assigns is revealed on an output of this transaction
+    that M9 accepts. A blinded seal or an output of another transaction is
+    not, as the enclave cannot see who holds it.
+
+  Every other transition is one the signer must read. It reads exactly one,
+  and that one is of the pinned contract: the mint of a `Sign`, the propagate
+  of a refill.
+  A bundle of another contract is read past, whatever its transitions are
+  and whatever seals they assign. The enclave does not see which state an
+  input holds, so it cannot keep that state by refusing: the host can spend
+  the UTXO without moving it. And a host that puts state of other contracts
+  on the UTXO of a right could otherwise make every mint of that right
+  refused, until the issuer sends new rights. The mint wallet must hold
+  nothing of value outside the pinned contract.
+  rgb-lib moves state to the new change output of the transaction first.
+  Without a change output, or when it is full, rgb-lib moves the state to a
+  UTXO that the wallet already holds. For state of the pinned contract that
+  seal is on another transaction, so the mint is refused, after the user's
+  lock. The bridge must refuse such a mint before the deposit.
+  The enclave does not see what state a side transition spends, so it does
+  not check that the state it assigns is all of it.
+  The inspection also decodes every transition type, assignment type, global
+  and metadata entry against the types rgb-lib itself knows, so an unknown
+  one, or a global or metadata value of the wrong length, is refused there,
+  before M1 to M4 read it. It compares no type with the BFA schema, which a
+  fascia does not carry, and it validates no operation: the shapes that M1 to
+  M4 and RR6 to RR8 require are the enclave's own rules. A `mintRight` that
+  carries state is still refused by the inspection, which pairs each
+  assignment type with the kind of state it holds and gives an `OS_MINT` none
+  (RR7).
 - **F7** The PSBT spends exactly one input (`MINT_INPUTS`), a Colored
   key-path input of the enclave. So the UTXO of the right must pay the fee
   and, for a witness mint, `MINT_WITNESS_SAT`. If that UTXO is too small for
@@ -281,23 +339,34 @@ needs a new image.
 - **M7** There is exactly one `OS_ASSET` leg: on a blinded seal (the
   depositor's), or on a witness seal that is an output of this transaction (a
   witness invoice). A seal on an output of another transaction is refused:
-  the enclave cannot see what that output pays.
+  the enclave cannot see what that output pays. A blinded seal is reported as
+  rgb-lib's invoice recipient id, which carries the prefix of
+  `BITCOIN_NETWORK`. Nothing binds on that string: the lock binds the seal
+  through the mint's OpId.
 - **M8** The sats that the mint pays out. It runs on the PSBT after the fee
   check, and before M6 reads the deposit.
-  - A blinded mint pays no sat out. Every output is a BIP-86 key-path output
-    that the enclave derives at a wallet path (rule C of
-    [section 7](#7-plain-btc-signbtc)), or carries 0 sat, as the `OP_RETURN`
+  - A blinded mint pays no sat out. Every output is the enclave's own
+    ([section 7](#7-plain-btc-signbtc)), or carries 0 sat, as the `OP_RETURN`
     must.
   - A witness mint pays exactly `MINT_WITNESS_SAT` to the output of its seal.
     That output must exist, must not be an `OP_RETURN`, and must not be the
-    enclave's own (rule A or rule C). Every other output is the enclave's by
-    rule C, or carries 0 sat; rule A gives no exemption here. The change may
-    be missing.
+    enclave's own. The host builds the PSBT and its output metadata, so the
+    enclave also refuses an output on the script of an input that it can
+    sign: that comparison needs no metadata, and it matches an input on a
+    script with a tree too. Every other output is the enclave's own, or
+    carries 0 sat. The change may be missing.
   - The connector and the enclave must use the same `MINT_WITNESS_SAT`. The
     PSBT pays the connector's value, fixed at `mint_begin`, and a mismatch is
     refused here, after the user's lock. The attestation does not carry the
     value, so the deploy must compare the two before a release takes witness
     invoices.
+- **M9** State of the pinned contract that a side transition moves stays in
+  the wallet. Each output that a side transition assigns state to (F6) must
+  be a key-path output that the enclave derives on the Colored account, at
+  child path `[0, i]`, the keychain rgb-lib scans, and must carry sats. So it is never the
+  `OP_RETURN`, a 0-sat output, a Vanilla output or the output of a witness
+  recipient. It runs in the core, with F6: a transition that fails it is no
+  side transition, so the signer must read it, and it reads exactly one.
 
 ### Stage 6 - Is the deposit this mint's, and the user the right one?
 
@@ -381,26 +450,20 @@ is a request of its own: a `Sign` request cannot reach this path.
   `BTC_MAX_TOTAL_SATS` is 0.
 - Only the vanilla account signs. A colored input is never signed here.
 - The total input value must not be more than `BTC_MAX_TOTAL_SATS`.
-- Outputs that the enclave does not own must total at most
-  `BTC_MAX_UNOWNED_SATS`.
+- No sat leaves the wallet. Every output is the enclave's own, or carries
+  0 sat.
 - The fee limits of Stage 3 apply. An input whose size the enclave cannot
   estimate refuses the request.
 
 The enclave derives ownership from its keys. There is no configured list of
-scripts. An output is the enclave's own in two cases:
-
-- **Rule A.** Its script equals the script of an input that the enclave can
-  sign: a Taproot key-path input whose internal key derives from a BIP-86
-  account and, with its tweak, gives the output key. A script tree can hold
-  foreign spend paths, so the exemption is limited to the input value on that
-  script. In `SignBtc` only inputs of the vanilla account count. M8 counts
-  inputs of either account.
-- **Rule C.** It is a BIP-86 key-path output of an enclave account, with no
-  script tree, at a wallet path `[k, i]`: both steps non-hardened, `k` = 0 on
-  the colored account and 0 or 1 on the vanilla account. The PSBT output
-  must carry the internal key and its key origin. The enclave derives the key
-  at that path and rebuilds the script. An output without this data, and an
-  enclave key at any other path, count as not owned.
+scripts. An output is the enclave's own when it is a BIP-86 key-path output
+of an enclave account, with no script tree, at a wallet path `[k, i]`: both
+steps non-hardened, `k` = 0 on the colored account and 0 or 1 on the vanilla
+account. The PSBT output must carry the internal key and its key origin. The
+enclave derives the key at that path and rebuilds the script. An output
+without this data, and an enclave key at any other path, count as not owned.
+So does an output on the script of a spent input: the wallet pays to a new
+address each time, and its outputs carry this data.
 
 An enclave key in one Taproot leaf proves nothing about the rest of the
 tree, so no rule accepts it.
@@ -408,8 +471,8 @@ tree, so no rule accepts it.
 There is no rate limit. Each limit bounds one request, and the change goes
 back to a vanilla output that the host can submit again. So a compromised
 host can turn the whole vanilla balance into fees, at most `MAX_FEE_SATS`
-per signature, and pay up to `BTC_MAX_UNOWNED_SATS` to its own address on
-each request. The bound on the sum belongs outside the enclave.
+per signature. It cannot pay an address outside the wallet. The bound on the
+sum belongs outside the enclave.
 
 ## 8. Rights refill (`SignRightsRefill`)
 
@@ -447,13 +510,18 @@ The cheap checks run first.
 
 - **RR5** F2, F3 and F5. F3 matters most here: RR12 admits 0-sat outputs, and
   a 0-sat P2TR before the `OP_RETURN` would switch the commitment method.
-- **RR3** F4 and F6: the refill's own fascia, of the pinned asset.
-- **RR6** The one transition is a `TS_PROPAGATE`.
+- **RR3** F4 and F6: the refill's own fascia, of the pinned asset. A refill
+  takes side transitions as a mint does, under M9.
+- **RR6** The one transition the signer reads is a `TS_PROPAGATE`.
 - **RR7** It closes exactly one input, an `OS_MINT`. It assigns `OS_MINT`
-  only, each right with no state, and has no globals and no metadata.
+  only, each right with no state, and has no globals and no metadata. A right
+  that carries state is not an `OS_MINT` assignment rgb-lib can represent, so
+  F6 refuses that fascia before this rule reads it.
 - **RR8** It makes 2 to 255 rights. Each is on a witness seal (an output of
   this transaction), never on a blinded seal or an output of another
-  transaction, and no two share an output.
+  transaction, and no two share an output. rgb-lib reports a revealed seal of
+  the inspected transaction under that transaction's txid, so a seal naming
+  any other txid is on another transaction.
 
 **Keys:**
 
@@ -529,8 +597,8 @@ transition is a commitment:
    from that output.
 4. rgb-lib rebuilds the MPC tree from every bundle that the fascia discloses
    and checks it against that `OP_RETURN` (F5).
-5. The bundle id commits the input map. Each entry must name the one
-   disclosed transition, whose id rgb-lib recomputes (F6).
+5. Each bundle id commits its input map. Each entry must name a disclosed
+   transition, whose id rgb-lib recomputes (F6).
 
 **The amount is checked three times**, from the fascia and the deposit:
 
@@ -544,7 +612,7 @@ transition is a commitment:
 **History decides whether a mint takes effect, never what it does.** A
 receiver validates the full history when it accepts the mint, so a bad
 history makes the mint invalid for everyone. It moves no other state of the
-wallet and inflates nothing. So the enclave checks no history, and each
+pinned contract out of the wallet and inflates nothing. So the enclave checks no history, and each
 missing check is a liveness limit only:
 
 - No consensus over the history, and no genesis or schema check. The pinned
@@ -563,10 +631,16 @@ missing check is a liveness limit only:
 
 A host that controls the bridge can therefore make a mint that no receiver
 accepts, after the user locked. It cannot mint units that no deposit backs,
-and it cannot move other state of the wallet: the transaction commits one
-transition (F2 - F6). It can destroy other state. The mint signer does not
-see which RGB state the spent UTXO holds, so a mint or a refill can spend a
-Colored UTXO that holds other state, and that state is lost (section 8).
+and it cannot move other state of the pinned contract out of the wallet:
+besides the mint, a bundle of that contract may commit only side
+transitions, which move state to funded Colored outputs that the enclave
+derives (F2 - F6, M9). Such a transition is no more validated than the mint,
+so a malformed one makes its whole bundle invalid: again a mint that no
+receiver accepts, and no unbacked units. It can move state of another
+contract anywhere, and it can destroy other state. The mint signer does not see which RGB state the spent
+UTXO holds, so a mint or a refill can spend a Colored UTXO that holds other
+state without moving it, or move less than it holds, and that state is lost
+(section 8).
 
 **A witness mint's output script is bound by the lockId.** A witness seal
 names an output number of the mint transaction, and the OpId commits that

@@ -6,8 +6,9 @@ settings to a role and CID; it is not executed as a shell script. The workflow
 sends only its path and the explicit bootstrap/recovery mode over SSM.
 
 This does not initialize an identity, approve new PCRs, register keys or enable
-Bridge traffic. Those are separate acceptance steps in [operations.md](operations.md)
-and issue #249. Deploying an enclave clears its in-memory keys.
+Bridge traffic. Follow [rollout acceptance](role-rollout.md) for identity
+registration, backend routing, configuration checks and rollback evidence.
+Deploying an enclave clears its in-memory keys.
 
 ## Prerequisites (before running release)
 
@@ -146,7 +147,8 @@ selected environment's region may be different from Stage's.
   and wrong expected address without writing/replacing the seed.
 - Record source SHA, artifact checksums/PCRs, role/CID mapping and outcomes. Mock
   tests do not establish real IAM/KMS/Nitro correctness.
-- Backend routing, xpub/on-chain registration, genuine Mint/Burn transactions,
-  opposite-role rejection and verifier compatibility remain separate #249 tests.
+- Complete [rollout acceptance](role-rollout.md), including backend routing,
+  attested xpub/on-chain registration, genuine Mint/Burn signing, opposite-role
+  rejection and verifier compatibility. Custody tests alone do not prove them.
 - Retire only the disposable resources once evidence is saved. Never destroy
   working signer resources or copy their ciphertext into the test namespace.

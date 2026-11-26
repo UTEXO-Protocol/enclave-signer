@@ -1,5 +1,5 @@
 name: Set up the Rust build
-description: Install Rust 1.96.1, the system packages, the private dependency access and the cargo cache.
+description: Install Rust 1.100.0, the system packages, the private dependency access and the cargo cache.
 
 inputs:
   components:
@@ -15,10 +15,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Rust 1.96.1
+    - name: Install Rust 1.100.0
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: "1.96.1"
+        toolchain: "1.100.0"
         components: ${{ inputs.components }}
 
     - name: Install system dependencies

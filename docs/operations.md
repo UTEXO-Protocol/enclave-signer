@@ -50,7 +50,9 @@ GRPC_HOST=0.0.0.0 GRPC_PORT=50051 USE_VSOCK=true ENCLAVE_VSOCK_CID=16 \
   ([building.md](building.md#workspaces)).
 
 Before an enclave takes traffic, check that a genuine request of its flow
-succeeds and that a request of the other flow is refused.
+succeeds and that a request of the other flow is refused. Complete
+[rollout acceptance](role-rollout.md) for the intended backend deployment;
+it covers attested identities, registration, routing and configuration.
 
 ### `deploy-host.sh`
 
@@ -71,8 +73,9 @@ the artifacts of that commit from S3.
   parent, the limits file, and the memory pool.
 - It does a cold deployment. It does not initialize keys, and it is not a
   rolling restart.
-- One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18` or
-  `20` selects another supported CID, with parents on ports 50051 to 50053.
+- One run deploys one enclave. The default CID is 16; `ENCLAVE_CID=18`,
+  `20` or `24` selects another supported CID. Parent ports are 50051, 50052,
+  50053 and 50055 respectively.
 
 Each CID has its own files, and a deploy changes only those:
 
@@ -106,10 +109,21 @@ and keep the quorum that the other signers need.
 `--memory` must be at least 4096 MiB, a whole number of GiB. The enclave
 needs 3072 MiB of usable memory (`enclave/src/memory.rs`), and the kernel and
 the root file system keep part of the launch value. A release enclave refuses
-to start with less, or when it cannot read its memory total. nitro-cli gives
-an enclave whole hugepages, 1 GiB pages first, so the deploy scripts refuse a
-value that is not a whole number of GiB. `ENCLAVE_MEMORY` sets the value for
-`deploy-host.sh`; its default is the minimum.
+to start with less, or when it cannot read its memory total. It also refuses
+to start when its limits in force need more, with a consignment scratch file
+and, on a burn signer, a validator child for each request: the refusal names
+the MiB they need. nitro-cli gives an enclave whole hugepages, 1 GiB pages
+first, so the deploy scripts refuse a value that is not a whole number of
+GiB. `ENCLAVE_MEMORY` sets the value for `deploy-host.sh`; its default is the
+minimum.
+
+A release burn signer also refuses to start when its probe validator child
+does not start or confine itself, or when the OOM settings of the kernel or
+the OOM score adjustment of the enclave process could end the enclave
+process before a validator child
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). It sets
+`vm.overcommit_memory` itself first, and refuses to start when it cannot. Its
+panic on the console names the reason. A start logs "validator child ready".
 
 The allocator pool. `memory_mib` in `/etc/nitro_enclaves/allocator.yaml`
 sets the hugepage pool when `nitro-enclaves-allocator.service` starts.
@@ -240,6 +254,9 @@ command. Its exit code 1 means "not ready" or no answer: read the
 ## Restart and upgrade
 
 A restart removes the keys in memory. systemd restores only the processes.
+A fault of rgb-lib on a consignment ends only a validator child of the burn
+signer, not the enclave process, so it removes no key
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)).
 
 - A mint signer recovers its seed with `init`, through KMS. It needs the
   verified address pin ([kms-persistence.md](kms-persistence.md)).
@@ -252,6 +269,10 @@ A restart removes the keys in memory. systemd restores only the processes.
   starts from a new seed.
 - New launch values need a new launch of the same EIF. The PCR allowlists do
   not change.
+
+Follow [rollback and identity continuity](role-rollout.md#rollback-and-identity-continuity)
+for verifier/KMS approvals, retained burn donors and registration transitions.
+Do not stop the last compatible burn donor during an upgrade.
 
 ## Debug mode
 

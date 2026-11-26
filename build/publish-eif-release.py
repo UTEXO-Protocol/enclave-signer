@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish existing Stage build artifacts; never run downloaded binaries."""
+"""Publish existing approved build artifacts; never run downloaded binaries."""
 
 import hashlib
 import json
@@ -20,6 +20,7 @@ from toolchain import EVIDENCE, validate as validate_toolchain, validate_observa
 PROFILES = {
     "stage-signet": ("signet", "Public Signet"),
     "stage-mainnet": ("bitcoin", "Bitcoin Mainnet"),
+    "prod-mainnet": ("bitcoin", "Bitcoin Mainnet"),
 }
 ROLES = ("burn", "mint")
 COMMON = ("PCR.json", "IMAGE-ENV.json", "SHA256SUMS", "metadata.json",
@@ -60,6 +61,9 @@ def inputs():
     profile_settings(profile)
     require(re.fullmatch(re.escape(profile) + r"-v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?",
                          values["RELEASE_TAG"]), f"Tag must be {profile}-vX.Y.Z (optional suffix)")
+    if profile == "prod-mainnet":
+        require(re.fullmatch(r"prod-mainnet-v[0-9]+\.[0-9]+\.[0-9]+", values["RELEASE_TAG"]),
+                "Production releases require prod-mainnet-vX.Y.Z without a suffix")
     return values
 
 
@@ -84,7 +88,8 @@ def validate():
     values = inputs()
     branch = os.environ["SOURCE_BRANCH"]
     build_run = os.environ["BUILD_RUN_ID"]
-    require(branch in ("dev", "stage"), "Only dev/stage are supported")
+    allowed = ("dev", "stage", "main") if values["BUILD_PROFILE"] == "prod-mainnet" else ("dev", "stage")
+    require(branch in allowed, "Unsupported source branch for this profile")
     require(re.fullmatch(r"[1-9][0-9]*", build_run), "Invalid build run ID")
     sha, repo, tag = (values[k] for k in ("RELEASE_SHA", "GH_REPO", "RELEASE_TAG"))
     subprocess.run(["git", "merge-base", "--is-ancestor", sha, f"origin/{branch}"], check=True)
@@ -161,7 +166,7 @@ def verify_bundle(directory, reference, role, sha, build_run, profile="stage-sig
         require(key not in image_env, f"Duplicate image setting: {key}")
         image_env[key] = value
     require(image_env.get("BITCOIN_NETWORK") == network, f"Expected {label} image")
-    if profile == "stage-mainnet":
+    if profile in ("stage-mainnet", "prod-mainnet"):
         for key, value in {"BTC_RELAY_MODE": "required", "SPV_MIN_CONFIRMATIONS": "3",
                            "EVM_FINALITY_TAG": "finalized"}.items():
             require(image_env.get(key) == value, f"Mainnet requires {key}={value}")
@@ -211,10 +216,13 @@ def package(bundles, references, output, sha, build_run, tag, repo, branch, prof
     (assets / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (assets / "SHA256SUMS").write_text("".join(
         f"{digest(path)}  {path.name}\n" for path in sorted(assets.iterdir())))
-    notes = [f"# Stage / {label} — {tag}", "",
-             "Recommended artifacts for Stage signers. This is a Stage prerelease.", "",
+    environment = "Production" if profile == "prod-mainnet" else "Stage"
+    description = ("Production signer release." if profile == "prod-mainnet" else
+                   "Recommended artifacts for Stage signers. This is a Stage prerelease.")
+    notes = [f"# {environment} / {label} — {tag}", "", description, "",
              f"- Bitcoin: **{label}**", "- EVM: **Arbitrum One (42161)**",
-             f"- Build profile: `{profile}`", f"- Source branch: `{branch}`",
+             f"- Build profile: `{profile}`", f"- RGB asset: `{roles['mint']['rgb_asset_id']}`",
+             f"- Source branch: `{branch}`",
              f"- Source commit: `{sha}`", f"- [Build EIF run]({manifest['build_url']})",
              f"- Builder profile: `toolchain.json` (SHA-256 `{manifest['toolchain_sha256']}`)", ""]
     for role in ROLES:
@@ -229,7 +237,7 @@ def package(bundles, references, output, sha, build_run, tag, repo, branch, prof
               "Use toolchain.json with the builder setup in the TEE guide. The profile pins tools;",
               "publication does not prove that two independent builds reproduce the PCRs.",
               "Use the Burn archive for a Burn cosigner. Use the CLI from the same release.", "",
-              "Publication does not deploy a signer or prove the current Stage deployment.",
+              "Publication does not deploy a signer or prove the current deployment.",
               "These are build measurements, not a live AWS attestation. Verify the signer's",
               "attestation and approved identity separately. Validation assumptions",
               f"are those of the source commit's {profile} profile.", ""]
@@ -285,22 +293,26 @@ def publish():
                 == manifest["toolchain_sha256"] for role in ROLES),
             "Role toolchain does not match the release manifest")
     unused_tag(repo, tag)
+    environment = "Production" if profile == "prod-mainnet" else "Stage"
+    flags = (["--prerelease=false", "--latest"] if profile == "prod-mainnet"
+             else ["--prerelease", "--latest=false"])
     # Creating the ref fails on a concurrent publisher; never move an existing tag.
     run("gh", "api", f"repos/{repo}/git/refs", "-f", f"ref=refs/tags/{tag}", "-f", f"sha={sha}")
     run("gh", "release", "create", tag, *[str(p) for p in sorted(assets.iterdir())],
-        "--repo", repo, "--verify-tag", "--draft", "--prerelease", "--latest=false",
-        "--title", f"Stage / {label} — {tag}", "--notes-file", str(OUTPUT / "notes.md"))
+        "--repo", repo, "--verify-tag", "--draft", "--latest=false",
+        *(["--prerelease=false"] if profile == "prod-mainnet" else ["--prerelease"]),
+        "--title", f"{environment} / {label} — {tag}", "--notes-file", str(OUTPUT / "notes.md"))
     # A failed upload leaves a draft, never a partially published signer release.
     with tempfile.TemporaryDirectory() as temporary:
         run("gh", "release", "download", tag, "--repo", repo, "--dir", temporary)
         for path in assets.iterdir():
             require(digest(Path(temporary) / path.name) == digest(path), "Uploaded asset mismatch")
-    run("gh", "release", "edit", tag, "--repo", repo, "--draft=false", "--prerelease", "--latest=false")
+    run("gh", "release", "edit", tag, "--repo", repo, "--draft=false", *flags)
     url = f"https://github.com/{repo}/releases/tag/{tag}"
     print(url)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
-            stream.write(f"Published [Stage / {label} release]({url}).\n")
+            stream.write(f"Published [{environment} / {label} release]({url}).\n")
 
 
 if __name__ == "__main__":

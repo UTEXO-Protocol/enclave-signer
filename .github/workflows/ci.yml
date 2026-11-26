@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       run_stress:
-        description: Run ignored RGB history and capacity checks in release mode
+        description: Run the ignored RGB history checks in release mode
         type: boolean
         default: false
 
@@ -124,6 +124,14 @@ jobs:
       - name: Clippy (parent)
         run: cargo clippy --manifest-path parent/Cargo.toml --all-targets -- -D warnings
 
+      # The parent has no release-mode compilation otherwise: the step below
+      # that builds it in release expects the `insecure-dev` guard to fail it,
+      # and the EIF workflow takes no lint flags. So a `not(debug_assertions)`
+      # block or a binding used only by a `debug_assert!` would warn nowhere.
+      # The parent has neither today; this keeps it that way.
+      - name: Clippy release (parent)
+        run: cargo clippy --release --manifest-path parent/Cargo.toml -- -D warnings
+
       # Builds the library and both binaries too.
       - name: Test (parent)
         run: |
@@ -221,11 +229,17 @@ jobs:
           cargo test $ENCLAVE --features mint-signer --test test_public_signet --test test_bfa_mint_over_the_wire
           cargo test $ENCLAVE --features mint-signer --test test_signing test_sign_btc
 
-      # Both roles here, so the release-mode dependencies compile once.
+      # Both roles here, so the release-mode dependencies compile once. This is
+      # the only step that compiles the release-mode code of a role, so it
+      # denies warnings: a `not(debug_assertions)` block is invisible to the
+      # debug clippy above. `cargo check` takes no lint flags, so this is
+      # clippy. Without `--all-targets`, as the shipped image has no test code.
       - name: Check release (mint and burn)
         run: |
           for role in mint-signer burn-signer; do
-            cargo check --release $ENCLAVE --features vsock,$role
+            cargo clippy --release $ENCLAVE --features vsock,$role -- -D warnings
+            # The integration tests build against the release library too.
+            cargo check --release $ENCLAVE --features $role --test '*'
           done
 
       # Unsupported feature sets must fail on their own `compile_error!`, not on
@@ -275,21 +289,32 @@ jobs:
           cargo test $ENCLAVE --features $TEST_FEATURES -- $skip
 
       # Ignored by default because they build large histories; this reuses the
-      # test build above. Three use 10 000 transfers: the consignment memory
+      # test build above. Each uses 10 000 transfers: the consignment memory
       # test, a whole burn through dispatch, and the default request limits.
-      # Two refuse forged histories at the caps (6 MB and 10 MB).
       - name: Test (burn signer, large-history tests)
         run: |
           set -o pipefail
-          cargo test $ENCLAVE --features $TEST_FEATURES --lib -- --ignored 10_000 \
-            a_listed_merge_within_every_cap_is_refused_by_its_walk_time \
-            a_chain_of_propagates_at_the_size_cap_is_refused_before_rgb_lib 2>&1 | tee test.log
-          awk '/^test result:/ { n += $4 } END { if (n != 5) { print "::error::expected 5 large-history tests, ran " n; exit 1 } }' test.log
+          cargo test $ENCLAVE --features $TEST_FEATURES --lib -- --ignored 10_000 2>&1 | tee test.log
+          awk '/^test result:/ { n += $4 } END { if (n != 3) { print "::error::expected 3 large-history tests, ran " n; exit 1 } }' test.log
+
+      # The lib test binary runs as root: the test moves itself into a cgroup
+      # with a memory limit, so the kernel must choose between it and its child.
+      - name: Test (validator child out of memory)
+        run: |
+          set -o pipefail
+          bin=$(cargo test $ENCLAVE --features $TEST_FEATURES --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.kind == ["lib"]) | .executable')
+          sudo "$bin" --ignored --exact \
+            networks::rgb::validation::runner::tests::the_kernel_ends_a_child_out_of_memory_and_the_key_still_signs 2>&1 | tee test.log
+          awk '/^test result:/ { n += $4 } END { if (n != 1) { print "::error::expected 1 out-of-memory test, ran " n; exit 1 } }' test.log
 
       - name: Test (RGB release stress, on request)
         if: github.event_name == 'workflow_dispatch' && inputs.run_stress
         timeout-minutes: 30
-        run: cargo test --locked --release $ENCLAVE --features burn-signer --lib networks::rgb::validation::tests -- --ignored --nocapture --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --locked --release $ENCLAVE --features $TEST_FEATURES --lib -- --ignored --nocapture --test-threads=1 10_000 2>&1 | tee stress.log
+          awk '/^test result:/ { n += $4 } END { if (n != 3) { print "::error::expected 3 large-history tests, ran " n; exit 1 } }' stress.log
 
       # The burn build without `vsock` and without the test-only features.
       - name: Test (burn without test features)

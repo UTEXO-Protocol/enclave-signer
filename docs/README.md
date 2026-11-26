@@ -33,8 +33,11 @@ hand.
 |----------|---------------|
 | [building.md](building.md) | Build the binaries and the enclave image. Reproducible measurements. The stage Signet profile is in [build/profiles/README.md](../build/profiles/README.md). |
 | [github-releases.md](github-releases.md) | Publish a verified Stage Signet build and its PCRs for cosigners. |
+| [production-eif.md](production-eif.md) | Production profile, protected environment and artifact publication. |
 | [configuration.md](configuration.md) | The settings: image settings, launch values, parent settings. |
 | [operations.md](operations.md) | Launch, launch check, readiness, restart. |
+| [mint-release.md](mint-release.md) | Per-CID Mint KMS/storage prerequisites and release configuration. |
+| [role-rollout.md](role-rollout.md) | Approved identities, registration, role-separated backend routing, configuration checks and rollback evidence. |
 | [runtime-limits.md](runtime-limits.md) | The limits that an operator can change on a running enclave. |
 | [parent-mtls.md](parent-mtls.md) | mTLS, client roles, and every path into the enclave. |
 | [kms-persistence.md](kms-persistence.md) | Seed custody of the mint signer, with AWS KMS and S3. |
@@ -44,7 +47,6 @@ hand.
 
 | Document | What it gives |
 |----------|---------------|
-| [validation-cost-model.md](validation-cost-model.md) | The model and the measurements behind the work caps of the burn signer. |
 | [burn-vector-provenance.md](burn-vector-provenance.md) | Fixed Burn vectors, their reference calculations, input sources and test scope. |
 | [AGENTS.md](../AGENTS.md) | The repository rules for a change. |
 

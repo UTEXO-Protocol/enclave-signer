@@ -5,7 +5,7 @@
 # Every dependency of the enclave workspace is public: the build takes no secret.
 # Example: docker build --build-arg SIGNER_ROLE=mint-signer -f build/Dockerfile.enclave-dev.bfa .
 # Builder glibc must stay compatible with the runtime stage below.
-FROM rust:1.96-slim AS builder
+FROM rust:1.100-slim AS builder
 
 # Builder-only tools: system Git fetches the git dependencies.
 RUN apt-get update && apt-get install -y \

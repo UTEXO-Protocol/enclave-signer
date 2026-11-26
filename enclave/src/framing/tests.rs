@@ -41,6 +41,20 @@ fn reject_truncated_body() {
     assert!(result.is_err());
 }
 
+/// A frame over the cap of its reader is refused before its body is read,
+/// even under the frame limit in force. A frame at the cap passes.
+#[test]
+fn a_frame_over_the_cap_of_its_reader_is_refused_before_its_body() {
+    let mut wire = 9u32.to_le_bytes().to_vec();
+    wire.extend_from_slice(&[7u8; 9]);
+    let mut cursor = Cursor::new(&wire);
+    let err = read_frame_within(&mut cursor, 8).unwrap_err().to_string();
+    assert!(err.contains("message too large: 9 bytes (max 8)"), "{err}");
+    assert_eq!(cursor.position(), 4);
+    let frame = read_frame_within(&mut Cursor::new(&wire), 9).unwrap();
+    assert_eq!(frame, vec![7u8; 9]);
+}
+
 /// Return a decode error for invalid protobuf data.
 #[test]
 fn reject_garbage_body() {
@@ -99,48 +113,42 @@ fn len_field(field: u32, payload: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(payload);
 }
 
-/// A `Sign` request whose RGB source has `n` Merkle proof entries with one
-/// empty path element each: 4 wire bytes per entry.
-fn sign_frame_with_empty_proof_entries(n: usize) -> Vec<u8> {
-    let mut proofs = Vec::with_capacity(n * 4);
-    for _ in 0..n {
-        proofs.extend_from_slice(&[0x32, 0x02, 0x22, 0x00]);
-    }
-    let mut sign = Vec::new();
-    len_field(3, &proofs, &mut sign); // SignRequest.rgb_source
+/// A `SubmitHeaders` request of `n` empty headers: 2 wire bytes per header.
+fn frame_of_empty_headers(n: usize) -> Vec<u8> {
+    let headers = [0x0a, 0x00].repeat(n); // SubmitHeadersRequest.headers
     let mut request = Vec::new();
-    len_field(3, &sign, &mut request); // EnclaveRequest.sign
+    len_field(11, &headers, &mut request); // EnclaveRequest.submit_headers
     let mut wire = (request.len() as u32).to_le_bytes().to_vec();
     wire.extend_from_slice(&request);
     wire
 }
 
 /// The request memory model (`memory.rs`): the shape check refuses a frame
-/// of repeated empty entries before the decode. Without the check, the
-/// frame would decode into 45 times its size.
+/// of empty headers before the decode. Without the check, each 2-byte header
+/// would decode into a `Vec` in a growing list.
 #[test]
-fn a_frame_of_empty_proof_entries_is_refused_within_the_request_memory_factor() {
+fn a_frame_of_empty_headers_is_refused_within_the_request_memory_factor() {
     use crate::memory::peak;
 
     let (wire, result, peak) = peak::measure(
-        || sign_frame_with_empty_proof_entries((MAX_MESSAGE_SIZE as usize - 64) / 4),
+        || frame_of_empty_headers((MAX_MESSAGE_SIZE as usize - 64) / 2),
         |wire| read_request(&mut Cursor::new(wire)).map(|_| ()),
     );
     let err = result.unwrap_err().to_string();
     assert!(err.contains("more than"), "got: {err}");
-    peak::assert_within_request_bound("read_request of empty proof entries", wire.len(), peak);
+    peak::assert_within_request_bound("read_request of empty headers", wire.len(), peak);
 }
 
-/// The element limit is exact. A `Sign` frame with `n` empty entries has
-/// 2 + 2n occurrences: `sign`, `rgb_source`, one for each entry and one
-/// for its path element. The frame at the limit is the most a request can
-/// expand, and it stays within the request bound.
+/// The element limit is exact. A `SubmitHeaders` frame with `n` empty
+/// headers has 1 + n occurrences: `submit_headers` and one for each header.
+/// The frame at the limit is the most a request can expand, and it stays
+/// within the request bound.
 #[test]
 fn the_wire_element_limit_is_exact() {
     use crate::memory::peak;
 
     let (at_limit, decoded, peak) = peak::measure(
-        || sign_frame_with_empty_proof_entries((MAX_WIRE_ELEMENTS - 2) / 2),
+        || frame_of_empty_headers(MAX_WIRE_ELEMENTS - 1),
         |wire| read_request(&mut Cursor::new(wire)).unwrap(),
     );
     peak::assert_within_request_bound("read_request at the element limit", at_limit.len(), peak);
@@ -154,37 +162,26 @@ fn the_wire_element_limit_is_exact() {
         elements,
         peak,
     );
-    let Some(enclave_request::Request::Sign(sign)) = decoded.request else {
-        panic!("not a Sign request");
+    let Some(enclave_request::Request::SubmitHeaders(submit)) = decoded.request else {
+        panic!("not a SubmitHeaders request");
     };
-    let Some(crate::proto::sign_request::SourceNetwork::RgbSource(source)) = sign.source_network
-    else {
-        panic!("not an RGB source");
-    };
-    assert_eq!(source.merkle_proofs.len(), (MAX_WIRE_ELEMENTS - 2) / 2);
+    assert_eq!(submit.headers.len(), MAX_WIRE_ELEMENTS - 1);
 
-    let over = sign_frame_with_empty_proof_entries((MAX_WIRE_ELEMENTS - 2) / 2 + 1);
+    let over = frame_of_empty_headers(MAX_WIRE_ELEMENTS);
     let err = read_request(&mut Cursor::new(&over))
         .unwrap_err()
         .to_string();
     assert!(err.contains("more than"), "got: {err}");
 }
 
-/// The largest real burn request passes the shape check. It has as many
-/// proof entries as the proof limit allows, each with a full mainnet
-/// path. The walk skips its consignment as bytes.
+/// The largest real burn request passes the shape check. The walk counts
+/// its `sign` field once and skips the consignment as bytes.
 #[test]
 fn the_largest_burn_request_passes_the_shape_check() {
-    use crate::config::{DEFAULT_MAX_CONSIGNMENT_BYTES, DEFAULT_MAX_MERKLE_PROOFS};
+    use crate::config::DEFAULT_MAX_CONSIGNMENT_BYTES;
     use crate::proto::sign_request::SourceNetwork;
-    use crate::proto::{MerkleProofEntry, RgbSource, SignRequest};
+    use crate::proto::{RgbSource, SignRequest};
 
-    let entry = MerkleProofEntry {
-        txid: vec![0x11; 32],
-        block_height: 900_000,
-        tx_position: 4_000,
-        merkle_path: vec![vec![0x5a; 32]; 13],
-    };
     let req = EnclaveRequest {
         request: Some(enclave_request::Request::Sign(SignRequest {
             amount: 1,
@@ -195,7 +192,6 @@ fn the_largest_burn_request_passes_the_shape_check() {
                 // without counting them.
                 consignment: vec![0x32; DEFAULT_MAX_CONSIGNMENT_BYTES],
                 consignment_hash: vec![0x22; 32],
-                merkle_proofs: vec![entry; DEFAULT_MAX_MERKLE_PROOFS],
                 commission: 0,
             })),
             destination_network: None,
@@ -208,8 +204,30 @@ fn the_largest_burn_request_passes_the_shape_check() {
         "{} bytes",
         wire.len()
     );
+    assert_eq!(count_request_elements(&wire[4..]).unwrap(), 1);
     let decoded = read_request(&mut Cursor::new(&wire)).unwrap();
     assert_eq!(decoded, req);
+}
+
+/// The largest real request in elements, a `SubmitHeaders` of
+/// `max_headers_per_submit` headers, passes the shape check.
+#[test]
+fn the_largest_header_batch_passes_the_shape_check() {
+    use crate::proto::SubmitHeadersRequest;
+
+    let headers = crate::limits::Limits::DEFAULTS.max_headers_per_submit as usize;
+    let req = EnclaveRequest {
+        request: Some(enclave_request::Request::SubmitHeaders(
+            SubmitHeadersRequest {
+                headers: vec![vec![0x5a; 80]; headers],
+                start_height: 1,
+            },
+        )),
+    };
+    let mut wire = Vec::new();
+    write_message(&mut wire, &req).unwrap();
+    assert_eq!(count_request_elements(&wire[4..]).unwrap(), 2 + headers);
+    assert_eq!(read_request(&mut Cursor::new(&wire)).unwrap(), req);
 }
 
 /// A message field sent with another wire type. The walk skips it, and
@@ -415,23 +433,13 @@ fn parse_proto_messages(proto: &str) -> BTreeMap<String, Vec<ProtoField>> {
 fn schema_message(schema: Schema) -> Option<&'static str> {
     match schema {
         Schema::Request => Some("EnclaveRequest"),
-        Schema::Sign => Some("SignRequest"),
-        Schema::RgbSource => Some("RgbSource"),
-        Schema::MerkleProofEntry => Some("MerkleProofEntry"),
         Schema::SubmitHeaders => Some("SubmitHeadersRequest"),
         Schema::SetEndpoints => Some("SetEndpointsRequest"),
         Schema::Leaf => None,
     }
 }
 
-const WALKED: [Schema; 6] = [
-    Schema::Request,
-    Schema::Sign,
-    Schema::RgbSource,
-    Schema::MerkleProofEntry,
-    Schema::SubmitHeaders,
-    Schema::SetEndpoints,
-];
+const WALKED: [Schema; 3] = [Schema::Request, Schema::SubmitHeaders, Schema::SetEndpoints];
 
 fn schema_of(message: &str) -> Schema {
     WALKED
@@ -515,7 +523,7 @@ fn the_shape_walk_knows_every_repeated_field_of_the_proto() {
         }
     }
     assert!(
-        repeated >= 3,
+        repeated >= 2,
         "{repeated} repeated fields reachable from EnclaveRequest"
     );
     for schema in WALKED {

@@ -40,24 +40,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RGB consignment validation (optional, behind rgb-validation feature). The
-# versions are the crates.io ones the pinned rgb-lib takes: another version can
-# change the BFA schema id. Exact pins keep a newer prerelease out.
+# version is the crates.io one the pinned rgb-lib takes: another version can
+# change the RGB consensus code the enclave runs. `Cargo.lock` fixes the whole
+# graph, and the EIF builds pass `--locked`, so the crates the enclave does not
+# name are pinned too.
 rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-rgb-schemas = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-# Not used directly: pins the consensus, VM and invoicing crates that rgb-ops
-# pulls with a caret requirement.
-rgb-consensus = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-rgb-aluvm = { version = "=0.11.2-rc.2", default-features = false, optional = true }
-rgb-invoicing = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
-# Decodes the fascia rgb-lib writes for a mint or refill tx, which carries its
-# RGB data (rgb-lib strips it from the PSBT). The version rgb-ops pins.
-strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6", optional = true }
-# RGB-Tools rgb-lib 0.3.0-beta.8, without the wallet. It validates a consignment
+# RGB-Tools rgb-lib after 0.3.0-beta.7, without the wallet. It validates a consignment
 # and reads its flat summary (`inspect_consignment`), and it inspects the
 # fascia of a mint or refill transaction (`inspect_fascia`).
-rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "ea2b745b66b20fbaf3001e2121e1329c4695f647", default-features = false, optional = true }
+rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "b754db77", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -88,7 +81,7 @@ rustls = { version = "0.23", default-features = false, features = ["logging", "p
 
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
-nix = { version = "0.31.2", features = ["socket", "time"] }
+nix = { version = "0.31.2", features = ["socket", "time", "resource"] }
 aws-nitro-enclaves-nsm-api = "0.5"
 
 [features]
@@ -142,7 +135,7 @@ allow-seed-import = []
 #
 # Every witness txid is checked against the enclave's SPV header chain before
 # EVM signing. Builds without RGB validation refuse RGB sources.
-rgb-validation = ["rgb-ops", "rgb-lib", "rgb-schemas", "rgb-invoicing", "rgb-consensus", "rgb-aluvm", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
+rgb-validation = ["rgb-ops", "rgb-lib", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
@@ -159,13 +152,16 @@ allow-debug-pcrs = ["attestation-verify/allow-debug-pcrs"]
 # `build.rs` turns the role into the `evm_to_rgb` / `rgb_to_evm` cfgs.
 #
 # `mint-signer` = EVM -> RGB: co-signs the RGB mint PSBT (and create_utxo). It
-# reads each mint and refill from its fascia, so it needs `strict_encoding`.
-mint-signer = ["rgb-validation", "kms-persistence", "dep:strict_encoding"]
+# reads each mint and refill from rgb-lib's inspection of its fascia.
+mint-signer = ["rgb-validation", "kms-persistence"]
 # `burn-signer` = RGB -> EVM: signs the `fundsOut` release (and its gas tx).
 burn-signer = ["rgb-validation"]
 
 [dev-dependencies]
 rand = "0.10.0"
+# Pins the BFA ids of `networks/rgb/bfa_schema.rs` to the compiled schema, and
+# builds its rules, which panic if the schema definition is inconsistent.
+rgb-schemas = { version = "=0.11.2-rc.2", default-features = false }
 # Canned KMS HTTP exchanges for the `kms` unit tests.
 aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-aws-lc", "test-util"] }
 http = "1"
@@ -174,7 +170,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 # Reads the shared vectors `docs/burn-destination-vectors.json`. Already in the lock.
 serde_json = "1"
 # The in-process BFA consignment generator (`src/test_support/bfa_consignment.rs`)
-# builds strict types. Already in the lock.
+# builds strict types and writes the fascia bytes a request carries.
 strict_encoding = { package = "rgb-strict-encoding", version = "=1.0.6" }
 # The generator commits its PSBTs with psbtu's `rgb_commit` and strips their
 # RGB keys, as rgb-lib does.

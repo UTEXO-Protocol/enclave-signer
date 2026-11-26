@@ -26,7 +26,24 @@ pub(super) fn handle_sign_rights_refill(
         .with_keys(|keys| psbt_validation::refill_gate(&psbt, keys))?;
     // RR15 counts only requests past the gate, so junk cannot use it up.
     ctx.state.refill_rate.admit(Instant::now())?;
-    let rights = crate::networks::rgb::validate_rights_refill(&req, &psbt, &ctx.bridge_config)?;
+    let own_colored_vout = |psbt: &bitcoin::psbt::Psbt, vout: u32| {
+        ctx.state
+            .with_keys(|keys| {
+                Ok(crate::networks::rgb::btc_ownership::output_is_self_derived(
+                    psbt,
+                    vout as usize,
+                    keys,
+                    Some(crate::keys::AccountType::Colored),
+                ))
+            })
+            .unwrap_or(false)
+    };
+    let rights = crate::networks::rgb::validate_rights_refill(
+        &req,
+        &psbt,
+        &ctx.bridge_config,
+        &own_colored_vout,
+    )?;
     ctx.state
         .with_keys(|keys| psbt_validation::assert_refill_rights_owned(&psbt, &rights, keys))?;
     tracing::info!(

@@ -40,6 +40,15 @@ use utexo_bridge_parent::transport_security::LimitedIncoming;
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DESTINATION_NETWORK: u32 = 84;
 
+/// The validator child of the burns: the fixture starts this test binary with
+/// only this test, which then serves one validation and exits.
+#[test]
+fn rgb_validator_child() {
+    if let Some(code) = utexo_bridge_enclave::networks::rgb::validation::run_if_test_child() {
+        std::process::exit(code);
+    }
+}
+
 /// Observe bytes consumed and returned by the actual handler, without replacing it.
 struct RecordedStream {
     stream: TcpStream,
@@ -95,16 +104,6 @@ fn grpc_request(request: &EnclaveSignRequest) -> grpc_proto::SignRequest {
                     .checked_add(1)
                     .expect("distinct legacy amount"),
                 rgb_asset_id: source.asset_id.clone(),
-                merkle_proofs: source
-                    .merkle_proofs
-                    .iter()
-                    .map(|proof| grpc_proto::MerkleProofEntry {
-                        txid: proof.txid.clone(),
-                        block_height: proof.block_height,
-                        tx_position: proof.tx_position,
-                        merkle_path: proof.merkle_path.clone(),
-                    })
-                    .collect(),
             })),
         }),
         data: Some(sign_request::Data::EvmData(enriched::EnrichedEvmPayload {
@@ -148,11 +147,6 @@ async fn sign_through_parent(
     let Some(SourceNetwork::RgbSource(source)) = &mut expected_request.source_network else {
         unreachable!();
     };
-    assert!(!source.merkle_proofs.is_empty());
-    assert!(source
-        .merkle_proofs
-        .iter()
-        .all(|proof| !proof.merkle_path.is_empty() && proof.tx_position != 0));
     source.consignment_valid = true;
 
     let enclave_listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -158,7 +158,7 @@ enum Command {
         #[arg(long, required_unless_present_any = ["mock", "allow_development_policy"])]
         image_env: Option<PathBuf>,
         /// Role of the deployed production image.
-        #[arg(long, value_parser = ["combined", "burn"], required_unless_present_any = ["mock", "allow_development_policy"])]
+        #[arg(long, value_parser = ["combined", "mint", "burn"], required_unless_present_any = ["mock", "allow_development_policy"])]
         signer_role: Option<String>,
         /// The bundle file to write.
         #[arg(long)]
@@ -166,6 +166,10 @@ enum Command {
         /// The registered EVM address. The attested address must equal it.
         #[arg(long)]
         expect_evm_address: Option<String>,
+        /// Approved Bitcoin account keys and master fingerprint. Supply all
+        /// three together when checking a Mint registration or recovery.
+        #[command(flatten)]
+        expect_mint_identity: Box<MintIdentityArgs>,
         /// Expect a mock-attestation enclave with the Development policy.
         /// For tests only.
         #[arg(long)]
@@ -214,13 +218,58 @@ enum Command {
     },
 }
 
+#[derive(Args, Default)]
+struct MintIdentityArgs {
+    /// Approved vanilla BIP-86 account xpub, compared with the attested key.
+    #[arg(long, requires_all = ["expect_account_xpub_colored", "expect_master_fingerprint"])]
+    expect_account_xpub_vanilla: Option<bitcoin::bip32::Xpub>,
+    /// Approved colored BIP-86 account xpub, compared with the attested key.
+    #[arg(long, requires_all = ["expect_account_xpub_vanilla", "expect_master_fingerprint"])]
+    expect_account_xpub_colored: Option<bitcoin::bip32::Xpub>,
+    /// Approved master fingerprint, as eight hex characters.
+    #[arg(long, requires_all = ["expect_account_xpub_vanilla", "expect_account_xpub_colored"])]
+    expect_master_fingerprint: Option<bitcoin::bip32::Fingerprint>,
+}
+
+impl MintIdentityArgs {
+    fn check(&self, keys: &utexo_bridge_parent::attest_verify::BundleKeys) -> anyhow::Result<()> {
+        for (name, expected, actual) in [
+            (
+                "account_xpub_vanilla",
+                self.expect_account_xpub_vanilla.map(|key| key.to_string()),
+                keys.account_xpub_vanilla.as_str(),
+            ),
+            (
+                "account_xpub_colored",
+                self.expect_account_xpub_colored.map(|key| key.to_string()),
+                keys.account_xpub_colored.as_str(),
+            ),
+            (
+                "master_fingerprint",
+                self.expect_master_fingerprint.map(|key| key.to_string()),
+                keys.master_fingerprint
+                    .strip_prefix("0x")
+                    .unwrap_or(&keys.master_fingerprint),
+            ),
+        ] {
+            if let Some(expected) = expected {
+                anyhow::ensure!(
+                    actual == expected,
+                    "{name} differs from the approved identity"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand)]
 enum LimitsAction {
     /// Print each limit: its current value and the value of the image
     Show,
     /// Change limits. Limits that are not named keep their values
     Set {
-        /// NAME=VALUE pairs, for example max_rgb_lib_ms=24000. `limits show`
+        /// NAME=VALUE pairs, for example evm_rpc_timeout_secs=24. `limits show`
         /// lists the names.
         pairs: Vec<String>,
         /// Read NAME=VALUE lines from this file. A pair on the command line
@@ -551,7 +600,6 @@ fn main() {
                 proxy_contract: proxy,
                 calldata_amount,
                 calldata_commission,
-                merkle_proofs: vec![],
                 consignment: vec![],
                 consignment_hash: vec![],
                 lz_release: None,
@@ -663,8 +711,12 @@ fn main() {
                         std::fs::read_to_string(&path)
                             .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
                     });
-                    let values = utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
-                        .unwrap_or_else(|e| fail(e));
+                    let (values, skipped) =
+                        utexo_bridge_parent::limits::parse(&pairs, text.as_deref())
+                            .unwrap_or_else(|e| fail(e));
+                    for note in skipped {
+                        eprintln!("note: {note}");
+                    }
                     client.set_limits(values, reset)
                 }
             };
@@ -727,6 +779,7 @@ fn main() {
             signer_role,
             out,
             expect_evm_address,
+            expect_mint_identity,
             mock,
             allow_development_policy,
             endpoints,
@@ -738,6 +791,7 @@ fn main() {
                 signer_role.as_deref(),
                 &out,
                 expect_evm_address.as_deref(),
+                *expect_mint_identity,
                 mock,
                 allow_development_policy,
                 endpoints,
@@ -867,6 +921,7 @@ fn export_attestation(
     signer_role: Option<&str>,
     out: &std::path::Path,
     expect_evm_address: Option<&str>,
+    expect_mint_identity: MintIdentityArgs,
     mock: bool,
     allow_development_policy: bool,
     endpoints: EndpointArgs,
@@ -877,8 +932,7 @@ fn export_attestation(
     use utexo_bridge_parent::launch_check;
 
     let pcrs = pcr_file.map_or(Ok(ExpectedPcrs::zero()), read_pcrs)?;
-    let (mode, expected) = if allow_development_policy {
-        anyhow::ensure!(!mock, "--allow-development-policy conflicts with --mock");
+    if !mock {
         for (name, pcr) in [
             ("PCR0", pcrs.pcr0),
             ("PCR1", pcrs.pcr1),
@@ -886,14 +940,18 @@ fn export_attestation(
         ] {
             anyhow::ensure!(
                 pcr != [0; 48],
-                "Development policy requires independently approved nonzero {name}; Nitro debug mode is not supported"
+                "real attestation export requires independently approved nonzero {name}; Nitro debug mode is not supported"
             );
         }
+    }
+    let (mode, expected) = if allow_development_policy {
+        anyhow::ensure!(!mock, "--allow-development-policy conflicts with --mock");
         (VerifyMode::Real, AttestedPolicy::Development)
     } else if mock {
         (VerifyMode::Mock, AttestedPolicy::Development)
     } else {
         let role = match signer_role {
+            Some("mint") => SignerRole::Mint,
             Some("burn") => SignerRole::Burn,
             Some("combined") => SignerRole::Combined,
             other => anyhow::bail!("unknown signer role {other:?}"),
@@ -916,6 +974,7 @@ fn export_attestation(
     rand::fill(&mut nonce);
     let response = client.get_attested_public_key(nonce)?;
     let bundle = export_bundle(response, nonce, &pcrs, mode, &expected, expect_evm)?;
+    expect_mint_identity.check(&bundle.public_keys)?;
 
     let tmp = out.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&bundle)? + "\n")
@@ -1063,6 +1122,61 @@ fn run_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mint_export_accepts_a_complete_account_identity_and_rejects_partial_pins() {
+        use bitcoin::bip32::{Xpriv, Xpub};
+        let private = Xpriv::new_master(bitcoin::Network::Bitcoin, &[7; 32]).unwrap();
+        let xpub = Xpub::from_priv(&bitcoin::secp256k1::Secp256k1::new(), &private).to_string();
+        let base = [
+            "cli",
+            "export-attestation",
+            "--signer-role",
+            "mint",
+            "--pcr-file",
+            "PCR.json",
+            "--image-env",
+            "IMAGE-ENV.json",
+            "--out",
+            "attestation.json",
+        ];
+        let pins = [
+            ("--expect-account-xpub-vanilla", xpub.as_str()),
+            ("--expect-account-xpub-colored", xpub.as_str()),
+            ("--expect-master-fingerprint", "73c5da0a"),
+        ];
+        let mut complete = base.to_vec();
+        for (flag, value) in pins {
+            complete.extend([flag, value]);
+        }
+        let parsed = Cli::try_parse_from(&complete).unwrap();
+        let Command::ExportAttestation {
+            signer_role,
+            expect_mint_identity,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected export-attestation");
+        };
+        assert_eq!(signer_role.as_deref(), Some("mint"));
+        assert!(expect_mint_identity.expect_account_xpub_vanilla.is_some());
+        assert!(expect_mint_identity.expect_account_xpub_colored.is_some());
+        assert!(expect_mint_identity.expect_master_fingerprint.is_some());
+        for omitted in 0..pins.len() {
+            let mut partial = base.to_vec();
+            for (index, (flag, value)) in pins.iter().enumerate() {
+                if index != omitted {
+                    partial.extend([*flag, *value]);
+                }
+            }
+            assert!(Cli::try_parse_from(partial).is_err());
+        }
+        for malformed in ["", "not-an-xpub", "xpub111111"] {
+            let mut bad = complete.clone();
+            bad[base.len() + 1] = malformed;
+            assert!(Cli::try_parse_from(bad).is_err());
+        }
+    }
 
     #[test]
     fn runtime_endpoint_arguments_reach_the_launch_request() {

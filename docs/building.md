@@ -115,28 +115,33 @@ ARN: a rebuild reproduces PCR0 without knowing them.
 
 **The asset and its schema.** The BFA schema id is
 `rgb:sch:3I0xZVEQnQxYVk7vDnh5uNtQyUfsmThw6dX9n_Gvb5o#mama-swing-album`. The
-enclave refuses any other schema, so an asset issued on another schema does
-not validate. Use the id of a BFA contract issued on this schema, for the
-mint image and the burn image.
+enclave validates under those rules only. A contract id is the genesis
+commitment, so the `RGB_ASSET_ID` pin fixes the schema of the asset: an id of
+a contract on another schema does not validate. Use the id of a BFA contract
+issued on this schema, for the mint image and the burn image.
 
-**Stage profiles.** `BUILD_PROFILE=stage-signet` builds both roles for public
+**Named profiles.** `BUILD_PROFILE=stage-signet` builds both roles for public
 Signet, with relay checks off. `BUILD_PROFILE=stage-mainnet` builds both roles
 for Bitcoin mainnet, with required relay checks and the Stage mainnet
-contracts. Each profile
+contracts. `BUILD_PROFILE=prod-mainnet` requires explicit production pins; see
+[production EIFs](production-eif.md). Each profile
 uses dedicated release inputs and its own S3 subdirectory; see
 [build/profiles/README.md](../build/profiles/README.md).
 
 **CI.** `.github/workflows/build-eif.yml` builds the `rgb-mint` and
-`rgb-burn` variants and uploads each EIF with its PCRs, checksums,
-`IMAGE-ENV.json`, `metadata.json` and host binaries to
-`s3://<bucket>/eif/<git_sha>/rgb-<role>/`. It takes the asset from the
-repository variable `BFA_RGB_ASSET_ID` and the account list from
-`KMS_ALLOWED_ACCOUNT_IDS`, and records the asset pin of the built image in
-`metadata.json`. `release-eif.yml` runs `deploy/deploy-host.sh` for one role
-and one CID: its `enclave_cid` input is 16, 18 or 20, and 16 by default. It
-passes no launch value, and `set-endpoints` of a role image refuses blank
-values. The `cd-*.yml` workflows push container images
-of the parent and of the dev enclave images only.
+`rgb-burn` variants and uploads their EIFs, PCRs, checksums, image environment,
+metadata, builder evidence and host binaries. The default profile uses
+`s3://<bucket>/eif/<git_sha>/rgb-<role>/`; named profiles add `<profile>/`
+between the SHA and role directory. Each profile selects its documented inputs
+and records the measured asset in `metadata.json`.
+
+`release-eif.yml` selects the deployment environment, then
+runs `deploy/deploy-host.sh` for one role and CID (16, 18, 20 or 24). Launch
+configuration, KMS prerequisites and readiness checks are described in
+[operations](operations.md) and [Mint release](mint-release.md). Production
+build and publication settings are in [production EIFs](production-eif.md).
+The `cd-*.yml` workflows publish parent and development enclave container images;
+they do not replace the EIF release/deployment workflows.
 
 ## Reproducibility
 

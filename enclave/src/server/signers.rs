@@ -164,7 +164,7 @@ fn signed_psbt_response((signed_psbt, inputs_signed): (Vec<u8>, usize)) -> Resul
 
 /// Sign a plain-BTC PSBT (create_utxo, UTXO management).
 /// Unlike [`handle_sign_psbt`], it has no RGB consignment and no EVM event.
-/// Authorization: outputs pay to enclave scripts or fit the unowned budget,
+/// Authorization: every output that carries sats is one the enclave derives,
 /// the pinned fee policy passes, and the operator amount cap holds
 /// ([`crate::networks::rgb::btc_crosscheck`]).
 /// A production build refuses to sign when the cap is not set.

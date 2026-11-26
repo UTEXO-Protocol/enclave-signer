@@ -20,7 +20,7 @@ utexo-bridge-parent-cli --addr vsock://16:5000 limits show
 ```
 
 ```bash
-utexo-bridge-parent-cli --addr vsock://16:5000 limits set max_rgb_lib_ms=24000 total_request_timeout_secs=40
+utexo-bridge-parent-cli --addr vsock://16:5000 limits set evm_rpc_timeout_secs=20 total_request_timeout_secs=60
 ```
 
 ```bash
@@ -51,16 +51,21 @@ reads. The path has only letters, digits, `_`, `.`, `/` and `-`. The file has on
 `NAME=VALUE` on each line. The text after a `#` is a comment:
 
 ```text
-# Long histories.
-max_rgb_lib_ms=24000
-total_request_timeout_secs=40
+# Shorter calls to the EVM RPC.
+evm_rpc_timeout_secs=20
 ```
+
+A deadline above the image's 90 s is not a change of this file alone: raise
+the timeouts above the enclave first ([The parent](#the-parent)).
 
 `deploy-host.sh` and `utexo-enclave-ctl.sh` send this file at each launch, before
 `set-endpoints`. The file is optional: with no file, the launch sends nothing and
 logs nothing. The enclave unit runs as `ubuntu`, so that user must be able to read
 the file. If the launch cannot read the file, or the enclave refuses it, the launch
-logs this and continues, and the enclave keeps the image values.
+logs this and continues, and the enclave keeps the image values. A line that names
+a limit reserved in the schema (`max_rgb_lib_ms`, `max_witness_check_cost`,
+`max_bundle_id_cost`, `max_reject_walk_cost`) sets nothing: the CLI skips it with a
+note, and the other lines apply.
 
 Before it downloads or stops anything, `deploy-host.sh` checks the file as
 `ubuntu`. When the file, or a link at its path, exists and `ubuntu` cannot read it,
@@ -75,18 +80,12 @@ checks them at launch.
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
-| `max_rgb_lib_ms` | 30000 | 1000 | 86400000 | Modeled rgb-lib time on one consignment. |
-| `max_witness_check_cost` | 134217728 | 1048576 | 2^50 | Steps to check transitions against witness txs. |
-| `max_bundle_id_cost` | 262144 | 1024 | 2^50 | Steps to hash bundle ids. |
-| `max_reject_walk_cost` | 67108864 | 1048576 | 2^50 | Steps of the reject-list walk. |
 | `max_reject_list_entries` | 20000 | 1 | 2^32 | Entries of a reject list. |
 | `reject_list_page_entries` | 1000 | 1 | 2^20 | Entries in one RPC call that reads a reject list. |
 | `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
 | `max_wire_elements` | 524288 | 1024 | 2^32 | Protobuf field occurrences in a request. |
 | `max_consignment_bytes` | 10485760 | 1024 | 2^32 | Size of a consignment. |
-| `max_merkle_proofs` | 16384 | 1 | 2^32 | Merkle proofs of a request. |
-| `max_total_proof_bytes` | 8388608 | 1024 | 2^32 | Size of all the proofs of a request. |
-| `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT or a fascia. |
+| `max_psbt_bytes` | 1048576 | 1024 | 2^32 | Size of a PSBT. A fascia has its own limit, `MAX_FASCIA_BYTES`, which is compiled in ([mint flow](mint-flow.md)). |
 | `max_gas_tx_bytes` | 1048576 | 1024 | 2^32 | Size of an unsigned gas transaction. |
 | `max_rlp_items` | 1024 | 16 | 2^20 | RLP items of a gas transaction. |
 | `max_funds_out_call_data_bytes` | 98304 | 1024 | 2^32 | Size of the calldata of a fundsOut. |
@@ -97,10 +96,9 @@ checks them at launch.
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 
-The image env can set the image values of `max_consignment_bytes` (to a lower
-value only), `max_merkle_proofs` and `max_total_proof_bytes`
-([configuration.md](configuration.md#transport-limits-and-dev-settings)). Then
-`limits show` prints those values as the image values.
+The image env can set the image value of `max_consignment_bytes`, to a lower
+value only ([configuration.md](configuration.md#transport-limits-and-dev-settings)).
+Then `limits show` prints that value as the image value.
 
 The lowest values keep the enclave reachable, so the operator can always send a
 new `limits set`. The highest values are very wide on purpose, because validation
@@ -113,9 +111,6 @@ The enclave checks all the new values first. If one check fails, the enclave
 refuses the request and changes nothing.
 
 - Each value must be in its range.
-- `max_rgb_lib_ms` must be at most three quarters of `total_request_timeout_secs`.
-  A request that passes the deadline does all its work, and then it cannot send
-  its reply. So 30 s of rgb-lib needs a deadline of at least 40 s.
 - Each per-call timeout must be at most `total_request_timeout_secs`:
   `io_idle_timeout_secs`, `first_bytes_timeout_secs` and `evm_rpc_timeout_secs`.
   The deadline does not stop a network call of the enclave, so a longer network
@@ -132,17 +127,22 @@ refuses the request and changes nothing.
   250,000 more entries.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
-  limits, a consignment scratch file for each request, and the baseline. rgb-lib
-  reads a consignment, and a fascia, only from a file, and the enclave keeps that
-  file in RAM. A consignment file takes up to `max_consignment_bytes` and a
-  fascia file up to `max_psbt_bytes`, and never more than `max_message_bytes`. A
+  limits, a consignment scratch file for each request, on the burn signer a
+  validator reserve for each request, and the baseline. rgb-lib reads a
+  consignment, and a fascia, only from a file, and the enclave keeps that file
+  in RAM. A consignment file takes up to `max_consignment_bytes` and a fascia
+  file up to `MAX_FASCIA_BYTES`, and never more than `max_message_bytes`. A
   request holds one such file at a time. The enclave removes the file when
-  rgb-lib ends, also after a refusal. The boot check does not count the files.
-  This check counts one file at the larger of the two limits, also for a
-  change that keeps the image values. A refusal states how many MiB the new
-  limits need. A larger frame or consignment limit can need a larger
-  `run-enclave --memory` value, which needs a new launch
-  ([operations.md](operations.md#memory)).
+  rgb-lib ends, also after a refusal: the burn signer writes it before its
+  validator child starts and removes it after it reaps the child. The reserve
+  is the memory of a validator child beside the validation heap: its process,
+  its stack, and the verdict frame that the enclave reads, which grows with
+  `max_consignment_bytes` (`memory::validator_reserve`). This check counts one
+  file at the larger of the two limits and one reserve for each request, and
+  the boot check counts them the same way for the values in force at boot. A
+  refusal states how many MiB the new limits need. A
+  larger frame or consignment limit can need a larger `run-enclave --memory`
+  value, which needs a new launch ([operations.md](operations.md#memory)).
 
 ## The reject list
 
@@ -173,62 +173,51 @@ The parent logs a warning when its value is below the value in force.
 
 ## Measured times
 
-The work limits (`max_rgb_lib_ms` and the three `..._cost` limits) bound the
-work of rgb-lib on one consignment.
-[validation-cost-model.md](validation-cost-model.md) has the model behind
-them.
+`total_request_timeout_secs` bounds the time of rgb-lib on one consignment:
+the burn signer ends its validator child before the deadline and refuses the
+burn with error code 10
+([tee-spec.md](tee-spec.md#validator-child-burn-signer)). No limit refuses a
+consignment for the work it asks before rgb-lib runs.
 
 These times come from a debug-mode enclave on an `m6i.2xlarge` (Intel Xeon Platinum
-8375C at 2.9 GHz, nitro-cli 1.4.5) on 2026-11-05, with 4096 MiB. `MemTotal` was
-3943 MiB. The request is a history of 10,000 transfers with a proof on each. The
-model gives it 19.95 s.
+8375C at 2.9 GHz, nitro-cli 1.4.5, enclave kernel 4.14.256) on 2026-11-23, with
+2 vCPUs and 4096 MiB. `MemTotal` was 3943 MiB. Each request is a burn of 10,000
+transfers with a 13-sibling SPV proof on each, 8,932,383 bytes, with a consignment
+of its own. The production burn build validates it as the validator child, so each
+time includes the start of the child and its questions to the enclave. Two runs
+gave the same times within 0.3 s.
 
-| Requests at once | 2 vCPUs (1 core) | 4 vCPUs (2 cores) |
-|---|---|---|
-| 1 | 14.3 s | 14.3 s |
-| 2 | 26.8 s | 14.9 s |
-| 4 | 52.8 s | 27.1 s |
+| Requests at once | Time of each request, 2 vCPUs (1 core) |
+|---|---|
+| 1 | 12.0 to 12.1 s |
+| 2 | 21.3 to 21.5 s |
+| 4 | 42.9 to 43.2 s |
 
 The default launch has 2 vCPUs, and these are two threads of one core. So four
-requests take 3.7 times as long as one. On every shape measured, the time of one
-request was at or below the model.
+requests take 3.6 times as long as one. 4 vCPUs were not measured through the
+validator child.
 
-An honest history at the 10 MiB limit models at about 23 s. Four of them at once take
-about 65 s on 2 vCPUs, so they fit the deadline of the image, 90 s. A forged request
-can model at the 30 s of `max_rgb_lib_ms`. Four of these at once can take about 110 s
-on 2 vCPUs, and they lose their replies. On 4 vCPUs they take about 57 s.
+Four of these requests at once fit the deadline of the image, 90 s, less
+`RESPONSE_MARGIN`. A request that takes longer, alone or beside others, does not:
+the burn signer ends its validator child before the deadline and refuses the burn.
+Before a change that cuts this headroom on purpose (a shorter deadline, a
+larger `max_consignment_bytes`, fewer vCPUs or more workers), measure the
+longest history that the bridge accepts on the CPU of the burn enclaves, at
+the concurrency of the host.
 
 ## Smaller production host
 
 For a 4-vCPU, 16-GiB host, use a burn enclave with **2 vCPUs (one core)**,
-**4096 MiB** and these settings:
+**4096 MiB** and `GRPC_MAX_CONCURRENT_SIGN=4`.
 
-| Setting | Value |
-|---|---:|
-| `max_rgb_lib_ms` | 30000 |
-| `total_request_timeout_secs` | 320 |
-| `GRPC_MAX_CONCURRENT_SIGN` | 4 |
-| Parent enclave wait | 330 s |
-| `GRPC_REQUEST_TIMEOUT_SECS` | 335 |
-| Backend request timeout | At least 340 s |
+The deadline stays the image's 90 s, so the parent, node and backend timeouts
+stay at their defaults too. This is the enclave of
+[Measured times](#measured-times): four requests at once take 43 s there.
+Every request can hold a worker until the deadline, so a longer deadline only
+raises what a forged consignment costs.
 
-The CPU times behind these values are in
-[validation-cost-model.md](validation-cost-model.md#measurements). Checked on
-2026-11-10 on a Nitro enclave with 2 vCPUs and 4096 MiB: `limits set` accepts
-the two enclave limits, and `limits show` reads them back with every other
-limit at its image value.
-
-The deadline is `30 s × 2 × 4 / 0.75 = 320 s`: keep the admitted histories,
-reserve twice the CPU time, account for four workers sharing one core, and
-leave one quarter for other work. The ×2 factor is headroom for the smaller
-host. Timeouts round up to five seconds: enclave 320, parent wait 330,
-parent request 335, backend 340.
-
-Use [the parent profile](../deploy/profiles/burn-small-host.env) and
-[the limits file](../deploy/profiles/burn-small-host-limits.conf) on every
-host deploy. Set the backend and parent values before raising the enclave
-deadline; [apply and persist the limits](#commands) for each selected CID.
-The release workflow does not forward the profile overrides.
+Use [the parent profile](../deploy/profiles/burn-small-host.env) on every
+host deploy. The release workflow does not forward the profile overrides.
 
 ## What the attestation shows
 
@@ -254,9 +243,8 @@ These values also stay constants:
 - `MAX_RLP_DEPTH`: it keeps the decoder from using all of the stack.
 - `MAX_STORED_HEADERS`: at the mainnet block rate, the chain reaches it in about
   19 years.
-- The rates of the cost model (`validation/cost.rs`) and of the memory model
-  (`memory.rs`). They describe the code of the image, so they change with the code.
-  `max_rgb_lib_ms` and the request deadline already cover a slower CPU.
+- The rates of the memory model (`memory.rs`). They describe the code of the
+  image, so they change with the code.
 - Small fixed formats, such as a mnemonic, a KMS reply and an attestation document.
 - The KMS and seed recovery timeouts.
 
@@ -285,10 +273,15 @@ before the parent. If `GetLimits` gets no answer within `LIMITS_IO_TIMEOUT`
 deadline.
 
 Timeouts above the parent do not follow the deadline: `GRPC_REQUEST_TIMEOUT_SECS` on
-the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` and
-`PARENT_ADAPTER_GRPC_TIMEOUT` on the signer node, and the timeout of the backend (2
-minutes). Each must stay above the deadline plus `ENCLAVE_WAIT_MARGIN_SECS`. A
-shorter one ends a slow request before the enclave answers, and a node retry then
+the parent (default 120 s), `PARENT_ADAPTER_GRPC_ATTEMPT_TIMEOUT` (default 110 s) and
+`PARENT_ADAPTER_GRPC_TIMEOUT` (default 120 s) on the signer node, its inbound
+`GRPC_REQUEST_TIMEOUT` (default 120 s, and `GRPC_SHUTDOWN_TIMEOUT` at least as long),
+`NODE_SIGN_TIMEOUT` of the backend's signer for each node (default 2 minutes), and the
+backend's own request timeout. Each must stay above the deadline plus
+`ENCLAVE_WAIT_MARGIN_SECS`. The image's 90 s fits these defaults; a longer deadline
+needs every one of them raised first, the node's attempt timeout too. A
+shorter one ends a slow request before the enclave answers, so the refusal of a
+validation that ran out of time (code 10) never reaches the backend, and a node retry then
 makes the enclave validate the same release again.
 
 The parent refuses to start when `GRPC_REQUEST_TIMEOUT_SECS` does not exceed the image

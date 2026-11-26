@@ -46,7 +46,7 @@ DOCKERFILE="${DOCKERFILE:?DOCKERFILE required (Dockerfile.enclave.mint or .burn)
 BUILD_PROFILE="${BUILD_PROFILE:-default}"
 case "$BUILD_PROFILE" in
     default) ;;
-    stage-signet|stage-mainnet) source "$SCRIPT_DIR/profiles/$BUILD_PROFILE.sh" ;;
+    stage-signet|stage-mainnet|prod-mainnet) source "$SCRIPT_DIR/profiles/$BUILD_PROFILE.sh" ;;
     *) echo "Error: unknown BUILD_PROFILE: $BUILD_PROFILE" >&2; exit 1 ;;
 esac
 EIF_NAME="${EIF_NAME:-utexo-bridge-enclave.eif}"
