@@ -1409,7 +1409,6 @@ fn gas_pinned_config() -> BridgeConfig {
         bridge_contract: [0xBB; 20],
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some([0xAA; 20]),
-        gas_tx_max_fee_per_gas: 1_000,
         gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         ..Default::default()
     }
@@ -1589,8 +1588,9 @@ fn test_gas_tx_rejects_fee_over_cap() {
     let port = common::start_test_server_with_config(|_| {}, gas_pinned_config());
     init(port);
 
-    // maxFeePerGas 5_000 exceeds the pinned 1_000 cap.
-    let tx = eip1559_full(&[0xAA; 20], 5_000, 21_000, &[]);
+    // A maxFeePerGas above the runtime limit is refused.
+    let over_limit = utexo_bridge_enclave::limits::Limits::DEFAULTS.gas_tx_max_fee_per_gas + 1;
+    let tx = eip1559_full(&[0xAA; 20], over_limit, 21_000, &[]);
     match &sign_gas_tx(port, tx).response {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
@@ -1612,25 +1612,6 @@ fn test_gas_tx_rejects_disallowed_selector() {
         Some(Response::Error(e)) => {
             assert_eq!(e.code, 3);
             assert!(e.message.contains("selector"), "got: {}", e.message);
-        }
-        other => panic!("expected ErrorResponse, got {:?}", other),
-    }
-}
-
-#[test]
-#[cfg(rgb_to_evm)]
-fn test_gas_tx_fails_closed_when_caps_unpinned() {
-    // A config that pins the destination but not the fee cap must fail closed.
-    let mut cfg = gas_pinned_config();
-    cfg.gas_tx_max_fee_per_gas = 0;
-    let port = common::start_test_server_with_config(|_| {}, cfg);
-    init(port);
-
-    let tx = eip1559_full(&[0xAA; 20], 100, 21_000, &[]);
-    match &sign_gas_tx(port, tx).response {
-        Some(Response::Error(e)) => {
-            assert_eq!(e.code, 3);
-            assert!(e.message.contains("cap not pinned"), "got: {}", e.message);
         }
         other => panic!("expected ErrorResponse, got {:?}", other),
     }

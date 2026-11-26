@@ -4,15 +4,24 @@ const CHAIN_ID: u64 = 1;
 const ALLOWED_TO: [u8; 20] = [0xAA; 20];
 const MAX_GAS_LIMIT: u64 = 30_000;
 const MAX_FEE_PER_GAS: u128 = 1_000;
+const MAX_VALUE_WEI: u64 = 1_000_000;
 const ALLOWED_SELECTOR: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
+/// Sets the fee and value limits of the calling test to the small test values.
+fn set_fee_limits() {
+    crate::limits::change_for_test(|l| {
+        l.gas_tx_max_fee_per_gas = MAX_FEE_PER_GAS as u64;
+        l.gas_tx_max_value_wei = MAX_VALUE_WEI;
+    });
+}
+
 fn cfg() -> BridgeConfig {
+    set_fee_limits();
     BridgeConfig {
         chain_id: CHAIN_ID,
         bridge_contract: [0xBB; 20],
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some(ALLOWED_TO),
-        gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
         gas_tx_allowed_selectors: vec![ALLOWED_SELECTOR],
         ..Default::default()
     }
@@ -207,15 +216,14 @@ fn onchain_lz_selector_matches_its_signature() {
     );
 }
 
-/// LZ posture: `GAS_TX_ALLOWED_TO` pinned at the proxy, plus a ceiling.
+/// LZ posture: `GAS_TX_ALLOWED_TO` pinned at the proxy.
 fn lz_cfg() -> BridgeConfig {
+    set_fee_limits();
     BridgeConfig {
         chain_id: CHAIN_ID,
         bridge_contract: ALLOWED_TO,
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some(ALLOWED_TO),
-        gas_tx_max_value_wei: Some(1_000_000),
-        gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
         // The carve-out changes only the value rule. The selector must be
         // allowlisted.
         gas_tx_allowed_selectors: vec![ONCHAIN_LZ_FUNDS_OUT_CALL_SELECTOR, ALLOWED_SELECTOR],
@@ -284,30 +292,25 @@ fn rejects_nonzero_value_when_bridge_contract_unpinned() {
     );
 }
 
-/// Fail-closed default: an unset pin keeps the `value == 0` posture.
 #[test]
-fn rejects_nonzero_value_when_ceiling_unset() {
-    let uncapped = BridgeConfig {
-        gas_tx_max_value_wei: None,
-        ..lz_cfg()
-    };
-    let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1, &lz_calldata());
-    let err = validate_gas_tx_request(&req(tx), &uncapped).unwrap_err();
+fn rejects_value_above_the_runtime_limit() {
+    let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1_000_001, &lz_calldata());
+    let err = validate_gas_tx_request(&req(tx), &lz_cfg()).unwrap_err();
     assert!(
-        err.to_string().contains("GAS_TX_MAX_VALUE_WEI unset"),
+        err.to_string().contains("gas_tx_max_value_wei"),
         "got: {err}"
     );
 }
 
 #[test]
-fn rejects_value_above_the_ceiling() {
-    let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, 1_000_001, &lz_calldata());
-    let err = validate_gas_tx_request(&req(tx), &lz_cfg()).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("exceeds pinned GAS_TX_MAX_VALUE_WEI"),
-        "got: {err}"
-    );
+fn signs_up_to_the_value_that_the_operator_set() {
+    let cfg = lz_cfg();
+    let above = MAX_VALUE_WEI + 1;
+    let tx = eip1559_with_data(CHAIN_ID, &ALLOWED_TO, above, &lz_calldata());
+    validate_gas_tx_request(&req(tx.clone()), &cfg).unwrap_err();
+
+    crate::limits::change_for_test(|l| l.gas_tx_max_value_wei = above);
+    validate_gas_tx_request(&req(tx), &cfg).expect("the raised limit covers this value");
 }
 
 #[test]
@@ -591,7 +594,8 @@ fn rejects_max_fee_over_cap() {
     );
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
-        err.to_string().contains("maxFeePerGas") && err.to_string().contains("exceeds pinned cap"),
+        err.to_string().contains("maxFeePerGas")
+            && err.to_string().contains("gas_tx_max_fee_per_gas"),
         "got: {err}"
     );
 }
@@ -611,7 +615,7 @@ fn rejects_priority_fee_over_cap() {
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
         err.to_string().contains("maxPriorityFeePerGas")
-            && err.to_string().contains("exceeds pinned cap"),
+            && err.to_string().contains("gas_tx_max_fee_per_gas"),
         "got: {err}"
     );
 }
@@ -629,18 +633,29 @@ fn rejects_legacy_gas_price_over_cap() {
     );
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
-        err.to_string().contains("maxFeePerGas") && err.to_string().contains("exceeds pinned cap"),
+        err.to_string().contains("maxFeePerGas")
+            && err.to_string().contains("gas_tx_max_fee_per_gas"),
         "got: {err}"
     );
 }
 
 #[test]
-fn rejects_when_fee_cap_unpinned() {
-    let mut c = cfg();
-    c.gas_tx_max_fee_per_gas = 0;
-    let tx = eip1559(CHAIN_ID, &ALLOWED_TO, 0);
-    let err = validate_gas_tx_request(&req(tx), &c).unwrap_err();
-    assert!(err.to_string().contains("fee cap not pinned"), "got: {err}");
+fn signs_up_to_the_fee_that_the_operator_set() {
+    let cfg = cfg();
+    let above = (MAX_FEE_PER_GAS + 1) as u64;
+    let tx = eip1559_full(
+        CHAIN_ID,
+        &ALLOWED_TO,
+        0,
+        1,
+        above,
+        21_000,
+        &ALLOWED_SELECTOR,
+    );
+    validate_gas_tx_request(&req(tx.clone()), &cfg).unwrap_err();
+
+    crate::limits::change_for_test(|l| l.gas_tx_max_fee_per_gas = above);
+    validate_gas_tx_request(&req(tx), &cfg).expect("the raised limit covers this fee");
 }
 
 #[test]

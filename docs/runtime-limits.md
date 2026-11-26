@@ -99,6 +99,8 @@ checks them at launch.
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
 | `gas_tx_max_gas_limit` | 3000000 | 21000 | 2^32 | The highest `gasLimit` of a gas transaction ([burn flow](burn-flow.md), G4). A release pays gas for each deposit that it cites, so a burn with a long mint ancestry needs a higher value. |
+| `gas_tx_max_fee_per_gas` | 1000000000 | 1 | 2^60 | The highest fee in wei for each unit of gas of a gas transaction: `maxFeePerGas`, `maxPriorityFeePerGas` and the legacy `gasPrice` ([burn flow](burn-flow.md), G4). When the gas price of the chain is above it, the gas key signs nothing. |
+| `gas_tx_max_value_wei` | 5000000000000000 | 1 | 2^60 | The highest native value in wei of a gas transaction ([burn flow](burn-flow.md), G6). Only `lzFundsOutCall` carries a value: the LayerZero fee. |
 
 The image env can set the image value of `max_consignment_bytes`, to a lower
 value only ([configuration.md](configuration.md#transport-limits-and-dev-settings)).

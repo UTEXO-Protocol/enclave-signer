@@ -59,7 +59,7 @@ them, and decide whether you accept each one:
 | `token_contract` | `--expect-token-contract` | `TOKEN_CONTRACT` in `IMAGE-ENV.json`. |
 | `evm_finality_tag` | `--expect-evm-finality-tag` | `EVM_FINALITY_TAG` in `IMAGE-ENV.json`: `safe` or `finalized`. `latest` is refused. |
 | `spv_min_confirmations` | `--expect-spv-min-confirmations` | `SPV_MIN_CONFIRMATIONS` in `IMAGE-ENV.json`. |
-| `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-max-*`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json`. |
+| `gas_tx_*` | `--expect-gas-tx-to`, `--expect-gas-selectors` | `GAS_TX_*` in `IMAGE-ENV.json`. |
 | `evm_rpc_tls.host` | `--expect-evm-rpc-host` | The EVM RPC host that you accept. |
 | `evm_rpc_tls.ca_sha256` | `--expect-evm-rpc-ca-sha256` | The SHA-256 of the CA that you accept, without `0x`. |
 

@@ -28,8 +28,6 @@ fn expect_prod(
         expected_bridge_contract: bridge_contract,
         expected_rgb_asset_id: rgb_asset_id,
         gas_tx_allowed_to: [0u8; 20],
-        gas_tx_max_fee_per_gas: 0,
-        gas_tx_max_value_wei: 0,
         gas_tx_allowed_selectors: Vec::new(),
         kms: None,
     }
@@ -53,8 +51,6 @@ fn production(signer_role: SignerRole) -> ExpectedPolicy {
         expected_bridge_contract: None,
         expected_rgb_asset_id: None,
         gas_tx_allowed_to: [0u8; 20],
-        gas_tx_max_fee_per_gas: 0,
-        gas_tx_max_value_wei: 0,
         gas_tx_allowed_selectors: Vec::new(),
         kms: None,
     }

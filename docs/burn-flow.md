@@ -414,18 +414,17 @@ uses the gas key `m/44'/60'/0'/0/1`.
   `GAS_TX_ALLOWED_TO`. Contract creation is refused.
 - **G4** `gasLimit` must be at most the runtime limit `gas_tx_max_gas_limit`
   ([runtime-limits.md](runtime-limits.md)). Each fee field must be at most
-  `GAS_TX_MAX_FEE_PER_GAS`. Together they bound the fee of one transaction.
-  The operator can change the gas limit, and the image fixes the fee.
+  the runtime limit `gas_tx_max_fee_per_gas`. Together they bound the fee of
+  one transaction. The operator can change both.
 - **G5** The calldata must start with a selector in
   `GAS_TX_ALLOWED_SELECTORS`. Empty calldata is refused: a bare call still
   runs the `fallback` or `receive` function of the destination.
 - **G6** `value` must be zero. One exception: the payable `lzFundsOutCall`,
   which carries the LayerZero messaging fee. It needs `to` equal to
-  `EVM_PROXY_CONTRACT_ADDRESS` and `value` at most `GAS_TX_MAX_VALUE_WEI`,
-  and its selector must still be in the allowlist.
-- **G7** The destination, the gas ceiling, the fee ceiling and the selector
-  allowlist must be set. An unset value refuses the request. An unset value
-  ceiling refuses only a non-zero `value`.
+  `EVM_PROXY_CONTRACT_ADDRESS` and `value` at most the runtime limit
+  `gas_tx_max_value_wei`, and its selector must still be in the allowlist.
+- **G7** The destination and the selector allowlist must be set. An unset
+  value refuses the request.
 
 A `Production` policy attests the gas rule, so a verifier can check it. A
 public-Signet image only measures it. The limits apply to one transaction,

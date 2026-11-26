@@ -62,8 +62,7 @@ class BuildArgumentsTests(unittest.TestCase):
                     'BUILD_PROFILE', 'STAGE_RGB_ASSET_ID', 'STAGE_TOKEN_CONTRACT',
                     'STAGE_GAS_TX_ALLOWED_SELECTORS', 'STAGE_MAINNET_RGB_ASSET_ID',
                     'STAGE_MAINNET_TOKEN_CONTRACT', 'STAGE_MAINNET_GAS_TX_ALLOWED_SELECTORS', 'RUST_LOG',
-                    'GAS_TX_ALLOWED_TO', 'GAS_TX_MAX_FEE_PER_GAS',
-                    'GAS_TX_MAX_VALUE_WEI', 'GAS_TX_ALLOWED_SELECTORS',
+                    'GAS_TX_ALLOWED_TO', 'GAS_TX_ALLOWED_SELECTORS',
                     'KMS_ALLOWED_ACCOUNT_IDS', 'ENCLAVE_FEATURES', *MEASURED_PINS, *MEMBER_INPUT_NAMES):
             self.env.pop(key, None)
         self.env.update(
@@ -414,8 +413,6 @@ class BuildArgumentsTests(unittest.TestCase):
                 if role == 'burn':
                     self.assertEqual(args['GAS_TX_ALLOWED_TO'], args['EVM_PROXY_CONTRACT_ADDRESS'])
                     self.assertEqual(args['GAS_TX_ALLOWED_SELECTORS'], '0xd8220faf,0x8f6b3031')
-                    self.assertEqual(args['GAS_TX_MAX_FEE_PER_GAS'], '1000000000')
-                    self.assertEqual(args['GAS_TX_MAX_VALUE_WEI'], '5000000000000000')
                 else:
                     self.assertFalse(any(key.startswith('GAS_TX_') for key in args))
 

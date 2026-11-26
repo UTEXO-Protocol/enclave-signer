@@ -107,28 +107,19 @@ pub struct BridgeConfig {
     ///
     /// A gas tx carries `value == 0`. The exception is the payable
     /// `lzFundsOutCall`: this pin must equal [`Self::bridge_contract`] and the
-    /// value must fit [`Self::gas_tx_max_value_wei`]. See `networks::evm::gas_tx`.
+    /// value must fit the runtime limit `gas_tx_max_value_wei`. See
+    /// `networks::evm::gas_tx`.
     ///
     /// [`gas_tx_allowed_selectors`](Self::gas_tx_allowed_selectors) limits the
-    /// callable functions. The fee cap and the runtime limit
+    /// callable functions. The runtime limits `gas_tx_max_fee_per_gas` and
     /// `gas_tx_max_gas_limit` limit the burn.
     ///
     /// [`crate::policy::SecurityPolicy`] commits the gas-tx rule in `user_data`.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
-    /// Max per-gas fee in wei (`GAS_TX_MAX_FEE_PER_GAS`): `maxFeePerGas` and
-    /// `maxPriorityFeePerGas` for EIP-1559, `gasPrice` for legacy. `0` = unset,
-    /// which fails gas-tx signing closed. A fee wider than `u128` exceeds the cap.
-    pub gas_tx_max_fee_per_gas: u128,
     /// Allowed 4-byte selectors of gas-tx calldata (`GAS_TX_ALLOWED_SELECTORS`,
     /// comma-separated hex). Empty calldata is refused: it calls the fallback or
     /// receive function. An empty list refuses all gas-tx signing.
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
-    /// Max native value in wei of one gas tx (`GAS_TX_MAX_VALUE_WEI`). `None`
-    /// refuses any non-zero value.
-    ///
-    /// The `TeeLzFundsOut` payload has no fee field, so nothing binds the fee to
-    /// its release. This cap limits the possible loss.
-    pub gas_tx_max_value_wei: Option<u128>,
     /// Max total input value in sats of a plain-BTC PSBT (`BTC_MAX_TOTAL_SATS`).
     /// `0` = unset: a production build refuses plain-BTC signing. It also bounds
     /// miner fees. The destination rule needs no config
@@ -240,9 +231,7 @@ impl Default for BridgeConfig {
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
             gas_tx_allowed_to: None,
-            gas_tx_max_fee_per_gas: 0,
             gas_tx_allowed_selectors: Vec::new(),
-            gas_tx_max_value_wei: None,
             btc_max_total_sats: 0,
             funds_in_contract: [0u8; 20],
             evm_finality_tag: EvmFinalityTag::Finalized,
@@ -297,11 +286,6 @@ impl BridgeConfig {
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
 
-        let gas_tx_max_fee_per_gas = std::env::var("GAS_TX_MAX_FEE_PER_GAS")
-            .ok()
-            .and_then(|s| s.parse::<u128>().ok())
-            .unwrap_or(0);
-
         // A malformed selector is dropped and logged. The others stay.
         let gas_tx_allowed_selectors = std::env::var("GAS_TX_ALLOWED_SELECTORS")
             .ok()
@@ -329,11 +313,6 @@ impl BridgeConfig {
                     .collect::<Vec<[u8; 4]>>()
             })
             .unwrap_or_default();
-
-        // Unset or unparseable stays `None`: a typo must not widen the ceiling.
-        let gas_tx_max_value_wei = std::env::var("GAS_TX_MAX_VALUE_WEI")
-            .ok()
-            .and_then(|s| s.trim().parse::<u128>().ok());
 
         let btc_max_total_sats = std::env::var("BTC_MAX_TOTAL_SATS")
             .ok()
@@ -363,14 +342,6 @@ impl BridgeConfig {
         .expect("BITCOIN_NETWORK must be a known network")
         .attested();
 
-        // Without the fee cap every gas tx fails. Show this at boot.
-        if gas_tx_allowed_to.is_some() && gas_tx_max_fee_per_gas == 0 {
-            tracing::warn!(
-                "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_FEE_PER_GAS is unset - gas-tx \
-                 (SignRawDigest) signing will FAIL CLOSED until the fee cap is pinned"
-            );
-        }
-
         let max_consignment_bytes =
             parse_consignment_limit(std::env::var("MAX_CONSIGNMENT_BYTES").ok().as_deref())
                 .unwrap_or_else(|e| panic!("{e}"));
@@ -388,9 +359,7 @@ impl BridgeConfig {
             bridge_contract,
             rgb_asset_id,
             gas_tx_allowed_to,
-            gas_tx_max_fee_per_gas,
             gas_tx_allowed_selectors,
-            gas_tx_max_value_wei,
             btc_max_total_sats,
             funds_in_contract,
             evm_finality_tag,

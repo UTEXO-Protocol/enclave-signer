@@ -724,9 +724,9 @@ deployed.
   to a sum. A gas transaction is not linked to one checked release, and the
   LayerZero fee is not bound to its release. A compromised listener can ask
   for many transactions within the limits and drain the gas account. The gas
-  limit is a runtime limit, so the operator of a parent can raise it, and the
-  attestation does not show it. The fee for each unit of gas stays in the
-  image. An image without the fee limit refuses every gas request.
+  limit, the fee for each unit of gas and the native value are runtime
+  limits, so the operator of a parent can raise them, and the attestation
+  does not show them.
 
 **Mint**
 

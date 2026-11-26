@@ -40,7 +40,7 @@ flowchart TB
         EPol[policy.rs<br/>SecurityPolicy<br/>Production / Development,<br/>resolved once at SetEndpoints<br/>server/endpoints.rs]
         EState[state/<br/>enclave.rs Phase Initial / Initializing /<br/>Cloning / Active<br/>replay_guard.rs NonceReplayGuard<br/>+ op_replay_guard, mint_replay_ttl_secs<br/>refill_rate.rs RR15: MAX_REFILLS_PER_HOUR]
         EFr[framing.rs<br/>len-prefixed proto, max_message_bytes]
-        BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO<br/>GAS_TX_MAX_FEE_PER_GAS / GAS_TX_MAX_VALUE_WEI<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>MINT_WITNESS_SAT<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS]
+        BCfg[config.rs - BridgeConfig env pins<br/>EVM_CHAIN_ID / EVM_PROXY_CONTRACT_ADDRESS / RGB_ASSET_ID<br/>GAS_TX_ALLOWED_TO<br/>GAS_TX_ALLOWED_SELECTORS<br/>FUNDS_IN_CONTRACT / TOKEN_CONTRACT / BTC_RELAY_MODE<br/>BTC_MAX_TOTAL_SATS<br/>MINT_WITNESS_SAT<br/>EVM_FINALITY_TAG / SPV_MIN_CONFIRMATIONS]
         EKms[kms/ + seed_persistence.rs<br/>KMS seed custody, mint only:<br/>TLS to KMS ends in the enclave]
         VFwd["vsock_forwarder.rs<br/>loopback -> vsock, per-port instances<br/>started at SetEndpoints<br/>EVM RPC TLS port -> 8002,<br/>KMS 443 -> 8003 (mint only)"]
         KM[keys.rs — KeyManager<br/>BIP-39/32/44/86<br/>SecretBox seed + keys]

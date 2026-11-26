@@ -4,12 +4,14 @@
 //! waits. So these values are configuration, not policy. The operator changes
 //! them with `SetLimits` (`utexo-bridge-parent-cli limits`), and a change needs
 //! no new image. The attestation does not cover them. Safety rules stay in the
-//! image: the SPV depth, the fee limits, the clone replay guard and the pins.
+//! image: the SPV depth, the Bitcoin fee limits, the clone replay guard and the
+//! pins.
 //!
-//! The gas limit of a gas transaction is here too. It decides how many
+//! The three amounts of a gas transaction are here too: its gas limit, its fee
+//! for each unit of gas and its native value. The gas limit decides how many
 //! deposits a release can cite, and that count grows with the mint ancestry of
-//! the burned asset. The image keeps the destination, the selectors, the fee
-//! for each unit of gas and the native value of such a transaction.
+//! the burned asset. The other two follow the gas price of the chain and the
+//! LayerZero fee. The image keeps the destination and the selectors.
 //!
 //! The mint replay guard is here because it is not a safety rule. A shorter
 //! window lets a retry for one deposit reach the signer sooner. Each signature
@@ -167,10 +169,18 @@ limits! {
     mint_max_outputs: 16, 1, 1 << 20;
     /// The highest `gasLimit` of a gas transaction. A release pays gas for each
     /// deposit that it cites, so a burn with a long mint ancestry needs more
-    /// than the value of the image. The fee for each unit of gas stays an image
-    /// setting (`GAS_TX_MAX_FEE_PER_GAS`), and the lowest value is the gas of a
-    /// plain transfer.
+    /// than the value of the image. The lowest value is the gas of a plain
+    /// transfer.
     gas_tx_max_gas_limit: 3_000_000, 21_000, 1 << 32;
+    /// The highest fee in wei for each unit of gas of a gas transaction:
+    /// `maxFeePerGas` and `maxPriorityFeePerGas`, or `gasPrice` of a legacy
+    /// transaction. When the gas price of the chain is above it, the gas key
+    /// signs nothing.
+    gas_tx_max_fee_per_gas: 1_000_000_000, 1, 1 << 60;
+    /// The highest native value in wei of a gas transaction. Only the payable
+    /// `lzFundsOutCall` carries a value: the LayerZero fee. The `TeeLzFundsOut`
+    /// payload has no fee field, so this value limits the possible loss.
+    gas_tx_max_value_wei: 5_000_000_000_000_000, 1, 1 << 60;
 }
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte

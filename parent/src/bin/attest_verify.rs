@@ -142,17 +142,6 @@ struct Cli {
     #[arg(long)]
     expect_gas_tx_to: Option<String>,
 
-    /// Expected gas-tx maximum fee per gas in wei (`GAS_TX_MAX_FEE_PER_GAS`).
-    /// Default 0 (not pinned). Ignored with --mock.
-    #[arg(long, default_value_t = 0)]
-    expect_gas_max_fee_per_gas: u128,
-
-    /// Expected gas-tx maximum native value in wei (`GAS_TX_MAX_VALUE_WEI`).
-    /// It limits the payable `lzFundsOutCall`. Default 0: the enclave signs no
-    /// non-zero value. Ignored with --mock.
-    #[arg(long, default_value_t = 0)]
-    expect_gas_max_value_wei: u128,
-
     /// Expected gas-tx selector allowlist (`GAS_TX_ALLOWED_SELECTORS`), as
     /// comma-separated 4-byte hex. Default empty. Ignored with --mock.
     #[arg(long, default_value = "")]
@@ -395,8 +384,6 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.expect_spv_min_confirmations,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
-            gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
-            gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,
             kms,
         };

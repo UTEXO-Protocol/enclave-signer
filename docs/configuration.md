@@ -42,15 +42,13 @@ All of the first three are required for a `Production` policy.
 | `MINT_WITNESS_SAT` | `1500` | Mint signer: the exact sats that a witness mint pays to the user's output. A non-number or a value outside 546 to 10000 stops the boot. It must equal the connector's `MINT_WITNESS_SAT` ([mint-flow.md](mint-flow.md), M8). Measured, not attested: read the value of an image from its `IMAGE-ENV.json`. |
 | `BTC_MAX_TOTAL_SATS` | `0` | Cap on the total input value of one `SignBtc` transaction. On a mint signer a non-zero value also turns `allow_vanilla_psbt` on in the attested policy. |
 | `GAS_TX_ALLOWED_TO` | unset | The only `to` that a gas transaction may have. |
-| `GAS_TX_MAX_FEE_PER_GAS` | `0` | Ceiling, in wei, on `maxFeePerGas`, `maxPriorityFeePerGas` and the legacy `gasPrice`. |
 | `GAS_TX_ALLOWED_SELECTORS` | empty | Comma-separated 4-byte selectors that a gas transaction may call. A malformed entry is dropped with a warning. |
-| `GAS_TX_MAX_VALUE_WEI` | unset | Ceiling on the native `value`. Only `lzFundsOutCall` to the proxy may carry value. |
 | `KMS_ALLOWED_ACCOUNT_IDS` | none | Mint signer: the AWS accounts that the seed KMS key may live in ([kms-persistence.md](kms-persistence.md)). |
 
-An unset destination, gas ceiling, fee ceiling or selector list refuses every
-gas transaction. An unset `GAS_TX_MAX_VALUE_WEI` refuses only a gas
-transaction with a non-zero value. The whole gas rule is part of the attested
-policy, and an unset value commits as zero.
+An unset destination or selector list refuses every gas transaction. Both are
+part of the attested policy, and an unset value commits as zero. The gas limit,
+the fee for each unit of gas and the native value of a gas transaction are
+runtime limits ([runtime-limits.md](runtime-limits.md)).
 
 `EVM_FINALITY_TAG` on Arbitrum:
 
