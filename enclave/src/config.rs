@@ -110,15 +110,11 @@ pub struct BridgeConfig {
     /// value must fit [`Self::gas_tx_max_value_wei`]. See `networks::evm::gas_tx`.
     ///
     /// [`gas_tx_allowed_selectors`](Self::gas_tx_allowed_selectors) limits the
-    /// callable functions. The gas and fee caps limit the burn.
+    /// callable functions. The fee cap and the runtime limit
+    /// `gas_tx_max_gas_limit` limit the burn.
     ///
     /// [`crate::policy::SecurityPolicy`] commits the gas-tx rule in `user_data`.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
-    /// Max `gasLimit` of a gas tx (`GAS_TX_MAX_GAS_LIMIT`). `0` = unset, which
-    /// fails gas-tx signing closed. With
-    /// [`gas_tx_max_fee_per_gas`](Self::gas_tx_max_fee_per_gas) it caps the fee
-    /// a gas tx can burn (`gasLimit * maxFeePerGas`).
-    pub gas_tx_max_gas_limit: u64,
     /// Max per-gas fee in wei (`GAS_TX_MAX_FEE_PER_GAS`): `maxFeePerGas` and
     /// `maxPriorityFeePerGas` for EIP-1559, `gasPrice` for legacy. `0` = unset,
     /// which fails gas-tx signing closed. A fee wider than `u128` exceeds the cap.
@@ -244,7 +240,6 @@ impl Default for BridgeConfig {
             bridge_contract: [0u8; 20],
             rgb_asset_id: String::new(),
             gas_tx_allowed_to: None,
-            gas_tx_max_gas_limit: 0,
             gas_tx_max_fee_per_gas: 0,
             gas_tx_allowed_selectors: Vec::new(),
             gas_tx_max_value_wei: None,
@@ -301,12 +296,6 @@ impl BridgeConfig {
         let gas_tx_allowed_to = std::env::var("GAS_TX_ALLOWED_TO")
             .ok()
             .and_then(|s| parse_eth_address(&s).ok());
-
-        // `0` fails the gas path closed, so a malformed value is safe.
-        let gas_tx_max_gas_limit = std::env::var("GAS_TX_MAX_GAS_LIMIT")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
 
         let gas_tx_max_fee_per_gas = std::env::var("GAS_TX_MAX_FEE_PER_GAS")
             .ok()
@@ -374,13 +363,11 @@ impl BridgeConfig {
         .expect("BITCOIN_NETWORK must be a known network")
         .attested();
 
-        // Without both caps every gas tx fails. Show this at boot.
-        if gas_tx_allowed_to.is_some() && (gas_tx_max_gas_limit == 0 || gas_tx_max_fee_per_gas == 0)
-        {
+        // Without the fee cap every gas tx fails. Show this at boot.
+        if gas_tx_allowed_to.is_some() && gas_tx_max_fee_per_gas == 0 {
             tracing::warn!(
-                "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_GAS_LIMIT and/or GAS_TX_MAX_FEE_PER_GAS \
-                 is unset - gas-tx (SignRawDigest) signing will FAIL CLOSED until both caps are \
-                 pinned"
+                "GAS_TX_ALLOWED_TO is set but GAS_TX_MAX_FEE_PER_GAS is unset - gas-tx \
+                 (SignRawDigest) signing will FAIL CLOSED until the fee cap is pinned"
             );
         }
 
@@ -401,7 +388,6 @@ impl BridgeConfig {
             bridge_contract,
             rgb_asset_id,
             gas_tx_allowed_to,
-            gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
             gas_tx_allowed_selectors,
             gas_tx_max_value_wei,

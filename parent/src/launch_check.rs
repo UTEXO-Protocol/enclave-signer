@@ -137,7 +137,6 @@ pub fn expected_policy(
         evm_rpc_tls,
         gas_tx_allowed_to: gas("GAS_TX_ALLOWED_TO")
             .map_or(Ok([0; 20]), |v| address20("GAS_TX_ALLOWED_TO", v))?,
-        gas_tx_max_gas_limit: number("GAS_TX_MAX_GAS_LIMIT", gas("GAS_TX_MAX_GAS_LIMIT"))?,
         gas_tx_max_fee_per_gas: number("GAS_TX_MAX_FEE_PER_GAS", gas("GAS_TX_MAX_FEE_PER_GAS"))?,
         gas_tx_max_value_wei: number("GAS_TX_MAX_VALUE_WEI", gas("GAS_TX_MAX_VALUE_WEI"))?,
         gas_tx_allowed_selectors: gas("GAS_TX_ALLOWED_SELECTORS")
@@ -256,7 +255,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
         spv_min_confirmations,
         evm_rpc_tls,
         gas_tx_allowed_to,
-        gas_tx_max_gas_limit,
         gas_tx_max_fee_per_gas,
         gas_tx_max_value_wei,
         gas_tx_allowed_selectors,
@@ -294,7 +292,6 @@ pub fn fields(policy: &AttestedPolicy) -> Vec<(&'static str, String)> {
     }
     out.extend([
         ("gas_tx_allowed_to", hex(gas_tx_allowed_to)),
-        ("gas_tx_max_gas_limit", gas_tx_max_gas_limit.to_string()),
         ("gas_tx_max_fee_per_gas", gas_tx_max_fee_per_gas.to_string()),
         ("gas_tx_max_value_wei", gas_tx_max_value_wei.to_string()),
         (

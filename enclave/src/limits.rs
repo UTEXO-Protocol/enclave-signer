@@ -6,6 +6,11 @@
 //! no new image. The attestation does not cover them. Safety rules stay in the
 //! image: the SPV depth, the fee limits, the clone replay guard and the pins.
 //!
+//! The gas limit of a gas transaction is here too. It decides how many
+//! deposits a release can cite, and that count grows with the mint ancestry of
+//! the burned asset. The image keeps the destination, the selectors, the fee
+//! for each unit of gas and the native value of such a transaction.
+//!
 //! The mint replay guard is here because it is not a safety rule. A shorter
 //! window lets a retry for one deposit reach the signer sooner. Each signature
 //! for that deposit is for the one transaction that its lockId names (M6), so
@@ -160,6 +165,12 @@ limits! {
     mint_max_inputs: 16, 1, 1 << 20;
     /// Outputs of a mint tx, before any fascia is decoded.
     mint_max_outputs: 16, 1, 1 << 20;
+    /// The highest `gasLimit` of a gas transaction. A release pays gas for each
+    /// deposit that it cites, so a burn with a long mint ancestry needs more
+    /// than the value of the image. The fee for each unit of gas stays an image
+    /// setting (`GAS_TX_MAX_FEE_PER_GAS`), and the lowest value is the gas of a
+    /// plain transfer.
+    gas_tx_max_gas_limit: 3_000_000, 21_000, 1 << 32;
 }
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte

@@ -412,9 +412,10 @@ uses the gas key `m/44'/60'/0'/0/1`.
   `max_rlp_items`. So the input bounds the memory of the decoder.
 - **G3** `chain_id` must equal `EVM_CHAIN_ID`. `to` must equal
   `GAS_TX_ALLOWED_TO`. Contract creation is refused.
-- **G4** `gasLimit` must be at most `GAS_TX_MAX_GAS_LIMIT`. Each fee field
-  must be at most `GAS_TX_MAX_FEE_PER_GAS`. Together they bound the fee of
-  one transaction.
+- **G4** `gasLimit` must be at most the runtime limit `gas_tx_max_gas_limit`
+  ([runtime-limits.md](runtime-limits.md)). Each fee field must be at most
+  `GAS_TX_MAX_FEE_PER_GAS`. Together they bound the fee of one transaction.
+  The operator can change the gas limit, and the image fixes the fee.
 - **G5** The calldata must start with a selector in
   `GAS_TX_ALLOWED_SELECTORS`. Empty calldata is refused: a bare call still
   runs the `fallback` or `receive` function of the destination.

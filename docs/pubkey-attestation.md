@@ -143,7 +143,6 @@ policy_commitment =
       u32_be(len(host)) || host || ca_sha256(32)    //   EVM RPC host, SHA-256 of the CA DER, set at launch
     // Gas-tx (SignRawDigest) rule:
     gas_tx_allowed_to(20)                           // all-zero = gas path unpinned
-    gas_tx_max_gas_limit_be8                        // gasLimit ceiling (0 = unset)
     gas_tx_max_fee_per_gas_be16                     // per-gas fee ceiling, wei (0 = unset)
     gas_tx_max_value_wei_be16                       // native-value ceiling, wei (0 = unset)
     u32_be(count(selectors)) || selector(4)...      // sorted, without duplicates
@@ -274,7 +273,7 @@ attest-verify \
 | `--expect-spv-min-confirmations`, `--expect-bitcoin-network` | The image values. Defaults: 3 and `bitcoin`. |
 | `--expect-evm-rpc-host`, `--expect-evm-rpc-ca-sha256` | Required with the `tls` source: the approved RPC host and CA hash. |
 | `--expect-evm-source` | `tls` (the default, and what the images use) or `disabled`. |
-| `--expect-gas-tx-to`, `--expect-gas-max-gas-limit`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. |
+| `--expect-gas-tx-to`, `--expect-gas-max-fee-per-gas`, `--expect-gas-max-value-wei`, `--expect-gas-selectors` | The gas rule of a burn signer. An omitted flag expects an unset value, not the value of the enclave. The gas limit of a gas transaction is a runtime limit ([runtime-limits.md](runtime-limits.md)), so the attestation does not carry it. |
 | `--expect-vanilla-psbt` | A mint signer with plain-BTC signing on. |
 | `--expect-kms-key-arn`, `--expect-kms-region`, `--expect-kms-seed-id`, `--expect-kms-evm-address` | The KMS values of a mint signer. The first three are required with the role `mint`; the address only when the operator set one. |
 | `--expect-chain-id`, `--expect-bridge-contract`, `--expect-rgb-asset-id` | Optional: compare the bridge pins. |

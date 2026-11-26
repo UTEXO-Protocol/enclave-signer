@@ -164,7 +164,6 @@ pub fn policy_cases(policy: &AttestedPolicy) -> Vec<(&'static str, Vec<u8>)> {
         x[0] ^= 1;
         x
     });
-    alter!(gas_tx_max_gas_limit, *gas_tx_max_gas_limit ^ 1);
     alter!(gas_tx_max_fee_per_gas, *gas_tx_max_fee_per_gas ^ 1);
     alter!(gas_tx_max_value_wei, *gas_tx_max_value_wei ^ 1);
     alter!(gas_tx_allowed_selectors, {

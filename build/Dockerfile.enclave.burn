@@ -113,9 +113,10 @@ ENV EVM_CHAIN_ID=${EVM_CHAIN_ID} \
 # EVM_PROXY_CONTRACT_ADDRESS - unset, it falls back to the proxy address and
 # points FundsIn verification at the wrong contract.
 # The burn signer also signs the gas tx that submits `fundsOut`
-# (`SignRawDigest`). That fails closed unless GAS_TX_ALLOWED_TO,
-# GAS_TX_MAX_GAS_LIMIT and GAS_TX_MAX_FEE_PER_GAS are all pinned; the default
-# zero limits refuse gas signing until configured. Every release calls the
+# (`SignRawDigest`). That fails closed unless GAS_TX_ALLOWED_TO and
+# GAS_TX_MAX_FEE_PER_GAS are both pinned; the default zero fee limit refuses
+# gas signing until configured. The gas limit of a gas tx is the runtime limit
+# gas_tx_max_gas_limit, which the operator can change. Every release calls the
 # MultisigProxy, so the gas tx goes to EVM_PROXY_CONTRACT_ADDRESS, not to
 # FUNDS_IN_CONTRACT. The plain-BTC (`SignBtc`)
 # path is not compiled in.
@@ -124,7 +125,6 @@ ENV EVM_CHAIN_ID=${EVM_CHAIN_ID} \
 # Development policy does not commit them.
 # SPV_MIN_CONFIRMATIONS: depth of each Bitcoin witness tx (at least 1). A Production policy attests it.
 ARG GAS_TX_ALLOWED_TO=${EVM_PROXY_CONTRACT_ADDRESS}
-ARG GAS_TX_MAX_GAS_LIMIT=0
 ARG GAS_TX_MAX_FEE_PER_GAS=0
 ARG GAS_TX_MAX_VALUE_WEI=0
 ARG GAS_TX_ALLOWED_SELECTORS=""
@@ -134,7 +134,6 @@ ENV BTC_RELAY_MODE=${BTC_RELAY_MODE} \
     FUNDS_IN_CONTRACT=${FUNDS_IN_CONTRACT} \
     TOKEN_CONTRACT=${TOKEN_CONTRACT} \
     GAS_TX_ALLOWED_TO=${GAS_TX_ALLOWED_TO} \
-    GAS_TX_MAX_GAS_LIMIT=${GAS_TX_MAX_GAS_LIMIT} \
     GAS_TX_MAX_FEE_PER_GAS=${GAS_TX_MAX_FEE_PER_GAS} \
     GAS_TX_MAX_VALUE_WEI=${GAS_TX_MAX_VALUE_WEI} \
     GAS_TX_ALLOWED_SELECTORS=${GAS_TX_ALLOWED_SELECTORS}

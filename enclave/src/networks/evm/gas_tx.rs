@@ -7,9 +7,9 @@
 //!      canonical RLP decoder;
 //!   2. computes the signing hash itself (`keccak256(preimage)`);
 //!   3. enforces the operator's allowlist: chain id == `EVM_CHAIN_ID`,
-//!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <=
-//!      `GAS_TX_MAX_GAS_LIMIT`, per-gas fees <= `GAS_TX_MAX_FEE_PER_GAS`, and a
-//!      leading 4-byte selector in `GAS_TX_ALLOWED_SELECTORS`.
+//!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <= the runtime
+//!      limit `gas_tx_max_gas_limit`, per-gas fees <= `GAS_TX_MAX_FEE_PER_GAS`,
+//!      and a leading 4-byte selector in `GAS_TX_ALLOWED_SELECTORS`.
 //!
 //! Carve-out to `value == 0`: the payable `lzFundsOutCall` forwards the
 //! LayerZero messaging fee. Allowed only when the selector is `lzFundsOutCall`,
@@ -76,7 +76,7 @@ struct GasTx<'a> {
     /// Wei. A number, not a zero flag, because the LayerZero carve-out
     /// compares it to a pinned ceiling.
     value: u128,
-    /// `gasLimit`, bounded by `GAS_TX_MAX_GAS_LIMIT`.
+    /// `gasLimit`, bounded by the runtime limit `gas_tx_max_gas_limit`.
     gas_limit: u64,
     /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy), bounded by
     /// `GAS_TX_MAX_FEE_PER_GAS`.
@@ -188,21 +188,17 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
     }
 
     // Fee/gas ceilings: a signed gas tx can burn at most
-    // `gasLimit * maxFeePerGas`. Unset caps fail closed.
-    if cfg.gas_tx_max_gas_limit == 0 {
-        return Err(reject(
-            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) - refusing to sign",
-        ));
-    }
+    // `gasLimit * maxFeePerGas`. An unset fee cap fails closed.
     if cfg.gas_tx_max_fee_per_gas == 0 {
         return Err(reject(
             "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) - refusing to sign",
         ));
     }
-    if tx.gas_limit > cfg.gas_tx_max_gas_limit {
+    let max_gas_limit = crate::limits::get().gas_tx_max_gas_limit;
+    if tx.gas_limit > max_gas_limit {
         return Err(reject(format!(
-            "gas tx: gasLimit {} exceeds pinned cap {}",
-            tx.gas_limit, cfg.gas_tx_max_gas_limit
+            "gas tx: gasLimit {} exceeds the limit {max_gas_limit} (gas_tx_max_gas_limit)",
+            tx.gas_limit
         )));
     }
     if tx.max_fee_per_gas > cfg.gas_tx_max_fee_per_gas {

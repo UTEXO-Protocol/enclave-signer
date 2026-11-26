@@ -604,6 +604,9 @@ pub struct Limits {
     pub mint_max_inputs: u64,
     #[prost(uint64, tag="29")]
     pub mint_max_outputs: u64,
+    /// The highest gasLimit of a transaction that the gas key signs.
+    #[prost(uint64, tag="30")]
+    pub gas_tx_max_gas_limit: u64,
 }
 /// Changes limits. The enclave checks all the values first, so a refused request
 /// changes nothing. The values stay until the enclave restarts.

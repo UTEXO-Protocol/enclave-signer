@@ -6,7 +6,10 @@ not change.
 
 Each limit only sets when the enclave refuses a request, or how long it waits.
 The safety rules stay in the image (see
-[What stays in the image](#what-stays-in-the-image)). The mint replay guard is a
+[What stays in the image](#what-stays-in-the-image)). The gas limit of a gas
+transaction is a limit too: it decides how many deposits a release can cite,
+and that count grows with the mint ancestry of the asset. The image still
+fixes what a gas transaction may call and its fee for each unit of gas. The mint replay guard is a
 limit because it is not a safety rule (see
 [The mint replay guard](#the-mint-replay-guard)).
 
@@ -95,6 +98,7 @@ checks them at launch.
 | `mint_replay_max_entries` | 100000 | 1024 | 2^32 | Deposits in the mint replay guard. |
 | `mint_max_inputs` | 16 | 1 | 2^20 | Inputs of a mint transaction, before the enclave decodes a fascia. |
 | `mint_max_outputs` | 16 | 1 | 2^20 | Outputs of a mint transaction, before the enclave decodes a fascia. |
+| `gas_tx_max_gas_limit` | 3000000 | 21000 | 2^32 | The highest `gasLimit` of a gas transaction ([burn flow](burn-flow.md), G4). A release pays gas for each deposit that it cites, so a burn with a long mint ancestry needs a higher value. |
 
 The image env can set the image value of `max_consignment_bytes`, to a lower
 value only ([configuration.md](configuration.md#transport-limits-and-dev-settings)).
@@ -232,7 +236,8 @@ These values stay in the image, because they decide what the enclave signs:
 
 - the SPV depth, the SPV tip age and the header rules
 - `EVM_FINALITY_TAG`
-- the fee limits, the sats budgets, the gas limits and the mint witness amount
+- the fee limits, the sats budgets, the fee for each unit of gas of a gas
+  transaction, and the mint witness amount
 - the replay guard of the clone handshake and the rate of rights refills
 - the pins: chain ids, contracts, the asset, the KMS accounts
 

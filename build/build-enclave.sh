@@ -104,7 +104,7 @@ fi
 if declares_build_arg ENCLAVE_FEATURES; then
     for arg in ENCLAVE_FEATURES BITCOIN_NETWORK BTC_RELAY_MODE EVM_CHAIN_ID \
         EVM_PROXY_CONTRACT_ADDRESS FUNDS_IN_CONTRACT TOKEN_CONTRACT \
-        GAS_TX_ALLOWED_TO GAS_TX_MAX_GAS_LIMIT GAS_TX_MAX_FEE_PER_GAS GAS_TX_MAX_VALUE_WEI \
+        GAS_TX_ALLOWED_TO GAS_TX_MAX_FEE_PER_GAS GAS_TX_MAX_VALUE_WEI \
         GAS_TX_ALLOWED_SELECTORS RUST_LOG; do
         if [ -n "${!arg:-}" ] && declares_build_arg "$arg"; then
             BUILD_ARGS+=(--build-arg "$arg=${!arg}")

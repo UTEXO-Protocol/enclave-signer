@@ -12,7 +12,6 @@ fn cfg() -> BridgeConfig {
         bridge_contract: [0xBB; 20],
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some(ALLOWED_TO),
-        gas_tx_max_gas_limit: MAX_GAS_LIMIT,
         gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
         gas_tx_allowed_selectors: vec![ALLOWED_SELECTOR],
         ..Default::default()
@@ -216,7 +215,6 @@ fn lz_cfg() -> BridgeConfig {
         rgb_asset_id: "rgb:test".into(),
         gas_tx_allowed_to: Some(ALLOWED_TO),
         gas_tx_max_value_wei: Some(1_000_000),
-        gas_tx_max_gas_limit: MAX_GAS_LIMIT,
         gas_tx_max_fee_per_gas: MAX_FEE_PER_GAS,
         // The carve-out changes only the value rule. The selector must be
         // allowlisted.
@@ -547,14 +545,37 @@ fn rejects_nesting_beyond_depth_limit() {
 // ---- fee/gas caps ----
 
 #[test]
-fn rejects_gas_limit_over_cap() {
-    // gasLimit above GAS_TX_MAX_GAS_LIMIT is the fee-griefing vector.
+fn rejects_gas_limit_over_the_runtime_limit() {
+    // A gasLimit above the limit is the fee-griefing vector.
+    crate::limits::change_for_test(|l| l.gas_tx_max_gas_limit = MAX_GAS_LIMIT);
     let tx = eip1559_full(CHAIN_ID, &ALLOWED_TO, 0, 1, 100, MAX_GAS_LIMIT + 1, &[]);
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
-        err.to_string().contains("gasLimit") && err.to_string().contains("exceeds pinned cap"),
+        err.to_string().contains("gasLimit") && err.to_string().contains("gas_tx_max_gas_limit"),
         "got: {err}"
     );
+}
+
+#[test]
+fn signs_up_to_the_gas_limit_that_the_operator_set() {
+    let above_image = crate::limits::Limits::DEFAULTS.gas_tx_max_gas_limit + 1;
+    let tx = eip1559_full(
+        CHAIN_ID,
+        &ALLOWED_TO,
+        0,
+        1,
+        100,
+        above_image,
+        &ALLOWED_SELECTOR,
+    );
+    let err = validate_gas_tx_request(&req(tx.clone()), &cfg()).unwrap_err();
+    assert!(
+        err.to_string().contains("gas_tx_max_gas_limit"),
+        "got: {err}"
+    );
+
+    crate::limits::change_for_test(|l| l.gas_tx_max_gas_limit = above_image);
+    validate_gas_tx_request(&req(tx), &cfg()).expect("the raised limit covers this gas tx");
 }
 
 #[test]
@@ -609,18 +630,6 @@ fn rejects_legacy_gas_price_over_cap() {
     let err = validate_gas_tx_request(&req(tx), &cfg()).unwrap_err();
     assert!(
         err.to_string().contains("maxFeePerGas") && err.to_string().contains("exceeds pinned cap"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn rejects_when_gas_cap_unpinned() {
-    let mut c = cfg();
-    c.gas_tx_max_gas_limit = 0;
-    let tx = eip1559(CHAIN_ID, &ALLOWED_TO, 0);
-    let err = validate_gas_tx_request(&req(tx), &c).unwrap_err();
-    assert!(
-        err.to_string().contains("gas-limit cap not pinned"),
         "got: {err}"
     );
 }

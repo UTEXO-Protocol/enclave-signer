@@ -203,12 +203,12 @@ pub enum AttestedPolicy {
         spv_min_confirmations: u32,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
-        /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the gas and
-        /// fee limits, and the allowed calldata selectors. An unset
+        /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the fee
+        /// limit, and the allowed calldata selectors. The gas limit is a
+        /// runtime limit, so it is not here. An unset
         /// `GAS_TX_ALLOWED_TO` gives all zeros, and the enclave rejects the
         /// gas path.
         gas_tx_allowed_to: [u8; 20],
-        gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
         /// Maximum native value (wei) of a gas tx, for the payable
         /// `lzFundsOutCall`. `0` means no non-zero value is signed. An unset
@@ -246,8 +246,7 @@ impl AttestedPolicy {
     ///              [spv_min_confirmations u32 BE]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
-    ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
-    ///              [gas_tx_max_fee_per_gas u128 BE]
+    ///              [gas_tx_allowed_to 20][gas_tx_max_fee_per_gas u128 BE]
     ///              [gas_tx_max_value_wei u128 BE]
     ///              [len(selectors) u32 BE][selector 4]...   (sorted, deduped)
     ///              [token_contract 20]
@@ -276,7 +275,6 @@ impl AttestedPolicy {
                 spv_min_confirmations,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
-                gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas,
                 gas_tx_max_value_wei,
                 gas_tx_allowed_selectors,
@@ -309,7 +307,6 @@ impl AttestedPolicy {
                 }
                 // Gas-tx rule.
                 out.extend_from_slice(gas_tx_allowed_to);
-                out.extend_from_slice(&gas_tx_max_gas_limit.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_fee_per_gas.to_be_bytes());
                 out.extend_from_slice(&gas_tx_max_value_wei.to_be_bytes());
                 // Sort and dedup the selectors, so env order and duplicates
@@ -417,7 +414,6 @@ impl AttestedPolicy {
                     })
                     .transpose()?;
                 let gas_tx_allowed_to = r.array()?;
-                let gas_tx_max_gas_limit = u64::from_be_bytes(r.array()?);
                 let gas_tx_max_fee_per_gas = u128::from_be_bytes(r.array()?);
                 let gas_tx_max_value_wei = u128::from_be_bytes(r.array()?);
                 let count = r.len()?;
@@ -457,7 +453,6 @@ impl AttestedPolicy {
                     spv_min_confirmations,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
-                    gas_tx_max_gas_limit,
                     gas_tx_max_fee_per_gas,
                     gas_tx_max_value_wei,
                     gas_tx_allowed_selectors,

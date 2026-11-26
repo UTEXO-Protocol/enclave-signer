@@ -142,11 +142,6 @@ struct Cli {
     #[arg(long)]
     expect_gas_tx_to: Option<String>,
 
-    /// Expected gas-tx `gasLimit` maximum (`GAS_TX_MAX_GAS_LIMIT`). Default 0
-    /// (not pinned). Ignored with --mock.
-    #[arg(long, default_value_t = 0)]
-    expect_gas_max_gas_limit: u64,
-
     /// Expected gas-tx maximum fee per gas in wei (`GAS_TX_MAX_FEE_PER_GAS`).
     /// Default 0 (not pinned). Ignored with --mock.
     #[arg(long, default_value_t = 0)]
@@ -400,7 +395,6 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.expect_spv_min_confirmations,
             )?,
             gas_tx_allowed_to: parse_expect_gas_to(&cli.expect_gas_tx_to)?,
-            gas_tx_max_gas_limit: cli.expect_gas_max_gas_limit,
             gas_tx_max_fee_per_gas: cli.expect_gas_max_fee_per_gas,
             gas_tx_max_value_wei: cli.expect_gas_max_value_wei,
             gas_tx_allowed_selectors: parse_expect_gas_selectors(&cli.expect_gas_selectors)?,

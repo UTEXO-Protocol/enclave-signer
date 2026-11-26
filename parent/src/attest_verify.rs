@@ -96,10 +96,10 @@ pub enum ExpectedPolicy {
         /// Expected Bitcoin witness depth (`SPV_MIN_CONFIRMATIONS`).
         spv_min_confirmations: u32,
         /// Expected gas-tx (`SignRawDigest`) rule. An all-zero destination,
-        /// zero caps and no selectors mean "not pinned". The enclave then
-        /// rejects every gas-tx request.
+        /// a zero fee cap and no selectors mean "not pinned". The enclave then
+        /// rejects every gas-tx request. The gas limit is a runtime limit and
+        /// is not attested.
         gas_tx_allowed_to: [u8; 20],
-        gas_tx_max_gas_limit: u64,
         gas_tx_max_fee_per_gas: u128,
         gas_tx_max_value_wei: u128,
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
@@ -654,7 +654,6 @@ fn expected_attested_policy(
             token_contract,
             spv_min_confirmations,
             gas_tx_allowed_to,
-            gas_tx_max_gas_limit,
             gas_tx_max_fee_per_gas,
             gas_tx_max_value_wei,
             gas_tx_allowed_selectors,
@@ -721,7 +720,6 @@ fn expected_attested_policy(
                 // The operator declares the gas-tx rule. `to_bytes` sorts the
                 // selector set, so the caller does not need to sort it.
                 gas_tx_allowed_to: *gas_tx_allowed_to,
-                gas_tx_max_gas_limit: *gas_tx_max_gas_limit,
                 gas_tx_max_fee_per_gas: *gas_tx_max_fee_per_gas,
                 gas_tx_max_value_wei: *gas_tx_max_value_wei,
                 gas_tx_allowed_selectors: gas_tx_allowed_selectors.clone(),

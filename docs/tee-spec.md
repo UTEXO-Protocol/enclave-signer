@@ -693,8 +693,10 @@ deployed.
   units. A consignment carries the whole lineage to genesis, so the mint
   count only grows, and every later holder inherits it. A release can cite
   only so many mints: `max_funds_out_call_data_bytes`, the frame and gRPC
-  limits, `GAS_TX_MAX_GAS_LIMIT` (each cited id costs gas in
-  `beforeFundsOut`) and the EVM transaction size. A burn above that is
+  limits, the runtime limit `gas_tx_max_gas_limit` (each cited id costs gas
+  in `beforeFundsOut`) and the EVM transaction size. The operator can raise
+  the limits among these on a running enclave
+  ([runtime-limits.md](runtime-limits.md)). A burn above that is
   refused after its units are burned, and it is never released. The backend
   or wallet must count the lineage mints before a burn.
 - **Release route (contracts).** The Bridge release route for source chain
@@ -718,12 +720,13 @@ deployed.
 - **Validator child.** The child contains a fault of rgb-lib, not an exploit:
   it runs as the same user as the enclave process
   ([validator child](#validator-child-burn-signer)).
-- **Gas transactions.** The gas limits apply to one transaction, not to a
-  sum. A gas transaction is not linked to one checked release, and the
+- **Gas transactions.** The gas and fee limits apply to one transaction, not
+  to a sum. A gas transaction is not linked to one checked release, and the
   LayerZero fee is not bound to its release. A compromised listener can ask
-  for many transactions within the limits and drain the gas account. The
-  production recipe sets no gas limits, so its gas path refuses every request
-  until an image sets them.
+  for many transactions within the limits and drain the gas account. The gas
+  limit is a runtime limit, so the operator of a parent can raise it, and the
+  attestation does not show it. The fee for each unit of gas stays in the
+  image. An image without the fee limit refuses every gas request.
 
 **Mint**
 

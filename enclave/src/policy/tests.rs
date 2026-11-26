@@ -134,7 +134,6 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     let config = BridgeConfig {
         btc_max_total_sats: 1_000_000,
         gas_tx_allowed_to: Some([0x33; 20]),
-        gas_tx_max_gas_limit: 100_000,
         gas_tx_max_fee_per_gas: 1_000,
         gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         ..pinned_config()
@@ -155,7 +154,6 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     let mint = resolve(SignerRole::Mint);
     assert!(mint.allow_vanilla_psbt);
     assert_eq!(mint.gas_tx_allowed_to, None);
-    assert_eq!(mint.gas_tx_max_gas_limit, 0);
     assert_eq!(mint.gas_tx_max_fee_per_gas, 0);
     assert_eq!(mint.gas_tx_max_value_wei, None);
     assert!(mint.gas_tx_allowed_selectors.is_empty());
@@ -163,7 +161,6 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     let burn = resolve(SignerRole::Burn);
     assert!(!burn.allow_vanilla_psbt);
     assert_eq!(burn.gas_tx_allowed_to, Some([0x33; 20]));
-    assert_eq!(burn.gas_tx_max_gas_limit, 100_000);
 
     let combined = resolve(SignerRole::Combined);
     assert!(combined.allow_vanilla_psbt);
@@ -515,7 +512,6 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
 
     let mut cfg = pinned_config();
     cfg.gas_tx_allowed_to = Some([0x77; 20]);
-    cfg.gas_tx_max_gas_limit = 30_000;
     cfg.gas_tx_max_fee_per_gas = 5_000;
     cfg.gas_tx_max_value_wei = Some(9_000);
     cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
@@ -529,7 +525,6 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     match &pinned {
         SecurityPolicy::Production(p) => {
             assert_eq!(p.gas_tx_allowed_to, Some([0x77; 20]));
-            assert_eq!(p.gas_tx_max_gas_limit, 30_000);
             assert_eq!(p.gas_tx_max_fee_per_gas, 5_000);
             assert_eq!(p.gas_tx_max_value_wei, Some(9_000));
             assert_eq!(p.gas_tx_allowed_selectors, vec![[0xaa, 0xbb, 0xcc, 0xdd]]);
@@ -544,7 +539,6 @@ fn gas_tx_value_ceiling_alone_changes_the_commitment() {
     let ctx = release_bridge_ctx();
     let mut base = pinned_config();
     base.gas_tx_allowed_to = Some([0x77; 20]);
-    base.gas_tx_max_gas_limit = 30_000;
     base.gas_tx_max_fee_per_gas = 5_000;
     base.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
 
