@@ -135,7 +135,7 @@ limits! {
     /// request that reads the list. The list is append-only, so it cannot get
     /// shorter again. Each page takes one RPC call of the request deadline. At
     /// about a second for each page, the value of the image fits that deadline.
-    max_reject_list_entries: 20_000, 1, 1 << 32;
+    max_reject_list_entries: 18_000, 1, 1 << 32;
     /// Entries in one `entries` call of a reject list. The value of the image
     /// is the page of rgb-lib. The page does not change what the enclave reads.
     reject_list_page_entries: 1_000, 1, 1 << 20;
@@ -204,11 +204,11 @@ const DENSE_CONSIGNMENT_RATE_TENTHS: u64 = 545;
 /// The heap of a PSBT at the densest rate measured. A request sets this rate too.
 const DENSE_PSBT_RATE: u64 = 103;
 /// The heap of one entry of a reject list, from the read of the enclave to the
-/// set that rgb-lib walks with in the validator child, with a margin on the
-/// rate measured (`networks::rgb::validation::ipc::tests`). A request holds
+/// sets that rgb-lib decides from the entries in the validator child, with a
+/// margin on the rate measured (`networks::rgb::validation::ipc::tests`). A request holds
 /// this beside the rest. The read reserves the length that the RPC reports, so
 /// only this limit stops a bad length.
-pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 220;
+pub(crate) const REJECT_LIST_ENTRY_BYTES: u64 = 400;
 
 impl Limits {
     /// The values of the image: the constants, and the consignment limit that

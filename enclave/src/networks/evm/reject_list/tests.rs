@@ -142,7 +142,7 @@ fn list_over_cap_fails_closed() {
     let max = Limits::DEFAULTS.max_reject_list_entries;
     rpc.entries = vec![entry_no(0, true); max as usize + 1];
     rpc.finalized_len = Some(0);
-    assert!(err_of(&rpc).contains("over the 20000"));
+    assert!(err_of(&rpc).contains("over the 18000"));
     assert!(rpc
         .calls()
         .iter()

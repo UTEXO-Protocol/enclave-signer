@@ -18,7 +18,7 @@ use rgb_lib::ChainNet;
 
 use super::bfa::{AnchorBinder, BoundAnchors, MintAnchor};
 use super::ipc::{self, start, to_child, to_enclave};
-use super::reject_list::{Decisions, ListAccess, RejectListContract, RejectListReader};
+use super::reject_list::{ListAccess, RejectListContract, RejectListLog, RejectListReader};
 use super::types::ValidatedConsignment;
 use super::validator::RgbValidator;
 use super::witness::BuriedHeaders;
@@ -411,14 +411,14 @@ impl EnclaveLink<'_> {
         }
     }
 
-    fn reject_list(&self, list: &RejectListContract) -> Result<Decisions> {
+    fn reject_list(&self, list: &RejectListContract) -> Result<RejectListLog> {
         let request = to_enclave::Body::RejectList(ipc::ListAddress {
             chain_id: list.chain_id,
             address: Bytes::copy_from_slice(&list.address),
         });
         match self.ask(request)? {
-            to_child::Body::Decisions(answer) => {
-                ipc::unpack_decisions(answer).map_err(EnclaveError::Internal)
+            to_child::Body::Entries(answer) => {
+                ipc::unpack_entries(answer).map_err(EnclaveError::Internal)
             }
             other => Err(unexpected("a reject list", &other)),
         }
@@ -432,7 +432,7 @@ fn unexpected(asked: &str, answer: &to_child::Body) -> EnclaveError {
         to_child::Body::AssetBound(_) => "an asset bind",
         to_child::Body::Bound(_) => "a lock bind",
         to_child::Body::Header(_) => "a header",
-        to_child::Body::Decisions(_) => "a reject list",
+        to_child::Body::Entries(_) => "a reject list",
         to_child::Body::Refused(_) => "a refusal",
     };
     EnclaveError::Internal(format!("the enclave answered {asked} with {kind}"))

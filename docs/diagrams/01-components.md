@@ -56,7 +56,7 @@ flowchart TB
             NES[signing.rs<br/>EIP-712 MultisigProxy v1<br/>TeeFundsOut / TeeLzFundsOut digest]
         end
         subgraph NRGB [networks/rgb/]
-            NRV["validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>reject_list.rs list decisions + resolver,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs reads the inspection, schema.rs genesis gate,<br/>runner.rs burn: runs consensus.rs in a validator child,<br/>answers its resolvers, ends it before the deadline,<br/>ipc.rs the frames between them"]
+            NRV["validation/<br/>witness.rs on-chain witness resolver,<br/>validator.rs the validator of one network,<br/>consensus.rs one rgb-lib validate_consignment_with_resolver<br/>then inspect_consignment,<br/>reject_list.rs the resolver that gives rgb-lib<br/>the entries of the list it names,<br/>bfa.rs mint anchors bound to locks,<br/>consignment.rs reads the inspection,<br/>runner.rs burn: runs consensus.rs in a validator child,<br/>answers its resolvers, ends it before the deadline,<br/>ipc.rs the frames between them"]
             NRCH["child.rs - validator child, burn signer only<br/>this binary with --rgb-validator, one per request,<br/>fd 0 a socket pair, no key, only RUST_LOG of the environment:<br/>consensus.rs on the scratch file,<br/>each resolver question to the enclave"]
             NRSC[scratch.rs<br/>the file rgb-lib reads a consignment<br/>or a fascia from]
             NRF["flow.rs<br/>accepted transitions + amount rule"]

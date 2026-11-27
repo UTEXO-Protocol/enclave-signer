@@ -13,7 +13,7 @@ use attestation_verify::EvmFinalityTag;
 use super::events::EvmReceiptProvider;
 use crate::conn::RESPONSE_MARGIN;
 use crate::error::{EnclaveError, Result};
-use crate::networks::rgb::validation::{OpoutKey, RejectListEntry};
+use crate::networks::rgb::validation::{OpoutKey, RejectListEntry, RejectListLog};
 
 sol! {
     /// `IRgbRejectList.Entry`.
@@ -26,14 +26,6 @@ sol! {
 
     function length() external view returns (uint256);
     function entries(uint256 start, uint256 end) external view returns (Entry[] memory page);
-}
-
-/// The list as of the latest block, and how many leading entries are
-/// finalized.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RejectListLog {
-    pub entries: Vec<RejectListEntry>,
-    pub finalized: usize,
 }
 
 /// Reads the whole list at `contract`. Refuses a list over

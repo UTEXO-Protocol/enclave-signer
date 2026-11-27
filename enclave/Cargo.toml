@@ -39,18 +39,12 @@ alloy-sol-types = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# RGB consignment validation (optional, behind rgb-validation feature). The
-# version is the crates.io one the pinned rgb-lib takes: another version can
-# change the RGB consensus code the enclave runs. `Cargo.lock` fixes the whole
-# graph, and the EIF builds pass `--locked`, so the crates the enclave does not
-# name are pinned too.
-rgb-ops = { version = "=0.11.2-rc.2", default-features = false, optional = true }
 # Byte views of RGB ids. The version rgb-ops pins.
 amplify = { version = "=4.8.1", optional = true }
 # RGB-Tools rgb-lib after 0.3.0-beta.7, without the wallet. It validates a consignment
 # and reads its flat summary (`inspect_consignment`), and it inspects the
 # fascia of a mint or refill transaction (`inspect_fascia`).
-rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "b754db77", default-features = false, optional = true }
+rgb-lib = { git = "https://github.com/RGB-Tools/rgb-lib", rev = "f4971e01", default-features = false, optional = true }
 attestation-verify = { path = "../attestation-verify" }
 serde = { version = "1", features = ["derive"] }
 
@@ -124,7 +118,7 @@ vsock = []
 # DANGER: allows importing a raw seed over the wire. Testing only.
 allow-seed-import = []
 # The RGB bridge stack that a signer role turns on. In the enclave it validates
-# RGB consignments with rgbstd and binds BFA mints to EVM locks. BFA is the only
+# RGB consignments with rgb-lib and binds BFA mints to EVM locks. BFA is the only
 # schema the enclave admits. Each BFA `mint` leaves an EVM lock claim that RGB
 # consensus cannot finalize alone.
 #
@@ -135,7 +129,7 @@ allow-seed-import = []
 #
 # Every witness txid is checked against the enclave's SPV header chain before
 # EVM signing. Builds without RGB validation refuse RGB sources.
-rgb-validation = ["rgb-ops", "rgb-lib", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
+rgb-validation = ["rgb-lib", "dep:amplify", "dep:alloy", "dep:tokio", "dep:rustls", "dep:rustls-pki-types", "dep:webpki"]
 # Mock attestation: skip NSM / COSE / cert-chain checks and use raw CBOR docs.
 # Testing only. Never enable in production builds.
 mock-attestation = ["attestation-verify/mock"]
@@ -159,6 +153,14 @@ burn-signer = ["rgb-validation"]
 
 [dev-dependencies]
 rand = "0.10.0"
+# The tests build RGB operations with rgbstd; the enclave reaches it only
+# through rgb-lib. The version is the crates.io one the pinned rgb-lib takes:
+# another version can change the RGB consensus code the enclave runs. The
+# lockfile resolves this pin together with rgb-lib's requirement, so it also
+# fixes the version a release build compiles. `Cargo.lock` fixes the whole
+# graph, and the EIF builds pass `--locked`, so the crates the enclave does not
+# name are pinned too.
+rgb-ops = { version = "=0.11.2-rc.2", default-features = false }
 # Pins the BFA ids of `networks/rgb/bfa_schema.rs` to the compiled schema, and
 # builds its rules, which panic if the schema definition is inconsistent.
 rgb-schemas = { version = "=0.11.2-rc.2", default-features = false }

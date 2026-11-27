@@ -153,13 +153,12 @@ checks its verdict ([specification](tee-spec.md#validator-child-burn-signer)).
 
 - **B2.1** The bytes must be a V1 transfer file. Its genesis is the one the
   `RGB_ASSET_ID` pin names (B2.7), so its schema is BFA.
-- **B2.2** The contract id must pass the asset bind (B2.7) before the child
-  reads where the genesis publishes its reject list (`GS_REJECT_LIST`), which
-  must be an EVM contract; a URL list is refused. The enclave reaches that
-  address over the network in Stage 3b, so a foreign genesis must not choose
-  it. The reject-list reader is an input to validation, so the bind runs
-  before rgb-lib; refusing a foreign asset there also spares rgb-lib the work,
-  which is all that ordering buys beyond the bind itself.
+- **B2.2** The contract id must pass the asset bind (B2.7) before rgb-lib
+  runs. rgb-lib reads where the genesis publishes its reject list
+  (`GS_REJECT_LIST`) and names it to the reject-list resolver (Stage 3b). The
+  enclave reaches that address over the network, so a foreign genesis must
+  not choose it. Refusing a foreign asset before rgb-lib also spares rgb-lib
+  the work, which is all that ordering buys beyond the bind itself.
 - **B2.3** One call of rgb-lib's `validate_consignment_with_resolver` runs
   RGB consensus over the whole history, under the BFA rules that rgb-lib's
   pinned `rgb-schemas` compiles. rgb-lib asks three resolvers, and the burn
@@ -270,7 +269,8 @@ passed. The enclave reads only the list that the pinned asset's genesis
 names. It trusts the pinned EVM RPC for the content of the list: TLS
 authenticates the endpoint, not the answers.
 
-- **B3.7** The list must be on `EVM_CHAIN_ID`, and the node must report that
+- **B3.7** The list must be an EVM contract; the resolver refuses a URL list
+  unread. The list must be on `EVM_CHAIN_ID`, and the node must report that
   chain id. A list on another chain is refused.
 - **B3.8** The enclave reads the whole list on each request: `length()` at
   the `finalized` block and at the latest block, then the entries at the
@@ -281,11 +281,13 @@ authenticates the endpoint, not the answers.
   `finalized` block has no finalized entries. Before each RPC call the
   enclave refuses if a call as slow as the slowest one so far would end
   less than `RESPONSE_MARGIN` before the request deadline.
-- **B3.9** The latest finalized entry for an output decides. A pending
-  reject counts at once, also over a finalized allow. A pending allow does
-  not count. The `finalized` tag is fixed in code here, not taken from
-  `EVM_FINALITY_TAG`. So the signer never releases what an rgb-lib wallet
-  still refuses.
+- **B3.9** The enclave gives rgb-lib the entries as read, in append order,
+  and how many of them are finalized. rgb-lib decides from them: the latest
+  finalized entry for an output decides, a pending reject counts at once,
+  also over a finalized allow, and a pending allow does not count. rgb-lib
+  refuses a count of finalized entries above the number of entries. The
+  `finalized` tag is fixed in code here, not taken from `EVM_FINALITY_TAG`.
+  So the signer never releases what an rgb-lib wallet still refuses.
 - **B3.10** rgb-lib starts from the inputs and outputs of every terminal
   operation: the operations that nothing in the consignment builds on. It
   walks the history of each one back. An allowed output stops its branch. A

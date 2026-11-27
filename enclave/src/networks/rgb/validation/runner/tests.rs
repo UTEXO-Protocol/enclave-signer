@@ -6,7 +6,7 @@ use super::super::bfa::MintAnchor;
 #[cfg(target_os = "linux")]
 use super::super::child::OOM_SCORE_ADJ_MAX;
 use super::super::child::{lib_test_entry, FAULT_ENV};
-use super::super::reject_list::{Decisions, RejectListReader};
+use super::super::reject_list::{RejectListLog, RejectListReader};
 use super::super::tests::{
     assert_same, bind_all, burn_bytes, burn_history, listed_burn, mined, open_lists, validator,
     witness_ids, PAYEE,
@@ -194,7 +194,7 @@ fn scripted(
         bump(&side.reads);
         match side.error("list") {
             Some(e) => Err(e),
-            None => Ok(Decisions::default()),
+            None => Ok(RejectListLog::default()),
         }
     };
     let lists = ListAccess {
@@ -309,7 +309,7 @@ fn the_reject_list_is_read_once_and_only_after_the_bind() {
         peer.bind();
         let answer = peer.ask(list_request());
         assert!(
-            matches!(answer, Some(to_child::Body::Decisions(_))),
+            matches!(answer, Some(to_child::Body::Entries(_))),
             "{answer:?}"
         );
         peer.send(list_request());
@@ -856,7 +856,7 @@ fn the_kill_timer_ends_a_child_while_the_worker_answers_it() {
         // Killed, and not reaped while the worker is here.
         assert_eq!(process_state(pid.get().unwrap()), Some('Z'));
         sleep_until(kill_at + RESPONSE_MARGIN / 2);
-        Ok(Decisions::default())
+        Ok(RejectListLog::default())
     };
     let lists = ListAccess {
         bind_asset: &record,
@@ -890,7 +890,7 @@ fn a_stalled_list_read_ends_at_the_kill_time() {
     let client = crate::test_support::stalled_evm_client(&stalled);
     let read = |_: &RejectListContract| {
         crate::networks::evm::events::check_node_chain_id(&client, 42161)
-            .map(|_| Decisions::default())
+            .map(|_| RejectListLog::default())
     };
     let any_asset = |_: &str| Ok(());
     let lists = ListAccess {

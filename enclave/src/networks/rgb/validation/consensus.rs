@@ -31,7 +31,6 @@ use super::super::scratch::with_scratch_file;
 use super::bfa::{self, AnchorBinder, BindingResolver};
 use super::consignment::extract_transition_summary;
 use super::reject_list::{ListAccess, ListResolver, RejectListContract};
-use super::schema::reject_list;
 use super::types::WitnessBlock;
 use super::types::{TransitionSummary, ValidatedConsignment};
 use super::validator::RgbValidator;
@@ -57,24 +56,17 @@ impl RgbValidator {
         lists: &ListAccess<'_>,
     ) -> Result<ValidatedConsignment> {
         let start = std::time::Instant::now();
-        let (transfer, list, bytes_len) = load_bounded(path, lists)?;
+        let (transfer, bytes_len) = load_bounded(path, lists)?;
         let resolvers = Resolvers {
             witnesses: HeadersOnlyResolver::new(self.chain_net, headers),
             anchors: bind.map(BindingResolver::new),
-            list: list
-                .zip(lists.read)
-                .map(|(l, read)| ListResolver::new(l, read)),
+            list: lists.read.map(ListResolver::new),
         };
         let path = path.to_str().ok_or_else(|| {
             EnclaveError::Internal(format!("scratch path {} is not UTF-8", path.display()))
         })?;
-        let (validation, transitions_by_witness) = self.run_rgb_lib(
-            path,
-            &resolvers,
-            list.as_ref(),
-            &transfer,
-            headers.safe_height(),
-        )?;
+        let (validation, transitions_by_witness) =
+            self.run_rgb_lib(path, &resolvers, &transfer, headers.safe_height())?;
         let witness_blocks = witness_blocks(&validation, &resolvers.witnesses)?;
         let mint_locks = match resolvers.anchors {
             Some(anchors) => anchors.into_locks()?,
@@ -120,7 +112,6 @@ impl RgbValidator {
         &self,
         path: &str,
         resolvers: &Resolvers<'_>,
-        list: Option<&RejectListContract>,
         transfer: &Transfer,
         safe_height: Option<NonZeroU32>,
     ) -> Result<(ConsignmentValidation, Summary)> {
@@ -138,7 +129,9 @@ impl RgbValidator {
             safe_height,
             &options,
         );
-        let validation = resolver_failure_first(validation, resolvers.take_failure(), list)?;
+        let list = resolvers.list.as_ref().and_then(ListResolver::asked);
+        let validation =
+            resolver_failure_first(validation, resolvers.take_failure(), list.as_ref())?;
         check_validation(&validation, transfer)?;
         // Only what validation passed.
         Ok((validation, extract_transition_summary(path)?))
@@ -158,13 +151,9 @@ pub(super) fn resolver_failure_first<T>(
     }
 }
 
-/// Parses the transfer in the file at `path` and runs every check that needs
-/// no resolver, so a foreign history never reaches rgb-lib.
-/// Returns its list and the length of the file.
-fn load_bounded(
-    path: &Path,
-    lists: &ListAccess<'_>,
-) -> Result<(Transfer, Option<RejectListContract>, usize)> {
+/// Parses the transfer in the file at `path` and binds its asset, so a
+/// foreign history never reaches rgb-lib. Returns the length of the file.
+fn load_bounded(path: &Path, lists: &ListAccess<'_>) -> Result<(Transfer, usize)> {
     let file = File::open(path).map_err(|e| file_error(path, e))?;
     // Saturates where a length has no `usize`.
     let bytes_len = file.metadata().map_err(|e| file_error(path, e))?.len();
@@ -181,13 +170,12 @@ fn load_bounded(
     // validation peak (`memory.rs`).
     let transfer = decoded.clone();
     drop(decoded);
-    // The asset pin runs before the reject-list location is read, because the
-    // enclave reaches that address over the network: a foreign genesis must
-    // not choose it. The pin admits one contract id, hence one genesis, hence
-    // one schema. Refusing here also spares rgb-lib the work.
+    // The asset pin runs before rgb-lib reads the reject-list location,
+    // because the enclave reaches that address over the network: a foreign
+    // genesis must not choose it. The pin admits one contract id, hence one
+    // genesis, hence one schema. Refusing here also spares rgb-lib the work.
     (lists.bind_asset)(&transfer.contract_id().to_string())?;
-    let list = reject_list(&transfer.genesis)?;
-    Ok((transfer, list, bytes_len))
+    Ok((transfer, bytes_len))
 }
 
 /// An enclave fault: the enclave wrote the file it reads.

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::io::Cursor;
 
@@ -41,6 +42,13 @@ fn opout(n: u8) -> OpoutKey {
         op: [n; 32],
         ty: 4_000 + u16::from(n),
         no: u16::from(n),
+    }
+}
+
+fn entry(n: u8, reject: bool) -> RejectListEntry {
+    RejectListEntry {
+        opout: opout(n),
+        reject,
     }
 }
 
@@ -141,10 +149,10 @@ fn every_message_round_trips() {
             locks: pack_locks(&[lock(1), lock(2)]),
         }),
         to_child::Body::Header(vec![0x5a; 80]),
-        to_child::Body::Decisions(Decisions {
-            reject: pack_opouts([opout(1)].iter()),
-            allow: pack_opouts([opout(2), opout(3)].iter()),
-        }),
+        to_child::Body::Entries(pack_entries(RejectListLog {
+            entries: vec![entry(1, true), entry(2, false), entry(1, false)],
+            finalized: 2,
+        })),
         to_child::Body::Refused(Empty {}),
     ];
     for body in to_child {
@@ -263,17 +271,57 @@ fn a_record_list_of_another_length_is_refused() {
         ),
         unpack_anchors,
     );
-    let o = opout(1);
-    let opouts: BTreeSet<OpoutKey> = [opout(3), opout(1), opout(2)].into();
+    let e = entry(1, true);
+    let entries = vec![entry(3, false), entry(1, true), entry(3, true)];
     check_records(
-        "opout",
+        "reject-list entry",
         (
-            pack_opouts([o].iter()),
-            concat(&[&o.op, &o.ty.to_le_bytes(), &o.no.to_le_bytes()]),
+            entry_records(vec![e]),
+            concat(&[
+                &e.opout.op,
+                &e.opout.ty.to_le_bytes(),
+                &e.opout.no.to_le_bytes(),
+                &[1],
+            ]),
         ),
-        (pack_opouts(opouts.iter()), opouts),
-        unpack_opouts,
+        (entry_records(entries.clone()), entries),
+        unpack_entry_records,
     );
+}
+
+/// The packed entries of `entries`.
+fn entry_records(entries: Vec<RejectListEntry>) -> Vec<u8> {
+    pack_entries(RejectListLog {
+        entries,
+        finalized: 0,
+    })
+    .entries
+}
+
+fn unpack_entry_records(bytes: &[u8]) -> Result<Vec<RejectListEntry>, String> {
+    let answer = Entries {
+        entries: bytes.to_vec(),
+        finalized: 0,
+    };
+    unpack_entries(answer).map(|log| log.entries)
+}
+
+/// The entries and the finalized count cross as read, in append order and
+/// with repeats. A flag other than 0 or 1 is refused.
+#[test]
+fn a_reject_list_crosses_as_read() {
+    let log = RejectListLog {
+        entries: vec![entry(2, false), entry(1, true), entry(2, true)],
+        finalized: 1,
+    };
+    assert_eq!(unpack_entries(pack_entries(log.clone())).unwrap(), log);
+    let mut answer = pack_entries(RejectListLog {
+        entries: vec![entry(1, true)],
+        finalized: 1,
+    });
+    *answer.entries.last_mut().unwrap() = 2;
+    let err = unpack_entries(answer).unwrap_err();
+    assert!(err.contains("the flag 2"), "{err}");
 }
 
 /// Each of the eight transition types crosses as itself, and a code of no
@@ -534,25 +582,28 @@ fn every_frame_of_the_enclave_fits_the_cap_of_its_child() {
         max_reject_list_entries: 40_000,
         ..Limits::DEFAULTS
     };
-    let opouts = |range: std::ops::Range<u32>| -> BTreeSet<OpoutKey> {
+    let entries = |range: std::ops::Range<u32>| -> Vec<RejectListEntry> {
         range
-            .map(|n| OpoutKey {
-                op: [n.to_le_bytes(), [0xab; 4], [0xcd; 4], [0xef; 4]]
-                    .concat()
-                    .repeat(2)
-                    .try_into()
-                    .unwrap(),
-                ty: 4_000,
-                no: 0,
+            .map(|n| RejectListEntry {
+                opout: OpoutKey {
+                    op: [n.to_le_bytes(), [0xab; 4], [0xcd; 4], [0xef; 4]]
+                        .concat()
+                        .repeat(2)
+                        .try_into()
+                        .unwrap(),
+                    ty: 4_000,
+                    no: 0,
+                },
+                reject: n < 30_000,
             })
             .collect()
     };
-    let longest = reject_list::Decisions {
-        reject: opouts(0..30_000),
-        allow: opouts(30_000..40_000),
+    let longest = RejectListLog {
+        entries: entries(0..40_000),
+        finalized: usize::MAX,
     };
     let wire = frame_of(&ToChild {
-        body: Some(to_child::Body::Decisions(pack_decisions(longest))),
+        body: Some(to_child::Body::Entries(pack_entries(longest))),
     });
     let cap = enclave_frame_bytes(&limits);
     assert!(wire.len() as u64 > limits.max_message_bytes);
@@ -581,9 +632,9 @@ fn every_frame_of_the_enclave_fits_the_cap_of_its_child() {
             locks: pack_locks(&[lock(0xff)]),
         }),
         to_child::Body::Header(vec![0xff; 80]),
-        to_child::Body::Decisions(pack_decisions(reject_list::Decisions {
-            reject: opouts(0..1),
-            allow: Default::default(),
+        to_child::Body::Entries(pack_entries(RejectListLog {
+            entries: entries(0..1),
+            finalized: usize::MAX,
         })),
         to_child::Body::Refused(Empty {}),
     ];
@@ -593,27 +644,32 @@ fn every_frame_of_the_enclave_fits_the_cap_of_its_child() {
     }
 }
 
-/// One list from the enclave's read to the set rgb-lib walks with in the
-/// child stays within the rate that `Limits::check` counts. The frame of the
-/// enclave stays in the count until the child has its sets, as the two
-/// processes free their copies in no fixed order. Each size is just past a
-/// hash table growth, the worst point of the rate. The rate is the same for
-/// a list of rejects and for a list of allows, and a mixed list takes less.
+/// One list, from the enclave's read to the sets rgb-lib decides from its
+/// entries in the child, stays within the rate that `Limits::check` counts.
+/// The child runs in process here, through `ListResolver` and rgb-lib's own
+/// decision code. The frame of the enclave stays in the count until the
+/// child has its sets, as the two processes free their copies in no fixed
+/// order. Each size is just past a hash table growth, the worst point of the
+/// rate. The validation of the consignment without its list is not counted:
+/// the request bound counts it (`limits::DENSE_CONSIGNMENT_RATE_TENTHS`).
 #[test]
 fn a_list_fits_the_heap_that_the_limits_count() {
-    use super::super::reject_list::{decisions, RejectListEntry};
+    use super::super::reject_list::{ListAccess, RejectListContract};
+    use super::super::tests::{bind_all, listed_burn, mined, validator, witness_ids};
     use crate::limits::{change_for_test, REJECT_LIST_ENTRY_BYTES};
     use crate::memory::peak;
     use crate::networks::evm::reject_list::read_reject_list;
     use crate::test_support::{far_deadline, ListEvm};
-    use rgb_lib::no_wallet::RejectList;
 
     const LIST: [u8; 20] = [0x4e; 20];
     change_for_test(|l| {
         l.max_reject_list_entries = 1 << 20;
         l.max_consignment_bytes = 1 << 20;
     });
-    for len in [28_673u32, 229_377] {
+    let bytes = listed_burn().0.consignment();
+    let chain = mined(&witness_ids(&bytes));
+    let any_asset = |_: &str| Ok(());
+    let measure = |len: u32, reject: bool| {
         let entries: Vec<_> = (0..len)
             .map(|i| {
                 let mut op = [0xab; 32];
@@ -624,44 +680,55 @@ fn a_list_fits_the_heap_that_the_limits_count() {
                         ty: 4000,
                         no: 0,
                     },
-                    reject: true,
+                    reject,
                 }
             })
             .collect();
         let (_, _, used) = peak::measure(
             || ListEvm::new(1, entries),
             |rpc| {
-                // The enclave: `server::reject_list::read_decisions`, then the
+                // The enclave: `server::reject_list::read_entries`, then the
                 // answer of the runner.
                 let frame = {
                     let log = read_reject_list(rpc, &LIST, far_deadline()).unwrap();
-                    let decided = decisions(&log.entries, log.finalized);
-                    drop(log);
-                    let answer = to_child::Body::Decisions(pack_decisions(decided));
+                    let answer = to_child::Body::Entries(pack_entries(log));
                     ToChild { body: Some(answer) }.encode_to_vec()
                 };
-                // The child: its read of the frame, then `ListResolver`.
-                let answer = {
-                    let read = frame.clone();
-                    ToChild::decode(&read[..]).unwrap()
+                // The child: its read of the frame, then `ListResolver` and
+                // rgb-lib.
+                let read = |_: &RejectListContract| {
+                    let answer = ToChild::decode(&frame.clone()[..]).unwrap();
+                    let Some(to_child::Body::Entries(answer)) = answer.body else {
+                        panic!("not an answer to a list read");
+                    };
+                    Ok(unpack_entries(answer).unwrap())
                 };
-                let Some(to_child::Body::Decisions(answer)) = answer.body else {
-                    panic!("not an answer to a list read");
+                let lists = ListAccess {
+                    bind_asset: &any_asset,
+                    read: Some(&read),
                 };
-                let decided = unpack_decisions(answer).unwrap();
-                let rejected = decided.reject.into_iter().map(|o| (o.into(), false));
-                let allowed = decided.allow.into_iter().map(|o| (o.into(), true));
-                (frame, RejectList::from_decisions(rejected.chain(allowed)))
+                validator().validate_consignment(&bytes, Some(&bind_all), &chain, &lists)
             },
         );
-        let budget = u64::from(len) * REJECT_LIST_ENTRY_BYTES;
-        println!(
-            "a list of {len} entries: {used} bytes, {:.1} for each entry, budget {budget}",
-            used as f64 / f64::from(len)
-        );
-        assert!(
-            used as u64 <= budget,
-            "a list of {len} entries took {used} bytes, over {budget}"
-        );
+        used
+    };
+    let without = measure(0, true);
+    let mut over = Vec::new();
+    for reject in [true, false] {
+        for len in [28_673u32, 229_377] {
+            let used = measure(len, reject).saturating_sub(without);
+            let budget = u64::from(len) * REJECT_LIST_ENTRY_BYTES;
+            println!(
+                "a list of {len} entries (reject: {reject}): {used} bytes, {:.1} for each \
+                 entry, budget {budget}",
+                used as f64 / f64::from(len)
+            );
+            if used as u64 > budget {
+                over.push(format!(
+                    "{len} entries (reject: {reject}): {used} > {budget}"
+                ));
+            }
+        }
     }
+    assert!(over.is_empty(), "lists over the budget: {over:?}");
 }

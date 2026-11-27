@@ -85,7 +85,7 @@ checks them at launch.
 | `io_idle_timeout_secs` | 10 | 2 | 3600 | Longest block of one socket read or write. |
 | `first_bytes_timeout_secs` | 10 | 1 | 3600 | Time for the first bytes of an egress client. |
 | `evm_rpc_timeout_secs` | 15 | 1 | 3600 | Time for one EVM RPC call. |
-| `max_reject_list_entries` | 20000 | 1 | 2^32 | Entries of a reject list. |
+| `max_reject_list_entries` | 18000 | 1 | 2^32 | Entries of a reject list. |
 | `reject_list_page_entries` | 1000 | 1 | 2^20 | Entries in one RPC call that reads a reject list. |
 | `max_message_bytes` | 25165824 | 1048576 | 2^32 - 1 | Size of one frame. |
 | `max_wire_elements` | 524288 | 1024 | 2^32 | Protobuf field occurrences in a request. |
@@ -131,8 +131,8 @@ refuses the request and changes nothing.
   `max_message_bytes`.
 - A densest consignment and a reject list at `max_reject_list_entries` must fit
   the heap of a frame together. At the image values, the list limit stops at about
-  33,000 entries. Each MiB less of `max_consignment_bytes` gives room for about
-  250,000 more entries.
+  18,300 entries. Each MiB less of `max_consignment_bytes` gives room for about
+  140,000 more entries.
 - Two dense PSBTs at `max_psbt_bytes` must fit the heap of a frame.
 - A release build must have enough usable memory for four requests at the new
   limits, a consignment scratch file for each request, on the burn signer a
