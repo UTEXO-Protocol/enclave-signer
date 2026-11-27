@@ -267,3 +267,25 @@ fn the_config_values_are_the_start_values_of_the_request_limits() {
     .unwrap();
     assert_eq!(in_force(&cfg).max_consignment_bytes, 2048);
 }
+
+#[test]
+fn a_gas_transaction_bound_stops_at_its_image_ceiling() {
+    // A caller on the parent can change a limit, so the ceiling is the bound that holds.
+    let at_the_ceilings = apply_to_defaults(|l| {
+        l.gas_tx_max_gas_limit = GAS_TX_GAS_LIMIT_CEILING;
+        l.gas_tx_max_fee_per_gas = GAS_TX_FEE_PER_GAS_CEILING;
+        l.gas_tx_max_value_wei = GAS_TX_VALUE_WEI_CEILING;
+    })
+    .expect("the ceilings themselves are accepted");
+    assert_eq!(
+        at_the_ceilings.gas_tx_max_gas_limit,
+        GAS_TX_GAS_LIMIT_CEILING
+    );
+
+    let over_gas = apply_to_defaults(|l| l.gas_tx_max_gas_limit = GAS_TX_GAS_LIMIT_CEILING + 1);
+    assert!(over_gas.unwrap_err().contains("gas_tx_max_gas_limit"));
+    let over_fee = apply_to_defaults(|l| l.gas_tx_max_fee_per_gas = GAS_TX_FEE_PER_GAS_CEILING + 1);
+    assert!(over_fee.unwrap_err().contains("gas_tx_max_fee_per_gas"));
+    let over_value = apply_to_defaults(|l| l.gas_tx_max_value_wei = GAS_TX_VALUE_WEI_CEILING + 1);
+    assert!(over_value.unwrap_err().contains("gas_tx_max_value_wei"));
+}

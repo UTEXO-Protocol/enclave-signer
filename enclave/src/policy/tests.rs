@@ -134,8 +134,6 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     let config = BridgeConfig {
         btc_max_total_sats: 1_000_000,
         gas_tx_allowed_to: Some([0x33; 20]),
-        gas_tx_max_gas_limit: 100_000,
-        gas_tx_max_fee_per_gas: 1_000,
         gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         ..pinned_config()
     };
@@ -155,15 +153,11 @@ fn signer_role_attests_the_other_roles_paths_as_off() {
     let mint = resolve(SignerRole::Mint);
     assert!(mint.allow_vanilla_psbt);
     assert_eq!(mint.gas_tx_allowed_to, None);
-    assert_eq!(mint.gas_tx_max_gas_limit, 0);
-    assert_eq!(mint.gas_tx_max_fee_per_gas, 0);
-    assert_eq!(mint.gas_tx_max_value_wei, None);
     assert!(mint.gas_tx_allowed_selectors.is_empty());
 
     let burn = resolve(SignerRole::Burn);
     assert!(!burn.allow_vanilla_psbt);
     assert_eq!(burn.gas_tx_allowed_to, Some([0x33; 20]));
-    assert_eq!(burn.gas_tx_max_gas_limit, 100_000);
 
     let combined = resolve(SignerRole::Combined);
     assert!(combined.allow_vanilla_psbt);
@@ -515,9 +509,6 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
 
     let mut cfg = pinned_config();
     cfg.gas_tx_allowed_to = Some([0x77; 20]);
-    cfg.gas_tx_max_gas_limit = 30_000;
-    cfg.gas_tx_max_fee_per_gas = 5_000;
-    cfg.gas_tx_max_value_wei = Some(9_000);
     cfg.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
     let pinned = SecurityPolicy::resolve(&ctx, &cfg, EvmDataSource::Disabled, None);
 
@@ -529,48 +520,10 @@ fn gas_tx_rule_is_carried_into_the_commitment() {
     match &pinned {
         SecurityPolicy::Production(p) => {
             assert_eq!(p.gas_tx_allowed_to, Some([0x77; 20]));
-            assert_eq!(p.gas_tx_max_gas_limit, 30_000);
-            assert_eq!(p.gas_tx_max_fee_per_gas, 5_000);
-            assert_eq!(p.gas_tx_max_value_wei, Some(9_000));
             assert_eq!(p.gas_tx_allowed_selectors, vec![[0xaa, 0xbb, 0xcc, 0xdd]]);
         }
         other => panic!("expected Production, got {other:?}"),
     }
-}
-
-#[test]
-fn gas_tx_value_ceiling_alone_changes_the_commitment() {
-    // The LayerZero value cap is part of the attested gas-tx rule.
-    let ctx = release_bridge_ctx();
-    let mut base = pinned_config();
-    base.gas_tx_allowed_to = Some([0x77; 20]);
-    base.gas_tx_max_gas_limit = 30_000;
-    base.gas_tx_max_fee_per_gas = 5_000;
-    base.gas_tx_allowed_selectors = vec![[0xaa, 0xbb, 0xcc, 0xdd]];
-
-    let mut raised = base.clone();
-    raised.gas_tx_max_value_wei = Some(1);
-
-    assert_ne!(
-        SecurityPolicy::resolve(&ctx, &base, EvmDataSource::Disabled, None).commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &raised, EvmDataSource::Disabled, None).commitment_bytes(),
-        "raising GAS_TX_MAX_VALUE_WEI must change the attested commitment"
-    );
-}
-
-#[test]
-fn unset_gas_tx_value_ceiling_commits_as_zero() {
-    // `None` and `Some(0)` enforce the same rule, so they commit the same bytes.
-    let ctx = release_bridge_ctx();
-    let mut unset = pinned_config();
-    unset.gas_tx_max_value_wei = None;
-    let mut zero = pinned_config();
-    zero.gas_tx_max_value_wei = Some(0);
-
-    assert_eq!(
-        SecurityPolicy::resolve(&ctx, &unset, EvmDataSource::Disabled, None).commitment_bytes(),
-        SecurityPolicy::resolve(&ctx, &zero, EvmDataSource::Disabled, None).commitment_bytes(),
-    );
 }
 
 #[test]

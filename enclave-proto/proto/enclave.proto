@@ -415,6 +415,13 @@ message Limits {
   uint64 mint_replay_max_entries = 25;
   uint64 mint_max_inputs = 28;
   uint64 mint_max_outputs = 29;
+  // The highest gasLimit of a transaction that the gas key signs.
+  uint64 gas_tx_max_gas_limit = 30;
+  // The highest maxFeePerGas and maxPriorityFeePerGas, in wei, of a transaction
+  // that the gas key signs.
+  uint64 gas_tx_max_fee_per_gas = 31;
+  // The highest native value, in wei, of a transaction that the gas key signs.
+  uint64 gas_tx_max_value_wei = 32;
 }
 
 // Changes limits. The enclave checks all the values first, so a refused request

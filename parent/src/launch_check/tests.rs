@@ -19,9 +19,6 @@ fn image_env() -> String {
         "TOKEN_CONTRACT=0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
         "SPV_MIN_CONFIRMATIONS=6",
         "GAS_TX_ALLOWED_TO=0xC985c12bbCECe96A13A72A62FD75d8aB9381ef5A",
-        "GAS_TX_MAX_GAS_LIMIT=300000",
-        "GAS_TX_MAX_FEE_PER_GAS=1000",
-        "GAS_TX_MAX_VALUE_WEI=5",
         "GAS_TX_ALLOWED_SELECTORS=0xdeadbeef,0x01020304",
         "BTC_MAX_TOTAL_SATS=1000000",
     ])
@@ -395,30 +392,6 @@ fn gas_tx_allowed_to_mismatch_aborts() {
 }
 
 #[test]
-fn gas_tx_max_gas_limit_mismatch_aborts() {
-    assert_mismatch(
-        set!(gas_tx_max_gas_limit, 1),
-        "gas_tx_max_gas_limit mismatch: expected 300000, attested 1",
-    );
-}
-
-#[test]
-fn gas_tx_max_fee_per_gas_mismatch_aborts() {
-    assert_mismatch(
-        set!(gas_tx_max_fee_per_gas, 1),
-        "gas_tx_max_fee_per_gas mismatch: expected 1000, attested 1",
-    );
-}
-
-#[test]
-fn gas_tx_max_value_wei_mismatch_aborts() {
-    assert_mismatch(
-        set!(gas_tx_max_value_wei, 6),
-        "gas_tx_max_value_wei mismatch: expected 5, attested 6",
-    );
-}
-
-#[test]
 fn gas_tx_allowed_selectors_mismatch_aborts() {
     assert_mismatch(
         set!(gas_tx_allowed_selectors, vec![[0xde, 0xad, 0xbe, 0xef]]),
@@ -654,9 +627,6 @@ fn a_missing_required_image_env_key_is_an_error() {
 fn mint_masks_the_gas_fields_and_burn_masks_vanilla() {
     let AttestedPolicy::Production {
         gas_tx_allowed_to,
-        gas_tx_max_gas_limit,
-        gas_tx_max_fee_per_gas,
-        gas_tx_max_value_wei,
         gas_tx_allowed_selectors,
         allow_vanilla_psbt,
         ..
@@ -665,25 +635,17 @@ fn mint_masks_the_gas_fields_and_burn_masks_vanilla() {
         unreachable!()
     };
     assert_eq!(gas_tx_allowed_to, [0; 20]);
-    assert_eq!(
-        (
-            gas_tx_max_gas_limit,
-            gas_tx_max_fee_per_gas,
-            gas_tx_max_value_wei
-        ),
-        (0, 0, 0)
-    );
     assert!(gas_tx_allowed_selectors.is_empty());
     assert!(allow_vanilla_psbt);
 
     let AttestedPolicy::Production {
         allow_vanilla_psbt,
-        gas_tx_max_gas_limit,
+        gas_tx_allowed_selectors,
         ..
     } = expected_policy(SignerRole::Burn, &image_env(), &endpoints()).unwrap()
     else {
         unreachable!()
     };
     assert!(!allow_vanilla_psbt);
-    assert_eq!(gas_tx_max_gas_limit, 300_000);
+    assert!(!gas_tx_allowed_selectors.is_empty());
 }

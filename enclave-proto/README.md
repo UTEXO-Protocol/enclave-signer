@@ -33,8 +33,8 @@ disagree, or if the commit recorded below drifts from the `rev` that
 | | |
 |---|---|
 | Upstream | https://github.com/UTEXO-Protocol/federated-signer-proto |
-| Commit | `06778c89364ae3c6185fbce850e91523913385b9` (branch `main`, the merge of `chore/reserve-merkle-proofs`) |
-| Commit date | 2026-11-24T12:10:07Z |
+| Commit | `1428f8b963fa70ad1a18a3e0ad444eff803be471` |
+| Commit date | 2026-11-27T09:40:20Z |
 
 This is the commit `parent/Cargo.toml` pins as a git dependency, so both
 crates compile against one schema version. Keep them in lockstep.
@@ -48,7 +48,7 @@ crates compile against one schema version. Keep them in lockstep.
 Verify against upstream (needs read access to the private repo):
 
 ```bash
-REV=06778c89364ae3c6185fbce850e91523913385b9
+REV=1428f8b963fa70ad1a18a3e0ad444eff803be471
 git clone https://github.com/UTEXO-Protocol/federated-signer-proto /tmp/fsp
 git -C /tmp/fsp checkout "$REV"
 diff /tmp/fsp/rust-gen/src/enclave/enclave.rs enclave-proto/src/enclave.rs
@@ -63,8 +63,8 @@ git hash-object enclave-proto/src/enclave.rs enclave-proto/proto/enclave.proto
 
 | File | Upstream blob hash |
 |---|---|
-| `rust-gen/src/enclave/enclave.rs` | `c77374704872d77f75c439448fb00342bf3fc496` |
-| `proto/enclave/enclave.proto` | `1c38039b86d303f60cbb83964536a5737705734e` |
+| `rust-gen/src/enclave/enclave.rs` | `04d8b391c61ef195c2721c9e192b02649fe69115` |
+| `proto/enclave/enclave.proto` | `a6c70e05e5a23856d4deba61bd48274ff15b86f9` |
 
 ## Why only `prost`
 

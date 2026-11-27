@@ -4,7 +4,14 @@
 //! waits. So these values are configuration, not policy. The operator changes
 //! them with `SetLimits` (`utexo-bridge-parent-cli limits`), and a change needs
 //! no new image. The attestation does not cover them. Safety rules stay in the
-//! image: the SPV depth, the fee limits, the clone replay guard and the pins.
+//! image: the SPV depth, the Bitcoin fee limits, the clone replay guard and the
+//! pins.
+//!
+//! The three amounts of a gas transaction are here too: its gas limit, its fee
+//! for each unit of gas and its native value. The gas limit decides how many
+//! deposits a release can cite, and that count grows with the mint ancestry of
+//! the burned asset. The other two follow the gas price of the chain and the
+//! LayerZero fee. The image keeps the destination and the selectors.
 //!
 //! The mint replay guard is here because it is not a safety rule. A shorter
 //! window lets a retry for one deposit reach the signer sooner. Each signature
@@ -96,6 +103,18 @@ macro_rules! limits {
     };
 }
 
+/// The ceilings of the three bounds of a gas transaction. A caller on the parent
+/// can change a runtime limit without a key, so a ceiling is the bound that an
+/// image holds: no limit change can pass it.
+///
+/// The highest `gasLimit` a limit change can allow: the gas of one block of the
+/// lock chain, so a release that cites the most deposits still fits.
+pub const GAS_TX_GAS_LIMIT_CEILING: u64 = 32_000_000;
+/// The highest fee in wei for each unit of gas a limit change can allow.
+pub const GAS_TX_FEE_PER_GAS_CEILING: u64 = 10_000_000_000;
+/// The highest native value in wei a limit change can allow.
+pub const GAS_TX_VALUE_WEI_CEILING: u64 = 50_000_000_000_000_000;
+
 limits! {
     /// Socket deadline of one request, from accept
     /// ([`crate::conn::TOTAL_REQUEST_TIMEOUT`]). The parent reads the value in
@@ -160,6 +179,21 @@ limits! {
     mint_max_inputs: 16, 1, 1 << 20;
     /// Outputs of a mint tx, before any fascia is decoded.
     mint_max_outputs: 16, 1, 1 << 20;
+    /// The highest `gasLimit` of a gas transaction. A release pays gas for each
+    /// deposit that it cites, so a burn with a long mint ancestry needs more
+    /// than the value of the image. The lowest value is the gas of a plain
+    /// transfer. The highest is `GAS_TX_GAS_LIMIT_CEILING`.
+    gas_tx_max_gas_limit: 3_000_000, 21_000, GAS_TX_GAS_LIMIT_CEILING;
+    /// The highest fee in wei for each unit of gas of a gas transaction:
+    /// `maxFeePerGas` and `maxPriorityFeePerGas`, or `gasPrice` of a legacy
+    /// transaction. When the gas price of the chain is above it, the gas key
+    /// signs nothing. The highest value is `GAS_TX_FEE_PER_GAS_CEILING`.
+    gas_tx_max_fee_per_gas: 1_000_000_000, 1, GAS_TX_FEE_PER_GAS_CEILING;
+    /// The highest native value in wei of a gas transaction. Only the payable
+    /// `lzFundsOutCall` carries a value: the LayerZero fee. The `TeeLzFundsOut`
+    /// payload has no fee field, so this value limits the possible loss. The
+    /// highest value is `GAS_TX_VALUE_WEI_CEILING`.
+    gas_tx_max_value_wei: 5_000_000_000_000_000, 1, GAS_TX_VALUE_WEI_CEILING;
 }
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte

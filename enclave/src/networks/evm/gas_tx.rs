@@ -7,17 +7,19 @@
 //!      canonical RLP decoder;
 //!   2. computes the signing hash itself (`keccak256(preimage)`);
 //!   3. enforces the operator's allowlist: chain id == `EVM_CHAIN_ID`,
-//!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <=
-//!      `GAS_TX_MAX_GAS_LIMIT`, per-gas fees <= `GAS_TX_MAX_FEE_PER_GAS`, and a
-//!      leading 4-byte selector in `GAS_TX_ALLOWED_SELECTORS`.
+//!      `to` == `GAS_TX_ALLOWED_TO`, `value == 0`, `gasLimit` <= the runtime
+//!      limit `gas_tx_max_gas_limit`, per-gas fees <= the runtime limit
+//!      `gas_tx_max_fee_per_gas`, and a leading 4-byte selector in
+//!      `GAS_TX_ALLOWED_SELECTORS`.
 //!
 //! Carve-out to `value == 0`: the payable `lzFundsOutCall` forwards the
 //! LayerZero messaging fee. Allowed only when the selector is `lzFundsOutCall`,
-//! `to` == pinned `EVM_PROXY_CONTRACT_ADDRESS`, and `value` <= `GAS_TX_MAX_VALUE_WEI`. The
-//! selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
+//! `to` == pinned `EVM_PROXY_CONTRACT_ADDRESS`, and `value` <= the runtime limit
+//! `gas_tx_max_value_wei`. The selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! Any unset pin fails the path closed. A `Production` policy commits the whole
-//! rule in the attestation `user_data`. A public-Signet image only measures it in PCR0.
+//! Any unset pin fails the path closed. A `Production` policy commits the
+//! destination and the selectors in the attestation `user_data`. A public-Signet
+//! image only measures them in PCR0. The runtime limits are not attested.
 //!
 //! Not bounded here: total fee spend across many txs (validation is
 //! stateless). The LayerZero fee is not bound to its release.
@@ -74,15 +76,15 @@ struct GasTx<'a> {
     chain_id: u64,
     to: [u8; 20],
     /// Wei. A number, not a zero flag, because the LayerZero carve-out
-    /// compares it to a pinned ceiling.
+    /// compares it to the runtime limit `gas_tx_max_value_wei`.
     value: u128,
-    /// `gasLimit`, bounded by `GAS_TX_MAX_GAS_LIMIT`.
+    /// `gasLimit`, bounded by the runtime limit `gas_tx_max_gas_limit`.
     gas_limit: u64,
-    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy), bounded by
-    /// `GAS_TX_MAX_FEE_PER_GAS`.
+    /// `maxFeePerGas` (EIP-1559) or `gasPrice` (legacy), bounded by the
+    /// runtime limit `gas_tx_max_fee_per_gas`.
     max_fee_per_gas: u128,
     /// `maxPriorityFeePerGas` (EIP-1559), or `gasPrice` for legacy. Bounded by
-    /// `GAS_TX_MAX_FEE_PER_GAS`.
+    /// the runtime limit `gas_tx_max_fee_per_gas`.
     max_priority_fee_per_gas: u128,
     /// Leading 4-byte function selector, or `None` for empty calldata (which
     /// `validate_gas_tx_request` refuses).
@@ -96,9 +98,9 @@ struct GasTx<'a> {
 /// not taken from the wire.
 ///
 /// Fails closed (`CrossCheck`) on: no preimage, bad or non-canonical RLP,
-/// unsupported envelope, unpinned chain id / destination / gas cap / fee cap,
+/// unsupported envelope, unpinned chain id / destination,
 /// chain id or destination mismatch, contract creation, a non-zero value that
-/// fails the LayerZero carve-out, `gasLimit` or fee above the cap, or a
+/// fails the LayerZero carve-out, `gasLimit` or fee above its runtime limit, or a
 /// selector not in the operator allowlist.
 pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -> Result<[u8; 32]> {
     if req.unsigned_tx.is_empty() {
@@ -146,6 +148,8 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         )));
     }
 
+    let limits = crate::limits::get();
+
     // A non-zero value is a drain vector. Refused by default; the LayerZero
     // fee carve-out needs all three legs below.
     if tx.value != 0 {
@@ -173,48 +177,36 @@ pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -
         }
 
         // (c) Bounded: nothing on-chain constrains the fee.
-        let max = cfg.gas_tx_max_value_wei.ok_or_else(|| {
-            reject(
-                "gas tx: non-zero value requires a pinned ceiling (GAS_TX_MAX_VALUE_WEI unset) \
-                 - refusing to sign",
-            )
-        })?;
-        if tx.value > max {
+        let max_value = u128::from(limits.gas_tx_max_value_wei);
+        if tx.value > max_value {
             return Err(reject(format!(
-                "gas tx: value {} exceeds pinned GAS_TX_MAX_VALUE_WEI {}",
-                tx.value, max
+                "gas tx: value {} exceeds the limit {max_value} (gas_tx_max_value_wei)",
+                tx.value
             )));
         }
     }
 
     // Fee/gas ceilings: a signed gas tx can burn at most
-    // `gasLimit * maxFeePerGas`. Unset caps fail closed.
-    if cfg.gas_tx_max_gas_limit == 0 {
-        return Err(reject(
-            "gas tx: gas-limit cap not pinned (GAS_TX_MAX_GAS_LIMIT unset) - refusing to sign",
-        ));
-    }
-    if cfg.gas_tx_max_fee_per_gas == 0 {
-        return Err(reject(
-            "gas tx: fee cap not pinned (GAS_TX_MAX_FEE_PER_GAS unset) - refusing to sign",
-        ));
-    }
-    if tx.gas_limit > cfg.gas_tx_max_gas_limit {
+    // `gasLimit * maxFeePerGas`.
+    let max_gas_limit = limits.gas_tx_max_gas_limit;
+    if tx.gas_limit > max_gas_limit {
         return Err(reject(format!(
-            "gas tx: gasLimit {} exceeds pinned cap {}",
-            tx.gas_limit, cfg.gas_tx_max_gas_limit
+            "gas tx: gasLimit {} exceeds the limit {max_gas_limit} (gas_tx_max_gas_limit)",
+            tx.gas_limit
         )));
     }
-    if tx.max_fee_per_gas > cfg.gas_tx_max_fee_per_gas {
+    let max_fee = u128::from(limits.gas_tx_max_fee_per_gas);
+    if tx.max_fee_per_gas > max_fee {
         return Err(reject(format!(
-            "gas tx: maxFeePerGas {} exceeds pinned cap {}",
-            tx.max_fee_per_gas, cfg.gas_tx_max_fee_per_gas
+            "gas tx: maxFeePerGas {} exceeds the limit {max_fee} (gas_tx_max_fee_per_gas)",
+            tx.max_fee_per_gas
         )));
     }
-    if tx.max_priority_fee_per_gas > cfg.gas_tx_max_fee_per_gas {
+    if tx.max_priority_fee_per_gas > max_fee {
         return Err(reject(format!(
-            "gas tx: maxPriorityFeePerGas {} exceeds pinned cap {}",
-            tx.max_priority_fee_per_gas, cfg.gas_tx_max_fee_per_gas
+            "gas tx: maxPriorityFeePerGas {} exceeds the limit {max_fee} \
+             (gas_tx_max_fee_per_gas)",
+            tx.max_priority_fee_per_gas
         )));
     }
 

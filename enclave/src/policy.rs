@@ -82,13 +82,6 @@ pub struct ProductionPolicy {
     /// `None` fails the gas path closed and is attested as all-zero.
     /// See `networks::evm::gas_tx`.
     pub gas_tx_allowed_to: Option<[u8; 20]>,
-    /// Max gas-tx `gasLimit` (`GAS_TX_MAX_GAS_LIMIT`). 0 fails closed.
-    pub gas_tx_max_gas_limit: u64,
-    /// Max gas-tx per-gas fee in wei (`GAS_TX_MAX_FEE_PER_GAS`). 0 fails closed.
-    pub gas_tx_max_fee_per_gas: u128,
-    /// Max gas-tx native value in wei (`GAS_TX_MAX_VALUE_WEI`), for the payable
-    /// `lzFundsOutCall`. `None` allows no non-zero value and is attested as 0.
-    pub gas_tx_max_value_wei: Option<u128>,
     /// Gas-tx calldata selector allowlist (`GAS_TX_ALLOWED_SELECTORS`).
     pub gas_tx_allowed_selectors: Vec<[u8; 4]>,
     /// The KMS pin set at launch. See [`SecurityPolicy::with_kms`].
@@ -218,17 +211,6 @@ impl SecurityPolicy {
             // The same pins that `validate_gas_tx_request` enforces, so the
             // attested and the enforced rules agree.
             gas_tx_allowed_to: bridge.gas_tx_allowed_to.filter(|_| signs_gas_tx),
-            gas_tx_max_gas_limit: if signs_gas_tx {
-                bridge.gas_tx_max_gas_limit
-            } else {
-                0
-            },
-            gas_tx_max_fee_per_gas: if signs_gas_tx {
-                bridge.gas_tx_max_fee_per_gas
-            } else {
-                0
-            },
-            gas_tx_max_value_wei: bridge.gas_tx_max_value_wei.filter(|_| signs_gas_tx),
             gas_tx_allowed_selectors: if signs_gas_tx {
                 bridge.gas_tx_allowed_selectors.clone()
             } else {
@@ -288,10 +270,6 @@ impl SecurityPolicy {
                 evm_rpc_tls: p.evm_rpc_tls.clone(),
                 // Unset commits as all-zero, which the gas path never accepts.
                 gas_tx_allowed_to: p.gas_tx_allowed_to.unwrap_or([0u8; 20]),
-                gas_tx_max_gas_limit: p.gas_tx_max_gas_limit,
-                gas_tx_max_fee_per_gas: p.gas_tx_max_fee_per_gas,
-                // Unset commits as 0, which is the enforced rule.
-                gas_tx_max_value_wei: p.gas_tx_max_value_wei.unwrap_or(0),
                 gas_tx_allowed_selectors: p.gas_tx_allowed_selectors.clone(),
                 kms: p.kms.clone(),
                 clone_peer_pcr3: p.clone_peer_pcr3,

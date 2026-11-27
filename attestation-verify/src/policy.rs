@@ -203,17 +203,12 @@ pub enum AttestedPolicy {
         spv_min_confirmations: u32,
         /// The EVM RPC TLS pin. `Some` only for [`EvmDataSource::PinnedTlsRpc`].
         evm_rpc_tls: Option<EvmRpcTlsPin>,
-        /// Gas-tx (`SignRawDigest`) rule: the pinned destination, the gas and
-        /// fee limits, and the allowed calldata selectors. An unset
-        /// `GAS_TX_ALLOWED_TO` gives all zeros, and the enclave rejects the
-        /// gas path.
+        /// Gas-tx (`SignRawDigest`) rule: the pinned destination and the
+        /// allowed calldata selectors. The gas limit, the fee for each unit
+        /// of gas and the native value are runtime limits, so they are not
+        /// here. An unset `GAS_TX_ALLOWED_TO` gives all zeros, and the enclave
+        /// rejects the gas path.
         gas_tx_allowed_to: [u8; 20],
-        gas_tx_max_gas_limit: u64,
-        gas_tx_max_fee_per_gas: u128,
-        /// Maximum native value (wei) of a gas tx, for the payable
-        /// `lzFundsOutCall`. `0` means no non-zero value is signed. An unset
-        /// `GAS_TX_MAX_VALUE_WEI` gives `0`.
-        gas_tx_max_value_wei: u128,
         /// Allowed 4-byte calldata selectors. [`to_bytes`](AttestedPolicy::to_bytes)
         /// sorts and dedups them, so env order does not change the commitment.
         gas_tx_allowed_selectors: Vec<[u8; 4]>,
@@ -246,9 +241,7 @@ impl AttestedPolicy {
     ///              [spv_min_confirmations u32 BE]
     ///              [evm_rpc_tls: 0x00 | 0x01 ++ len(host) u32 BE ++ host
     ///               ++ ca_sha256 32]
-    ///              [gas_tx_allowed_to 20][gas_tx_max_gas_limit u64 BE]
-    ///              [gas_tx_max_fee_per_gas u128 BE]
-    ///              [gas_tx_max_value_wei u128 BE]
+    ///              [gas_tx_allowed_to 20]
     ///              [len(selectors) u32 BE][selector 4]...   (sorted, deduped)
     ///              [token_contract 20]
     ///              [kms: 0x00 | 0x01 ++ len(arn) u32 BE ++ arn
@@ -276,9 +269,6 @@ impl AttestedPolicy {
                 spv_min_confirmations,
                 evm_rpc_tls,
                 gas_tx_allowed_to,
-                gas_tx_max_gas_limit,
-                gas_tx_max_fee_per_gas,
-                gas_tx_max_value_wei,
                 gas_tx_allowed_selectors,
                 token_contract,
                 kms,
@@ -309,9 +299,6 @@ impl AttestedPolicy {
                 }
                 // Gas-tx rule.
                 out.extend_from_slice(gas_tx_allowed_to);
-                out.extend_from_slice(&gas_tx_max_gas_limit.to_be_bytes());
-                out.extend_from_slice(&gas_tx_max_fee_per_gas.to_be_bytes());
-                out.extend_from_slice(&gas_tx_max_value_wei.to_be_bytes());
                 // Sort and dedup the selectors, so env order and duplicates
                 // do not change the commitment.
                 let mut selectors = gas_tx_allowed_selectors.clone();
@@ -417,9 +404,6 @@ impl AttestedPolicy {
                     })
                     .transpose()?;
                 let gas_tx_allowed_to = r.array()?;
-                let gas_tx_max_gas_limit = u64::from_be_bytes(r.array()?);
-                let gas_tx_max_fee_per_gas = u128::from_be_bytes(r.array()?);
-                let gas_tx_max_value_wei = u128::from_be_bytes(r.array()?);
                 let count = r.len()?;
                 let mut gas_tx_allowed_selectors: Vec<[u8; 4]> = Vec::new();
                 for _ in 0..count {
@@ -457,9 +441,6 @@ impl AttestedPolicy {
                     spv_min_confirmations,
                     evm_rpc_tls,
                     gas_tx_allowed_to,
-                    gas_tx_max_gas_limit,
-                    gas_tx_max_fee_per_gas,
-                    gas_tx_max_value_wei,
                     gas_tx_allowed_selectors,
                     token_contract,
                     kms,

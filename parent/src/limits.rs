@@ -40,6 +40,9 @@ limit_fields! {
     mint_replay_max_entries,
     mint_max_inputs,
     mint_max_outputs,
+    gas_tx_max_gas_limit,
+    gas_tx_max_fee_per_gas,
+    gas_tx_max_value_wei,
 }
 
 /// Names that are reserved in the schema and set nothing. A limits file of an

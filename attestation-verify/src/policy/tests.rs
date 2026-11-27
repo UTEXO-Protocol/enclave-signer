@@ -24,9 +24,6 @@ fn prod(
         spv_min_confirmations: 6,
         evm_rpc_tls: None,
         gas_tx_allowed_to: [0xAA; 20],
-        gas_tx_max_gas_limit: 21_000,
-        gas_tx_max_fee_per_gas: 1_000,
-        gas_tx_max_value_wei: 0,
         gas_tx_allowed_selectors: vec![[0xde, 0xad, 0xbe, 0xef]],
         token_contract: [0x77; 20],
         kms: None,
@@ -96,13 +93,7 @@ fn unknown_finality_tag_refuses_to_decode() {
 }
 
 /// `base()` with the gas-tx fields overridden, for the gas tests.
-fn base_with_gas(
-    to: [u8; 20],
-    max_gas: u64,
-    max_fee: u128,
-    max_value: u128,
-    selectors: Vec<[u8; 4]>,
-) -> AttestedPolicy {
+fn base_with_gas(to: [u8; 20], selectors: Vec<[u8; 4]>) -> AttestedPolicy {
     match base() {
         AttestedPolicy::Production {
             allow_vanilla_psbt,
@@ -137,9 +128,6 @@ fn base_with_gas(
             spv_min_confirmations,
             evm_rpc_tls,
             gas_tx_allowed_to: to,
-            gas_tx_max_gas_limit: max_gas,
-            gas_tx_max_fee_per_gas: max_fee,
-            gas_tx_max_value_wei: max_value,
             gas_tx_allowed_selectors: selectors,
             token_contract,
             kms,
@@ -461,14 +449,7 @@ fn from_bytes_refuses_bad_input() {
     let mut utf8 = good.clone();
     utf8[at] = 0xff;
     bad.push(utf8);
-    let unsorted = base_with_gas(
-        [0xAA; 20],
-        21_000,
-        1_000,
-        0,
-        vec![[1, 1, 1, 1], [2, 2, 2, 2]],
-    )
-    .to_bytes();
+    let unsorted = base_with_gas([0xAA; 20], vec![[1, 1, 1, 1], [2, 2, 2, 2]]).to_bytes();
     let at = unsorted
         .windows(8)
         .position(|w| w == [1, 1, 1, 1, 2, 2, 2, 2])
@@ -504,14 +485,11 @@ fn asset_length_prefix_matches_the_wire_contract() {
 
 #[test]
 fn every_gas_tx_field_changes_the_bytes() {
-    let base_gas = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 2, 3, 4]]);
+    let base_gas = base_with_gas([0xAA; 20], vec![[1, 2, 3, 4]]);
     let cases = [
-        base_with_gas([0xBB; 20], 21_000, 1_000, 0, vec![[1, 2, 3, 4]]), // destination
-        base_with_gas([0xAA; 20], 30_000, 1_000, 0, vec![[1, 2, 3, 4]]), // gas cap
-        base_with_gas([0xAA; 20], 21_000, 2_000, 0, vec![[1, 2, 3, 4]]), // fee cap
-        base_with_gas([0xAA; 20], 21_000, 1_000, 5, vec![[1, 2, 3, 4]]), // value ceiling
-        base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[9, 9, 9, 9]]), // selector
-        base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![]),             // no selectors
+        base_with_gas([0xBB; 20], vec![[1, 2, 3, 4]]), // destination
+        base_with_gas([0xAA; 20], vec![[9, 9, 9, 9]]), // selector
+        base_with_gas([0xAA; 20], vec![]),             // no selectors
     ];
     for c in cases {
         assert_ne!(
@@ -525,35 +503,17 @@ fn every_gas_tx_field_changes_the_bytes() {
 #[test]
 fn selector_allowlist_is_order_and_dup_independent() {
     // Selector order and duplicates do not change the attested bytes.
-    let a = base_with_gas(
-        [0xAA; 20],
-        21_000,
-        1_000,
-        0,
-        vec![[1, 1, 1, 1], [2, 2, 2, 2]],
-    );
-    let b = base_with_gas(
-        [0xAA; 20],
-        21_000,
-        1_000,
-        0,
-        vec![[2, 2, 2, 2], [1, 1, 1, 1], [1, 1, 1, 1]],
-    );
+    let a = base_with_gas([0xAA; 20], vec![[1, 1, 1, 1], [2, 2, 2, 2]]);
+    let b = base_with_gas([0xAA; 20], vec![[2, 2, 2, 2], [1, 1, 1, 1], [1, 1, 1, 1]]);
     assert_eq!(a.to_bytes(), b.to_bytes());
 }
 
 #[test]
 fn selector_count_prefix_matches_the_wire_contract() {
     // V1 offset for base(): 9-byte asset, no TLS pin.
-    const OFFSET: usize = 135;
-    let one = base_with_gas([0xAA; 20], 21_000, 1_000, 0, vec![[1, 1, 1, 1]]);
-    let two = base_with_gas(
-        [0xAA; 20],
-        21_000,
-        1_000,
-        0,
-        vec![[1, 1, 1, 1], [2, 2, 2, 2]],
-    );
+    const OFFSET: usize = 95;
+    let one = base_with_gas([0xAA; 20], vec![[1, 1, 1, 1]]);
+    let two = base_with_gas([0xAA; 20], vec![[1, 1, 1, 1], [2, 2, 2, 2]]);
     let one_bytes = one.to_bytes();
     let two_bytes = two.to_bytes();
     assert_eq!(&one_bytes[OFFSET..OFFSET + 8], &[0, 0, 0, 1, 1, 1, 1, 1]);
