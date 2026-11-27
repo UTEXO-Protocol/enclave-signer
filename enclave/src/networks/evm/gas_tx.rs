@@ -17,8 +17,9 @@
 //! `to` == pinned `EVM_PROXY_CONTRACT_ADDRESS`, and `value` <= the runtime limit
 //! `gas_tx_max_value_wei`. The selector must also be in `GAS_TX_ALLOWED_SELECTORS`.
 //!
-//! Any unset pin fails the path closed. A `Production` policy commits the whole
-//! rule in the attestation `user_data`. A public-Signet image only measures it in PCR0.
+//! Any unset pin fails the path closed. A `Production` policy commits the
+//! destination and the selectors in the attestation `user_data`. A public-Signet
+//! image only measures them in PCR0. The runtime limits are not attested.
 //!
 //! Not bounded here: total fee spend across many txs (validation is
 //! stateless). The LayerZero fee is not bound to its release.
@@ -97,9 +98,9 @@ struct GasTx<'a> {
 /// not taken from the wire.
 ///
 /// Fails closed (`CrossCheck`) on: no preimage, bad or non-canonical RLP,
-/// unsupported envelope, unpinned chain id / destination / gas cap / fee cap,
+/// unsupported envelope, unpinned chain id / destination,
 /// chain id or destination mismatch, contract creation, a non-zero value that
-/// fails the LayerZero carve-out, `gasLimit` or fee above the cap, or a
+/// fails the LayerZero carve-out, `gasLimit` or fee above its runtime limit, or a
 /// selector not in the operator allowlist.
 pub fn validate_gas_tx_request(req: &SignRawDigestRequest, cfg: &BridgeConfig) -> Result<[u8; 32]> {
     if req.unsigned_tx.is_empty() {

@@ -8,8 +8,10 @@ Each limit only sets when the enclave refuses a request, or how long it waits.
 The safety rules stay in the image (see
 [What stays in the image](#what-stays-in-the-image)). The gas limit of a gas
 transaction is a limit too: it decides how many deposits a release can cite,
-and that count grows with the mint ancestry of the asset. The image still
-fixes what a gas transaction may call and its fee for each unit of gas. The mint replay guard is a
+and that count grows with the mint ancestry of the asset. The fee for each
+unit of gas and the native value of a gas transaction are limits as well. The
+image still fixes what a gas transaction may call: its destination and its
+selectors. The mint replay guard is a
 limit because it is not a safety rule (see
 [The mint replay guard](#the-mint-replay-guard)).
 
@@ -238,8 +240,9 @@ These values stay in the image, because they decide what the enclave signs:
 
 - the SPV depth, the SPV tip age and the header rules
 - `EVM_FINALITY_TAG`
-- the fee limits, the sats budgets, the fee for each unit of gas of a gas
-  transaction, and the mint witness amount
+- the fee limits of Bitcoin transactions, the sats budgets and the mint witness
+  amount
+- the destination and the selectors of a gas transaction
 - the replay guard of the clone handshake and the rate of rights refills
 - the pins: chain ids, contracts, the asset, the KMS accounts
 

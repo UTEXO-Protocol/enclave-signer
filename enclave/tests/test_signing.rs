@@ -1399,9 +1399,9 @@ fn eip1559_unsigned(chain_id: u64, to: &[u8; 20], value: u64) -> Vec<u8> {
     out
 }
 
-/// `BridgeConfig` with the full gas-tx rule pinned: chain_id 1,
-/// destination 0xAA..., fee <= 1_000 wei, selector 0xdeadbeef. The gas limit is
-/// the runtime limit `gas_tx_max_gas_limit` at its image value.
+/// `BridgeConfig` with the gas-tx rule pinned: chain_id 1, destination 0xAA...,
+/// selector 0xdeadbeef. The gas limit, the fee and the value are the runtime
+/// limits at their image values.
 #[cfg(rgb_to_evm)]
 fn gas_pinned_config() -> BridgeConfig {
     BridgeConfig {

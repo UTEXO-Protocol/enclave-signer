@@ -426,8 +426,9 @@ uses the gas key `m/44'/60'/0'/0/1`.
 - **G7** The destination and the selector allowlist must be set. An unset
   value refuses the request.
 
-A `Production` policy attests the gas rule, so a verifier can check it. A
-public-Signet image only measures it. The limits apply to one transaction,
+A `Production` policy attests the destination and the selectors, so a verifier
+can check them. A public-Signet image only measures them. The three runtime
+limits are not attested. The limits apply to one transaction,
 not to a sum of transactions. A gas transaction is not linked to one checked
 release, and the LayerZero fee is not a field of `TeeLzFundsOut`. The enclave
 does not check who receives the fees.
