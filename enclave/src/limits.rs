@@ -103,6 +103,18 @@ macro_rules! limits {
     };
 }
 
+/// The ceilings of the three bounds of a gas transaction. A caller on the parent
+/// can change a runtime limit without a key, so a ceiling is the bound that an
+/// image holds: no limit change can pass it.
+///
+/// The highest `gasLimit` a limit change can allow: the gas of one block of the
+/// lock chain, so a release that cites the most deposits still fits.
+pub const GAS_TX_GAS_LIMIT_CEILING: u64 = 32_000_000;
+/// The highest fee in wei for each unit of gas a limit change can allow.
+pub const GAS_TX_FEE_PER_GAS_CEILING: u64 = 10_000_000_000;
+/// The highest native value in wei a limit change can allow.
+pub const GAS_TX_VALUE_WEI_CEILING: u64 = 50_000_000_000_000_000;
+
 limits! {
     /// Socket deadline of one request, from accept
     /// ([`crate::conn::TOTAL_REQUEST_TIMEOUT`]). The parent reads the value in
@@ -170,17 +182,18 @@ limits! {
     /// The highest `gasLimit` of a gas transaction. A release pays gas for each
     /// deposit that it cites, so a burn with a long mint ancestry needs more
     /// than the value of the image. The lowest value is the gas of a plain
-    /// transfer.
-    gas_tx_max_gas_limit: 3_000_000, 21_000, 1 << 32;
+    /// transfer. The highest is `GAS_TX_GAS_LIMIT_CEILING`.
+    gas_tx_max_gas_limit: 3_000_000, 21_000, GAS_TX_GAS_LIMIT_CEILING;
     /// The highest fee in wei for each unit of gas of a gas transaction:
     /// `maxFeePerGas` and `maxPriorityFeePerGas`, or `gasPrice` of a legacy
     /// transaction. When the gas price of the chain is above it, the gas key
-    /// signs nothing.
-    gas_tx_max_fee_per_gas: 1_000_000_000, 1, 1 << 60;
+    /// signs nothing. The highest value is `GAS_TX_FEE_PER_GAS_CEILING`.
+    gas_tx_max_fee_per_gas: 1_000_000_000, 1, GAS_TX_FEE_PER_GAS_CEILING;
     /// The highest native value in wei of a gas transaction. Only the payable
     /// `lzFundsOutCall` carries a value: the LayerZero fee. The `TeeLzFundsOut`
-    /// payload has no fee field, so this value limits the possible loss.
-    gas_tx_max_value_wei: 5_000_000_000_000_000, 1, 1 << 60;
+    /// payload has no fee field, so this value limits the possible loss. The
+    /// highest value is `GAS_TX_VALUE_WEI_CEILING`.
+    gas_tx_max_value_wei: 5_000_000_000_000_000, 1, GAS_TX_VALUE_WEI_CEILING;
 }
 
 /// The heap of a consignment at the densest rate measured, in tenths of a byte

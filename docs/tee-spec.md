@@ -726,7 +726,9 @@ deployed.
   for many transactions within the limits and drain the gas account. The gas
   limit, the fee for each unit of gas and the native value are runtime
   limits, so the operator of a parent can raise them, and the attestation
-  does not show them.
+  does not show the values in force. The image fixes a ceiling for each
+  ([runtime limits](runtime-limits.md#what-the-attestation-shows)), so one
+  transaction cannot cost more than the ceilings allow.
 
 **Mint**
 
